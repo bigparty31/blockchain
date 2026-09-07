@@ -46,6 +46,31 @@ cd app
 flutter create .
 ```
 
+## 시작하기
+
+```bash
+git clone https://github.com/bigparty31/blockchain.git
+cd blockchain
+git checkout develop
+git pull
+
+# 본인 브랜치 생성 (아래 표에서 자기 브랜치명 확인)
+git checkout -b feat/backend-auth
+```
+
+작업 후:
+
+```bash
+git add .
+git commit -m "feat: 작업 내용"
+git push -u origin feat/backend-auth
+```
+
+GitHub에서 `develop`으로 PR을 연다. `main`으로 보내지 않는다.
+
+> 브랜치는 항상 최신 `develop`에서 딴다. 미리 만들어두지 말 것.
+> 작업 중 `develop`이 앞서가면 `git merge develop`으로 따라잡는다.
+
 ## 브랜치 규칙
 
 | 브랜치 | 용도 |
