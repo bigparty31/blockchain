@@ -11,8 +11,8 @@ async def get_balance():
     PRD §7.4 산출식 (장부잔액 = 확정수입 - 확정지출)을 따릅니다.
     """
     return BalanceResponse(
-        balance=4845000,
+        balance=4965000,
         income=5000000,
-        expense=155000,
+        expense=35000,
     )
 

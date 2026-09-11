@@ -14,10 +14,13 @@
 cd backend
 
 # 가상환경 생성 (최초 1회)
-python -m venv venv
+python -m venv .venv
 
 # 가상환경 활성화 (Windows PowerShell)
-.\venv\Scripts\Activate.ps1
+.\.venv\Scripts\Activate.ps1
+
+# (참고) macOS / Linux 활성화
+# source .venv/bin/activate
 
 # 패키지 설치
 pip install -r requirements.txt
@@ -43,7 +46,7 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 | `GET` | `/` | 헬스체크 및 서비스 상태 | `{ "status": "ok", ... }` |
 | `GET` | `/entries` | 수입·지출 내역 목록 | 더미 3건 (확정 지출, 대기 지출, 확정 수입) |
 | `POST` | `/entries` | 지출/수입 신규 등록 | `{ "id": 4, "status": "PENDING", ... }` |
-| `GET` | `/balance` | 장부 잔액 요약 | `{ "balance": 4845000, "income": 5000000, "expense": 155000 }` |
+| `GET` | `/balance` | 장부 잔액 요약 | `{ "balance": 4965000, "income": 5000000, "expense": 35000 }` |
 | `GET` | `/budgets` | 카테고리별 예산 현황 | 행사비, 사업비, 운영비 편성액 및 잔량 |
 
 ---
