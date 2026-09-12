@@ -6,10 +6,18 @@ pragma solidity ^0.8.24;
 /// @dev
 /// - entryId 는 백엔드 DB auto-increment 값. 컨트랙트는 중복만 막는다.
 /// - amount 는 원 단위 정수. correctsId != 0 인 정정 항목에서만 음수 허용.
+/// - hash 는 PRD §8 meta_hash = SHA256(amount | counterparty | purpose | occurred_at | receipt_hash).
+///   SHA-256 32바이트를 bytes32 에 그대로 담는다 (keccak 아님). 영수증은 receipt_hash 로 이미 포함.
+///   EIP-712 서명 digest 와는 별개 값 — meta_hash 는 서명 대상 struct 의 한 필드다.
+///   구분자·인코딩 세부는 docs/CONTRACTS.md "entry.hash" 절 참고.
 /// - 예산 초과 검사는 등록(recordPending) 시점, 예산 소모(BudgetToken.spend)는 확정(confirmEntry) 시점.
 ///   등록 시 초과면 revert 하지 않고 BLOCKED 로 저장 + EntryBlocked emit (이벤트를 남기기 위함).
 ///   BLOCKED 항목은 confirmEntry 에서 거부되며 잔액 계산에서도 제외한다.
-///   확정 시 잔량 부족이면 그대로 revert (정상 동작).
+///   확정 시 잔량 부족이면 그대로 revert (정상 동작). 등록 시 검사는 대기 건을 예약하지 않으므로
+///   대기 여러 건이 같은 예산을 나눠 쓰다 나중 건 확정이 revert 할 수 있다. 그 경우 상태는 PENDING 그대로이고
+///   앱이 rejectEntry 로 반려한다.
+/// - INCOME 항목은 budgetId = 0. 예산 검사·소모는 EXPENSE 에만 적용.
+/// - 승인자(confirmEntry / rejectEntry 서명자)는 AUDITOR 또는 PRESIDENT. 등록자 != 승인자는 별도 검사.
 /// - recordPending / confirmEntry / rejectEntry 는 모두 서버 릴레이어가 호출하되,
 ///   EIP-712 서명자가 실제 행위자(등록자·승인자·반려자)다. ERC-2771 포워더는 쓰지 않는다.
 ///   릴레이어가 actor 를 파라미터로 넘기면 등록자를 위조할 수 있어 "등록자 != 승인자" 검사가 무력화되기 때문.
@@ -39,7 +47,7 @@ interface IAccountingLedger {
     }
 
     struct Entry {
-        bytes32 hash; // 오프체인 기록(영수증·내용) 해시
+        bytes32 hash; // PRD §8 meta_hash (SHA-256). docs/CONTRACTS.md "entry.hash" 절
         int256 amount; // 원. 정정 항목만 음수 가능
         Kind kind;
         Status status;
@@ -85,8 +93,12 @@ interface IAccountingLedger {
     }
 
     // --------------------------------------------------------------- events
-    // 손종인(백엔드)이 이 이벤트만으로 잔액을 계산한다. EntryConfirmed 에 금액·kind 를 반복해서 담는 이유.
-    // 잔액 = Σ EntryConfirmed.amount (budgetId 별). EntryPending / EntryBlocked / EntryRejected 는 잔액에 영향 없음.
+    // 손종인(백엔드)이 이 이벤트만으로 장부 잔액을 계산한다. EntryConfirmed 에 금액·kind 를 반복해서 담는 이유.
+    // 장부 잔액 = Σ EntryConfirmed.amount (kind == INCOME) − Σ EntryConfirmed.amount (kind == EXPENSE).
+    // 수입·지출 모두 양수로 들어오므로 kind 로 나눠 빼야 한다. 그냥 더하면 안 된다.
+    // 예산 잔량은 이 이벤트로 계산하지 않는다. 구현은 BudgetToken.remaining() 호출,
+    // 이벤트 재계산(Issued + Increased − Reclaimed − Spent + Refunded)은 검증용.
+    // EntryPending / EntryBlocked / EntryRejected 는 잔액에 영향 없음.
 
     event EntryPending(
         uint256 indexed id,
@@ -132,7 +144,7 @@ interface IAccountingLedger {
     error SignatureExpired(uint256 deadline);
     /// @dev 서명자가 등록 권한 롤(TREASURER)이 아님
     error NotRegistrant(address signer);
-    /// @dev 서명자가 승인 권한 롤이 아님
+    /// @dev 서명자가 승인 권한 롤(AUDITOR 또는 PRESIDENT)이 아님
     error NotApprover(address signer);
     /// @dev 등록자 == 승인자
     error SelfApproval(uint256 id, address account);
@@ -143,11 +155,12 @@ interface IAccountingLedger {
     /// @dev 지출이고 예산 초과/마감/미존재면 revert 대신 BLOCKED 저장 + EntryBlocked emit.
     function recordPending(RecordRequest calldata request, bytes calldata signature) external;
 
-    /// @notice 항목 확정. approval 의 EIP-712 서명자가 승인자. 지출이면 BudgetToken.spend/refund 를 호출한다.
-    /// @dev PENDING 이 아니면(BLOCKED 포함) revert. BudgetToken 호출 실패 시 전체 revert.
+    /// @notice 항목 확정. approval 의 EIP-712 서명자가 승인자(AUDITOR 또는 PRESIDENT, 등록자 제외).
+    ///         지출이면 BudgetToken.spend/refund 를 호출한다.
+    /// @dev PENDING 이 아니면(BLOCKED 포함) revert. BudgetToken 호출 실패(잔량 부족 등) 시 전체 revert 하고 상태는 PENDING 유지.
     function confirmEntry(ConfirmApproval calldata approval, bytes calldata signature) external;
 
-    /// @notice 항목 반려. decision 의 EIP-712 서명자가 반려자.
+    /// @notice 항목 반려. decision 의 EIP-712 서명자가 반려자(AUDITOR 또는 PRESIDENT, 등록자 제외).
     function rejectEntry(RejectDecision calldata decision, bytes calldata signature) external;
 
     function getEntry(uint256 id) external view returns (Entry memory);

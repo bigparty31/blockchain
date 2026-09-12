@@ -67,6 +67,8 @@ interface IBudgetToken {
     /// @notice 마감 경과 후 미집행 잔량 회수.
     function reclaim(uint256 budgetId) external;
 
+    /// @notice 현재 잔량. 백엔드는 이 값을 쓴다.
+    /// @dev 이벤트로 검증할 때: Σ BudgetIssued + Σ BudgetIncreased − Σ BudgetReclaimed − Σ BudgetSpent + Σ BudgetRefunded.
     function remaining(uint256 budgetId) external view returns (uint256);
 
     function getBudget(uint256 budgetId) external view returns (Budget memory);

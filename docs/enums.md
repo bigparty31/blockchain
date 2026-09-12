@@ -2,6 +2,8 @@
 
 ## role
 
+온체인 롤은 이름 기준(`bytes32 = keccak256("TREASURER")` 등), 숫자 아님. `STUDENT`는 온체인 롤이 아니다 (SBT 보유로 판별).
+
 | 값 | 설명 |
 | --- | --- |
 | `STUDENT` | 학생 |
