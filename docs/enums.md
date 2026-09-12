@@ -2,6 +2,8 @@
 
 ## role
 
+온체인 롤은 이름 기준(`bytes32 = keccak256("TREASURER")` 등), 숫자 아님. `STUDENT`는 온체인 롤이 아니다 (SBT 보유로 판별).
+
 | 값 | 설명 |
 | --- | --- |
 | `STUDENT` | 학생 |
@@ -43,3 +45,20 @@
 | `DUPLICATE` | 중복 |
 | `NO_NUMBER` | 번호 없음 |
 | `UNREADABLE` | 판독 불가 |
+
+## block_reason
+
+`EntryBlocked.reason`. 등록 시점 예산 검사 실패 사유. 온체인 enum 순서 = 이 표 순서.
+
+| 값 | 설명 |
+| --- | --- |
+| `BUDGET_EXCEEDED` | 잔량 부족 |
+| `BUDGET_EXPIRED` | 집행 마감 경과 |
+| `BUDGET_NOT_FOUND` | 존재하지 않는 예산 |
+
+## objection status
+
+| 값 | 설명 |
+| --- | --- |
+| `OPEN` | 미답변 |
+| `ANSWERED` | 답변 완료 |
