@@ -1,0 +1,113 @@
+{
+  "_comment": "docs/HASHING.md 의 테스트 벡터. 백엔드 유닛테스트와 앱 테스트에 그대로 사용한다. 문서에서 값을 눈으로 옮겨 적지 말 것.",
+  "rule_document": "docs/HASHING.md",
+  "hash_rule_version": 1,
+  "separator": "U+001F",
+  "encoding": "UTF-8",
+  "normalization": "NFC",
+  "meta_hash": [
+    {
+      "name": "expense_with_receipt",
+      "description": "지출, 영수증 있음",
+      "input": {
+        "amount": 35000,
+        "counterparty": "한결문구",
+        "purpose": "신입생 환영회 명찰 및 필기구 구매",
+        "occurred_at": 1757300000,
+        "receipt_hash": "0xabc1234567890abcdef1234567890abcdef1234567890abcdef1234567890abc"
+      },
+      "preimage_hex": "33353030301fed959ceab2b0ebacb8eab5ac1fec8ba0ec9e85ec839d20ed9998ec9881ed9a8c20ebaa85ecb0b020ebb08f20ed9584eab8b0eab5ac20eab5aceba7a41f313735373330303030301f307861626331323334353637383930616263646566313233343536373839306162636465663132333435363738393061626364656631323334353637383930616263",
+      "expected": "0x2e66f4be0afea4b6e81eb8cd981dddc2f357e72da0567782c946aa18cc39c05d"
+    },
+    {
+      "name": "income_without_receipt",
+      "description": "수입, 영수증 없음 (receipt_hash 가 NULL 이라 빈 값으로 끝난다)",
+      "input": {
+        "amount": 5000000,
+        "counterparty": "컴퓨터공학과 학생회비 일괄 납부",
+        "purpose": "2026-2학기 학과 학생회비 수납",
+        "occurred_at": 1757100000,
+        "receipt_hash": null
+      },
+      "preimage_hex": "353030303030301fecbbb4ed93a8ed84b0eab3b5ed9599eab3bc20ed9599ec839ded9a8cebb98420ec9dbceab48420eb82a9ebb6801f323032362d32ed9599eab8b020ed9599eab3bc20ed9599ec839ded9a8cebb98420ec8898eb82a91f313735373130303030301f",
+      "expected": "0x70ad6e3e77e4041042c0056123de607d0b8c6184cc2a764b53578f06d46e531b"
+    },
+    {
+      "name": "correction_negative_amount",
+      "description": "정정, 금액 음수",
+      "input": {
+        "amount": -20000,
+        "counterparty": "한결문구",
+        "purpose": "입력 오류 정정",
+        "occurred_at": 1757300000,
+        "receipt_hash": null
+      },
+      "preimage_hex": "2d32303030301fed959ceab2b0ebacb8eab5ac1fec9e85eba0a520ec98a4eba59820eca095eca0951f313735373330303030301f",
+      "expected": "0x13a26a42fc46ec3031d6e2437a00ac3273239a7a1582058b61574b70a5bf08ad"
+    },
+    {
+      "name": "nfd_input_normalizes_to_nfc",
+      "description": "counterparty 가 NFD(조합형)로 들어온 경우. canonical() 이 NFC 정규화를 하면 expense_with_receipt 와 같은 해시가 나와야 한다. 정규화를 빼먹은 구현은 여기서만 걸린다.",
+      "input_is_nfd": true,
+      "input": {
+        "amount": 35000,
+        "counterparty": "한결문구",
+        "purpose": "신입생 환영회 명찰 및 필기구 구매",
+        "occurred_at": 1757300000,
+        "receipt_hash": "0xabc1234567890abcdef1234567890abcdef1234567890abcdef1234567890abc"
+      },
+      "preimage_hex": "33353030301fed959ceab2b0ebacb8eab5ac1fec8ba0ec9e85ec839d20ed9998ec9881ed9a8c20ebaa85ecb0b020ebb08f20ed9584eab8b0eab5ac20eab5aceba7a41f313735373330303030301f307861626331323334353637383930616263646566313233343536373839306162636465663132333435363738393061626364656631323334353637383930616263",
+      "expected": "0x2e66f4be0afea4b6e81eb8cd981dddc2f357e72da0567782c946aa18cc39c05d"
+    }
+  ],
+  "text_hash": [
+    {
+      "name": "warning_reason",
+      "input": "OCR 금액 불일치, 영수증 원본 확인함",
+      "expected": "0x41357b2c4497cfd0b66c43ad57242c82c8850c666e229aea0ca7ded5052e54fb"
+    },
+    {
+      "name": "objection_content",
+      "input": "영수증 미첨부 사유가 궁금합니다",
+      "expected": "0x2a737959edd39d9f96fc6015c21127aae8882ebf3a18230dab18a4f9e1093597"
+    }
+  ],
+  "file_hash": [
+    {
+      "name": "bank_csv_sample",
+      "description": "거래내역 CSV. 바이트 그대로 해시한다 (정규화·트림 없음)",
+      "content_utf8": "날짜,적요,출금,입금,잔액\n2026-09-08,한결문구,35000,,4965000\n",
+      "expected": "0xed6a74f157c79bec09aec2b1f9b8dde80ac22e46fe31fda31928fa13eedf5bd2"
+    }
+  ],
+  "negative_cases": [
+    {
+      "name": "pipe_separator_collision",
+      "description": "구분자를 파이프로 썼다면 아래 두 항목이 같은 해시를 냈을 것이다. U+001F 에서는 서로 달라야 한다. 두 expected 가 다른지 확인한다.",
+      "must_differ": true,
+      "entry_a": {
+        "amount": 35000,
+        "counterparty": "한결문구",
+        "purpose": "명찰|필기구",
+        "occurred_at": 1757300000,
+        "receipt_hash": null,
+        "expected": "0x7820a629c053e32b0bfe22c366e9c94b582c038188578acf51dbd20baef1d356"
+      },
+      "entry_b": {
+        "amount": 35000,
+        "counterparty": "한결문구|명찰",
+        "purpose": "필기구",
+        "occurred_at": 1757300000,
+        "receipt_hash": null,
+        "expected": "0xbfc53236e9c9103822fb50d1a366b36acb18b65312e1f5ce6de6d786d1a34404"
+      }
+    },
+    {
+      "name": "bom_must_not_be_trimmed",
+      "description": "2차 안전망. U+FEFF 는 1차 입력 검증에서 400 으로 거부되지만 canonical() 자체도 지우면 안 된다. Dart 의 String.trim() 은 지우므로 쓰면 안 된다. input 은 실제 U+FEFF 문자로 시작한다.",
+      "input": "﻿한결문구",
+      "assert": "canonical(input) == input",
+      "canonical_output_utf8_hex": "efbbbfed959ceab2b0ebacb8eab5ac"
+    }
+  ]
+}
