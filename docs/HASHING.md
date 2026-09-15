@@ -193,9 +193,24 @@ Entry { hash, amount, kind, status, occurredAt, budgetId, correctsId, registrant
 **검증 절차**
 
 1. 원본 필드로 `meta_hash`를 재계산해 `getEntry(id).hash`와 비교
-2. `kind` · `budgetId` · `amount` · `correctsId` · `status`를 `getEntry(id)` 값과 **직접 비교**
+2. 아래 필드를 `getEntry(id)` 값과 **직접 비교**
+
+| 비교할 필드 | DB / API 쪽 | 비고 |
+| --- | --- | --- |
+| `amount` | `amount` | |
+| `kind` | `kind` | enum 순서는 `docs/enums.md` |
+| `budgetId` | `budget_id` | **NULL → 0** (§2.1) |
+| `correctsId` | `corrects_entry_id` | **NULL → 0** (§2.1) |
+| `status` | `status` | |
+| `registrant` | `created_by` | **주소 ↔ user id 매핑 필요** (아래) |
+| `approver` | `approved_by` | 주소 ↔ user id 매핑. 미처리면 `address(0)` ↔ `NULL` |
+| `occurredAt` | `occurred_at` | 해시에도 들어가지만 따로 봐도 된다 |
+
+`term_id`는 이 목록에 없다. 지출은 `budgetId`를 거쳐 확인하고, 수입은 확인할 방법이 없다 (§2.3).
 
 2번을 빠뜨리면 반쪽짜리 검증이다. 해시 식은 PRD §8이 고정한 것이라 바꾸지 않고, 비교 대상을 늘려서 메운다.
+
+> **`registrant` / `approver`는 지갑 주소이고 DB의 `created_by` / `approved_by`는 user id다.** 값 자체가 달라서 그냥 비교하면 안 되고, `User.wallet_address`로 옮긴 뒤 대조해야 한다. **이 두 필드가 "누가 등록하고 누가 승인했는가"의 유일한 온체인 증거**이므로 빠뜨리면 안 된다. 주소 매핑은 인증 파트(손종인)가 API로 내려준다.
 
 ### 2.1 NULL과 0 — 비교 전에 맞춰야 한다
 
@@ -205,6 +220,8 @@ Entry { hash, amount, kind, status, occurredAt, budgetId, correctsId, registrant
 | --- | --- | --- |
 | `budget_id = NULL` | `budgetId = 0` | **모든 수입 항목** |
 | `corrects_entry_id = NULL` | `correctsId = 0` | **정정이 아닌 모든 항목** |
+| `approved_by = NULL` | `approver = address(0)` | **승인 대기 중인 모든 항목** |
+| `reject_reason = NULL` | `reasonHash = bytes32(0)` | 반려되지 않은 항목 |
 
 원장의 대부분이 여기 걸린다. 그냥 비교하면 `None != 0`이라 배지가 거의 전부 빨강이 된다. **비교 전에 `NULL`을 `0`으로 맞춘 뒤 대조한다.**
 
@@ -259,9 +276,11 @@ SHA256( 정본 문자열 )   — 아래 「여러 줄 텍스트 규칙」으로 
 
 **여러 줄 텍스트 규칙** — 이의 본문과 반려 사유는 여러 줄일 수 있다. `meta_hash` 필드와 달리 **줄바꿈을 허용한다.** 필드가 하나뿐이라 구분자 충돌이 없기 때문이다.
 
-- 금지하는 것은 `U+001F`와 보이지 않는 공백류(U+00A0, U+200B, U+3000, U+FEFF)뿐이다. 제어문자 중 **`U+000A`(LF)는 허용**한다
+- 제어문자 중 **허용하는 것은 `U+0009`(탭)와 `U+000A`(LF) 둘뿐이다.** 나머지(`U+000B` VT, `U+000C` FF, `U+001F` 등)는 400으로 거부한다. 보이지 않는 공백류 금지는 `meta_hash` 필드와 같다(§1.1)
 - **개행은 LF로 통일한다.** 입력의 `CRLF`·`CR`은 저장 전에 `LF`로 바꾼다. 웹(Windows)과 모바일이 서로 다른 개행을 보내면 같은 글인데 해시가 갈린다
-- **앞뒤의 공백과 개행을 제거한다.** 사용자가 끝에 엔터를 치면 값이 달라지기 때문이다 (`meta_hash` 필드는 공백만 제거 — §1.1)
+- **앞뒤에서 제거할 문자는 `U+0020`·`U+0009`·`U+000A` 셋으로 고정한다.** 사용자가 끝에 엔터나 탭을 치면 값이 달라지기 때문이다
+
+> **여기서도 언어 기본 `trim`을 쓰면 안 된다.** `meta_hash` 필드와 같은 이유다(§1.1). 탭을 제거 대상에 넣은 것도 그래서다 — 탭은 이 필드에서 합법인데 Dart·JS의 `trim()`은 지우고 Python의 `strip(" \n")`은 남긴다. 제거 문자를 셋으로 못박아 양쪽을 맞춘다.
 
 ```
 "OCR 금액 불일치, 영수증 원본 확인함"  -> 0x41357b2c4497cfd0b66c43ad57242c82c8850c666e229aea0ca7ded5052e54fb
@@ -289,9 +308,13 @@ CSV 예시 -> 0xed6a74f157c79bec09aec2b1f9b8dde80ac22e46fe31fda31928fa13eedf5bd2
 
 ### 누가 계산하고 누가 검증하는가
 
-1. 앱이 **전송할 바이트 그대로**를 해시해 `receipt_hash`로 보낸다. **hex는 생성 시점부터 소문자로 만든다** — 대문자로 보내면 서버가 400으로 거부한다(§5). 서버가 말없이 소문자로 고치면 앱이 서명용으로 계산한 `meta_hash`와 값이 갈려 승인 시점에 `HashMismatch`로 revert 되기 때문에, 등록 단계에서 막는다
-2. 서버는 받은 바이트를 **가공 없이 저장**한다
-3. 서버가 저장한 바이트로 해시를 **재계산해 대조**한다. 불일치면 400
+**파일을 먼저 올리고, 항목 등록은 그 뒤에 한다.** 순서가 바뀌면 서버가 대조할 대상이 없다.
+
+1. **앱이 파일을 업로드한다.** 이때 **전송할 바이트 그대로**를 해시한 `receipt_hash`를 함께 보낸다. **hex는 생성 시점부터 소문자로 만든다** — 대문자로 보내면 서버가 400으로 거부한다(§5). 서버가 말없이 소문자로 고치면 앱이 서명용으로 계산한 `meta_hash`와 값이 갈려 승인 시점에 `HashMismatch`로 revert 되기 때문에, 등록 단계에서 막는다
+2. 서버는 받은 바이트를 **가공 없이 저장**하고, **저장한 바이트로 해시를 재계산해 대조**한다. 불일치면 400
+3. **항목 등록(`POST /entries`)은 이미 저장된 `receipt_hash`만 참조한다.** 대응하는 파일이 없는 `receipt_hash`가 오면 400
+
+> **왜 순서를 고정하는가** — 등록 요청에 해시만 오고 파일이 나중에 올라오면, 서버는 재계산할 대상이 없는 채로 `meta_hash`를 만들어 온체인에 올리게 된다. 그러면 **`receipt_hash`는 있는데 파일은 없는(또는 다른 파일인) 항목**이 생기고, 해시는 서로 맞으니 검증 배지는 초록으로 뜬다. 존재하지 않는 영수증이 검증을 통과하는 셈이다.
 
 **앱이 촬영 후 압축·리사이즈를 하려면 그 결과 바이트를 해시해야 한다.** 원본을 해시하고 리사이즈본을 올리면 서버 재계산에서 걸린다. 서버도 썸네일 생성 등으로 원본을 덮어쓰면 안 된다.
 
@@ -334,10 +357,12 @@ def meta_hash(amount: int, counterparty: str, purpose: str,
                    str(occurred_at), receipt_hash or ""])
     return "0x" + hashlib.sha256(pre.encode("utf-8")).hexdigest()
 
+TRIM_TEXT = " \t\n"   # U+0020, U+0009, U+000A (§3)
+
 def canonical_text(s: str) -> str:
-    """여러 줄 텍스트용 (§3). 개행을 LF 로 통일하고 앞뒤 공백·개행을 제거한다."""
+    """여러 줄 텍스트용 (§3). 개행을 LF 로 통일하고 앞뒤 공백·탭·개행을 제거한다."""
     s = s.replace("\r\n", "\n").replace("\r", "\n")
-    return unicodedata.normalize("NFC", s.strip(" \n"))
+    return unicodedata.normalize("NFC", s.strip(TRIM_TEXT))
 
 def text_hash(text: str) -> str:
     # text 는 canonical_text 를 거친 정본 값이어야 한다
@@ -377,6 +402,22 @@ String metaHash({
   ].join(_us);
   return '0x${sha256.convert(utf8.encode(pre))}';
 }
+
+/// §3 여러 줄 텍스트용. 개행을 LF 로 통일하고 앞뒤 공백·탭·개행을 제거한다.
+/// 감사 앱이 warningReasonHash / reasonHash 를 서명 전에 직접 만들 때 쓴다.
+String canonicalText(String s) {
+  var t = s.replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+  bool edge(String c) => c == ' ' || c == '\t' || c == '\n';
+  while (t.isNotEmpty && edge(t[0])) { t = t.substring(1); }
+  while (t.isNotEmpty && edge(t[t.length - 1])) { t = t.substring(0, t.length - 1); }
+  return unorm.nfc(t);
+}
+
+/// 인자는 canonicalText 를 거친 정본 값이어야 한다.
+String textHash(String text) => '0x${sha256.convert(utf8.encode(text))}';
+
+/// 파일은 바이트 그대로 (§4). 정규화·트림을 하지 않는다.
+String fileHash(List<int> bytes) => '0x${sha256.convert(bytes)}';
 ```
 
 > **Dart 주의** — 표준 라이브러리에 유니코드 정규화가 없다. `crypto`만으로는 NFC를 못 한다. `unorm_dart` 같은 패키지를 `pubspec.yaml`에 추가해야 한다.

@@ -29,15 +29,18 @@
 
 `AccountingLedger`의 `Entry.hash` / `RecordRequest.hash` / `ConfirmApproval.hash` / `EntryPending.hash` / `EntryConfirmed.hash`는 모두 같은 값으로, PRD §8의 `meta_hash`다.
 
+> **계산 규칙의 정본은 `docs/HASHING.md`다.** 구현할 때는 반드시 그 문서를 볼 것. 아래는 요약이며, 어긋나면 `docs/HASHING.md`가 맞다.
+
 ```
-meta_hash = SHA256(amount | counterparty | purpose | occurred_at | receipt_hash)
+meta_hash = SHA256( amount ␟ counterparty ␟ purpose ␟ occurred_at ␟ receipt_hash )
 ```
 
+- `␟`는 **U+001F (Unit Separator)** 한 글자다. **파이프(`|`)가 아니다.** 목적란이 자유 입력이라 파이프를 쓰면 서로 다른 거래가 같은 해시를 낸다 (`docs/HASHING.md` §1).
 - SHA-256 출력이 32바이트라 `bytes32`에 그대로 넣는다 (keccak 아님).
 - 영수증은 `receipt_hash`로 이미 포함되므로 영수증 파일·OCR 결과는 따로 올리지 않는다.
 - `confirmEntry`는 저장된 `hash`와 `ConfirmApproval.hash`가 다르면 `HashMismatch`로 revert. 승인자가 본 내용이 등록된 내용과 같다는 보증.
 - **EIP-712 서명 해시(digest)와는 별개 값**이다. `meta_hash`는 서명 대상 struct 안에 들어가는 필드이고, digest는 그 struct 전체를 EIP-712로 인코딩한 결과다.
-- 필드 구분자·인코딩(정수 표기, 문자열 정규화, `receipt_hash` 없을 때 처리 등) 세부는 손종인이 확정 예정 (2026-09 2주차). 확정 전까지 백엔드·앱이 각자 계산하지 말 것.
+- 필드 구분자·정수 표기·문자열 정규화·`receipt_hash` NULL 처리, 그리고 `reasonHash` 등 텍스트 해시와 파일 해시 규칙은 **`docs/HASHING.md`에서 확정됐다.** 샘플과 테스트 벡터는 `docs/hashing_vectors.json`에 있다.
 
 ## category
 
