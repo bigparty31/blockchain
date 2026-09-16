@@ -1,10 +1,11 @@
 {
   "_comment": "docs/HASHING.md 의 테스트 벡터. 백엔드 유닛테스트와 앱 테스트에 그대로 사용한다. 문서에서 값을 눈으로 옮겨 적지 말 것.",
   "_harness": {
-    "meta_hash": "input.counterparty 와 input.purpose 에 canonical() 을 적용한 뒤 meta_hash() 를 호출한다. preimage_hex 와 expected 를 모두 대조한다.",
+    "meta_hash": "input.counterparty 와 input.purpose 에 canonical() 을 적용한 뒤 meta_hash() 를 호출한다. preimage_hex 와 expected 를 모두 대조한다. input_is_nfd 가 true 인 벡터는 counterparty 가 실제로 NFD 인지(unicodedata.is_normalized 검사) 먼저 확인한다. 편집기가 NFC 로 합쳐버리면 테스트가 조용히 무의미해진다.",
     "text_hash": "input 에 canonical_text() 를 적용한 뒤 text_hash() 를 호출한다.",
     "file_hash": "content_hex 를 바이트로 되돌린 뒤 file_hash() 를 호출한다. 문자열로 다루지 말 것.",
-    "negative_cases": "kind 에 따라 분기한다. meta_hash_pair 는 두 항목의 해시를 각각 계산해 expected 와 맞는지 본 뒤, 서로 다른지 확인한다. canonical_identity 는 canonical(input) 이 input 과 같은지 본다."
+    "negative_cases": "kind 에 따라 분기한다. meta_hash_pair 는 두 항목의 해시를 각각 계산해 expected 와 맞는지 본 뒤, 서로 다른지 확인한다. canonical_identity 는 canonical(input) 이 input 과 같은지 본다.",
+    "student_app": "학생 앱은 API 가 준 정본 값을 그대로 해시한다. canonical() 을 적용하지 않으므로 expense_with_receipt · income_without_receipt · correction_negative_amount 3건만 실행한다. nfd_input_normalizes_to_nfc 와 leading_trailing_spaces_trimmed 는 canonical() 을 검사하는 벡터라 대상이 아니다."
   },
   "rule_document": "docs/HASHING.md",
   "hash_rule_version": 1,
@@ -12,7 +13,6 @@
   "separator_name": "U+001F (Unit Separator)",
   "encoding": "UTF-8",
   "normalization": "NFC",
-
   "meta_hash": [
     {
       "name": "expense_with_receipt",
@@ -21,11 +21,11 @@
         "amount": 35000,
         "counterparty": "한결문구",
         "purpose": "신입생 환영회 명찰 및 필기구 구매",
-        "occurred_at": 1757300000,
+        "occurred_at": 1788793200,
         "receipt_hash": "0xabc1234567890abcdef1234567890abcdef1234567890abcdef1234567890abc"
       },
-      "preimage_hex": "33353030301fed959ceab2b0ebacb8eab5ac1fec8ba0ec9e85ec839d20ed9998ec9881ed9a8c20ebaa85ecb0b020ebb08f20ed9584eab8b0eab5ac20eab5aceba7a41f313735373330303030301f307861626331323334353637383930616263646566313233343536373839306162636465663132333435363738393061626364656631323334353637383930616263",
-      "expected": "0x2e66f4be0afea4b6e81eb8cd981dddc2f357e72da0567782c946aa18cc39c05d"
+      "preimage_hex": "33353030301fed959ceab2b0ebacb8eab5ac1fec8ba0ec9e85ec839d20ed9998ec9881ed9a8c20ebaa85ecb0b020ebb08f20ed9584eab8b0eab5ac20eab5aceba7a41f313738383739333230301f307861626331323334353637383930616263646566313233343536373839306162636465663132333435363738393061626364656631323334353637383930616263",
+      "expected": "0x24ae73988d927fb39f45eb6024e9ff8ffa19e8501603565bd82710ea8df4b937"
     },
     {
       "name": "income_without_receipt",
@@ -34,11 +34,11 @@
         "amount": 5000000,
         "counterparty": "컴퓨터공학과 학생회비 일괄 납부",
         "purpose": "2026-2학기 학과 학생회비 수납",
-        "occurred_at": 1757100000,
+        "occurred_at": 1788620400,
         "receipt_hash": null
       },
-      "preimage_hex": "353030303030301fecbbb4ed93a8ed84b0eab3b5ed9599eab3bc20ed9599ec839ded9a8cebb98420ec9dbceab48420eb82a9ebb6801f323032362d32ed9599eab8b020ed9599eab3bc20ed9599ec839ded9a8cebb98420ec8898eb82a91f313735373130303030301f",
-      "expected": "0x70ad6e3e77e4041042c0056123de607d0b8c6184cc2a764b53578f06d46e531b"
+      "preimage_hex": "353030303030301fecbbb4ed93a8ed84b0eab3b5ed9599eab3bc20ed9599ec839ded9a8cebb98420ec9dbceab48420eb82a9ebb6801f323032362d32ed9599eab8b020ed9599eab3bc20ed9599ec839ded9a8cebb98420ec8898eb82a91f313738383632303430301f",
+      "expected": "0x74c9740556d857575586251e71fa24091ffaece5c01c4f889d7c1224ce7af3a9"
     },
     {
       "name": "correction_negative_amount",
@@ -47,11 +47,11 @@
         "amount": -20000,
         "counterparty": "한결문구",
         "purpose": "입력 오류 정정",
-        "occurred_at": 1757300000,
+        "occurred_at": 1788793200,
         "receipt_hash": null
       },
-      "preimage_hex": "2d32303030301fed959ceab2b0ebacb8eab5ac1fec9e85eba0a520ec98a4eba59820eca095eca0951f313735373330303030301f",
-      "expected": "0x13a26a42fc46ec3031d6e2437a00ac3273239a7a1582058b61574b70a5bf08ad"
+      "preimage_hex": "2d32303030301fed959ceab2b0ebacb8eab5ac1fec9e85eba0a520ec98a4eba59820eca095eca0951f313738383739333230301f",
+      "expected": "0xebd26de486f8caba6e4d24662acd1cc671be1c9c60cfd3048da527c9a351ca73"
     },
     {
       "name": "nfd_input_normalizes_to_nfc",
@@ -59,13 +59,13 @@
       "input_is_nfd": true,
       "input": {
         "amount": 35000,
-        "counterparty": "한결문구",
+        "counterparty": "\u1112\u1161\u11ab\u1100\u1167\u11af\u1106\u116e\u11ab\u1100\u116e",
         "purpose": "신입생 환영회 명찰 및 필기구 구매",
-        "occurred_at": 1757300000,
+        "occurred_at": 1788793200,
         "receipt_hash": "0xabc1234567890abcdef1234567890abcdef1234567890abcdef1234567890abc"
       },
-      "preimage_hex": "33353030301fed959ceab2b0ebacb8eab5ac1fec8ba0ec9e85ec839d20ed9998ec9881ed9a8c20ebaa85ecb0b020ebb08f20ed9584eab8b0eab5ac20eab5aceba7a41f313735373330303030301f307861626331323334353637383930616263646566313233343536373839306162636465663132333435363738393061626364656631323334353637383930616263",
-      "expected": "0x2e66f4be0afea4b6e81eb8cd981dddc2f357e72da0567782c946aa18cc39c05d"
+      "preimage_hex": "33353030301fed959ceab2b0ebacb8eab5ac1fec8ba0ec9e85ec839d20ed9998ec9881ed9a8c20ebaa85ecb0b020ebb08f20ed9584eab8b0eab5ac20eab5aceba7a41f313738383739333230301f307861626331323334353637383930616263646566313233343536373839306162636465663132333435363738393061626364656631323334353637383930616263",
+      "expected": "0x24ae73988d927fb39f45eb6024e9ff8ffa19e8501603565bd82710ea8df4b937"
     },
     {
       "name": "leading_trailing_spaces_trimmed",
@@ -74,14 +74,13 @@
         "amount": 35000,
         "counterparty": "  한결문구 ",
         "purpose": " 신입생 환영회 명찰 및 필기구 구매  ",
-        "occurred_at": 1757300000,
+        "occurred_at": 1788793200,
         "receipt_hash": "0xabc1234567890abcdef1234567890abcdef1234567890abcdef1234567890abc"
       },
-      "preimage_hex": "33353030301fed959ceab2b0ebacb8eab5ac1fec8ba0ec9e85ec839d20ed9998ec9881ed9a8c20ebaa85ecb0b020ebb08f20ed9584eab8b0eab5ac20eab5aceba7a41f313735373330303030301f307861626331323334353637383930616263646566313233343536373839306162636465663132333435363738393061626364656631323334353637383930616263",
-      "expected": "0x2e66f4be0afea4b6e81eb8cd981dddc2f357e72da0567782c946aa18cc39c05d"
+      "preimage_hex": "33353030301fed959ceab2b0ebacb8eab5ac1fec8ba0ec9e85ec839d20ed9998ec9881ed9a8c20ebaa85ecb0b020ebb08f20ed9584eab8b0eab5ac20eab5aceba7a41f313738383739333230301f307861626331323334353637383930616263646566313233343536373839306162636465663132333435363738393061626364656631323334353637383930616263",
+      "expected": "0x24ae73988d927fb39f45eb6024e9ff8ffa19e8501603565bd82710ea8df4b937"
     }
   ],
-
   "text_hash": [
     {
       "name": "warning_reason",
@@ -120,7 +119,6 @@
       "expected": "0x244d5eef2147dd6866400427123843db054695059b0daa17d44b3e89bea1e572"
     }
   ],
-
   "file_hash": [
     {
       "name": "bank_csv_utf8",
@@ -136,7 +134,6 @@
       "must_differ_from": "bank_csv_utf8"
     }
   ],
-
   "negative_cases": [
     {
       "name": "pipe_separator_collision",
@@ -150,11 +147,11 @@
             "amount": 35000,
             "counterparty": "한결문구",
             "purpose": "명찰|필기구",
-            "occurred_at": 1757300000,
+            "occurred_at": 1788793200,
             "receipt_hash": null
           },
-          "preimage_hex": "33353030301fed959ceab2b0ebacb8eab5ac1febaa85ecb0b07ced9584eab8b0eab5ac1f313735373330303030301f",
-          "expected": "0x7820a629c053e32b0bfe22c366e9c94b582c038188578acf51dbd20baef1d356"
+          "preimage_hex": "33353030301fed959ceab2b0ebacb8eab5ac1febaa85ecb0b07ced9584eab8b0eab5ac1f313738383739333230301f",
+          "expected": "0x97e5cc689fcd00181f242244f4af6afe703562368eea69c36ac23f156ec2968d"
         },
         {
           "name": "entry_b",
@@ -162,11 +159,11 @@
             "amount": 35000,
             "counterparty": "한결문구|명찰",
             "purpose": "필기구",
-            "occurred_at": 1757300000,
+            "occurred_at": 1788793200,
             "receipt_hash": null
           },
-          "preimage_hex": "33353030301fed959ceab2b0ebacb8eab5ac7cebaa85ecb0b01fed9584eab8b0eab5ac1f313735373330303030301f",
-          "expected": "0xbfc53236e9c9103822fb50d1a366b36acb18b65312e1f5ce6de6d786d1a34404"
+          "preimage_hex": "33353030301fed959ceab2b0ebacb8eab5ac7cebaa85ecb0b01fed9584eab8b0eab5ac1f313738383739333230301f",
+          "expected": "0x366171dd7ff8e2a311cbc13caa91895de6cd304912e44a3fa47b7295bc0e74c6"
         }
       ]
     },
@@ -174,8 +171,9 @@
       "name": "bom_must_not_be_trimmed",
       "kind": "canonical_identity",
       "description": "2차 안전망. U+FEFF 는 1차 입력 검증에서 400 으로 거부되지만 canonical() 자체가 지우면 안 된다. Dart 의 String.trim() 은 지우므로 쓰면 안 된다.",
-      "input": "﻿한결문구",
+      "input": "\ufeff한결문구",
       "expected_output_hex": "efbbbfed959ceab2b0ebacb8eab5ac"
     }
-  ]
+  ],
+  "occurred_at_rule": "사용일의 KST(Asia/Seoul) 자정을 Unix 초로 변환한 값 (HASHING.md §1.3)"
 }
