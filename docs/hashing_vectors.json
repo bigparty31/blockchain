@@ -2,9 +2,9 @@
   "_comment": "docs/HASHING.md 의 테스트 벡터. 백엔드 유닛테스트와 앱 테스트에 그대로 사용한다. 문서에서 값을 눈으로 옮겨 적지 말 것.",
   "_harness": {
     "meta_hash": "input.counterparty 와 input.purpose 에 canonical() 을 적용한 뒤 meta_hash() 를 호출한다. preimage_hex 와 expected 를 모두 대조한다. input_is_nfd 가 true 인 벡터는 counterparty 가 실제로 NFD 인지(unicodedata.is_normalized 검사) 먼저 확인한다. 편집기가 NFC 로 합쳐버리면 테스트가 조용히 무의미해진다.",
-    "text_hash": "input 에 canonical_text() 를 적용한 뒤 text_hash() 를 호출한다.",
-    "file_hash": "content_hex 를 바이트로 되돌린 뒤 file_hash() 를 호출한다. 문자열로 다루지 말 것.",
-    "negative_cases": "kind 에 따라 분기한다. meta_hash_pair 는 두 항목의 해시를 각각 계산해 expected 와 맞는지 본 뒤, 서로 다른지 확인한다. canonical_identity 는 canonical(input) 이 input 과 같은지 본다.",
+    "text_hash": "input 에 canonical_text() 를 적용한 뒤 text_hash() 를 호출한다. input_is_nfd 가 true 인 벡터는 input 이 실제로 NFD 인지 먼저 확인한다.",
+    "file_hash": "content_hex 를 바이트로 되돌린 뒤 file_hash() 를 호출한다. 문자열로 다루지 말 것. must_differ_from 이 있으면 지목된 벡터와 해시가 서로 달라야 한다는 것까지 확인한다.",
+    "negative_cases": "kind 에 따라 분기한다. meta_hash_pair 는 두 항목의 해시를 각각 계산해 expected 와 맞는지 본 뒤 서로 다른지 확인한다. canonical_identity 는 canonical(input) 을 계산해 그 UTF-8 바이트가 expected_output_hex 와 같은지 본다 — expected_output_hex 가 정본이며, 입력과 같은지 비교하는 것만으로는 부족하다.",
     "student_app": "학생 앱은 API 가 준 정본 값을 그대로 해시한다. canonical() 을 적용하지 않으므로 expense_with_receipt · income_without_receipt · correction_negative_amount 3건만 실행한다. nfd_input_normalizes_to_nfc 와 leading_trailing_spaces_trimmed 는 canonical() 을 검사하는 벡터라 대상이 아니다."
   },
   "rule_document": "docs/HASHING.md",
@@ -117,6 +117,13 @@
       "description": "위와 같은 내용에서 앞뒤 공백이 없는 경우. trailing_whitespace_trimmed 와 expected 가 같아야 한다.",
       "input": "입력 오류로 반려합니다.",
       "expected": "0x244d5eef2147dd6866400427123843db054695059b0daa17d44b3e89bea1e572"
+    },
+    {
+      "name": "nfd_text_normalizes_to_nfc",
+      "description": "NFD(조합형)로 들어온 이의 본문. canonical_text() 가 NFC 정규화를 하면 objection_content 와 같은 해시가 나와야 한다. §3 처리 순서 4번을 빼먹은 구현은 여기서만 걸린다.",
+      "input_is_nfd": true,
+      "input": "\u110b\u1167\u11bc\u1109\u116e\u110c\u1173\u11bc \u1106\u1175\u110e\u1165\u11b7\u1107\u116e \u1109\u1161\u110b\u1172\u1100\u1161 \u1100\u116e\u11bc\u1100\u1173\u11b7\u1112\u1161\u11b8\u1102\u1175\u1103\u1161",
+      "expected": "0x2a737959edd39d9f96fc6015c21127aae8882ebf3a18230dab18a4f9e1093597"
     }
   ],
   "file_hash": [
@@ -173,6 +180,27 @@
       "description": "2차 안전망. U+FEFF 는 1차 입력 검증에서 400 으로 거부되지만 canonical() 자체가 지우면 안 된다. Dart 의 String.trim() 은 지우므로 쓰면 안 된다.",
       "input": "\ufeff한결문구",
       "expected_output_hex": "efbbbfed959ceab2b0ebacb8eab5ac"
+    },
+    {
+      "name": "nbsp_must_not_be_trimmed",
+      "kind": "canonical_identity",
+      "description": "canonical() 은 U+0020 만 제거한다. NBSP(U+00A0)는 남겨야 한다. 인자 없는 Python strip() 이나 Dart trim() 은 지우므로 여기서 걸린다.",
+      "input": "\u00a0한결문구\u00a0",
+      "expected_output_hex": "c2a0ed959ceab2b0ebacb8eab5acc2a0"
+    },
+    {
+      "name": "ideographic_space_must_not_be_trimmed",
+      "kind": "canonical_identity",
+      "description": "canonical() 은 U+0020 만 제거한다. 전각공백(U+3000)는 남겨야 한다. 인자 없는 Python strip() 이나 Dart trim() 은 지우므로 여기서 걸린다.",
+      "input": "\u3000한결문구\u3000",
+      "expected_output_hex": "e38080ed959ceab2b0ebacb8eab5ace38080"
+    },
+    {
+      "name": "tab_must_not_be_trimmed",
+      "kind": "canonical_identity",
+      "description": "canonical() 은 U+0020 만 제거한다. 탭(U+0009)는 남겨야 한다. 인자 없는 Python strip() 이나 Dart trim() 은 지우므로 여기서 걸린다.",
+      "input": "\t한결문구\t",
+      "expected_output_hex": "09ed959ceab2b0ebacb8eab5ac09"
     }
   ],
   "occurred_at_rule": "사용일의 KST(Asia/Seoul) 자정을 Unix 초로 변환한 값 (HASHING.md §1.3)"

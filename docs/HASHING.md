@@ -209,7 +209,7 @@ budget_id=7 로 변조                      -> d8e7c7ae0471a319b0c7546f…  (불
 >
 > 이 둘을 검증하려면 해당 이벤트를 읽어야 한다. 「OCR 불일치 상태로 승인됨」 뱃지(S7)와 반려 사유 표시가 여기 걸린다.
 
-`getEntry(id)`가 돌려주는 `Entry`에 검증에 필요한 값이 모두 들어 있다.
+`getEntry(id)`가 돌려주는 `Entry`에 **위 예외를 뺀 나머지**가 모두 들어 있다.
 
 ```
 Entry { hash, amount, kind, status, occurredAt, budgetId, correctsId, registrant, approver }
@@ -228,7 +228,7 @@ Entry { hash, amount, kind, status, occurredAt, budgetId, correctsId, registrant
 | `correctsId` | `corrects_entry_id` | **NULL → 0** (§2.1) |
 | `status` | `status` | |
 | `registrant` | `created_by` | **주소 ↔ user id 매핑 필요** (아래) |
-| `approver` | `approved_by` | 주소 ↔ user id 매핑. 미처리면 `address(0)` ↔ `NULL` |
+| `approver` | `approved_by` | 주소 ↔ user id 매핑. 미처리면 `address(0)` ↔ `NULL`. **`REJECTED`는 비교 제외** (아래) |
 | `occurredAt` | `occurred_at` | 해시에도 들어가지만 따로 봐도 된다 |
 
 3. 영수증이 있으면 **내려받은 바이트로 `fileHash`를 재계산해 `receipt_hash`와 비교**한다 (§4)
@@ -238,6 +238,8 @@ Entry { hash, amount, kind, status, occurredAt, budgetId, correctsId, registrant
 > 3번을 빠뜨리면 **영수증만 바꿔치기한 위조를 못 잡는다.** `meta_hash`는 `receipt_hash`(파일의 해시)를 덮을 뿐, 그 해시가 실제로 내려온 파일의 것인지는 보증하지 않는다. 학생 앱이 영수증을 열어볼 때 함께 확인하면 된다.
 
 2번을 빠뜨리면 반쪽짜리 검증이다. 해시 식은 PRD §8이 고정한 것이라 바꾸지 않고, 비교 대상을 늘려서 메운다.
+
+> **`REJECTED` 항목은 `approver`를 비교하지 않는다.** 컨트랙트의 `approver`는 확정자와 **반려자를 겸한다**(`confirmEntry` / `rejectEntry` 서명자). 그런데 DB에는 `approved_by`와 `reject_reason`만 있고 **반려자 컬럼이 없다.** 그대로 비교하면 체인에는 감사 주소가, DB에는 `NULL`이 있어 **반려된 항목이 전부 위조로 판정된다.** `rejected_by` 컬럼이 생기기 전까지 `REJECTED` 상태에서는 이 필드를 건너뛴다 (§8).
 
 > **`registrant` / `approver`는 지갑 주소이고 DB의 `created_by` / `approved_by`는 user id다.** 값 자체가 달라서 그냥 비교하면 안 되고, `User.wallet_address`로 옮긴 뒤 대조해야 한다. **이 두 필드가 "누가 등록하고 누가 승인했는가"의 유일한 온체인 증거**이므로 빠뜨리면 안 된다. 주소 매핑은 인증 파트(손종인)가 API로 내려준다.
 
@@ -251,6 +253,7 @@ Entry { hash, amount, kind, status, occurredAt, budgetId, correctsId, registrant
 | `corrects_entry_id = NULL` | `correctsId = 0` | **정정이 아닌 모든 항목** |
 | `approved_by = NULL` | `approver = address(0)` | **승인 대기 중인 모든 항목** |
 | `reject_reason = NULL` | `reasonHash = bytes32(0)` | 반려되지 않은 항목 |
+| `warning_ack_reason = NULL` | `warningReasonHash = bytes32(0)` | **경고 없이 확정된 모든 항목** |
 
 원장의 대부분이 여기 걸린다. 그냥 비교하면 `None != 0`이라 배지가 거의 전부 빨강이 된다. **비교 전에 `NULL`을 `0`으로 맞춘 뒤 대조한다.**
 
@@ -302,6 +305,10 @@ SHA256( 정본 문자열 )   — 아래 「여러 줄 텍스트 규칙」으로 
 | `answerHash` | 이의 답변 (`answer`) |
 
 값이 없으면 `bytes32(0)`을 넘긴다. 빈 문자열을 해시하지 않는다.
+
+> **다듬은 뒤 빈 문자열이 되는 경우도 같다.** `"  \n\t "` 처럼 공백·탭·개행만 있는 사유는 아래 처리를 거치면 `""`가 된다. 이때 `text_hash("")`를 올리면 안 된다 — 그 값은 `0xe3b0c44298fc1c14…`이고 `bytes32(0)`이 아니라서, §2.1의 `NULL ↔ bytes32(0)` 대조에서 **위조로 판정된다.**
+>
+> 빈 문자열이면 `bytes32(0)`을 넘긴다. 사유가 필수인 자리(경고 무시 승인·반려)에서는 **400으로 거부**한다.
 
 **여러 줄 텍스트 규칙** — 이의 본문과 반려 사유는 여러 줄일 수 있다. `meta_hash` 필드와 달리 **줄바꿈을 허용한다.** 필드가 하나뿐이라 구분자 충돌이 없기 때문이다.
 
@@ -373,7 +380,8 @@ CSV는 은행에서 받은 파일을 **그대로** 해시한다. 인코딩(CP949
 - **보이지 않는 공백류 금지** — U+00A0, U+200B, U+3000, U+FEFF -> 400 (§1.1). 두 종류 모두에 적용
 - `counterparty`, `purpose`는 다듬은 뒤 **빈 문자열이면 400**
 - `amount`는 정수. 0 금지. 음수는 `corrects_entry_id`가 있을 때만 허용
-- `occurred_at`은 Unix 초 정수
+- `occurred_at`은 Unix 초 정수이고 **KST 자정이어야 한다** — `ts % 86400 == 54000`이 아니면 400 (§1.3). 머지된 목업의 `1757300000`은 이 검사를 통과하지 못한다(`% 86400 = 10400`)
+- **텍스트 해시 대상이 다듬은 뒤 빈 문자열**이면, 사유가 필수인 자리(경고 무시 승인·반려)에서는 400. 선택인 자리에서는 `bytes32(0)`을 넘긴다 (§3)
 - `receipt_hash`는 `0x` + **소문자** hex 64자 또는 NULL. **대문자가 오면 400.** 서버가 소문자로 고쳐 저장하면 앱이 서명한 `meta_hash`와 값이 갈린다 (§4)
 
 ---
@@ -499,3 +507,4 @@ Python과 Node로 독립 구현해 위 샘플 3건이 동일하게 나오는 것
 - 검증용 원본 필드를 내려주는 API(`GET /entries/{id}/verify` 등)가 아직 없다. §2의 이벤트 필드 비교까지 가능한 응답 형태가 필요하다
 - **수입 항목의 `term`을 검증할 방법이 없다.** 지출은 `budgetId → getBudget().term`으로 도달하지만 수입은 `budgetId = 0`이라 거쳐 갈 예산이 없다(§2.3). `Entry`나 이벤트에 `term`을 넣어달라고 장석연에게 요청한다. 이벤트는 배포 후 바꿀 수 없으므로 구현 착수 전에 정리돼야 한다 (PR #3 리뷰로 이미 요청)
 - **ID 채번을 1부터 시작해야 한다.** `0`을 "없음"으로 예약하기 때문이다(§2.1). 김경윤과 확인
+- **`Entry`에 `rejected_by` 컬럼이 없다.** 컨트랙트의 `approver`는 확정자와 반려자를 겸하는데 DB에는 확정자만 있다. 그래서 `REJECTED` 항목의 서명자를 대조할 수 없다(§2). 김경윤 ERD 반영 요청
