@@ -350,11 +350,17 @@ def canonical(s: str) -> str:
     """저장 시점에 한 번만 호출. 결과가 정본."""
     return unicodedata.normalize("NFC", s.strip(TRIM))
 
-def meta_hash(amount: int, counterparty: str, purpose: str,
-              occurred_at: int, receipt_hash: str | None) -> str:
+def _int(v, field: str) -> str:
+    """정수만 받는다. ORM 이 Decimal·datetime 을 넘겨도 조용히 통과하지 않게 한다."""
+    if isinstance(v, bool) or not isinstance(v, int):
+        raise TypeError(f"{field}: int 여야 한다 (받은 타입 {type(v).__name__})")
+    return str(v)
+
+def meta_hash(amount, counterparty: str, purpose: str,
+              occurred_at, receipt_hash: str | None) -> str:
     # counterparty, purpose 는 이미 canonical 을 거친 정본 값
-    pre = US.join([str(amount), counterparty, purpose,
-                   str(occurred_at), receipt_hash or ""])
+    pre = US.join([_int(amount, "amount"), counterparty, purpose,
+                   _int(occurred_at, "occurred_at"), receipt_hash or ""])
     return "0x" + hashlib.sha256(pre.encode("utf-8")).hexdigest()
 
 TRIM_TEXT = " \t\n"   # U+0020, U+0009, U+000A (§3)
@@ -423,6 +429,8 @@ String fileHash(List<int> bytes) => '0x${sha256.convert(bytes)}';
 > **Dart 주의** — 표준 라이브러리에 유니코드 정규화가 없다. `crypto`만으로는 NFC를 못 한다. `unorm_dart` 같은 패키지를 `pubspec.yaml`에 추가해야 한다.
 > `String.trim()`은 쓰지 말 것. BOM 처리가 Python과 다르다 (§1.1).
 
+> **`amount`·`occurred_at`을 `str()`로 바로 넘기지 말 것.** ORM 이 넘기는 값이 `int` 가 아닐 수 있다. `str(Decimal("35000.00"))` 은 `"35000.00"`, `str(datetime(...))` 은 `"2025-09-08 05:33:20+00:00"` 이 되어 **예외 없이 다른 preimage** 가 만들어지고, 승인 시점에 `HashMismatch` 로만 드러난다. 위 `_int()` 처럼 타입을 막아두는 편이 안전하다. Dart 는 `int` 타입이 강제돼 이 문제가 없다.
+
 Python과 Node로 독립 구현해 위 샘플 3건이 동일하게 나오는 것을 확인했다. Dart 구현 후에도 같은 값이 나오는지 대조할 것.
 
 ---
@@ -432,6 +440,10 @@ Python과 Node로 독립 구현해 위 샘플 3건이 동일하게 나오는 것
 규칙을 한 번이라도 고치면 **이미 확정된 항목의 배지가 전부 깨진다.** 온체인 해시는 옛 규칙으로 계산된 값이기 때문이다.
 
 그래서 `Entry`에 `hash_version` 컬럼(기본값 `1`)을 두기를 제안한다. 규칙이 바뀌면 새 항목만 `2`로 쌓고, 검증할 때 버전에 맞는 계산식을 쓴다. 나중에 추가하려면 이미 늦다. -> 김경윤 ERD 반영 요청
+
+> **한계 — 이 버전 번호는 체인에 없다.** §2는 DB를 믿지 않는다는 전제로 쓰였는데, `hash_version`은 DB 컬럼이라 검증하는 쪽이 그 값을 서버에서 받아야 한다. 규칙이 v2로 올라간 뒤라면 서버가 v1이라고 잘못 내려주는 것만으로 정상 항목에 빨간 배지가 뜨거나, 반대로 위조를 놓칠 수 있다.
+>
+> 지금은 **규칙이 v1 하나뿐이라 실제 문제가 없다.** 근본 해결은 `Entry`에 버전 필드를 두는 것이라 컨트랙트 변경이 필요하므로 지금 요청하지 않는다. 다만 **규칙을 v2로 올리기 전에 반드시 이 문제를 먼저 정리한다.**
 
 **이 문서와 `docs/hashing_vectors.json`은 `.github/CODEOWNERS` 대상이다.** `docs/enums.md`를 보호하는 이유("상태값이 어긋나면 백엔드와 앱이 조용히 안 맞는다")가 여기에도 그대로 적용되며, 결과는 더 크다. 값이 어긋나면 이미 확정된 항목의 배지까지 전부 깨진다. 규칙을 바꾸는 PR은 손종인 승인을 거친다.
 
