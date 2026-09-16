@@ -6,10 +6,11 @@ pragma solidity ^0.8.24;
 /// @dev
 /// - entryId 는 백엔드 DB auto-increment 값. 컨트랙트는 중복만 막는다.
 /// - amount 는 원 단위 정수. correctsId != 0 인 정정 항목에서만 음수 허용.
-/// - hash 는 PRD §8 meta_hash = SHA256(amount | counterparty | purpose | occurred_at | receipt_hash).
+/// - hash 는 PRD §8 meta_hash. 계산 규칙의 정본은 docs/HASHING.md 다.
+///   구분자는 U+001F (Unit Separator) 이고 파이프(|) 가 아니다 — 목적란이 자유 입력이라
+///   파이프를 쓰면 서로 다른 거래가 같은 해시를 낸다 (docs/HASHING.md §1).
 ///   SHA-256 32바이트를 bytes32 에 그대로 담는다 (keccak 아님). 영수증은 receipt_hash 로 이미 포함.
 ///   EIP-712 서명 digest 와는 별개 값 — meta_hash 는 서명 대상 struct 의 한 필드다.
-///   구분자·인코딩 세부는 docs/CONTRACTS.md "entry.hash" 절 참고.
 /// - 예산 초과 검사는 등록(recordPending) 시점, 예산 소모(BudgetToken.spend)는 확정(confirmEntry) 시점.
 ///   등록 시 초과면 revert 하지 않고 BLOCKED 로 저장 + EntryBlocked emit (이벤트를 남기기 위함).
 ///   BLOCKED 항목은 confirmEntry 에서 거부되며 잔액 계산에서도 제외한다.

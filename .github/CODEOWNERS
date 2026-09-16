@@ -6,3 +6,10 @@
 
 # 상태값이 어긋나면 백엔드와 앱이 조용히 안 맞는다
 /docs/enums.md      @bigparty31
+
+# 해시 규칙이 바뀌면 이미 확정된 항목의 검증 배지가 전부 깨진다
+/docs/HASHING.md           @apple1231
+/docs/hashing_vectors.json @apple1231
+
+# category 해시가 어긋나면 같은 항목이 다른 예산으로 갈라진다
+/docs/CONTRACTS.md  @bigparty31
