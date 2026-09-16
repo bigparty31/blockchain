@@ -11,7 +11,7 @@ from app.schemas.entry import (
 
 router = APIRouter(prefix="/entries", tags=["Entries"])
 
-# PRD §8 규격에 맞춘 초기 목업 더미 데이터 3건
+# PRD §8 및 docs/HASHING.md 규격에 맞춘 초기 목업 더미 데이터 3건 (KST 자정 타임스탬프 준수)
 DUMMY_ENTRIES: List[EntryResponse] = [
     EntryResponse(
         id=1,
@@ -21,13 +21,13 @@ DUMMY_ENTRIES: List[EntryResponse] = [
         counterparty="한결문구",
         purpose="신입생 환영회 명찰 및 필기구 구매",
         budget_id=2,
-        occurred_at=1757300000,
+        occurred_at=1788793200,  # 2026-09-08 00:00:00 KST (% 86400 == 54000)
         receipt_path="/receipts/sample_01.jpg",
         receipt_hash="0xabc1234567890abcdef1234567890abcdef1234567890abcdef1234567890abc",
-        meta_hash="0x456def1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+        meta_hash="0x24ae73988d927fb39f45eb6024e9ff8ffa19e8501603565bd82710ea8df4b937",
         ocr_amount=35000,
         ocr_approval_no="12345678",
-        ocr_paid_at=1757300000,
+        ocr_paid_at=1788793200,
         ocr_status=OCRStatus.MATCH,
         category_warning=False,
         warning_ack_reason=None,
@@ -48,13 +48,13 @@ DUMMY_ENTRIES: List[EntryResponse] = [
         counterparty="청년피자",
         purpose="개강총회 다과 주문",
         budget_id=1,
-        occurred_at=1757386400,
+        occurred_at=1788706800,  # 2026-09-07 00:00:00 KST (% 86400 == 54000)
         receipt_path="/receipts/sample_02.jpg",
         receipt_hash="0xdef4567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
-        meta_hash="0x789abc1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+        meta_hash="0x622fc1b357c04032e65bc1855c73aaff6d519464d69bf22b10761f3b26a1b793",
         ocr_amount=120000,
         ocr_approval_no="87654321",
-        ocr_paid_at=1757386400,
+        ocr_paid_at=1788706800,
         ocr_status=OCRStatus.MATCH,
         category_warning=False,
         warning_ack_reason=None,
@@ -75,10 +75,10 @@ DUMMY_ENTRIES: List[EntryResponse] = [
         counterparty="컴퓨터공학과 학생회비 일괄 납부",
         purpose="2026-2학기 학과 학생회비 수납",
         budget_id=None,
-        occurred_at=1757100000,
+        occurred_at=1788620400,  # 2026-09-06 00:00:00 KST (% 86400 == 54000)
         receipt_path=None,
         receipt_hash=None,
-        meta_hash="0x9990001234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+        meta_hash="0x74c9740556d857575586251e71fa24091ffaece5c01c4f889d7c1224ce7af3a9",
         ocr_amount=None,
         ocr_approval_no=None,
         ocr_paid_at=None,
