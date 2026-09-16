@@ -1,10 +1,18 @@
 {
   "_comment": "docs/HASHING.md 의 테스트 벡터. 백엔드 유닛테스트와 앱 테스트에 그대로 사용한다. 문서에서 값을 눈으로 옮겨 적지 말 것.",
+  "_harness": {
+    "meta_hash": "input.counterparty 와 input.purpose 에 canonical() 을 적용한 뒤 meta_hash() 를 호출한다. preimage_hex 와 expected 를 모두 대조한다.",
+    "text_hash": "input 에 canonical_text() 를 적용한 뒤 text_hash() 를 호출한다.",
+    "file_hash": "content_hex 를 바이트로 되돌린 뒤 file_hash() 를 호출한다. 문자열로 다루지 말 것.",
+    "negative_cases": "kind 에 따라 분기한다. meta_hash_pair 는 두 항목의 해시를 각각 계산해 expected 와 맞는지 본 뒤, 서로 다른지 확인한다. canonical_identity 는 canonical(input) 이 input 과 같은지 본다."
+  },
   "rule_document": "docs/HASHING.md",
   "hash_rule_version": 1,
-  "separator": "U+001F",
+  "separator": "\u001f",
+  "separator_name": "U+001F (Unit Separator)",
   "encoding": "UTF-8",
   "normalization": "NFC",
+
   "meta_hash": [
     {
       "name": "expense_with_receipt",
@@ -58,56 +66,116 @@
       },
       "preimage_hex": "33353030301fed959ceab2b0ebacb8eab5ac1fec8ba0ec9e85ec839d20ed9998ec9881ed9a8c20ebaa85ecb0b020ebb08f20ed9584eab8b0eab5ac20eab5aceba7a41f313735373330303030301f307861626331323334353637383930616263646566313233343536373839306162636465663132333435363738393061626364656631323334353637383930616263",
       "expected": "0x2e66f4be0afea4b6e81eb8cd981dddc2f357e72da0567782c946aa18cc39c05d"
+    },
+    {
+      "name": "leading_trailing_spaces_trimmed",
+      "description": "counterparty·purpose 앞뒤에 U+0020 이 붙은 경우. canonical() 이 이를 제거하면 expense_with_receipt 와 같은 해시가 나와야 한다. 트림을 빼먹은 구현은 여기서만 걸린다.",
+      "input": {
+        "amount": 35000,
+        "counterparty": "  한결문구 ",
+        "purpose": " 신입생 환영회 명찰 및 필기구 구매  ",
+        "occurred_at": 1757300000,
+        "receipt_hash": "0xabc1234567890abcdef1234567890abcdef1234567890abcdef1234567890abc"
+      },
+      "preimage_hex": "33353030301fed959ceab2b0ebacb8eab5ac1fec8ba0ec9e85ec839d20ed9998ec9881ed9a8c20ebaa85ecb0b020ebb08f20ed9584eab8b0eab5ac20eab5aceba7a41f313735373330303030301f307861626331323334353637383930616263646566313233343536373839306162636465663132333435363738393061626364656631323334353637383930616263",
+      "expected": "0x2e66f4be0afea4b6e81eb8cd981dddc2f357e72da0567782c946aa18cc39c05d"
     }
   ],
+
   "text_hash": [
     {
       "name": "warning_reason",
+      "description": "경고 무시 승인 사유 (한 줄)",
       "input": "OCR 금액 불일치, 영수증 원본 확인함",
       "expected": "0x41357b2c4497cfd0b66c43ad57242c82c8850c666e229aea0ca7ded5052e54fb"
     },
     {
       "name": "objection_content",
+      "description": "이의 본문 (한 줄)",
       "input": "영수증 미첨부 사유가 궁금합니다",
       "expected": "0x2a737959edd39d9f96fc6015c21127aae8882ebf3a18230dab18a4f9e1093597"
+    },
+    {
+      "name": "multiline_crlf_normalized_to_lf",
+      "description": "CRLF 로 들어온 여러 줄 텍스트. canonical_text() 가 LF 로 통일하면 multiline_lf 와 같은 해시가 나와야 한다. 개행 정규화를 빼먹은 구현은 여기서만 걸린다.",
+      "input": "영수증 금액이 다릅니다.\r\n확인 부탁드립니다.",
+      "expected": "0xc301f0cc28f907cb2cf1c0ba9518250f03ae2dee91166ddd14697389373ef7a2"
+    },
+    {
+      "name": "multiline_lf",
+      "description": "위와 같은 내용을 LF 로 보낸 경우. multiline_crlf_normalized_to_lf 와 expected 가 같아야 한다.",
+      "input": "영수증 금액이 다릅니다.\n확인 부탁드립니다.",
+      "expected": "0xc301f0cc28f907cb2cf1c0ba9518250f03ae2dee91166ddd14697389373ef7a2"
+    },
+    {
+      "name": "trailing_whitespace_trimmed",
+      "description": "앞뒤에 공백·탭·개행이 붙은 경우. canonical_text() 가 셋 모두 제거하면 trailing_whitespace_clean 과 같은 해시가 나와야 한다. 탭을 빼먹은 구현은 여기서만 걸린다.",
+      "input": " \t입력 오류로 반려합니다.\n\t ",
+      "expected": "0x244d5eef2147dd6866400427123843db054695059b0daa17d44b3e89bea1e572"
+    },
+    {
+      "name": "trailing_whitespace_clean",
+      "description": "위와 같은 내용에서 앞뒤 공백이 없는 경우. trailing_whitespace_trimmed 와 expected 가 같아야 한다.",
+      "input": "입력 오류로 반려합니다.",
+      "expected": "0x244d5eef2147dd6866400427123843db054695059b0daa17d44b3e89bea1e572"
     }
   ],
+
   "file_hash": [
     {
-      "name": "bank_csv_sample",
-      "description": "거래내역 CSV. 바이트 그대로 해시한다 (정규화·트림 없음)",
-      "content_utf8": "날짜,적요,출금,입금,잔액\n2026-09-08,한결문구,35000,,4965000\n",
+      "name": "bank_csv_utf8",
+      "description": "거래내역 CSV (UTF-8). 바이트 그대로 해시한다. content_hex 를 바이트로 되돌려 쓸 것 — 문자열로 다루면 OS 개행 변환에 걸린다.",
+      "content_hex": "eb82a0eca79c2ceca081ec9a942cecb69ceab8882cec9e85eab8882cec9e94ec95a10a323032362d30392d30382ced959ceab2b0ebacb8eab5ac2c33353030302c2c343936353030300a",
       "expected": "0xed6a74f157c79bec09aec2b1f9b8dde80ac22e46fe31fda31928fa13eedf5bd2"
+    },
+    {
+      "name": "bank_csv_cp949",
+      "description": "같은 내용을 CP949 로 저장한 CSV. 은행이 내려주는 실제 형식이다. UTF-8 본과 해시가 달라야 한다 — 인코딩을 변환하면 해시가 깨진다는 것을 고정한다 (HASHING.md §4).",
+      "content_hex": "b3afc2a52cc0fbbfe42cc3e2b1dd2cc0d4b1dd2cc0dcbed70a323032362d30392d30382cc7d1b0e1b9aeb1b82c33353030302c2c343936353030300a",
+      "expected": "0x4589ff317f68dea1e3cb5103aba559aea3e5928a4cb4fbf6b5ab05d3666bd339",
+      "must_differ_from": "bank_csv_utf8"
     }
   ],
+
   "negative_cases": [
     {
       "name": "pipe_separator_collision",
-      "description": "구분자를 파이프로 썼다면 아래 두 항목이 같은 해시를 냈을 것이다. U+001F 에서는 서로 달라야 한다. 두 expected 가 다른지 확인한다.",
+      "kind": "meta_hash_pair",
+      "description": "구분자를 파이프로 썼다면 이 두 항목이 같은 해시를 냈을 것이다. U+001F 에서는 각자 expected 와 일치하면서 서로 달라야 한다.",
       "must_differ": true,
-      "entry_a": {
-        "amount": 35000,
-        "counterparty": "한결문구",
-        "purpose": "명찰|필기구",
-        "occurred_at": 1757300000,
-        "receipt_hash": null,
-        "expected": "0x7820a629c053e32b0bfe22c366e9c94b582c038188578acf51dbd20baef1d356"
-      },
-      "entry_b": {
-        "amount": 35000,
-        "counterparty": "한결문구|명찰",
-        "purpose": "필기구",
-        "occurred_at": 1757300000,
-        "receipt_hash": null,
-        "expected": "0xbfc53236e9c9103822fb50d1a366b36acb18b65312e1f5ce6de6d786d1a34404"
-      }
+      "entries": [
+        {
+          "name": "entry_a",
+          "input": {
+            "amount": 35000,
+            "counterparty": "한결문구",
+            "purpose": "명찰|필기구",
+            "occurred_at": 1757300000,
+            "receipt_hash": null
+          },
+          "preimage_hex": "33353030301fed959ceab2b0ebacb8eab5ac1febaa85ecb0b07ced9584eab8b0eab5ac1f313735373330303030301f",
+          "expected": "0x7820a629c053e32b0bfe22c366e9c94b582c038188578acf51dbd20baef1d356"
+        },
+        {
+          "name": "entry_b",
+          "input": {
+            "amount": 35000,
+            "counterparty": "한결문구|명찰",
+            "purpose": "필기구",
+            "occurred_at": 1757300000,
+            "receipt_hash": null
+          },
+          "preimage_hex": "33353030301fed959ceab2b0ebacb8eab5ac7cebaa85ecb0b01fed9584eab8b0eab5ac1f313735373330303030301f",
+          "expected": "0xbfc53236e9c9103822fb50d1a366b36acb18b65312e1f5ce6de6d786d1a34404"
+        }
+      ]
     },
     {
       "name": "bom_must_not_be_trimmed",
-      "description": "2차 안전망. U+FEFF 는 1차 입력 검증에서 400 으로 거부되지만 canonical() 자체도 지우면 안 된다. Dart 의 String.trim() 은 지우므로 쓰면 안 된다. input 은 실제 U+FEFF 문자로 시작한다.",
+      "kind": "canonical_identity",
+      "description": "2차 안전망. U+FEFF 는 1차 입력 검증에서 400 으로 거부되지만 canonical() 자체가 지우면 안 된다. Dart 의 String.trim() 은 지우므로 쓰면 안 된다.",
       "input": "﻿한결문구",
-      "assert": "canonical(input) == input",
-      "canonical_output_utf8_hex": "efbbbfed959ceab2b0ebacb8eab5ac"
+      "expected_output_hex": "efbbbfed959ceab2b0ebacb8eab5ac"
     }
   ]
 }
