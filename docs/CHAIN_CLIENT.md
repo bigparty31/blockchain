@@ -42,6 +42,10 @@
 | `reject_entry(decision, signature)` | `rejectEntry` | `REJECTED` |
 | `get_entry(entry_id)` | `getEntry` | 없으면 `None` |
 
+`getEntry`는 없는 id에도 0으로 채운 구조체를 돌려주고, status 0은 `PENDING`이다. 그대로 옮기면 없는 항목이 `PENDING`으로 보이므로 실제 구현은 `exists(id)`를 먼저 확인해 없으면 `None`을 돌려준다.
+
+`registrant`·`approver`는 web3.py가 돌려주는 EIP-55 체크섬 주소(대소문자 섞임)다. DB의 `wallet_address`와 비교할 때는 **양쪽을 소문자로 맞춘다.** Fake도 같은 형식으로 돌려준다.
+
 쓰기 메서드는 **트랜잭션이 블록에 들어갈 때까지 기다린 뒤** 최종 상태를 돌려준다. `recordPending`은 반환값이 없어 `PENDING`/`BLOCKED`를 이벤트로만 알 수 있기 때문이다. 파이썬에서는 `async`로 기다린다.
 
 ## 4. 결과와 실패
@@ -51,41 +55,63 @@
 | 정상 | `TxResult(tx_hash, status, block_reason)` | 기록됨 |
 | revert | `ChainRevert(reason, detail)` | **바뀌지 않음** |
 | 연결 실패 | `ChainUnavailable` | **들어갔는지 모름** |
-| 입력 형식 오류 | 모델 생성 시 `ValueError` | 호출 전에 막힘 |
+| 입력 형식 오류 | `ValueError` — 모델 생성 시, 서명은 메서드 호출 시 | 체인에 보내기 전에 막힘 |
 
 **`BLOCKED`는 예외가 아니다.** 트랜잭션은 성공했고 예산 조건 위반이 기록된 것이다. 에러 처리 분기에 넣지 말 것.
 
-**`ChainUnavailable`이면 바로 재시도하지 않는다.** 먼저 `get_entry(id)`로 들어갔는지 확인한다. 이미 들어갔는데 다시 보내면 `ENTRY_ALREADY_EXISTS`로 revert 된다.
+**`ChainUnavailable`이면 바로 재시도하지 않는다.** 먼저 `get_entry(id)`로 들어갔는지 확인한다. 확정·반려 때는 항목이 원래 있으므로 `None`인지가 아니라 `status`로 판단한다.
+
+| 메서드 | 이미 들어간 것으로 보는 조건 | 확인 없이 다시 보내면 |
+| --- | --- | --- |
+| `record_pending` | `get_entry(id)`가 `None`이 아님 | `ENTRY_ALREADY_EXISTS`로 revert |
+| `confirm_entry` | `status`가 `CONFIRMED` | `INVALID_STATUS`로 revert |
+| `reject_entry` | `status`가 `REJECTED` | `INVALID_STATUS`로 revert |
 
 계획표가 요구한 세 가지:
 
 | 상황 | 모양 | DB 처리 |
 | --- | --- | --- |
-| 서명 불일치 | `ChainRevert(INVALID_SIGNATURE)` | `status` NULL 유지 |
+| 서명 불일치 (등록) | `ChainRevert(NOT_REGISTRANT)` | `status` NULL 유지 |
+| 서명 불일치 (확정·반려) | `ChainRevert(NOT_APPROVER)` | `PENDING` 유지 |
 | 등록 시 예산 초과 | `TxResult(status=BLOCKED, block_reason=BUDGET_EXCEEDED)` | `BLOCKED` 저장, 사유 표시 |
 | 확정 시 잔량 부족 | `ChainRevert(INSUFFICIENT_BUDGET)` | `PENDING` 유지, 반려 흐름으로 |
 
+**서명 불일치는 `INVALID_SIGNATURE`로 오지 않는다.** EIP-712 서명은 형식만 맞으면 다른 데이터에 대한 서명이어도 실패하지 않고 엉뚱한 주소를 복구해 낸다. 컨트랙트에는 권한 없는 사람이 서명한 것으로 보여서 `NOT_REGISTRANT`·`NOT_APPROVER`가 난다. `INVALID_SIGNATURE`는 서명 바이트 자체가 깨졌을 때만 난다. 그래서 revert만으로는 "앱이 다른 값에 서명함"과 "정말 권한이 없는 사람"을 구분할 수 없다 (§6).
+
 `RevertReason`의 값은 Solidity 에러 이름 그대로다 (`"InvalidSignature"` 등). 전체 목록은 `backend/app/chain/models.py`.
 
-**모델이 체인 호출 전에 막는 것** — 해시가 `0x` + 소문자 hex 64자가 아님, 서명이 `0x` + hex 130자가 아님, `id`가 0 이하, `occurred_at`이 KST 자정이 아님 (HASHING §1.3, §5).
+**체인 호출 전에 막는 것**
+
+- 모델 생성 시 — 해시가 `0x` + 소문자 hex 64자가 아님, `id`가 0 이하, `occurred_at`이 음수이거나 KST 자정이 아님 (HASHING §1.3, §5)
+- 메서드 호출 시 — 서명이 `0x` + hex 130자가 아님. 대소문자 모두 받고 소문자로 바꿔 쓴다
+
+서명 검사의 `ValueError`는 `ChainError`가 아니다. `ChainError`만 잡으면 500으로 새어 나가므로 API 입력 검증에서 먼저 막거나 따로 잡는다.
 
 ## 5. FakeChainClient
 
-입력만으로 판정되는 컨트랙트 규칙은 그대로 흉내 낸다 — 중복 id, 금액 0, 정정 아닌 음수, 정정 대상 없음·미확정, 상태 전이, 해시 불일치, 서명 시한. 서명자·권한·예산 잔량처럼 체인 상태가 필요한 결과는 직접 지정한다.
+입력만으로 판정되는 컨트랙트 규칙은 그대로 흉내 낸다 — 중복 id, 금액 0, 정정 아닌 음수, 정정 대상 없음·미확정, 상태 전이, 해시 불일치, 서명 시한, 예산 id 0인 지출(`BLOCKED`, `BUDGET_NOT_FOUND`). 서명자·권한·예산 잔량처럼 체인 상태가 필요한 결과와 연결 실패는 직접 지정한다.
 
 ```python
-from app.chain import FakeChainClient, RevertReason, BlockReason
+from app.chain import FakeChainClient, RevertReason, BlockReason, fake_signature
 
-chain = FakeChainClient()
+chain = FakeChainClient(clock=lambda: 1_790_000_000)  # 시각 고정. 생략하면 time.time
 
-chain.block_next(BlockReason.BUDGET_EXCEEDED)                    # 다음 지출 등록을 BLOCKED 로
+TREASURER = "0x1111111111111111111111111111111111111111"
+sig = fake_signature(TREASURER)  # TREASURER 가 서명한 것으로 취급. 부를 때마다 다른 문자열
+
+chain.block_next(BlockReason.BUDGET_EXCEEDED)                       # 다음 지출 등록을 BLOCKED 로
 chain.fail_next("confirm_entry", RevertReason.INSUFFICIENT_BUDGET)  # 다음 확정을 revert
-chain.fail_next("record_pending", RevertReason.INVALID_SIGNATURE)   # 서명 불일치
+chain.fail_next("record_pending", RevertReason.NOT_REGISTRANT)      # 서명 불일치 (§4)
+chain.unavailable_next("record_pending")                            # 연결 실패. 체인에 안 들어감
+chain.unavailable_next("confirm_entry", landed=True)                # 체인엔 들어갔는데 응답만 못 받음
 ```
 
-- `fail_next`는 한 번만 적용되고 상태를 바꾸지 않는다
-- `block_next`는 지출에만 적용된다. 수입 등록은 예산 검사를 안 한다
-- 서명자 주소는 서명 문자열로 만든다. **같은 서명 문자열로 등록·확정하면 `SELF_APPROVAL`**이 난다
+- `fail_next`·`unavailable_next`는 한 번만 적용된다. `fail_next`는 상태를 바꾸지 않는다
+- `unavailable_next(landed=True)`는 체인에서 평소대로 처리한 뒤(성공이든 revert든) `ChainUnavailable`을 던진다
+- 메서드 이름은 파이썬 이름(`record_pending`, `confirm_entry`, `reject_entry`)이다. 다른 값이면 `ValueError`
+- `block_next`는 예산 id가 0이 아닌 지출에만 적용된다. 수입 등록은 예산 검사를 안 한다
+- 서명자는 서명의 앞 20바이트다. **같은 주소로 만든 서명으로 등록·확정하면 `SELF_APPROVAL`**이 난다. 테스트에서는 `fake_signature`로 서명을 만든다
+- `clock`을 넘기지 않으면 현재 시각으로 `deadline`을 판정한다. 고정된 `deadline`을 쓰는 테스트는 `clock`도 고정한다
 
 ## 6. 다음 주에 정할 것
 
@@ -95,3 +121,4 @@ chain.fail_next("record_pending", RevertReason.INVALID_SIGNATURE)   # 서명 불
 - 한 id에 확정·반려 서명을 둘 다 릴레이하지 않는 장치 — ChainClient 안인지 서비스 계층인지
 - 반려 사유·경고 사유 필수 검사 — `AccountingLedger` 구현 때 revert로 추가 예정. 에러 이름이 정해지면 `RevertReason`에 넣는다
 - 앱이 서명에 쓸 EIP-712 도메인(`chainId`, `verifyingContract`)을 내려주는 경로
+- ③에서 서버가 서명자를 먼저 복구해 확인할지 — revert만으로는 서명 불일치와 권한 없음을 구분할 수 없다 (§4)

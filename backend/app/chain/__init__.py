@@ -1,5 +1,5 @@
 from app.chain.client import ChainClient
-from app.chain.fake import FakeChainClient
+from app.chain.fake import FakeChainClient, fake_signature
 from app.chain.models import (
     BlockReason,
     ChainEntry,
@@ -16,6 +16,7 @@ from app.chain.models import (
 __all__ = [
     "ChainClient",
     "FakeChainClient",
+    "fake_signature",
     "BlockReason",
     "ChainEntry",
     "ChainError",

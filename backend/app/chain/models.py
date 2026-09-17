@@ -19,7 +19,7 @@ ZERO_BYTES32 = "0x" + "0" * 64
 ZERO_ADDRESS = "0x" + "0" * 40
 
 _BYTES32 = re.compile(r"0x[0-9a-f]{64}")
-_SIGNATURE = re.compile(r"0x[0-9a-f]{130}")
+_SIGNATURE = re.compile(r"0x[0-9a-fA-F]{130}")
 _KST_MIDNIGHT_REMAINDER = 54000  # KST 00:00 = UTC 15:00 → Unix 초 % 86400
 
 
@@ -41,10 +41,14 @@ def _bytes32(value: str) -> str:
 
 
 def check_signature(signature: str) -> str:
-    """EIP-712 서명 형식(0x + 65바이트)만 본다. 서명자 검증은 컨트랙트가 한다."""
+    """EIP-712 서명 형식(0x + 65바이트)만 보고 소문자로 맞춰 돌려준다. 서명자 검증은 컨트랙트가 한다.
+
+    서명은 모델 필드가 아니어서 모델 생성 때가 아니라 ChainClient 메서드를 부를 때 검사된다.
+    대소문자가 달라도 같은 바이트라 둘 다 받는다 (해시는 HASHING §5 대로 소문자만 받는다).
+    """
     if not _SIGNATURE.fullmatch(signature):
-        raise ValueError("서명은 0x + 소문자 hex 130자여야 한다")
-    return signature
+        raise ValueError("서명은 0x + hex 130자여야 한다")
+    return signature.lower()
 
 
 class _Frozen(BaseModel):
@@ -62,7 +66,7 @@ class RecordRequest(_Frozen):
     hash: str = Field(..., description="meta_hash (docs/HASHING.md §1)")
     amount: int = Field(..., description="원 단위. 정정 항목만 음수")
     kind: EntryKind
-    occurred_at: int = Field(..., description="사용일 KST 00:00:00 Unix 초 (docs/HASHING.md §1.3)")
+    occurred_at: int = Field(..., ge=0, description="사용일 KST 00:00:00 Unix 초 (docs/HASHING.md §1.3)")
     budget_id: int = Field(0, ge=0, description="INCOME 은 0")
     corrects_id: int = Field(0, ge=0, description="정정 대상 entryId. 정정이 아니면 0")
     deadline: int = Field(..., ge=0, description="서명 유효 시한 (Unix 초)")
@@ -130,8 +134,8 @@ class ChainEntry(_Frozen):
     occurred_at: int
     budget_id: int
     corrects_id: int
-    registrant: str = Field(..., description="등록 서명자 주소")
-    approver: str = Field(..., description="확정·반려 서명자 주소. 미처리면 address(0)")
+    registrant: str = Field(..., description="등록 서명자 주소. EIP-55 체크섬 형식이라 DB 와 비교할 땐 양쪽을 소문자로 맞춘다")
+    approver: str = Field(..., description="확정·반려 서명자 주소. 미처리면 address(0). 형식은 registrant 와 같다")
 
 
 # ---------------------------------------------------------------- 에러
@@ -141,10 +145,10 @@ class RevertReason(str, Enum):
     """값은 Solidity 에러 이름 그대로다. 실제 구현에서 revert 데이터를 이 값으로 옮긴다."""
 
     UNAUTHORIZED = "Unauthorized"
-    INVALID_SIGNATURE = "InvalidSignature"
+    INVALID_SIGNATURE = "InvalidSignature"  # 서명 바이트가 깨졌을 때만. 다른 데이터에 서명하면 아래 둘로 온다
     SIGNATURE_EXPIRED = "SignatureExpired"
-    NOT_REGISTRANT = "NotRegistrant"
-    NOT_APPROVER = "NotApprover"
+    NOT_REGISTRANT = "NotRegistrant"  # 등록 서명자가 총무가 아님. 앱이 다른 값에 서명해도 이것
+    NOT_APPROVER = "NotApprover"  # 확정·반려 서명자가 감사·회장이 아님. 앱이 다른 값에 서명해도 이것
     SELF_APPROVAL = "SelfApproval"
     HASH_MISMATCH = "HashMismatch"
     INVALID_STATUS = "InvalidStatus"
