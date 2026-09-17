@@ -1,0 +1,4 @@
+-r requirements.txt
+pytest>=8.0.0
+httpx>=0.27.0  # FastAPI TestClient
+py-solc-x>=2.0.0  # scripts/export_abi.py

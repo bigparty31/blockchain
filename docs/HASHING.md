@@ -388,7 +388,7 @@ CSV는 은행에서 받은 파일을 **그대로** 해시한다. 인코딩(CP949
 
 ## 6. 구현
 
-**Python (백엔드)**
+**Python (백엔드)** — `backend/app/hashing.py`에 구현돼 있고, `backend/tests/test_hashing.py`가 `docs/hashing_vectors.json`을 `_harness` 지시대로 대조한다. 저장 전 검사(§5)는 `prepare_field`·`prepare_text`, 사유 해시(빈 값이면 `bytes32(0)`)는 `reason_hash`. 아래는 핵심만 옮긴 것이다.
 
 ```python
 import hashlib, unicodedata
