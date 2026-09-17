@@ -56,3 +56,7 @@ build/
 *.swp
 .DS_Store
 Thumbs.db
+
+
+# 기획 문서 (저장소 관리 대상 아님)
+학생회비-투명성-시스템-PRD*.md
