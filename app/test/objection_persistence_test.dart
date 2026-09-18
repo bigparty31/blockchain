@@ -1,5 +1,10 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:student_council_app/core/enums.dart';
+import 'package:student_council_app/core/hashing.dart';
+import 'package:student_council_app/models/entry_model.dart';
 import 'package:student_council_app/models/objection_model.dart';
+import 'package:student_council_app/screens/student/objection_screen.dart';
 import 'package:student_council_app/services/student_api_service.dart';
 
 /// 제기한 이의가 화면을 나갔다 와도 남아 있는지 확인한다.
@@ -57,4 +62,73 @@ void main() {
     expect(a.id, isNot(b.id));
     expect(ids.toSet().length, ids.length, reason: 'id 가 중복되면 안 된다');
   });
+
+  testWidgets('본문을 앱이 다듬지 않고 원문 그대로 보낸다', (tester) async {
+    // 본문의 정본화·해시는 백엔드가 저장 시점에 한 번만 한다
+    // (HASHING.md §1.1 파트별 표, student_screens.md §3.4).
+    // 앱이 먼저 다듬으면, 지금은 로직이 같아 결과가 같더라도 한쪽만 바뀌는 순간
+    // 학생이 실제로 친 원문과 저장·해시되는 값이 조용히 갈린다.
+    const typed = '  영수증 품목과 지출 목적이 맞지 않습니다  \n';
+    expect(Hashing.canonicalText(typed), isNot(typed),
+        reason: '다듬으면 값이 달라지는 입력이어야 검사에 뜻이 있다');
+
+    await tester.pumpWidget(MaterialApp(
+      home: Builder(
+        builder: (context) => Scaffold(
+          body: ElevatedButton(
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => ObjectionScreen(entry: _entry(21)),
+              ),
+            ),
+            child: const Text('열기'),
+          ),
+        ),
+      ),
+    ));
+
+    await tester.tap(find.text('열기'));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), typed);
+
+    // 제출 버튼은 화면 아래에 있어 그냥 tap 하면 헛친다.
+    await tester.ensureVisible(find.text('이의 제출'));
+    await tester.pumpAndSettle();
+
+    // 제출은 실제 http 호출(및 그 폴백)을 타므로 가짜 시계 밖에서 돌려야 한다.
+    await tester.runAsync(() async {
+      await tester.tap(find.text('이의 제출'));
+      await tester.pump();
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+    });
+
+    final raised = await StudentApiService().fetchObjections(entryId: 21);
+    expect(raised, hasLength(1));
+    expect(raised.single.content, typed);
+  });
+}
+
+/// 이의 대상이 될 최소한의 항목.
+EntryModel _entry(int id) {
+  final occurredAt = Hashing.kstMidnightOf(2026, 9, 10);
+  return EntryModel(
+    id: id,
+    termId: 1,
+    kind: EntryKind.EXPENSE,
+    amount: 35000,
+    counterparty: '한결문구',
+    purpose: '신입생 환영회 명찰 및 필기구 구매',
+    occurredAt: occurredAt,
+    metaHash: Hashing.metaHash(
+      amount: 35000,
+      counterparty: '한결문구',
+      purpose: '신입생 환영회 명찰 및 필기구 구매',
+      occurredAt: occurredAt,
+    ),
+    status: EntryStatus.CONFIRMED,
+    createdBy: 2,
+    approvedBy: 3,
+  );
 }

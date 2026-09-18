@@ -8,6 +8,44 @@ import '../../../core/enums.dart';
 /// 배지 색은 **판단을 대신하지 않는다.** 초록은 「등록 이후 바뀌지 않았다」는
 /// 뜻이지 「이 지출이 정당하다」는 뜻이 아니다. 문구를 그렇게 읽히게 쓰지 말 것.
 
+/// 검증이 아직 끝나지 않았을 때. 초록도 빨강도 아닌 상태를 명시한다.
+///
+/// 검증은 온체인 조회와 영수증 내려받기가 끝나야 완성되므로, 그 전까지 배지
+/// 자리를 비워 두면 「아무 문제 없음」으로 읽힌다. 목록과 정정 이력이 함께 쓴다.
+class VerifyingChip extends StatelessWidget {
+  const VerifyingChip({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: AppTheme.divider.withOpacity(0.6),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: const Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(
+            width: 10,
+            height: 10,
+            child: CircularProgressIndicator(strokeWidth: 1.6),
+          ),
+          SizedBox(width: 6),
+          Text(
+            '검증 중',
+            style: TextStyle(
+              color: AppTheme.textSub,
+              fontWeight: FontWeight.bold,
+              fontSize: 11,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 /// 검증 배지 (S4) — 앱이 직접 재계산한 해시와 온체인 값의 대조 결과.
 class VerificationBadge extends StatelessWidget {
   final VerificationStatus status;

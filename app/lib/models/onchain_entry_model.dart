@@ -12,7 +12,12 @@ import '../core/enums.dart';
 /// 변하지 않는다 (§2 실측). 그래서 이 값들을 체인에서 직접 읽어 대조해야 한다.
 class OnChainEntry {
   /// 온체인에 기록된 `meta_hash`. SHA-256 출력 32바이트이며 keccak 이 아니다.
-  final String hash;
+  ///
+  /// **아직 체인에 해시가 올라가지 않은 항목이 있다** — 트랜잭션이 채굴되기 전이거나
+  /// 서버가 `hash: null` 을 내려주는 경우다. 이때 빈 문자열로 뭉개서 비교에 넣으면
+  /// 「재계산한 값 ≠ ''」 가 되어 **멀쩡한 대기 항목이 전부 「변조 감지」로 뜬다.**
+  /// 없는 것은 없는 것으로 둔다 — 대조하지 못한 것은 「모름」이지 불일치가 아니다.
+  final String? hash;
   final int amount;
   final EntryKind kind;
   final EntryStatus status;
@@ -52,14 +57,43 @@ class OnChainEntry {
 
   bool get hasApprover => !_isZeroAddress(approver);
 
+  /// 체인에 해시가 기록되어 있는지. 없으면 1단계 대조를 「모름」으로 남긴다.
+  bool get hasHash => hash != null;
+
+  /// 체인에 이 항목의 기록이 실제로 있는지.
+  ///
+  /// 컨트랙트의 `getEntry(id)` 는 없는 id 에 대해 **0 으로 채운 struct** 를 돌려준다.
+  /// 그것을 진짜 기록으로 믿고 대조하면 `금액 35,000 ↔ 0` 이 어긋나 **아직 안 올라간
+  /// 항목이 「변조 감지」로 뜬다.** 해시만 「모름」으로 돌려서는 이 경로가 안 막힌다.
+  ///
+  /// 기록이 지워진 경우도 같은 모양으로 나타나는데, 그것 역시 검증 실패가 아니라
+  /// **데이터 없음**으로 보여줘야 한다 (`student_screens.md` §3.2, PRD §7.3).
+  ///
+  /// `amount` 는 0 이 금지된 값이라(`HASHING.md` §5) 판별 기준으로 쓸 수 있다.
+  bool get hasRecord =>
+      hasHash || amount != 0 || !_isZeroAddress(registrant);
+
   static bool _isZeroAddress(String address) {
     final lower = address.toLowerCase();
     return lower == zeroAddress || lower == '0x0' || address.isEmpty;
   }
 
+  /// 「아직 기록되지 않음」을 뜻하는 해시 표기를 모두 null 로 모은다.
+  ///
+  /// 서버는 `null`, 컨트랙트는 `bytes32(0)` 으로 같은 뜻을 말한다. 어느 쪽이든
+  /// **값이 없다는 뜻이지 「재계산한 값과 다르다」는 뜻이 아니다.**
+  static String? _hashOrNull(dynamic value) {
+    if (value is! String) return null;
+    final bare = value.toLowerCase().replaceFirst(RegExp(r'^0x'), '');
+    if (bare.isEmpty) return null;
+    // bytes32(0) — `0x000…0`. 길이에 상관없이 0 뿐이면 기록 없음으로 본다.
+    if (RegExp(r'^0+$').hasMatch(bare)) return null;
+    return value;
+  }
+
   factory OnChainEntry.fromJson(Map<String, dynamic> json) {
     return OnChainEntry(
-      hash: json['hash'] ?? '',
+      hash: _hashOrNull(json['hash']),
       amount: json['amount'] ?? 0,
       kind: EntryKind.fromCode(json['kind'] ?? 'EXPENSE'),
       status: EntryStatus.fromCode(json['status'] ?? 'PENDING'),

@@ -58,24 +58,37 @@ class _EntryListScreenState extends State<EntryListScreen> {
   }
 
   /// 체인별로 검증을 돌린다. 끝나는 대로 배지를 갱신한다.
+  ///
+  /// **원본뿐 아니라 정정 항목도 검증한다.** 정정도 저마다 온체인 entry 이고,
+  /// 카드에 크게 뜨는 최종 금액이 정정 금액에서 나온다. 원본만 보면 정정 내용이
+  /// 나중에 조작돼도 배지가 초록으로 남는다.
   Future<void> _verifyAll() async {
     final wallets = await _api.fetchWalletMap();
 
     for (final chain in _chains) {
-      final entry = chain.original;
-      final onChain = await _api.fetchOnChainEntry(entry.id);
-      final receiptBytes = await _api.fetchReceiptBytes(entry);
-      if (!mounted) return;
+      for (final entry in chain.allEntries) {
+        final onChain = await _api.fetchOnChainEntry(entry.id);
+        final receiptBytes = await _api.fetchReceiptBytes(entry);
+        if (!mounted) return;
 
-      setState(() {
-        _reports[entry.id] = EntryVerifier.verify(
-          entry,
-          onChain: onChain,
-          receiptBytes: receiptBytes,
-          walletByUserId: wallets,
-        );
-      });
+        setState(() {
+          _reports[entry.id] = EntryVerifier.verify(
+            entry,
+            onChain: onChain,
+            receiptBytes: receiptBytes,
+            walletByUserId: wallets,
+          );
+        });
+      }
     }
+  }
+
+  /// 체인 전체의 대표 배지. 아직 한 건이라도 안 끝났으면 null 로 두어
+  /// 「검증 중」을 유지한다 — 덜 끝난 상태를 결과로 보여주면 안 된다.
+  VerificationStatus? _chainStatus(EntryChain chain) {
+    final reports = chain.allEntries.map((e) => _reports[e.id]).toList();
+    if (reports.any((r) => r == null)) return null;
+    return EntryVerifier.chainStatus(reports.map((r) => r!.status));
   }
 
   List<EntryChain> get _visible {
@@ -87,12 +100,15 @@ class _EntryListScreenState extends State<EntryListScreen> {
       case _Filter.expense:
         return _chains.where((c) => c.original.kind == EntryKind.EXPENSE).toList();
       case _Filter.flagged:
-        // 학생이 눈여겨봐야 할 건 — 검증 실패 또는 경고 승인
+        // 학생이 눈여겨봐야 할 건 — 검증 실패 또는 경고 승인.
+        // 정정 항목이 어긋난 체인도 여기 걸려야 한다. 원본만 보면
+        // 정정 쪽 불일치가 「확인 필요」에서 조용히 빠진다.
         return _chains.where((c) {
-          final e = c.original;
-          final report = _reports[e.id];
-          return (report?.isTampered ?? false) ||
-              OcrWarningBadge.isWarning(e.ocrStatus, e.categoryWarning);
+          final tampered = c.allEntries
+              .any((e) => _reports[e.id]?.isTampered ?? false);
+          final head = c.original;
+          return tampered ||
+              OcrWarningBadge.isWarning(head.ocrStatus, head.categoryWarning);
         }).toList();
     }
   }
@@ -125,7 +141,7 @@ class _EntryListScreenState extends State<EntryListScreen> {
                               final chain = _visible[i];
                               return _EntryChainCard(
                                 chain: chain,
-                                report: _reports[chain.original.id],
+                                status: _chainStatus(chain),
                                 onTap: () => Navigator.push(
                                   context,
                                   MaterialPageRoute(
@@ -206,12 +222,14 @@ class _EntryListScreenState extends State<EntryListScreen> {
 /// 항목 한 건(정정 체인 포함) 카드
 class _EntryChainCard extends StatelessWidget {
   final EntryChain chain;
-  final VerificationReport? report;
+
+  /// 원본과 정정을 모두 검증한 결과의 대표 상태. 아직 안 끝났으면 null.
+  final VerificationStatus? status;
   final VoidCallback onTap;
 
   const _EntryChainCard({
     required this.chain,
-    required this.report,
+    required this.status,
     required this.onTap,
   });
 
@@ -304,10 +322,10 @@ class _EntryChainCard extends StatelessWidget {
                 spacing: 6,
                 runSpacing: 6,
                 children: [
-                  if (report == null)
-                    const _VerifyingChip()
+                  if (status == null)
+                    const VerifyingChip()
                   else
-                    VerificationBadge(status: report!.status, compact: true),
+                    VerificationBadge(status: status!, compact: true),
                   if (OcrWarningBadge.isWarning(head.ocrStatus, head.categoryWarning))
                     OcrWarningBadge(
                       ocrStatus: head.ocrStatus,
@@ -351,41 +369,6 @@ class _EntryChainCard extends StatelessWidget {
             ],
           ),
         ),
-      ),
-    );
-  }
-}
-
-/// 검증이 아직 끝나지 않았을 때. 초록도 빨강도 아닌 상태를 명시한다.
-class _VerifyingChip extends StatelessWidget {
-  const _VerifyingChip();
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color: AppTheme.divider.withOpacity(0.6),
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: const Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          SizedBox(
-            width: 10,
-            height: 10,
-            child: CircularProgressIndicator(strokeWidth: 1.6),
-          ),
-          SizedBox(width: 6),
-          Text(
-            '검증 중',
-            style: TextStyle(
-              color: AppTheme.textSub,
-              fontWeight: FontWeight.bold,
-              fontSize: 11,
-            ),
-          ),
-        ],
       ),
     );
   }

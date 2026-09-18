@@ -343,6 +343,10 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
     if (byCategory.isEmpty) return const SizedBox.shrink();
 
     final total = byCategory.values.fold(0, (a, b) => a + b);
+    // 정정 항목 금액은 증감분(음수)이라 원본과 정정이 서로 상쇄되면 합계가 0 이
+    // 될 수 있다. 목록이 비었는지만 보고 합계를 그대로 나누면 `~/ 0` 으로 앱이 죽는다.
+    // 합계가 0 이하면 비율 막대 자체가 뜻을 잃으므로 차트를 내린다.
+    if (total <= 0) return const SizedBox.shrink();
     final palette = [AppTheme.primary, AppTheme.income, AppTheme.pending, AppTheme.info];
     final items = byCategory.entries.toList();
 

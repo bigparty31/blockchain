@@ -25,7 +25,17 @@ class _EntryDetailScreenState extends State<EntryDetailScreen> {
   final _api = StudentApiService();
 
   List<ObjectionModel> _objections = [];
+
+  /// 원본 항목의 검증 결과.
   VerificationReport? _report;
+
+  /// 정정 항목의 검증 결과 (entry id 기준).
+  ///
+  /// **정정도 저마다 온체인 entry 다.** 원본만 검증하면, 화면 위쪽에 크게 뜨는
+  /// 최종 금액(`원본 + Σ확정정정`)의 근거가 검증 밖에 남는다. 확정된 기록을
+  /// 고치는 유일한 통로가 정정이라(PRD, 규칙 5) 여기가 사각지대면 「확정 기록은
+  /// 못 고친다」는 보장이 그대로 우회된다.
+  final Map<int, VerificationReport> _correctionReports = {};
 
   /// 검증 3단계에서 해시를 재계산한 **바로 그 바이트**.
   ///
@@ -43,11 +53,12 @@ class _EntryDetailScreenState extends State<EntryDetailScreen> {
     _verify();
   }
 
-  /// HASHING.md §2 의 세 단계를 모두 돌린다.
+  /// HASHING.md §2 의 세 단계를 **원본과 정정 항목 모두에** 돌린다.
   Future<void> _verify() async {
+    final wallets = await _api.fetchWalletMap();
+
     final onChain = await _api.fetchOnChainEntry(_entry.id);
     final receiptBytes = await _api.fetchReceiptBytes(_entry);
-    final wallets = await _api.fetchWalletMap();
     if (!mounted) return;
 
     setState(() {
@@ -60,6 +71,22 @@ class _EntryDetailScreenState extends State<EntryDetailScreen> {
         walletByUserId: wallets,
       );
     });
+
+    // 원본이 끝난 뒤 정정을 하나씩. 끝나는 대로 이력 줄의 배지를 갱신한다.
+    for (final correction in widget.chain.corrections) {
+      final chainEntry = await _api.fetchOnChainEntry(correction.id);
+      final bytes = await _api.fetchReceiptBytes(correction);
+      if (!mounted) return;
+
+      setState(() {
+        _correctionReports[correction.id] = EntryVerifier.verify(
+          correction,
+          onChain: chainEntry,
+          receiptBytes: bytes,
+          walletByUserId: wallets,
+        );
+      });
+    }
   }
 
   Future<void> _loadObjections() async {
@@ -93,7 +120,11 @@ class _EntryDetailScreenState extends State<EntryDetailScreen> {
             const DemoDataBanner(),
             const SizedBox(height: 16),
           ],
-          _VerificationCard(report: _report),
+          _VerificationCard(
+            report: _report,
+            corrections: widget.chain.corrections,
+            correctionReports: _correctionReports,
+          ),
           const SizedBox(height: 16),
           if (OcrWarningBadge.isWarning(_entry.ocrStatus, _entry.categoryWarning)) ...[
             _buildOcrWarningCard(),
@@ -304,9 +335,19 @@ class _EntryDetailScreenState extends State<EntryDetailScreen> {
             ),
           ),
           const SizedBox(height: 14),
-          _historyRow(label: '원본', entry: _entry, isOriginal: true),
+          _historyRow(
+            label: '원본',
+            entry: _entry,
+            isOriginal: true,
+            report: _report,
+          ),
           ...widget.chain.corrections.map(
-            (c) => _historyRow(label: '정정', entry: c, isOriginal: false),
+            (c) => _historyRow(
+              label: '정정',
+              entry: c,
+              isOriginal: false,
+              report: _correctionReports[c.id],
+            ),
           ),
           const SizedBox(height: 4),
           Container(
@@ -333,10 +374,13 @@ class _EntryDetailScreenState extends State<EntryDetailScreen> {
     );
   }
 
+  /// 이력 한 줄. [report] 는 **그 항목 자체의** 검증 결과다 — 정정도 각각
+  /// 검증하므로, 어느 줄이 어긋났는지 여기서 바로 드러난다.
   Widget _historyRow({
     required String label,
     required EntryModel entry,
     required bool isOriginal,
+    required VerificationReport? report,
   }) {
     // 정정 항목은 증감분이므로 부호를 붙여 보여준다.
     final amountText = isOriginal
@@ -391,9 +435,30 @@ class _EntryDetailScreenState extends State<EntryDetailScreen> {
                     decoration: isOriginal ? TextDecoration.lineThrough : null,
                   ),
                 ),
-                if (entry.correctionReason != null) ...[
+                const SizedBox(height: 4),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 4,
+                  children: [
+                    if (report == null)
+                      const VerifyingChip()
+                    else
+                      VerificationBadge(status: report.status, compact: true),
+                    if (entry.correctionReason != null)
+                      CorrectionBadge(reason: entry.correctionReason!),
+                  ],
+                ),
+                if (report != null && report.mismatches.isNotEmpty) ...[
                   const SizedBox(height: 4),
-                  CorrectionBadge(reason: entry.correctionReason!),
+                  Text(
+                    '어긋난 항목 — '
+                    '${report.mismatches.map((f) => f.label).join(', ')}',
+                    style: const TextStyle(
+                      fontSize: 10,
+                      color: AppTheme.expense,
+                      height: 1.4,
+                    ),
+                  ),
                 ],
               ],
             ),
@@ -742,8 +807,18 @@ class _EntryDetailScreenState extends State<EntryDetailScreen> {
 /// 배지 색만 보여주면 학생은 그 색을 믿는 수밖에 없다.
 /// 세 단계의 결과와 근거가 된 값을 함께 보여줘야 직접 확인할 수 있다.
 class _VerificationCard extends StatelessWidget {
+  /// 원본 항목의 결과. 아래 1·2·3단계 상세는 전부 이 항목 기준이다.
   final VerificationReport? report;
-  const _VerificationCard({required this.report});
+
+  /// 같은 체인의 정정 항목들과 그 검증 결과. 배지는 이것까지 합쳐서 정한다.
+  final List<EntryModel> corrections;
+  final Map<int, VerificationReport> correctionReports;
+
+  const _VerificationCard({
+    required this.report,
+    required this.corrections,
+    required this.correctionReports,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -765,26 +840,53 @@ class _VerificationCard extends StatelessWidget {
     }
 
     final r = report!;
+
+    // 배지는 원본만이 아니라 **정정까지 합친 결과**다. 정정이 어긋났는데
+    // 원본만 보고 초록을 주면, 화면에 크게 뜬 최종 금액을 보증하는 셈이 된다.
+    final done = corrections.map((c) => correctionReports[c.id]).toList();
+    final pendingCorrections = done.any((x) => x == null);
+    final status = pendingCorrections
+        // 정정 검증이 아직 안 끝났으면 초록을 주지 않는다.
+        ? (r.status == VerificationStatus.verified
+            ? VerificationStatus.partial
+            : r.status)
+        : EntryVerifier.chainStatus([r.status, ...done.map((x) => x!.status)]);
+
+    final tamperedCorrections = corrections
+        .where((c) => correctionReports[c.id]?.isTampered ?? false)
+        .toList();
+
     late final Color color;
     late final String headline;
     late final String body;
 
-    switch (r.status) {
+    switch (status) {
       case VerificationStatus.verified:
         color = AppTheme.success;
         headline = '검증됨';
-        body = '세 가지를 모두 확인했습니다. 기록이 등록된 이후 바뀌지 않았고, '
-            '블록체인에 남은 값과도 일치합니다.';
+        body = corrections.isEmpty
+            ? '세 가지를 모두 확인했습니다. 기록이 등록된 이후 바뀌지 않았고, '
+                '블록체인에 남은 값과도 일치합니다.'
+            : '원본과 정정 ${corrections.length}건을 모두 확인했습니다. 등록된 이후 '
+                '바뀌지 않았고, 블록체인에 남은 값과도 일치합니다.';
       case VerificationStatus.tampered:
         color = AppTheme.expense;
         headline = '변조 감지';
-        body = '앱에서 다시 계산한 값이 블록체인에 기록된 값과 다릅니다. '
-            '등록 이후 내용이 변경되었을 수 있습니다.';
+        body = tamperedCorrections.isEmpty
+            ? '앱에서 다시 계산한 값이 블록체인에 기록된 값과 다릅니다. '
+                '등록 이후 내용이 변경되었을 수 있습니다.'
+            : '정정 항목 '
+                '${tamperedCorrections.map((c) => '#${c.id}').join(', ')} 에서 '
+                '블록체인에 기록된 값과 다른 내용이 발견되었습니다. 아래 정정 이력에서 '
+                '확인할 수 있습니다.';
       case VerificationStatus.partial:
         color = AppTheme.info;
         headline = '부분 검증';
-        body = '확인한 항목에서는 이상이 없었지만, 아직 확인하지 못한 항목이 '
-            '있습니다. 이상 없음이 아니라 「아직 모름」입니다.';
+        body = pendingCorrections
+            ? '원본은 확인했고 정정 항목을 확인하는 중입니다. 이상 없음이 아니라 '
+                '「아직 모름」입니다.'
+            : '확인한 항목에서는 이상이 없었지만, 아직 확인하지 못한 항목이 '
+                '있습니다. 이상 없음이 아니라 「아직 모름」입니다.';
       case VerificationStatus.unavailable:
         color = AppTheme.textSub;
         headline = '검증 불가';
@@ -803,7 +905,7 @@ class _VerificationCard extends StatelessWidget {
         children: [
           Row(
             children: [
-              VerificationBadge(status: r.status),
+              VerificationBadge(status: status),
               const Spacer(),
               Text(
                 headline,
@@ -823,6 +925,21 @@ class _VerificationCard extends StatelessWidget {
 
           const Divider(height: 24),
 
+          // 아래 단계별 값은 원본 하나의 것이다. 여러 항목의 해시를 한 카드에
+          // 뭉개면 어느 값이 무엇인지 읽을 수 없어, 정정은 이력 줄에서 따로 보여준다.
+          if (corrections.isNotEmpty) ...[
+            Text(
+              '아래 1·2·3단계는 원본 항목 기준입니다. 정정 ${corrections.length}건의 '
+              '검증 결과는 정정 이력에 함께 표시됩니다.',
+              style: TextStyle(
+                fontSize: 10,
+                color: AppTheme.textSub.withOpacity(0.9),
+                height: 1.4,
+              ),
+            ),
+            const SizedBox(height: 12),
+          ],
+
           // ── 1단계 ──
           _StepRow(
             step: 1,
@@ -837,17 +954,34 @@ class _VerificationCard extends StatelessWidget {
           const SizedBox(height: 10),
           _hashRow('앱에서 재계산한 값', r.recomputedHash, color),
           const SizedBox(height: 6),
-          _hashRow(
-            r.onChainHash != null ? '블록체인에 기록된 값' : '서버가 내려준 값',
-            r.comparedAgainst ?? '없음',
-            color,
-          ),
-          if (r.onChainHash == null) ...[
-            const SizedBox(height: 4),
+          // 「무엇과 비교했는가」를 정확히 말한다. 대조하지 못했는데 값을 나란히
+          // 보여주면 비교한 것처럼 읽힌다.
+          if (r.comparedAgainst == null)
             Text(
-              '체인 값을 직접 읽지 못해 서버 값과 비교했습니다.',
-              style: TextStyle(fontSize: 10, color: AppTheme.textSub.withOpacity(0.9)),
+              r.chainDataAvailable
+                  ? '체인에 아직 해시가 기록되지 않아 대조하지 못했습니다. '
+                      '통과가 아니라 확인할 수 없다는 뜻입니다.'
+                  : '대조할 해시가 없습니다.',
+              style: TextStyle(
+                fontSize: 10,
+                color: AppTheme.textSub.withOpacity(0.9),
+                height: 1.4,
+              ),
+            )
+          else ...[
+            _hashRow(
+              r.onChainHash != null ? '블록체인에 기록된 값' : '서버가 내려준 값',
+              r.comparedAgainst!,
+              color,
             ),
+            if (r.onChainHash == null) ...[
+              const SizedBox(height: 4),
+              Text(
+                '체인 값을 직접 읽지 못해 서버 값과 비교했습니다.',
+                style:
+                    TextStyle(fontSize: 10, color: AppTheme.textSub.withOpacity(0.9)),
+              ),
+            ],
           ],
 
           const SizedBox(height: 16),

@@ -33,11 +33,18 @@ class _ObjectionScreenState extends State<ObjectionScreen> {
   }
 
   Future<void> _submit() async {
-    // `String.trim()` 을 쓰지 않는다. Dart 의 trim() 은 U+FEFF(BOM)를 지우는데
-    // 백엔드의 Python `strip()` 은 남긴다 (HASHING.md §3). 앱이 먼저 지워버리면
-    // 학생이 실제로 친 것과 다른 본문이 해시되어 온체인에 남는다.
-    final content = Hashing.canonicalText(_controller.text);
-    if (content.length < _minLength) {
+    // **다듬은 값을 보내지 않는다.** 본문의 정본화와 해시는 백엔드가 저장 시점에
+    // 한 번만 하고 그 값이 정본이다 — HASHING.md §1.1 의 파트별 표가 학생 앱을
+    // 「가공 없이 그대로」로 못박았고, student_screens.md §3.4 도 같은 말을 한다.
+    //
+    // 지금은 양쪽 로직이 같아 결과가 같지만, 한쪽만 바뀌면 학생이 실제로 친 원문과
+    // 저장·해시되는 값이 조용히 갈린다. 앱이 먼저 다듬으면 백엔드의 입력 검증
+    // (제어문자 거부, §5)이 볼 입력을 앱이 미리 세탁하는 문제도 생긴다.
+    final content = _controller.text;
+
+    // [Hashing.canonicalText] 는 **길이를 재는 자로만** 쓴다. 전송에는 쓰지 않는다.
+    // 원문 그대로 길이를 재면 공백 열 칸이 최소 길이를 통과한다.
+    if (Hashing.canonicalText(content).length < _minLength) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('$_minLength자 이상 구체적으로 작성해 주세요'),

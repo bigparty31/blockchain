@@ -40,12 +40,31 @@ class EntryVerifier {
       receiptHash: entry.receiptHash,
     );
 
+    // 내용이 하나도 안 담긴 struct 는 「기록 없음」이지 불일치가 아니다.
+    // 그대로 대조하면 아직 체인에 안 올라간 항목이 전부 「변조 감지」가 된다.
+    final chain = (onChain != null && onChain.hasRecord) ? onChain : null;
+
     // ── 1단계: 해시 대조 ──────────────────────────────────────
     // 체인 값이 있으면 그것과, 없으면 API 가 준 meta_hash 와 비교한다.
     // 후자는 「서버가 준 값끼리」 맞춰보는 것이라 신뢰도가 낮다.
-    final chainHash = onChain?.hash;
+    //
+    // **체인 해시가 없을 때 빈 문자열과 비교하지 않는다.** 아직 채굴되지 않아
+    // 해시가 안 올라간 것뿐인데 「재계산한 값 ≠ ''」 로 불일치를 만들면,
+    // 멀쩡한 대기 항목이 학생 화면에 「변조 감지」로 뜬다.
+    final chainHash = chain?.hash;
     final serverHash = entry.metaHash;
-    final comparedAgainst = chainHash ?? (serverHash.isEmpty ? null : serverHash);
+
+    // 체인 기록을 **읽었는데** 해시 자리가 비어 있으면, 대조할 것이 없다는 사실을
+    // 확인한 것이다. 이때는 서버 해시로 대신 맞춰보지 않는다 — 통과시켜 봐야
+    // 「서버가 준 값끼리」 맞는다는 뜻이라 확인한 것이 없는데, 1단계가 초록으로
+    // 남으면 화면이 「확인함」에 가깝게 읽힌다. 「검증 불가」로 남긴다.
+    //
+    // 체인 조회 자체를 못 한 경우(`chain == null`)는 다르다. 체인에 무엇이 있는지
+    // 모르는 상태이므로, 서버 값과라도 맞춰보고 「부분 검증」에 머문다.
+    final chainReadButNoHash = chain != null && chainHash == null;
+    final comparedAgainst = chainReadButNoHash
+        ? null
+        : (chainHash ?? (serverHash.isEmpty ? null : serverHash));
 
     final CheckState hashState;
     if (comparedAgainst == null) {
@@ -57,23 +76,55 @@ class EntryVerifier {
     }
 
     // ── 2단계: 해시가 덮지 않는 필드 대조 ─────────────────────
-    final fieldChecks = onChain == null
+    final fieldChecks = chain == null
         ? <FieldCheck>[]
-        : _compareFields(entry, onChain, walletByUserId);
+        : _compareFields(entry, chain, walletByUserId);
 
     // ── 3단계: 영수증 바이트 재계산 ───────────────────────────
     final receipt = _checkReceipt(entry, receiptBytes);
 
     return VerificationReport(
-      status: _decide(hashState, fieldChecks, receipt.state, onChain != null),
+      status: _decide(
+        hashState,
+        fieldChecks,
+        receipt.state,
+        chainDataAvailable: chain != null,
+        chainHashCompared: chainHash != null,
+      ),
       hashState: hashState,
       recomputedHash: recomputed,
       onChainHash: chainHash,
       serverHash: serverHash.isEmpty ? null : serverHash,
-      chainDataAvailable: onChain != null,
+      comparedAgainst: comparedAgainst,
+      chainDataAvailable: chain != null,
       fieldChecks: fieldChecks,
       receipt: receipt,
     );
+  }
+
+  /// 정정 체인 전체(원본 + 정정)의 대표 상태.
+  ///
+  /// **정정 항목도 저마다 온체인 entry 다.** 원본만 검증하면 화면에 크게 뜨는
+  /// 최종 금액(`원본 + Σ확정정정`)의 근거가 검증 밖에 남는다. 확정된 기록을
+  /// 고치는 유일한 통로가 정정이므로(PRD, `CLAUDE.md` 규칙 5), 여기가 사각지대면
+  /// 「확정 기록은 못 고친다」는 보장이 그대로 우회된다.
+  ///
+  /// 집계는 나쁜 쪽을 따른다 — 하나라도 어긋나면 체인 전체가 「변조 감지」다.
+  static VerificationStatus chainStatus(Iterable<VerificationStatus> statuses) {
+    final all = statuses.toList();
+    if (all.isEmpty) return VerificationStatus.unavailable;
+    if (all.contains(VerificationStatus.tampered)) {
+      return VerificationStatus.tampered;
+    }
+    // 전부 대조할 기록이 없을 때만 「검증 불가」다. 일부라도 확인했으면
+    // 「아무것도 모른다」가 아니라 「일부만 확인했다」이므로 부분 검증이다.
+    if (all.every((s) => s == VerificationStatus.unavailable)) {
+      return VerificationStatus.unavailable;
+    }
+    if (all.every((s) => s == VerificationStatus.verified)) {
+      return VerificationStatus.verified;
+    }
+    return VerificationStatus.partial;
   }
 
   /// HASHING.md §2 의 비교 표. NULL ↔ 0 변환을 반드시 거친다 —
@@ -229,9 +280,10 @@ class EntryVerifier {
   static VerificationStatus _decide(
     CheckState hashState,
     List<FieldCheck> fields,
-    CheckState receiptState,
-    bool chainAvailable,
-  ) {
+    CheckState receiptState, {
+    required bool chainDataAvailable,
+    required bool chainHashCompared,
+  }) {
     final anyFailed = hashState == CheckState.failed ||
         receiptState == CheckState.failed ||
         fields.any((f) => f.state == CheckState.failed);
@@ -241,7 +293,11 @@ class EntryVerifier {
 
     // 세 단계를 다 못 돌았으면 초록을 주지 않는다.
     // 「확인 못 함」을 「이상 없음」으로 보여주면 검증의 의미가 없다.
-    final incomplete = !chainAvailable ||
+    //
+    // 체인 해시가 없어 서버 해시로 대신 맞춰본 경우도 여기 걸린다 —
+    // 「서버가 준 값끼리」 일치한 것이라 체인과 대조했다고 말할 수 없다.
+    final incomplete = !chainDataAvailable ||
+        !chainHashCompared ||
         receiptState == CheckState.unavailable ||
         fields.any((f) => f.state == CheckState.unavailable);
 
@@ -331,11 +387,20 @@ class VerificationReport {
   final CheckState hashState;
   final String recomputedHash;
 
-  /// 체인에서 읽은 해시. API 가 아직 없으면 null.
+  /// 체인에서 읽은 해시.
+  ///
+  /// API 가 아직 없을 때뿐 아니라 **채굴 전이라 체인에 해시가 없을 때도 null** 이다.
+  /// 두 경우 모두 「대조하지 못했다」이지 「다르다」가 아니다.
   final String? onChainHash;
 
-  /// 서버가 내려준 해시. 체인 값이 없을 때 대신 비교한 대상.
+  /// 서버가 내려준 해시. **비교에 썼다는 뜻은 아니다** — [comparedAgainst] 를 볼 것.
   final String? serverHash;
+
+  /// 재계산한 해시를 **실제로 맞춰본 상대 값.** 아무것도 대조하지 못했으면 null.
+  ///
+  /// 체인 기록을 읽었는데 해시가 비어 있으면 서버 값으로 대신 맞춰보지 않으므로
+  /// 여기도 null 이다. 화면이 「무엇과 비교했는가」를 정확히 말할 수 있어야 한다.
+  final String? comparedAgainst;
 
   /// `getEntry(id)` 결과를 받아왔는지.
   final bool chainDataAvailable;
@@ -349,6 +414,7 @@ class VerificationReport {
     required this.recomputedHash,
     required this.onChainHash,
     required this.serverHash,
+    required this.comparedAgainst,
     required this.chainDataAvailable,
     required this.fieldChecks,
     required this.receipt,
@@ -356,9 +422,6 @@ class VerificationReport {
 
   bool get isTampered => status == VerificationStatus.tampered;
   bool get isVerified => status == VerificationStatus.verified;
-
-  /// 실제로 비교한 상대 값. 체인 값이 있으면 그것, 없으면 서버 값.
-  String? get comparedAgainst => onChainHash ?? serverHash;
 
   /// 불일치한 필드만 추린다.
   List<FieldCheck> get mismatches =>
@@ -369,6 +432,9 @@ class VerificationReport {
     final reasons = <String>[];
     if (!chainDataAvailable) {
       reasons.add('온체인 조회 API가 아직 없어 체인 값과 대조하지 못했습니다');
+    } else if (onChainHash == null) {
+      // 대조 실패가 아니라 아직 대조할 것이 없는 상태다.
+      reasons.add('체인에 아직 해시가 기록되지 않아 온체인 값과 대조하지 못했습니다');
     }
     if (receipt.state == CheckState.unavailable) {
       reasons.add('영수증을 내려받아야 파일 해시를 다시 계산할 수 있습니다');

@@ -29,6 +29,13 @@ class EntryChain {
 
   bool get hasCorrection => corrections.isNotEmpty;
 
+  /// 이 체인에 속한 모든 항목. 원본이 먼저, 그 뒤에 정정이 등록 순서로 온다.
+  ///
+  /// **검증은 이 목록 전체를 돌아야 한다.** 정정 항목도 저마다 온체인 entry 이고,
+  /// 화면에 크게 뜨는 [finalAmount] 가 정정 금액에서 나온다. 원본만 검증하면
+  /// 검증한 적 없는 숫자에 배지가 붙는다.
+  List<EntryModel> get allEntries => [original, ...corrections];
+
   /// 화면 대표로 쓸 항목 — 가장 마지막 정정, 없으면 원본.
   ///
   /// 정정 항목은 금액이 증감분이므로 **금액 표시에는 쓰지 말 것.**

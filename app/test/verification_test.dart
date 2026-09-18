@@ -319,6 +319,122 @@ void main() {
       );
     });
 
+    group('체인에 해시가 아직 없을 때 — 「변조」로 몰지 않는다', () {
+      // 채굴 전이라 해시가 안 올라간 것뿐인 정상 항목을 빨강으로 띄우면,
+      // 학생은 멀쩡한 기록을 조작된 것으로 읽는다. 「모름」이어야 한다.
+      OnChainEntry chainWithoutHash(EntryModel e) => OnChainEntry(
+            hash: null,
+            amount: e.amount,
+            kind: e.kind,
+            status: e.status,
+            occurredAt: e.occurredAt,
+            budgetId: e.budgetId ?? 0,
+            correctsId: 0,
+            registrant: registrant,
+            approver: approver,
+          );
+
+      test('체인 해시가 없으면 불일치가 아니라 대조하지 못한 것이다', () {
+        final e = soundEntry();
+        final r = EntryVerifier.verify(
+          e,
+          onChain: chainWithoutHash(e),
+          receiptBytes: receiptBytes,
+          walletByUserId: wallets,
+        );
+
+        expect(r.status, isNot(VerificationStatus.tampered));
+        expect(r.hashState, isNot(CheckState.failed));
+        expect(r.onChainHash, isNull);
+        expect(r.mismatches, isEmpty);
+      });
+
+      test('서버 해시로 대신 맞춰보지 않는다 — 「검증 불가」다', () {
+        // 서버 값끼리 맞춰 통과시켜 봐야 확인한 것이 없다.
+        // 체인 해시가 없다는 것은 대조할 기록이 없다는 뜻이다.
+        final e = soundEntry();
+        final r = EntryVerifier.verify(
+          e,
+          onChain: chainWithoutHash(e),
+          receiptBytes: receiptBytes,
+          walletByUserId: wallets,
+        );
+
+        expect(r.hashState, CheckState.unavailable);
+        expect(r.status, VerificationStatus.unavailable);
+        expect(r.comparedAgainst, isNull, reason: '무엇과도 대조하지 않았다');
+        expect(r.pendingReasons, isNotEmpty);
+      });
+
+      test('서버가 hash: null 을 줘도 빈 문자열로 뭉개지 않는다', () {
+        // 빈 문자열은 「값 없음」과 다르게 취급돼 그대로 비교에 들어간다.
+        final onChain = OnChainEntry.fromJson(const {
+          'hash': null,
+          'amount': 35000,
+          'kind': 'EXPENSE',
+          'status': 'CONFIRMED',
+        });
+        expect(onChain.hash, isNull);
+        expect(onChain.hasHash, isFalse);
+      });
+
+      test('API 응답 그대로 — 해시만 없는 정상 항목은 변조가 아니다', () {
+        // 신고된 경로 그대로. `hash: null` 이 빈 문자열로 뭉개지면 여기서
+        // 「재계산한 값 ≠ ''」 가 되어 멀쩡한 대기 항목이 빨강으로 뜬다.
+        final e = soundEntry();
+        final onChain = OnChainEntry.fromJson({
+          'hash': null,
+          'amount': e.amount,
+          'kind': e.kind.code,
+          'status': e.status.code,
+          'occurred_at': e.occurredAt,
+          'budget_id': e.budgetId,
+          'corrects_id': 0,
+          'registrant': registrant,
+          'approver': approver,
+        });
+
+        final r = EntryVerifier.verify(
+          e,
+          onChain: onChain,
+          receiptBytes: receiptBytes,
+          walletByUserId: wallets,
+        );
+
+        expect(r.status, VerificationStatus.unavailable,
+            reason: '「변조 감지」가 아니라 「검증 불가」다');
+        expect(r.mismatches, isEmpty);
+      });
+
+      test('bytes32(0) 은 기록이 아니라 「아직 없음」이다', () {
+        // 컨트랙트는 없는 값을 0 으로 돌려준다.
+        final onChain = OnChainEntry.fromJson({
+          'hash': '0x${'0' * 64}',
+          'amount': 35000,
+        });
+        expect(onChain.hash, isNull);
+      });
+
+      test('0 으로 채워진 struct 는 체인 기록으로 치지 않는다', () {
+        // `getEntry(id)` 는 없는 id 에도 빈 struct 를 돌려준다. 그것을 진짜
+        // 기록으로 믿고 대조하면 `금액 35,000 ↔ 0` 이 어긋나 변조로 판정된다.
+        final e = soundEntry();
+        final empty = OnChainEntry.fromJson(const {});
+
+        expect(empty.hasRecord, isFalse);
+
+        final r = EntryVerifier.verify(
+          e,
+          onChain: empty,
+          receiptBytes: receiptBytes,
+          walletByUserId: wallets,
+        );
+        expect(r.status, isNot(VerificationStatus.tampered));
+        expect(r.chainDataAvailable, isFalse);
+        expect(r.mismatches, isEmpty);
+      });
+    });
+
     test('반려 항목은 승인자를 비교하지 않는다', () {
       // rejected_by 컬럼이 없어 그냥 비교하면 반려 건이 전부 위조가 된다.
       final rejected = _entry(
@@ -350,6 +466,82 @@ void main() {
         CheckState.notApplicable,
       );
       expect(r.status, isNot(VerificationStatus.tampered));
+    });
+  });
+
+  group('정정 항목도 검증 대상이다', () {
+    // 정정은 확정된 기록을 고치는 **유일한 통로**다. 원본만 검증하면
+    // 정정 내용이 조작돼도 화면상 초록으로 남고, 화면에 크게 뜨는 최종 금액
+    // (`원본 + Σ확정정정`)이 검증된 적 없는 숫자가 된다.
+    final original = _entry(
+      id: 4,
+      amount: 50000,
+      counterparty: '대학마트',
+      purpose: '체육대회 간식 구매',
+      occurredAt: d0910,
+      budgetId: 1,
+    );
+    final correction = _entry(
+      id: 5,
+      amount: -20000,
+      counterparty: '대학마트',
+      purpose: '입력 오류 정정',
+      occurredAt: d0910,
+      budgetId: 1,
+      correctsEntryId: 4,
+      correctionReason: CorrectionReason.INPUT_ERROR,
+    );
+
+    test('체인에 원본과 정정이 모두 들어 있다', () {
+      final chain = EntryMerge.fold([original, correction]).single;
+      expect(chain.allEntries.map((e) => e.id), [4, 5]);
+    });
+
+    test('정정 하나가 어긋나면 체인 전체가 변조 감지다', () {
+      expect(
+        EntryVerifier.chainStatus(const [
+          VerificationStatus.verified,
+          VerificationStatus.tampered,
+        ]),
+        VerificationStatus.tampered,
+      );
+    });
+
+    test('일부만 확인했으면 부분 검증이다 — 「아무것도 모른다」가 아니다', () {
+      expect(
+        EntryVerifier.chainStatus(const [
+          VerificationStatus.verified,
+          VerificationStatus.unavailable,
+        ]),
+        VerificationStatus.partial,
+      );
+    });
+
+    test('전부 대조할 기록이 없을 때만 검증 불가다', () {
+      expect(
+        EntryVerifier.chainStatus(const [
+          VerificationStatus.unavailable,
+          VerificationStatus.unavailable,
+        ]),
+        VerificationStatus.unavailable,
+      );
+    });
+
+    test('모두 통과해야 초록이다', () {
+      expect(
+        EntryVerifier.chainStatus(const [
+          VerificationStatus.verified,
+          VerificationStatus.verified,
+        ]),
+        VerificationStatus.verified,
+      );
+      expect(
+        EntryVerifier.chainStatus(const [
+          VerificationStatus.verified,
+          VerificationStatus.partial,
+        ]),
+        VerificationStatus.partial,
+      );
     });
   });
 }
