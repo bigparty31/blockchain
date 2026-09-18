@@ -74,6 +74,5 @@ class EntryCreate(BaseModel):
 
 
 class EntryCreateResponse(BaseModel):
-    id: int = Field(..., description="생성된 Entry ID")
-    status: EntryStatus = Field(EntryStatus.PENDING, description="초기 상태 (PENDING)")
-    message: str = Field("지출/수입 내역이 성공적으로 PENDING 상태로 등록되었습니다.")
+    id: int = Field(..., description="생성된 초안 Entry ID")
+    message: str = Field("지출/수입 초안이 성공적으로 등록되었습니다. 기기 서명을 진행해 주세요.")

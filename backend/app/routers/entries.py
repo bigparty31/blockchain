@@ -27,7 +27,7 @@ DUMMY_ENTRIES: List[EntryResponse] = [
         meta_hash="0x24ae73988d927fb39f45eb6024e9ff8ffa19e8501603565bd82710ea8df4b937",
         ocr_amount=35000,
         ocr_approval_no="12345678",
-        ocr_paid_at=1788793200,
+        ocr_paid_at=1788825820,  # 2026-09-08 09:03:40 KST (실제 결제 시각)
         ocr_status=OCRStatus.MATCH,
         category_warning=False,
         warning_ack_reason=None,
@@ -54,7 +54,7 @@ DUMMY_ENTRIES: List[EntryResponse] = [
         meta_hash="0x622fc1b357c04032e65bc1855c73aaff6d519464d69bf22b10761f3b26a1b793",
         ocr_amount=120000,
         ocr_approval_no="87654321",
-        ocr_paid_at=1788706800,
+        ocr_paid_at=1788775450,  # 2026-09-07 19:04:10 KST (실제 결제 시각)
         ocr_status=OCRStatus.MATCH,
         category_warning=False,
         warning_ack_reason=None,
@@ -154,7 +154,6 @@ async def create_entry(entry: EntryCreate):
 
     return EntryCreateResponse(
         id=new_id,
-        status=EntryStatus.PENDING,
-        message="지출/수입 내역이 성공적으로 PENDING 상태로 등록되었습니다.",
+        message="지출/수입 초안이 등록되었으며, 기기 서명 제출 대기 상태입니다.",
     )
 
