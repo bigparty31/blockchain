@@ -7,13 +7,14 @@ client = TestClient(app)
 
 
 def test_get_entries():
-    """초기 더미 데이터 3건(tx_pending이 존재하는 확정/대기 항목)만 조회되는지 검증"""
+    """초기 더미 데이터 3건(status가 존재하는 확정/대기 항목)만 조회되는지 검증"""
     response = client.get("/entries")
     assert response.status_code == 200
     data = response.json()
     assert len(data) >= 3
-    # 모든 조회 결과는 tx_pending이 존재해야 함 (초안 제외 필터 검증)
+    # 모든 조회 결과는 status와 tx_pending이 존재해야 함 (초안 status IS NULL 제외 필터 검증)
     for entry in data:
+        assert entry["status"] is not None
         assert entry["tx_pending"] is not None
 
 
@@ -41,7 +42,7 @@ def test_create_entry_draft_and_submit():
     draft_data = res_draft.json()
 
     draft_id = draft_data["id"]
-    # 1단계 응답에는 status와 tx_pending이 없어야 함 (초안)
+    # 1단계 응답에는 status와 tx_pending이 없어야 함 (초안 status IS NULL)
     assert "status" not in draft_data or draft_data.get("status") is None
     assert "tx_pending" not in draft_data or draft_data.get("tx_pending") is None
 
@@ -75,7 +76,7 @@ def test_create_entry_draft_and_submit():
 
 
 def test_submit_blocked_budget_exceeded():
-    """예산 초과 시 2단계 submit에서 BLOCKED 상태 및 block_reason 반환 검증"""
+    """예산 초과 시 2단계 submit에서 BLOCKED 상태, block_reason 및 체인 tx_pending 반환 검증"""
     req_body = {
         "term_id": 1,
         "kind": "EXPENSE",
@@ -100,7 +101,17 @@ def test_submit_blocked_budget_exceeded():
     assert submit_data["id"] == draft_id
     assert submit_data["status"] == "BLOCKED"
     assert submit_data["block_reason"] == "BUDGET_EXCEEDED"
-    assert submit_data["tx_pending"] is None
+    # 체인의 recordPending은 예산 초과여도 트랜잭션이 성공하고 BLOCKED로 저장하므로 tx_pending이 존재해야 함
+    assert submit_data["tx_pending"] is not None
+    assert submit_data["tx_pending"].startswith("0x")
+
+    # PRD §8 "BLOCKED 기록은 남겨 개정 요청 근거로 사용" - 목록 조회 시 포함되어야 함
+    res_list = client.get("/entries")
+    entries = res_list.json()
+    blocked_entry = next((e for e in entries if e["id"] == draft_id), None)
+    assert blocked_entry is not None
+    assert blocked_entry["status"] == "BLOCKED"
+    assert blocked_entry["tx_pending"] == submit_data["tx_pending"]
 
 
 def test_ocr_duplication_conflict():

@@ -84,46 +84,9 @@ class EntryCreate(BaseModel):
     correction_reason: Optional[CorrectionReason] = Field(None, description="정정 사유")
 
 
-class Eip712Domain(BaseModel):
-    name: str = Field(..., description="컨트랙트명")
-    version: str = Field(..., description="버전")
-    chainId: int = Field(..., description="체인 ID")
-    verifyingContract: str = Field(..., description="컨트랙트 주소")
-
-
-class SignMessage(BaseModel):
-    id: int = Field(..., description="Entry ID")
-    hash: str = Field(..., description="meta_hash")
-    amount: int = Field(..., description="금액 (원 단위 정수)")
-    kind: int = Field(..., description="수입: 0, 지출: 1")
-    occurredAt: int = Field(..., description="발생 일시 (Unix 초)")
-    budgetId: int = Field(..., description="예산 ID (없으면 0)")
-    correctsId: int = Field(..., description="정정 대상 ID (없으면 0)")
-
-
-class SignPayload(BaseModel):
-    domain: Eip712Domain
-    message: SignMessage
-
-
 class EntryCreateResponse(BaseModel):
     id: int = Field(..., description="생성된 초안 Entry ID")
-    sign: Optional[SignPayload] = Field(None, description="모바일 앱 EIP-712 서명용 페이로드")
-    message: str = Field("지출/수입 초안이 성공적으로 등록되었습니다. 기기 서명을 진행해 주세요.")
-
-
-class DraftSubmitRequest(BaseModel):
-    meta_hash: str = Field(..., description="모바일 앱이 직접 계산/확인한 meta_hash")
-    deadline: int = Field(..., description="서명 유효 시한 (Unix Timestamp)")
-    signature: str = Field(..., description="기기 생체인증 EIP-712 서명 (0x...)")
-
-
-class DraftSubmitResponse(BaseModel):
-    id: int = Field(..., description="Entry ID")
-    status: EntryStatus = Field(..., description="온체인 반영 상태 (PENDING, CONFIRMED, BLOCKED 등)")
-    tx_pending: Optional[str] = Field(None, description="체인 트랜잭션 해시")
-    fail_reason: Optional[str] = Field(None, description="실패 사유")
-    message: str = Field(..., description="처리 결과 메시지")
+    message: str = Field("지출/수입 초안이 등록되었으며, 기기 서명 제출 대기 상태입니다.")
 
 
 class EntrySubmitRequest(BaseModel):
@@ -134,6 +97,7 @@ class EntrySubmitRequest(BaseModel):
 class EntrySubmitResponse(BaseModel):
     id: int = Field(..., description="Entry ID")
     status: EntryStatus = Field(..., description="장부 상태 (PENDING | BLOCKED)")
-    tx_pending: Optional[str] = Field(None, description="Pending 등록 트랜잭션 해시 (BLOCKED 시 null)")
+    tx_pending: Optional[str] = Field(None, description="체인 트랜잭션 해시 (BLOCKED 포함 온체인 기록 시 부여)")
     block_reason: Optional[BlockReason] = Field(None, description="차단 사유 (BLOCKED 시 필수)")
     message: str = Field(..., description="처리 결과 메시지")
+

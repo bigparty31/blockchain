@@ -104,9 +104,9 @@ DUMMY_ENTRIES: List[EntryResponse] = [
 @router.get("/", response_model=List[EntryResponse], include_in_schema=False)
 async def get_entries():
     """모바일 앱 '내역 목록' 및 '대시보드'에서 호출하는 수입·지출 내역 목록 API입니다.
-    온체인 트랜잭션이 발행된 건(tx_pending is not None)만 반환하며, 기기 서명 미제출 초안은 제외됩니다.
+    체인에 기록된 건(status is not None)만 반환하며, 기기 서명 미제출 초안은 제외됩니다.
     """
-    return [e for e in DUMMY_ENTRIES if e.tx_pending is not None]
+    return [e for e in DUMMY_ENTRIES if e.status is not None]
 
 
 @router.post(
@@ -117,12 +117,6 @@ async def get_entries():
 )
 @router.post(
     "/",
-    response_model=EntryCreateResponse,
-    status_code=status.HTTP_201_CREATED,
-    include_in_schema=False,
-)
-@router.post(
-    "/drafts",
     response_model=EntryCreateResponse,
     status_code=status.HTTP_201_CREATED,
     include_in_schema=False,
@@ -185,11 +179,6 @@ async def create_entry(entry: EntryCreate):
     response_model=EntrySubmitResponse,
     summary="초안 기기 서명 제출 및 온체인 등록 (2단계 목업)",
 )
-@router.post(
-    "/drafts/{id}/submit",
-    response_model=EntrySubmitResponse,
-    include_in_schema=False,
-)
 async def submit_entry(id: int, req: EntrySubmitRequest):
     """1단계에서 발급받은 초안 id에 대해 모바일 기기 서명을 제출하여 블록체인에 등록합니다.
     현재는 목업 수준으로 고정값을 반환하며, 다음 주에 손종인 ChainClient 실구현으로 교체될 자리입니다.
@@ -201,21 +190,21 @@ async def submit_entry(id: int, req: EntrySubmitRequest):
             detail=f"ID {id}에 해당하는 초안 내역을 찾을 수 없습니다.",
         )
 
+    target.tx_pending = f"0x{id:064x}"
+
     # 예산 초과(BLOCKED) 케이스 시뮬레이션: budget_id가 999이거나 금액이 10,000,000 이상인 경우
     if target.budget_id == 999 or target.amount >= 10_000_000:
         target.status = EntryStatus.BLOCKED
-        target.tx_pending = None
         return EntrySubmitResponse(
             id=id,
             status=EntryStatus.BLOCKED,
-            tx_pending=None,
+            tx_pending=target.tx_pending,
             block_reason=BlockReason.BUDGET_EXCEEDED,
             message="해당 예산 카테고리의 잔량이 부족하여 지출 등록이 차단(BLOCKED)되었습니다.",
         )
 
     # 정상 PENDING 등록 시뮬레이션
     target.status = EntryStatus.PENDING
-    target.tx_pending = f"0x{id:064x}"
 
     return EntrySubmitResponse(
         id=id,
@@ -224,3 +213,4 @@ async def submit_entry(id: int, req: EntrySubmitRequest):
         block_reason=None,
         message="온체인에 성공적으로 기록되어 감사 승인 대기(PENDING) 상태가 되었습니다.",
     )
+
