@@ -11,7 +11,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.schemas.entry import EntryKind, EntryStatus
 
-# docs/enums.md 표 순서 = 온체인 uint8 값
+# docs/enums.md 표 순서 = 온체인 uint8 값. 튜플의 인덱스가 곧 그 값이다.
+# 다음 주 실제 구현에서 enum 과 uint8 을 옮길 때 쓴다 (KIND_ORDER.index(kind) → 0·1, STATUS_ORDER[v] → enum).
 KIND_ORDER = (EntryKind.INCOME, EntryKind.EXPENSE)
 STATUS_ORDER = (EntryStatus.PENDING, EntryStatus.CONFIRMED, EntryStatus.REJECTED, EntryStatus.BLOCKED)
 
@@ -31,6 +32,7 @@ class BlockReason(str, Enum):
     BUDGET_NOT_FOUND = "BUDGET_NOT_FOUND"
 
 
+# EntryBlocked 이벤트의 reason uint8 매핑. 쓰임은 KIND_ORDER 와 같다
 BLOCK_REASON_ORDER = (BlockReason.BUDGET_EXCEEDED, BlockReason.BUDGET_EXPIRED, BlockReason.BUDGET_NOT_FOUND)
 
 
