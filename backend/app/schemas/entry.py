@@ -30,6 +30,12 @@ class CorrectionReason(str, Enum):
     RECLASSIFY = "RECLASSIFY"
 
 
+class BlockReason(str, Enum):
+    BUDGET_EXCEEDED = "BUDGET_EXCEEDED"
+    BUDGET_EXPIRED = "BUDGET_EXPIRED"
+    BUDGET_NOT_FOUND = "BUDGET_NOT_FOUND"
+
+
 class EntryResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -50,7 +56,7 @@ class EntryResponse(BaseModel):
     ocr_status: Optional[OCRStatus] = Field(None, description="OCR 대조 상태")
     category_warning: bool = Field(False, description="예산 카테고리 불일치 경고 여부")
     warning_ack_reason: Optional[str] = Field(None, description="경고 무시 승인 사유")
-    status: EntryStatus = Field(..., description="장부 상태 (PENDING | CONFIRMED | REJECTED | BLOCKED)")
+    status: Optional[EntryStatus] = Field(None, description="장부 상태 (초안은 null, 온체인은 PENDING | CONFIRMED | REJECTED | BLOCKED)")
     created_by: int = Field(..., description="등록자 User ID (총무/회장)")
     approved_by: Optional[int] = Field(None, description="승인자 User ID (감사)")
     reject_reason: Optional[str] = Field(None, description="반려 사유")
@@ -117,4 +123,17 @@ class DraftSubmitResponse(BaseModel):
     status: EntryStatus = Field(..., description="온체인 반영 상태 (PENDING, CONFIRMED, BLOCKED 등)")
     tx_pending: Optional[str] = Field(None, description="체인 트랜잭션 해시")
     fail_reason: Optional[str] = Field(None, description="실패 사유")
+    message: str = Field(..., description="처리 결과 메시지")
+
+
+class EntrySubmitRequest(BaseModel):
+    signature: str = Field(..., description="EIP-712 기기 서명값 (0x...)")
+    deadline: int = Field(..., description="서명 유효 시한 (Unix timestamp 초 단위)")
+
+
+class EntrySubmitResponse(BaseModel):
+    id: int = Field(..., description="Entry ID")
+    status: EntryStatus = Field(..., description="장부 상태 (PENDING | BLOCKED)")
+    tx_pending: Optional[str] = Field(None, description="Pending 등록 트랜잭션 해시 (BLOCKED 시 null)")
+    block_reason: Optional[BlockReason] = Field(None, description="차단 사유 (BLOCKED 시 필수)")
     message: str = Field(..., description="처리 결과 메시지")

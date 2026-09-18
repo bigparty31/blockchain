@@ -213,9 +213,7 @@
 ---
 
 #### 3.1 [1단계] 초안 등록 및 검증 (`POST /entries`)
-- **설명**: 총무가 영수증 해시와 거래 내역을 입력하여 초안을 생성합니다.
-- **예산 검증 및 차단 (`BLOCKED`)**: 
-  - 잔여 예산 초과, 집행 마감 경과 등의 사유 발생 시 단순 `400 Bad Request`로 요청을 버리지 않고, **감사 및 추적을 위해 장부에 `status: BLOCKED`로 기록**하며 사유(`block_reason`)를 반환합니다.
+- **설명**: 총무가 영수증 해시와 거래 내역을 입력하여 초안을 생성합니다. 블록체인 기록 전이므로 온체인 상태가 아니며, 고유 `id`만 발급됩니다.
 
 **Request**
 ```json
@@ -242,20 +240,12 @@
 }
 ```
 
-**예산 초과 시 응답 (`200 OK` 또는 `422 Unprocessable` - BLOCKED 기록 및 사유 반환)**
-```json
-{
-  "id": 4,
-  "status": "BLOCKED",
-  "block_reason": "BUDGET_EXCEEDED",
-  "message": "해당 예산 카테고리의 잔량이 부족하여 지출 등록이 차단(BLOCKED)되었습니다."
-}
-```
-
 ---
 
 #### 3.2 [2단계] 모바일 앱 서명 및 체인 등록 (`POST /entries/{id}/submit`)
 - **설명**: 1단계에서 발급받은 `id`에 대해 총무의 모바일 기기 서명값(`RecordRequest` EIP-712 signature)을 백엔드로 전달하여 블록체인에 등록합니다. 등록 완료 시 `tx_pending` 해시가 부여되며 이 시점부터 온체인 **`PENDING`** 상태가 부여됩니다.
+- **예산 검증 및 차단 (`BLOCKED`)**: 
+  - 잔여 예산 초과, 집행 마감 경과 등의 사유 발생 시 단순 `400 Bad Request`로 요청을 버리지 않고, **감사 및 추적을 위해 장부에 `status: BLOCKED`로 기록**하며 사유(`block_reason`)를 반환합니다.
 
 **Request**
 ```json
@@ -265,13 +255,23 @@
 }
 ```
 
-**Response (`200 OK`)**
+**정상 등록 응답 (`200 OK` - 온체인 PENDING 등록)**
 ```json
 {
   "id": 2,
   "status": "PENDING",
   "tx_pending": "0x3333333333333333333333333333333333333333333333333333333333333333",
   "message": "온체인에 성공적으로 기록되어 감사 승인 대기(PENDING) 상태가 되었습니다."
+}
+```
+
+**예산 초과 시 차단 응답 (`200 OK` 또는 `422 Unprocessable` - BLOCKED 기록 및 사유 반환)**
+```json
+{
+  "id": 4,
+  "status": "BLOCKED",
+  "block_reason": "BUDGET_EXCEEDED",
+  "message": "해당 예산 카테고리의 잔량이 부족하여 지출 등록이 차단(BLOCKED)되었습니다."
 }
 ```
 
