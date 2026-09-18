@@ -67,12 +67,54 @@ class EntryCreate(BaseModel):
     counterparty: str = Field(..., description="거래처 (상호명)")
     purpose: str = Field(..., description="사용 목적")
     budget_id: Optional[int] = Field(None, description="배정 예산 ID")
-    occurred_at: int = Field(..., description="거래 일시 (Unix Timestamp)")
+    occurred_at: int = Field(..., description="거래 일시 (Unix Timestamp KST 자정)")
+    receipt_path: Optional[str] = Field(None, description="영수증 이미지 경로")
     receipt_hash: Optional[str] = Field(None, description="영수증 SHA-256 해시")
+    ocr_amount: Optional[int] = Field(None, description="OCR 인식 금액")
+    ocr_approval_no: Optional[str] = Field(None, description="영수증 카드 승인번호")
+    ocr_paid_at: Optional[int] = Field(None, description="OCR 인식 결제 일시 (실제 시각)")
+    ocr_status: Optional[OCRStatus] = Field(None, description="OCR 판독 상태")
     corrects_entry_id: Optional[int] = Field(None, description="정정 등록 시 대상 Entry ID")
     correction_reason: Optional[CorrectionReason] = Field(None, description="정정 사유")
 
 
+class Eip712Domain(BaseModel):
+    name: str = Field(..., description="컨트랙트명")
+    version: str = Field(..., description="버전")
+    chainId: int = Field(..., description="체인 ID")
+    verifyingContract: str = Field(..., description="컨트랙트 주소")
+
+
+class SignMessage(BaseModel):
+    id: int = Field(..., description="Entry ID")
+    hash: str = Field(..., description="meta_hash")
+    amount: int = Field(..., description="금액 (원 단위 정수)")
+    kind: int = Field(..., description="수입: 0, 지출: 1")
+    occurredAt: int = Field(..., description="발생 일시 (Unix 초)")
+    budgetId: int = Field(..., description="예산 ID (없으면 0)")
+    correctsId: int = Field(..., description="정정 대상 ID (없으면 0)")
+
+
+class SignPayload(BaseModel):
+    domain: Eip712Domain
+    message: SignMessage
+
+
 class EntryCreateResponse(BaseModel):
     id: int = Field(..., description="생성된 초안 Entry ID")
+    sign: Optional[SignPayload] = Field(None, description="모바일 앱 EIP-712 서명용 페이로드")
     message: str = Field("지출/수입 초안이 성공적으로 등록되었습니다. 기기 서명을 진행해 주세요.")
+
+
+class DraftSubmitRequest(BaseModel):
+    meta_hash: str = Field(..., description="모바일 앱이 직접 계산/확인한 meta_hash")
+    deadline: int = Field(..., description="서명 유효 시한 (Unix Timestamp)")
+    signature: str = Field(..., description="기기 생체인증 EIP-712 서명 (0x...)")
+
+
+class DraftSubmitResponse(BaseModel):
+    id: int = Field(..., description="Entry ID")
+    status: EntryStatus = Field(..., description="온체인 반영 상태 (PENDING, CONFIRMED, BLOCKED 등)")
+    tx_pending: Optional[str] = Field(None, description="체인 트랜잭션 해시")
+    fail_reason: Optional[str] = Field(None, description="실패 사유")
+    message: str = Field(..., description="처리 결과 메시지")
