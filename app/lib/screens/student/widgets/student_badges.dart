@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../../core/app_theme.dart';
+import '../../../core/entry_verifier.dart';
 import '../../../core/enums.dart';
-import '../../../core/meta_hash.dart';
 
 /// 학생 화면에서 반복되는 뱃지들.
 ///
@@ -30,6 +30,12 @@ class VerificationBadge extends StatelessWidget {
         color = AppTheme.expense;
         icon = Icons.gpp_bad_rounded;
         label = compact ? '변조 감지' : '변조 감지 · 등록 후 내용이 바뀜';
+      // 통과한 것만 보면 이상 없지만 세 단계를 다 못 돌린 상태다.
+      // 초록으로 보여주면 확인하지 못한 것을 확인했다고 말하는 셈이 된다.
+      case VerificationStatus.partial:
+        color = AppTheme.info;
+        icon = Icons.pending_outlined;
+        label = compact ? '부분 검증' : '부분 검증 · 일부 항목을 대조하지 못함';
       case VerificationStatus.unavailable:
         color = AppTheme.textSub;
         icon = Icons.help_outline_rounded;
@@ -186,6 +192,60 @@ class CorrectionBadge extends StatelessWidget {
               color: AppTheme.info,
               fontWeight: FontWeight.bold,
               fontSize: 12,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 「예시 데이터」 배너.
+///
+/// 서버에 연결되지 않아 개발용 예시 데이터를 보여주고 있을 때 띄운다.
+/// **조용히 폴백하면 안 된다** — 보고 있는 것이 실제 원장인지 예시인지
+/// 구분되지 않으면 이 앱의 검증 배지는 아무 의미가 없다.
+class DemoDataBanner extends StatelessWidget {
+  const DemoDataBanner({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: AppTheme.pending.withOpacity(0.14),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: AppTheme.pending.withOpacity(0.5)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.science_outlined, size: 18, color: AppTheme.pending),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  '예시 데이터입니다',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                    color: AppTheme.pending,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  '서버에 연결되지 않아 개발용 예시를 보여주고 있습니다. '
+                  '실제 학생회 회계 내역이 아닙니다.',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: AppTheme.textMain.withOpacity(0.85),
+                    height: 1.4,
+                  ),
+                ),
+              ],
             ),
           ),
         ],

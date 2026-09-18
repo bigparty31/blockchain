@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import '../../core/app_theme.dart';
+import '../../core/enums.dart';
 import '../../core/format.dart';
+import '../../core/hashing.dart';
 import '../../models/entry_model.dart';
 import '../../services/student_api_service.dart';
 
@@ -31,7 +33,10 @@ class _ObjectionScreenState extends State<ObjectionScreen> {
   }
 
   Future<void> _submit() async {
-    final content = _controller.text.trim();
+    // `String.trim()` 을 쓰지 않는다. Dart 의 trim() 은 U+FEFF(BOM)를 지우는데
+    // 백엔드의 Python `strip()` 은 남긴다 (HASHING.md §3). 앱이 먼저 지워버리면
+    // 학생이 실제로 친 것과 다른 본문이 해시되어 온체인에 남는다.
+    final content = Hashing.canonicalText(_controller.text);
     if (content.length < _minLength) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -59,6 +64,8 @@ class _ObjectionScreenState extends State<ObjectionScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final isIncome = widget.entry.kind == EntryKind.INCOME;
+
     return Scaffold(
       backgroundColor: AppTheme.bgPage,
       appBar: AppTheme.gradientAppBar(title: '이의 제기'),
@@ -96,17 +103,22 @@ class _ObjectionScreenState extends State<ObjectionScreen> {
               maxLines: 7,
               maxLength: 500,
               textInputAction: TextInputAction.newline,
-              decoration: const InputDecoration(
-                hintText: '예) 영수증에 적힌 품목과 지출 목적이 맞지 않는 것 같습니다. '
-                    '세부 내역서를 확인할 수 있을까요?',
-                hintStyle: TextStyle(
+              decoration: InputDecoration(
+                // 수입 항목에는 영수증이 없어서 지출용 예시가 맞지 않는다.
+                hintText: isIncome
+                    ? '예) 입금된 금액이 실제 납부 인원과 맞지 않는 것 같습니다. '
+                        '산출 근거를 확인할 수 있을까요?'
+                    : '예) 영수증에 적힌 품목과 지출 목적이 맞지 않는 것 같습니다. '
+                        '세부 내역서를 확인할 수 있을까요?',
+                hintStyle: const TextStyle(
                   color: AppTheme.textSub,
                   fontSize: 13,
                   height: 1.5,
                 ),
-                contentPadding: EdgeInsets.all(16),
+                contentPadding: const EdgeInsets.all(16),
                 border: InputBorder.none,
-                counterStyle: TextStyle(fontSize: 11, color: AppTheme.textSub),
+                counterStyle:
+                    const TextStyle(fontSize: 11, color: AppTheme.textSub),
               ),
               style: const TextStyle(
                 fontSize: 14,

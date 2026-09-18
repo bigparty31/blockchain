@@ -8,8 +8,16 @@ class Fmt {
   static final _date = DateFormat('yyyy.MM.dd');
   static final _dateTime = DateFormat('yyyy.MM.dd HH:mm');
 
-  /// `35000` → `35,000원`
-  static String won(int amount) => '${_won.format(amount)}원';
+  /// `35000` → `₩ 35,000`, `-20000` → `-₩ 20,000`
+  ///
+  /// 총무 화면(`screens/council/`)의 표기와 맞춘 것이다. 같은 잔액이 화면마다
+  /// 다른 모양으로 보이면 같은 값인지 아닌지부터 헷갈린다.
+  ///
+  /// 음수는 부호를 `₩` **앞**에 둔다. 뒤에 두면 `₩ -20,000` 처럼 부호가 가운데
+  /// 끼어 한눈에 안 들어온다 — 정정 항목 금액이 증감분이라 음수가 실제로 나온다.
+  static String won(int amount) => amount < 0
+      ? '-₩ ${_won.format(-amount)}'
+      : '₩ ${_won.format(amount)}';
 
   /// `35000` → `35,000` (단위를 따로 붙일 때)
   static String plain(int amount) => _won.format(amount);

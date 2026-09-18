@@ -25,6 +25,13 @@ class EntryModel {
   final String? rejectReason;
   final String? txPending;
   final String? txConfirm;
+
+  /// 확정 트랜잭션이 담긴 블록 번호 (S10).
+  ///
+  /// **백엔드에 아직 `block_number` 필드가 없어 현재는 항상 null 이다.**
+  /// 필드가 생기면 응답에 실려 오는 즉시 상세 화면에 표시된다 — 앱 쪽은 손댈 것이 없다.
+  final int? blockNumber;
+
   final int? correctsEntryId;
   final CorrectionReason? correctionReason;
 
@@ -52,6 +59,7 @@ class EntryModel {
     this.rejectReason,
     this.txPending,
     this.txConfirm,
+    this.blockNumber,
     this.correctsEntryId,
     this.correctionReason,
   });
@@ -81,6 +89,7 @@ class EntryModel {
       rejectReason: json['reject_reason'],
       txPending: json['tx_pending'],
       txConfirm: json['tx_confirm'],
+      blockNumber: json['block_number'],
       correctsEntryId: json['corrects_entry_id'],
       correctionReason: json['correction_reason'] != null
           ? CorrectionReason.fromCode(json['correction_reason'])

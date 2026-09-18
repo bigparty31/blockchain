@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import '../../core/app_theme.dart';
 import '../../core/format.dart';
+import '../../core/term_info.dart';
 import '../../models/membership_model.dart';
 import '../../services/student_api_service.dart';
 
@@ -157,7 +158,7 @@ class _MySbtScreenState extends State<MySbtScreen> {
           const SizedBox(height: 12),
           _kv('토큰 번호', '#${m.tokenId}'),
           _kv('발급 일시', Fmt.date(m.mintedAt)),
-          _kv('학기', '2026학년도 2학기'),
+          _kv('학기', TermInfo.currentTerm),
           _kv('커밋 해시', Fmt.shortHash(m.commitHash)),
           const SizedBox(height: 6),
           Text(

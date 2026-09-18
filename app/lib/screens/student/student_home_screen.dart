@@ -3,6 +3,7 @@ import '../../core/app_theme.dart';
 import '../../core/entry_merge.dart';
 import '../../core/enums.dart';
 import '../../core/format.dart';
+import '../../core/term_info.dart';
 import '../../models/budget_model.dart';
 import '../../models/entry_model.dart';
 import '../../models/snapshot_model.dart';
@@ -26,7 +27,6 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
 
   bool _loading = true;
   List<EntryModel> _entries = [];
-  List<EntryChain> _chains = [];
   List<BudgetModel> _budgets = [];
   SnapshotModel? _snapshot;
   int _unseen = 0;
@@ -48,7 +48,6 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
     if (!mounted) return;
     setState(() {
       _entries = entries;
-      _chains = EntryMerge.fold(entries);
       _budgets = budgets;
       _snapshot = snapshot;
       _unseen = EntryMerge.unseenCount(entries, lastSeen);
@@ -59,9 +58,11 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
   /// 장부 잔액은 항목에서 직접 계산한다 (PRD §7.4).
   /// 서버가 내려주는 합계를 그대로 믿으면, 서버가 숫자를 바꿨을 때
   /// 학생이 그것을 알 방법이 없다.
-  int get _ledgerBalance => EntryMerge.ledgerBalance(_chains);
-  int get _totalIncome => EntryMerge.totalIncome(_chains);
-  int get _totalExpense => EntryMerge.totalExpense(_chains);
+  ///
+  /// 정정 항목의 금액이 증감분이라 확정 항목을 그냥 다 더하면 된다.
+  int get _ledgerBalance => EntryMerge.ledgerBalance(_entries);
+  int get _totalIncome => EntryMerge.totalIncome(_entries);
+  int get _totalExpense => EntryMerge.totalExpense(_entries);
 
   Future<void> _openEntries() async {
     await Navigator.push(
@@ -90,6 +91,11 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
                 padding: const EdgeInsets.fromLTRB(20, 20, 20, 32),
                 sliver: SliverList(
                   delegate: SliverChildListDelegate([
+                    // 예시 데이터를 보고 있다면 숫자보다 먼저 알려야 한다.
+                    if (_api.usingDemoData) ...[
+                      const DemoDataBanner(),
+                      const SizedBox(height: 14),
+                    ],
                     _buildBalanceCard(),
                     const SizedBox(height: 14),
                     _buildIncomeExpenseRow(),
@@ -121,8 +127,10 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
   }
 
   Widget _buildAppBar() {
+    // 높이는 상태바 높이를 뺀 나머지를 나눠 쓰므로 여유를 둔다.
+    // 빠듯하게 맞추면 기기·폰트 설정에 따라 몇 픽셀씩 넘쳐 오버플로가 난다.
     return SliverAppBar(
-      expandedHeight: 160,
+      expandedHeight: 190,
       pinned: true,
       backgroundColor: AppTheme.primary,
       foregroundColor: Colors.white,
@@ -131,10 +139,12 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
           decoration: const BoxDecoration(gradient: AppTheme.headerGradient),
           child: SafeArea(
             child: Padding(
-              padding: const EdgeInsets.fromLTRB(20, 50, 20, 20),
+              // 위쪽 48 은 뒤로가기·새로고침 아이콘 줄을 비켜 가기 위한 것이다.
+              padding: const EdgeInsets.fromLTRB(20, 48, 20, 16),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisAlignment: MainAxisAlignment.end,
+                mainAxisSize: MainAxisSize.min,
                 children: [
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
@@ -163,7 +173,7 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
                   ),
                   const SizedBox(height: 2),
                   Text(
-                    '2026학년도 2학기 · 컴퓨터공학과',
+                    TermInfo.headline,
                     style: TextStyle(
                       color: Colors.white.withOpacity(0.85),
                       fontSize: 13,
@@ -320,11 +330,11 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
 
   /// 카테고리별 지출 차트 (S13)
   Widget _buildCategoryChart() {
-    // 예산 카테고리별로 확정 지출을 모은다. 정정된 건은 최종값만 잡힌다.
+    // 예산 카테고리별로 확정 지출을 모은다.
+    // 정정 항목은 증감분이므로 그대로 더하면 최종값이 된다.
     final byCategory = <String, int>{};
-    for (final chain in _chains) {
-      final e = chain.effective;
-      if (e == null || e.kind != EntryKind.EXPENSE) continue;
+    for (final e in _entries) {
+      if (e.status != EntryStatus.CONFIRMED || e.kind != EntryKind.EXPENSE) continue;
       final matched = _budgets.where((b) => b.id == e.budgetId);
       final name = matched.isEmpty ? '미분류' : matched.first.category;
       byCategory[name] = (byCategory[name] ?? 0) + e.amount;
