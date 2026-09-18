@@ -1,0 +1,5 @@
+id,kind,amount,counterparty,purpose,occurred_at,status
+1,INCOME,10000,학생회비 홍길동,학생회비 납부,2026-03-05,CONFIRMED
+2,EXPENSE,35000,OO문구점,비품 구매,2026-03-10,CONFIRMED
+3,EXPENSE,82000,OO식당,신입생 환영회 식비,2026-03-12,CONFIRMED
+4,INCOME,50000,후원금 김철수,동문 후원금,2026-03-15,CONFIRMED
