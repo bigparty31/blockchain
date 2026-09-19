@@ -50,7 +50,7 @@ meta_hash = SHA256( amount ␟ counterparty ␟ purpose ␟ occurred_at ␟ rece
 
 > **`meta_hash`는 고유 식별자가 아니다.** 상호·금액·날짜·목적이 같으면 서로 다른 두 거래라도 같은 값이 나온다. DB 유니크 인덱스나 중복 판정 키로 쓰면 안 된다. 중복 탐지는 OCR 승인번호 조합(`ocr_approval_no` + `ocr_paid_at` + `amount`)이 담당한다 (PRD §6).
 
-> **EIP-712 서명 해시(digest)와는 별개 값이다.** `RecordRequest.hash` / `ConfirmApproval.hash` 필드에 들어가는 것이 `meta_hash`이고, 기기가 실제로 서명하는 digest는 그 struct 전체를 EIP-712로 인코딩한 다른 값이다. 둘을 섞으면 `InvalidSignature`로 revert 된다.
+> **EIP-712 서명 해시(digest)와는 별개 값이다.** `RecordRequest.hash` / `ConfirmApproval.hash` 필드에 들어가는 것이 `meta_hash`이고, 기기가 실제로 서명하는 digest는 그 struct 전체를 EIP-712로 인코딩한 다른 값이다. 둘을 섞으면 서명자가 엉뚱한 주소로 복구되어 `NotRegistrant`(확정·반려는 `NotApprover`)로 revert 된다.
 
 ### 1.1 정본 문자열 — 언제 누가 다듬는가
 
