@@ -61,6 +61,8 @@
 - **주요 로직**:
   - `image_picker`로 카메라 촬영 또는 갤러리 선택.
   - 등록 시 `status: PENDING` 상태로 저장되어 예산 잔액에서 즉시 차감되지 않음 (감사/회장 승인 후 반영).
+  - **예산 초과·마감·미존재는 revert가 아니라 `BLOCKED`로 저장**된다. 결과 화면에 차단 사유(`block_reason`: `BUDGET_EXCEEDED` / `BUDGET_EXPIRED` / `BUDGET_NOT_FOUND`)를 표시하고, `BLOCKED` 건은 확정·반려할 수 없으므로 금액·예산을 고쳐 **새로 등록**하도록 안내한다 (§2.6).
+  - 사용일은 날짜로 받고 서버에는 **KST 00:00:00 Unix 초**(`occurred_at`)로 보낸다. 기기 로컬 시간대는 쓰지 않는다 (§2.6).
 
 ---
 
@@ -122,6 +124,9 @@
 ```
 - **주요 로직**:
   - `local_auth` 플러그인 호출하여 생체인증 성공 시 서명 생성 및 `CONFIRMED` 처리.
+  - **반려·경고 무시 승인은 사유 필수.** OCR이 `MATCH`가 아닌 건을 승인하려면 사유를 먼저 받고(빈 값이면 400), 반려도 사유 입력 후에만 처리한다 (§2.6).
+  - **승인이 예산 부족으로 실패할 수 있다.** 확정이 revert되어도 상태는 `PENDING` 그대로다. 실패 사유(`InsufficientBudget` / `BudgetExpired`)를 안내하고 **반려 흐름으로 넘긴다** (§2.6).
+  - 현재 승인 화면은 서버 연동 전 목업이다. 실패 재현용으로 id 4번 항목(`mockFailReason`), 경고 재현용으로 id 6번 항목(OCR `MISMATCH`)이 들어 있다.
 
 ---
 
@@ -177,6 +182,27 @@
 │ └──────────────────────────────────────────┘ │
 └──────────────────────────────────────────────┘
 ```
+
+---
+
+### 2.6 컨트랙트·해시 규칙 반영 사항 (화면 공통)
+
+`docs/HASHING.md`, `contracts/interfaces/IAccountingLedger.sol` 기준으로 화면에 반영한 규칙입니다. 구현은 `app/lib/screens/council/` (`input_rules.dart`, `reason_dialog.dart`, `registration_result.dart`).
+
+| 규칙 | 화면 동작 | 근거 |
+|:---|:---|:---|
+| 등록 시 예산 초과는 `BLOCKED` 저장 | 결과 다이얼로그에 `block_reason` 라벨과 코드를 표시. `PENDING`이면 화면을 닫고, `BLOCKED`면 입력 화면에 남는다 | IAccountingLedger, `enums.md` |
+| 확정 실패(예산 부족)는 revert, 상태 `PENDING` 유지 | 실패 다이얼로그 → `[반려로 처리]`로 반려 사유 입력 화면 이동(실패 사유가 미리 채워짐) | IAccountingLedger, RELAY §9 |
+| 반려·경고 무시 승인은 사유 필수 | 사유 입력창에서 빈 값·공백만 있는 값은 진행 불가 | HASHING §3, §5 |
+| 사유 텍스트 검사 | 탭·LF 외 제어문자, NBSP·ZWSP·전각공백·BOM 거부. CRLF는 LF로 본다 | HASHING §3 |
+| 한 줄 텍스트(사용처·항목명) 검사 | 탭 포함 제어문자 전면 거부(구분자 U+001F 충돌 차단), 보이지 않는 공백 거부 | HASHING §1.1, §5 |
+| 금액 | 양의 정수만 (쉼표·부호·소수점·0 불가) | HASHING §1, §5 |
+| 사용일 | 선택한 연·월·일을 `Hashing.kstMidnightOf`로 **KST 자정 Unix 초**로 변환 (`ts % 86400 == 54000`) | HASHING §1.3 |
+| 수입 등록 | 예산 검사 대상이 아니므로 `BLOCKED` 없이 `PENDING` | IAccountingLedger |
+
+**서명용 해시를 만들 때**: 사유 원문은 그대로 받아서 넘기고, 정본화(NFC 등)는 `Hashing.canonicalText`, 해시는 `Hashing.textHash`를 쓴다. `String.trim()`은 쓰지 않는다.
+
+**아직 목업인 부분**: 서버 호출·서명 제출은 연결하지 않았다. 등록 결과는 예산 잔량으로 `BLOCKED`를 흉내 낸 값이고(`simulateExpenseRegistration`), 승인의 `local_auth`도 실제 서명이 아니다. 서버 응답의 `status`·`block_reason`·`fail_reason`이 붙으면 그 자리를 바꾼다.
 
 ---
 
