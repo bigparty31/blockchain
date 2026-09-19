@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
 import '../../core/app_theme.dart';
+import '../../core/hashing.dart';
+import 'input_rules.dart';
+import 'registration_result.dart';
 
 /// [이승호 담당: app/lib/screens/council/]
 /// 2. 수입 등록 화면
@@ -51,70 +54,34 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
     if (picked != null) setState(() => _selectedDate = picked);
   }
 
-  void _submitIncome() {
-    if (_formKey.currentState!.validate()) {
-      showDialog(
-        context: context,
-        builder: (ctx) => Dialog(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-          child: Padding(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  width: 60,
-                  height: 60,
-                  decoration: BoxDecoration(
-                    color: AppTheme.income.withOpacity(0.12),
-                    shape: BoxShape.circle,
-                  ),
-                  child: const Icon(Icons.check_rounded, color: AppTheme.income, size: 30),
-                ),
-                const SizedBox(height: 16),
-                const Text('수입 등록 완료!',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: AppTheme.textMain),
-                ),
-                const SizedBox(height: 12),
-                Container(
-                  padding: const EdgeInsets.all(14),
-                  decoration: BoxDecoration(
-                    color: AppTheme.bgPage,
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      _InfoRow(label: '분류', value: _incomeType),
-                      _InfoRow(label: '출처', value: _sourceController.text),
-                      _InfoRow(label: '금액', value: '${_amountController.text}원'),
-                      _InfoRow(
-                        label: '일자',
-                        value: '${_selectedDate.year}-${_selectedDate.month.toString().padLeft(2, '0')}-${_selectedDate.day.toString().padLeft(2, '0')}',
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 8),
-                const Text('장부에 수입(INCOME)으로 등록되었습니다',
-                  style: TextStyle(color: AppTheme.textSub, fontSize: 13),
-                ),
-                const SizedBox(height: 16),
-                SizedBox(
-                  width: double.infinity,
-                  child: GradientButton(
-                    onPressed: () { Navigator.pop(ctx); Navigator.pop(context); },
-                    label: '확인',
-                    icon: Icons.check_rounded,
-                    gradient: AppTheme.incomeGradient,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
+  /// 사용일 → `occurred_at`. **KST 자정** Unix 초 (HASHING §1.3).
+  /// 기기 로컬 시간대를 쓰지 않고 선택한 연·월·일만 쓴다.
+  int get _occurredAt => Hashing.kstMidnightOf(
+        _selectedDate.year,
+        _selectedDate.month,
+        _selectedDate.day,
       );
-    }
+
+  Future<void> _submitIncome() async {
+    if (!_formKey.currentState!.validate()) return;
+
+    final date =
+        '${_selectedDate.year}-${_selectedDate.month.toString().padLeft(2, '0')}-${_selectedDate.day.toString().padLeft(2, '0')}';
+    final done = await showRegistrationResultDialog(
+      context,
+      kindLabel: '수입',
+      rows: [
+        ('분류', _incomeType),
+        ('출처', _sourceController.text),
+        ('금액', '${_amountController.text}원'),
+        ('일자', date),
+      ],
+      // 수입은 예산 검사 대상이 아니라 BLOCKED 가 없다. 감사 승인 전까지 PENDING.
+      result: const RegistrationResult.pending(),
+      occurredAtNote: '전송값 occurred_at: $_occurredAt (사용일 KST 00:00)',
+      gradient: AppTheme.incomeGradient,
+    );
+    if (done && mounted) Navigator.pop(context);
   }
 
   @override
@@ -238,7 +205,7 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
                   hint: '예: 2026학년도 2학기 학생회비 일괄 수납',
                   icon: Icons.edit_note_rounded,
                 ),
-                validator: (v) => (v == null || v.isEmpty) ? '수입 상세 내용을 입력해 주세요' : null,
+                validator: (v) => InputRules.singleLine(v, fieldName: '수입 상세 내용'),
               ),
               const SizedBox(height: 14),
 
@@ -250,7 +217,7 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
                   hint: '예: 5000000',
                   icon: Icons.monetization_on_rounded,
                 ),
-                validator: (v) => (v == null || v.isEmpty) ? '입금 금액을 입력해 주세요' : null,
+                validator: (v) => InputRules.positiveAmount(v, fieldName: '입금 금액'),
               ),
               const SizedBox(height: 14),
 
@@ -307,23 +274,6 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
             ],
           ),
         ),
-      ),
-    );
-  }
-}
-
-class _InfoRow extends StatelessWidget {
-  final String label, value;
-  const _InfoRow({required this.label, required this.value});
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 3),
-      child: Row(
-        children: [
-          Text('$label: ', style: const TextStyle(color: AppTheme.textSub, fontSize: 13)),
-          Expanded(child: Text(value, style: const TextStyle(color: AppTheme.textMain, fontWeight: FontWeight.w600, fontSize: 13))),
-        ],
       ),
     );
   }

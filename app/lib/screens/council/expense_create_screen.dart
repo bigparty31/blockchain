@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import '../../core/enums.dart';
 import '../../core/app_theme.dart';
+import '../../core/hashing.dart';
+import 'input_rules.dart';
+import 'registration_result.dart';
 
 /// [이승호 담당: app/lib/screens/council/]
 /// 1. 지출 등록 화면
@@ -22,6 +25,7 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
   DateTime _selectedDate = DateTime.now();
   bool _hasReceiptImage = false;
   OcrStatus _ocrStatus = OcrStatus.MATCH;
+  bool _submitting = false;
 
   final List<String> _budgetCategories = ['행사비', '사업비', '운영비'];
 
@@ -74,66 +78,40 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
     );
   }
 
-  void _submitExpense() {
-    if (_formKey.currentState!.validate()) {
-      showDialog(
-        context: context,
-        builder: (ctx) => Dialog(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-          child: Padding(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  width: 60,
-                  height: 60,
-                  decoration: BoxDecoration(
-                    color: AppTheme.primaryLight,
-                    shape: BoxShape.circle,
-                  ),
-                  child: const Icon(Icons.check_rounded, color: AppTheme.primary, size: 30),
-                ),
-                const SizedBox(height: 16),
-                const Text('지출 등록 완료!',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: AppTheme.textMain),
-                ),
-                const SizedBox(height: 12),
-                Container(
-                  padding: const EdgeInsets.all(14),
-                  decoration: BoxDecoration(
-                    color: AppTheme.bgPage,
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      _InfoRow(label: '항목', value: _titleController.text),
-                      _InfoRow(label: '사용처', value: _merchantController.text),
-                      _InfoRow(label: '금액', value: '${_amountController.text}원'),
-                      _InfoRow(label: '예산분류', value: _selectedBudgetCategory),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 8),
-                const Text('PENDING 상태로 등록되었습니다',
-                  style: TextStyle(color: AppTheme.textSub, fontSize: 13),
-                ),
-                const SizedBox(height: 16),
-                SizedBox(
-                  width: double.infinity,
-                  child: GradientButton(
-                    onPressed: () { Navigator.pop(ctx); Navigator.pop(context); },
-                    label: '확인',
-                    icon: Icons.check_rounded,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
+  /// 사용일 → `occurred_at`. **KST 자정** Unix 초 (HASHING §1.3).
+  /// 기기 로컬 시간대를 쓰지 않고 선택한 연·월·일만 쓴다.
+  int get _occurredAt => Hashing.kstMidnightOf(
+        _selectedDate.year,
+        _selectedDate.month,
+        _selectedDate.day,
       );
-    }
+
+  Future<void> _submitExpense() async {
+    if (_submitting || !_formKey.currentState!.validate()) return;
+    setState(() => _submitting = true);
+
+    final amount = int.parse(_amountController.text);
+    // 목업: 서버 연동 전에는 예산 잔량으로 BLOCKED 를 흉내 낸다.
+    final result = await simulateExpenseRegistration(
+      category: _selectedBudgetCategory,
+      amount: amount,
+    );
+    if (!mounted) return;
+    setState(() => _submitting = false);
+
+    final done = await showRegistrationResultDialog(
+      context,
+      kindLabel: '지출',
+      rows: [
+        ('항목', _titleController.text),
+        ('사용처', _merchantController.text),
+        ('금액', '$amount원'),
+        ('예산분류', _selectedBudgetCategory),
+      ],
+      result: result,
+      occurredAtNote: '전송값 occurred_at: $_occurredAt (사용일 KST 00:00)',
+    );
+    if (done && mounted) Navigator.pop(context);
   }
 
   @override
@@ -242,7 +220,7 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
                   hint: '예: 신입생 오리엔테이션 다과 구매',
                   icon: Icons.description_rounded,
                 ),
-                validator: (v) => (v == null || v.isEmpty) ? '항목명을 입력해 주세요' : null,
+                validator: (v) => InputRules.singleLine(v, fieldName: '항목명'),
               ),
               const SizedBox(height: 14),
 
@@ -253,7 +231,7 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
                   hint: '예: 한결문구점',
                   icon: Icons.storefront_rounded,
                 ),
-                validator: (v) => (v == null || v.isEmpty) ? '사용처를 입력해 주세요' : null,
+                validator: (v) => InputRules.singleLine(v, fieldName: '사용처'),
               ),
               const SizedBox(height: 14),
 
@@ -265,7 +243,7 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
                   hint: '예: 35000',
                   icon: Icons.monetization_on_rounded,
                 ),
-                validator: (v) => (v == null || v.isEmpty) ? '금액을 입력해 주세요' : null,
+                validator: (v) => InputRules.positiveAmount(v, fieldName: '금액'),
               ),
               const SizedBox(height: 14),
 
@@ -341,7 +319,7 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
 
               GradientButton(
                 onPressed: _submitExpense,
-                label: '지출 등록 신청하기',
+                label: _submitting ? '확인 중...' : '지출 등록 신청하기',
                 icon: Icons.upload_rounded,
               ),
               const SizedBox(height: 8),
@@ -374,23 +352,6 @@ class _SectionLabel extends StatelessWidget {
         const SizedBox(width: 8),
         Text(label, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: AppTheme.textMain)),
       ],
-    );
-  }
-}
-
-class _InfoRow extends StatelessWidget {
-  final String label, value;
-  const _InfoRow({required this.label, required this.value});
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Row(
-        children: [
-          Text('$label: ', style: const TextStyle(color: AppTheme.textSub, fontSize: 13)),
-          Expanded(child: Text(value, style: const TextStyle(color: AppTheme.textMain, fontWeight: FontWeight.w600, fontSize: 13))),
-        ],
-      ),
     );
   }
 }
