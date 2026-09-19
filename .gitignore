@@ -56,3 +56,9 @@ build/
 *.swp
 .DS_Store
 Thumbs.db
+
+# Documents / PRD & Internal Docs
+학생회비-투명성-시스템-PRD*
+학생회비-투명성-시스템-PRD v0.7.md
+ERD_mermaid.md
+docs/ERD_mermaid.md
