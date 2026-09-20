@@ -94,3 +94,22 @@ enum OcrStatus {
     );
   }
 }
+
+/// 6. block_reason (EntryBlocked.reason — 등록 시점 예산 검사 실패 사유)
+/// 온체인 enum 순서 = docs/enums.md 표 순서.
+enum BlockReason {
+  BUDGET_EXCEEDED('BUDGET_EXCEEDED', '잔량 부족'),
+  BUDGET_EXPIRED('BUDGET_EXPIRED', '집행 마감 경과'),
+  BUDGET_NOT_FOUND('BUDGET_NOT_FOUND', '존재하지 않는 예산');
+
+  final String code;
+  final String label;
+  const BlockReason(this.code, this.label);
+
+  static BlockReason fromCode(String code) {
+    return BlockReason.values.firstWhere(
+      (e) => e.code == code,
+      orElse: () => BlockReason.BUDGET_EXCEEDED,
+    );
+  }
+}

@@ -64,9 +64,10 @@ class ApiService {
         counterparty: '한결문구',
         purpose: '신입생 환영회 명찰 및 필기구 구매',
         budgetId: 2,
-        occurredAt: 1757300000,
+        occurredAt: 1788793200, // 2026-09-08 00:00 KST (% 86400 == 54000)
         receiptPath: '/receipts/sample_01.jpg',
-        metaHash: '0x456def',
+        receiptHash: '0xabc1234567890abcdef1234567890abcdef1234567890abcdef1234567890abc',
+        metaHash: '0x24ae73988d927fb39f45eb6024e9ff8ffa19e8501603565bd82710ea8df4b937',
         ocrAmount: 35000,
         ocrApprovalNo: '12345678',
         ocrStatus: OcrStatus.MATCH,
@@ -81,9 +82,10 @@ class ApiService {
         counterparty: '청년피자',
         purpose: '개강총회 다과 주문',
         budgetId: 1,
-        occurredAt: 1757386400,
+        occurredAt: 1788706800, // 2026-09-07 00:00 KST
         receiptPath: '/receipts/sample_02.jpg',
-        metaHash: '0x789abc',
+        receiptHash: '0xdef4567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef',
+        metaHash: '0x622fc1b357c04032e65bc1855c73aaff6d519464d69bf22b10761f3b26a1b793',
         ocrAmount: 120000,
         ocrApprovalNo: '87654321',
         ocrStatus: OcrStatus.MATCH,
@@ -95,56 +97,13 @@ class ApiService {
         termId: 1,
         kind: EntryKind.INCOME,
         amount: 5000000,
-        counterparty: '컴퓨터공학과 학생회',
-        purpose: '2026학년도 2학기 학생회비 납부',
-        occurredAt: 1757213600,
-        metaHash: '0x123abc',
+        counterparty: '컴퓨터공학과 학생회비 일괄 납부',
+        purpose: '2026-2학기 학과 학생회비 수납',
+        occurredAt: 1788620400, // 2026-09-06 00:00 KST
+        metaHash: '0x74c9740556d857575586251e71fa24091ffaece5c01c4f889d7c1224ce7af3a9',
         status: EntryStatus.CONFIRMED,
         createdBy: 2,
       ),
     ];
-  }
-
-  /// 4. POST /entries (신규 지출/수입 등록)
-  Future<Map<String, dynamic>> createEntry({
-    required EntryKind kind,
-    required int amount,
-    required String counterparty,
-    required String purpose,
-    int? budgetId,
-    required int occurredAt,
-    int? correctsEntryId,
-    CorrectionReason? correctionReason,
-  }) async {
-    final payload = {
-      'term_id': 1,
-      'kind': kind.code,
-      'amount': amount,
-      'counterparty': counterparty,
-      'purpose': purpose,
-      if (budgetId != null) 'budget_id': budgetId,
-      'occurred_at': occurredAt,
-      if (correctsEntryId != null) 'corrects_entry_id': correctsEntryId,
-      if (correctionReason != null) 'correction_reason': correctionReason.code,
-    };
-
-    try {
-      final response = await http.post(
-        Uri.parse(ApiConfig.entries),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode(payload),
-      ).timeout(const Duration(seconds: 3));
-
-      if (response.statusCode == 201 || response.statusCode == 200) {
-        return jsonDecode(utf8.decode(response.bodyBytes));
-      }
-    } catch (_) {}
-
-    // 서버 미연결 시 로컬 성공 시뮬레이션 반환
-    return {
-      'id': 99,
-      'status': 'PENDING',
-      'message': '오프라인 시뮬레이션: 내역이 PENDING 상태로 등록되었습니다.',
-    };
   }
 }

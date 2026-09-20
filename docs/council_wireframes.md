@@ -61,6 +61,8 @@
 - **주요 로직**:
   - `image_picker`로 카메라 촬영 또는 갤러리 선택.
   - 등록 시 `status: PENDING` 상태로 저장되어 예산 잔액에서 즉시 차감되지 않음 (감사/회장 승인 후 반영).
+  - **예산 초과·마감·미존재는 revert가 아니라 `BLOCKED`로 저장**된다. 결과 화면에 차단 사유(`block_reason`: `BUDGET_EXCEEDED` / `BUDGET_EXPIRED` / `BUDGET_NOT_FOUND`)를 표시하고, `BLOCKED` 건은 확정·반려할 수 없으므로 금액·예산을 고쳐 **새로 등록**하도록 안내한다 (§2.6).
+  - 사용일은 날짜로 받고 서버에는 **KST 00:00:00 Unix 초**(`occurred_at`)로 보낸다. 기기 로컬 시간대는 쓰지 않는다 (§2.6).
 
 ---
 
@@ -122,6 +124,9 @@
 ```
 - **주요 로직**:
   - `local_auth` 플러그인 호출하여 생체인증 성공 시 서명 생성 및 `CONFIRMED` 처리.
+  - **반려·경고 무시 승인은 사유 필수.** OCR이 `MATCH`가 아닌 건을 승인하려면 사유를 먼저 받고(빈 값이면 400), 반려도 사유 입력 후에만 처리한다 (§2.6).
+  - **승인이 예산 부족으로 실패할 수 있다.** 확정이 revert되어도 상태는 `PENDING` 그대로다. 실패 사유(`InsufficientBudget` / `BudgetExpired`)를 안내하고 **반려 흐름으로 넘긴다** (§2.6).
+  - 현재 승인 화면은 서버 연동 전 목업이다. 실패 재현용으로 id 4번 항목(`mockFailReason`), 경고 재현용으로 id 6번 항목(OCR `MISMATCH`)이 들어 있다.
 
 ---
 
@@ -133,12 +138,16 @@
 │  <  장부 정정 신청                          │
 ├──────────────────────────────────────────────┤
 │  정정 대상 내역 ID (Entry ID) *              │
-│  [ 2                                     ]   │
+│  [ 1                     ] [ 내역 조회 ]     │
+│  #1 한결문구 · 현재 금액 ₩ 35,000            │
 │                                              │
 │  정정 사유 분류 (`docs/enums.md`) *          │
 │  [ 입력 오류 (INPUT_ERROR)              ▼ ] │
 │  * 선택 가능: INPUT_ERROR, RECEIPT_RECHECK,  │
 │               REFUND, RECLASSIFY             │
+│                                              │
+│  수정 후 올바른 금액 (원) *                  │
+│  [ 30,000 ] → 기록되는 정정 금액: -₩ 5,000   │
 │                                              │
 │  정정 상세 사유 *                            │
 │  [ 실제 영수증 상 금액과 입력 금액 10원 차이│ │
@@ -151,6 +160,11 @@
 │ └──────────────────────────────────────────┘ │
 └──────────────────────────────────────────────┘
 ```
+- **주요 로직**:
+  - **정정 항목의 금액은 새 총액이 아니라 증감분**이다(`올바른 금액 − 현재 금액`). 컨트랙트가 음수를 정정 항목에만 허용하고 장부 합계는 확정 항목을 그냥 더하기 때문에, 새 총액을 보내면 금액이 두 배가 된다 (`core/entry_merge.dart`, HASHING 샘플 3 `-20000`). 화면은 대상 내역의 현재 금액을 조회해 증감분을 자동 계산해 보여 준다.
+  - 대상은 **확정(`CONFIRMED`)된 원본 내역**만 가능하다(`CorrectionTargetNotConfirmed`). 승인 대기 중인 정정이 있으면 그 결과가 난 뒤에 신청한다.
+  - 증감분이 0이면(현재 금액과 같으면) 컨트랙트가 거부(`ZeroAmount`)하므로 제출할 수 없다.
+  - 정정 상세 사유는 텍스트 해시 대상이라 빈 값·제어문자·보이지 않는 공백을 막는다 (§2.6).
 
 ---
 
@@ -173,10 +187,76 @@
 │ │ [답변 완료]  관련 내역 #2  2026-09-12     │ │
 │ │ Q. 청년피자 다과 주문 건 참석자 명단?     │ │
 │ │ 총무단 답변: 출석 서명부 스캔본 증빙 추가  │ │
-│ │                       [ 답변 수정하기 ]  │ │
+│ │        (답변은 수정할 수 없음)           │ │
 │ └──────────────────────────────────────────┘ │
 └──────────────────────────────────────────────┘
 ```
+- **주요 로직**:
+  - **이미 답변한 이의에는 다시 답변할 수 없다.** 컨트랙트가 `ObjectionAlreadyAnswered`로 거부하므로 답변 완료 건에는 수정 버튼을 두지 않는다.
+  - 답변은 텍스트 해시(`answerHash`) 대상이라 빈 값·공백만 있는 값은 등록되지 않고 이유를 알려 준다. 서명할 EIP-712 도메인 이름은 원장과 다르므로(`ObjectionRegistry`) 서버가 내려주는 값을 그대로 쓴다.
+
+---
+
+### 2.6 컨트랙트·해시 규칙 반영 사항 (화면 공통)
+
+`docs/HASHING.md`, `contracts/interfaces/IAccountingLedger.sol` 기준으로 화면에 반영한 규칙입니다. 구현은 `app/lib/screens/council/` (`input_rules.dart`, `reason_dialog.dart`, `registration_result.dart`).
+
+| 규칙 | 화면 동작 | 근거 |
+|:---|:---|:---|
+| 등록 시 예산 초과는 `BLOCKED` 저장 | 결과 다이얼로그에 `block_reason` 라벨과 코드를 표시. `PENDING`이면 화면을 닫고, `BLOCKED`면 입력 화면에 남는다 | IAccountingLedger, `enums.md` |
+| 확정 실패(예산 부족)는 revert, 상태 `PENDING` 유지 | 실패 다이얼로그 → `[반려로 처리]`로 반려 사유 입력 화면 이동(실패 사유가 미리 채워짐) | IAccountingLedger, RELAY §9 |
+| 반려·경고 무시 승인은 사유 필수 | 사유 입력창에서 빈 값·공백만 있는 값은 진행 불가 | HASHING §3, §5 |
+| 사유 텍스트 검사 | 탭·LF 외 제어문자, NBSP·ZWSP·전각공백·BOM 거부. CRLF는 LF로 본다 | HASHING §3 |
+| 한 줄 텍스트(사용처·항목명) 검사 | 탭 포함 제어문자 전면 거부(구분자 U+001F 충돌 차단), 보이지 않는 공백 거부 | HASHING §1.1, §5 |
+| 금액 | 양의 정수만 (쉼표·부호·소수점·0 불가) | HASHING §1, §5 |
+| 사용일 | 선택한 연·월·일을 `Hashing.kstMidnightOf`로 **KST 자정 Unix 초**로 변환 (`ts % 86400 == 54000`) | HASHING §1.3 |
+| 수입 등록 | 예산 검사 대상이 아니므로 `BLOCKED` 없이 `PENDING` | IAccountingLedger |
+
+**서명용 해시를 만들 때**: 사유 원문은 그대로 받아서 넘기고, 정본화(NFC 등)는 `Hashing.canonicalText`, 해시는 `Hashing.textHash`를 쓴다. `String.trim()`은 쓰지 않는다.
+
+**아직 목업인 부분**: 서버 호출·서명 제출은 연결하지 않았다. 등록 결과는 예산 잔량으로 `BLOCKED`를 흉내 낸 값이고(`simulateExpenseRegistration`), 승인의 `local_auth`도 실제 서명이 아니다. 서버 응답의 `status`·`block_reason`·`fail_reason`이 붙으면 그 자리를 바꾼다.
+
+---
+
+### 2.7 라우트 이름 (`app/lib/router.dart`)
+
+화면 라우트 이름을 미리 등록해 둔 공용 파일입니다. 화면을 추가할 때는 `AppRoutes`에 한 줄, `AppRouter`에 한 case만 더하면 되어 병합 충돌이 없습니다. `main.dart`의 `MaterialApp(onGenerateRoute: AppRouter.onGenerateRoute)`로 연결되어 있고, 기존 `Navigator.push` 코드는 그대로 두었습니다. 이동은 `Navigator.pushNamed(context, AppRoutes.xxx, arguments: ...)`로 합니다.
+
+| 영역 | 이름 | 화면 | 인자 |
+|:---|:---|:---|:---|
+| 총무·감사 | `/council` | `CouncilHomeScreen` | `UserRole` (없으면 총무) |
+| | `/council/expense` | `ExpenseCreateScreen` | - |
+| | `/council/income` | `IncomeCreateScreen` | - |
+| | `/council/approvals` | `ApprovalListScreen` | - |
+| | `/council/corrections` | `CorrectionScreen` | - |
+| | `/council/inquiries` | `InquiryResponseScreen` | - |
+| | `/council/hardware-test` | `HardwareTestScreen` | - |
+| 학생 | `/student` | `StudentHomeScreen` | - |
+| | `/student/entries` | `EntryListScreen` | - |
+| | `/student/entries/detail` | `EntryDetailScreen` | `EntryChain` |
+| | `/student/objection` | `ObjectionScreen` | `EntryModel` |
+| | `/student/sbt` | `MySbtScreen` | - |
+
+- 인자 타입이 틀리면 조용히 기본값으로 넘기지 않고 "화면을 열 수 없어요" 오류 화면을 띄웁니다.
+- 학생 화면 이름은 이승호가 정한 초안이므로 장정아 확인이 필요합니다.
+- 로그인 화면은 `main.dart`의 `home`이라 라우트에 두지 않았습니다.
+
+---
+
+### 2.8 확인 필요 (백엔드·컨트랙트 담당과 정해야 하는 것)
+
+화면은 서버 연동 전 목업이라 아래가 정해지면 연결 방식이 바뀝니다.
+
+| # | 내용 | 확인할 곳 |
+|:---|:---|:---|
+| 1 | **정정 금액이 증감분이 맞는지** 공식 확인. `core/entry_merge.dart`에 "김경윤 확인 대기" 주석이 있다. 문서(HASHING 샘플 3, 컨트랙트 음수 규칙)는 증감분을 가리킨다 | 김경윤 |
+| 2 | **금액이 안 바뀌는 정정**(`RECLASSIFY` 재분류, `RECEIPT_RECHECK` 영수증 재확인)을 어떻게 기록하나. 컨트랙트가 `amount == 0`을 거부(`ZeroAmount`)해서 지금 화면은 제출을 막는다 | 김경윤, 장석연 |
+| 3 | **수입 분류 이름**이 `docs/CONTRACTS.md` category 표와 다르다. 화면: 학생회비 수납·단과대/학교 지원금·동문회 찬조금·행사 부스 수익금·기타 / 문서: 학생회비·지원금·후원금·이자수입. 표에 없는 항목은 문서에 먼저 추가(팀장 승인)해야 한다 | 김경윤, 장석연 |
+| 4 | **지출 예산 카테고리**가 화면에 `행사비·사업비·운영비`로 고정돼 있다. `GET /budgets` 응답으로 채워야 카테고리가 바뀌어도 맞는다 | 김경윤 |
+| 5 | **입력 필드와 API 필드가 다르다.** 지출 화면은 항목명·사용처·메모 3개를 받는데 `EntryCreate`는 `counterparty`·`purpose` 2개뿐이다. 메모를 `purpose`에 합치면 `meta_hash`가 달라진다 | 김경윤 |
+| 6 | **등록 흐름(초안 → 서명 → 제출)과 영수증 업로드 API**가 `docs/API.md`와 RELAY 제안이 서로 달라 미확정이다. 옛 단일 `POST /entries` 호출 코드(`createEntry`)는 삭제했다 | 김경윤, 손종인 |
+| 7 | **이의 목록·답변 API**가 없다. 답변 화면은 학생 쪽 `ObjectionModel`과 같은 모델을 쓰도록 맞춰야 한다 | 김경윤, 장정아 |
+| 8 | 자기가 등록한 건의 승인 차단(`SelfApproval`)은 로그인·사용자 ID가 붙어야 화면에서 막을 수 있다. `BLOCKED` 항목을 보는 화면도 아직 없다 | 손종인(인증) |
 
 ---
 
