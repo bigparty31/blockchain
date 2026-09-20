@@ -206,6 +206,31 @@
 
 ---
 
+### 2.7 라우트 이름 (`app/lib/router.dart`)
+
+화면 라우트 이름을 미리 등록해 둔 공용 파일입니다. 화면을 추가할 때는 `AppRoutes`에 한 줄, `AppRouter`에 한 case만 더하면 되어 병합 충돌이 없습니다. `main.dart`의 `MaterialApp(onGenerateRoute: AppRouter.onGenerateRoute)`로 연결되어 있고, 기존 `Navigator.push` 코드는 그대로 두었습니다. 이동은 `Navigator.pushNamed(context, AppRoutes.xxx, arguments: ...)`로 합니다.
+
+| 영역 | 이름 | 화면 | 인자 |
+|:---|:---|:---|:---|
+| 총무·감사 | `/council` | `CouncilHomeScreen` | `UserRole` (없으면 총무) |
+| | `/council/expense` | `ExpenseCreateScreen` | - |
+| | `/council/income` | `IncomeCreateScreen` | - |
+| | `/council/approvals` | `ApprovalListScreen` | - |
+| | `/council/corrections` | `CorrectionScreen` | - |
+| | `/council/inquiries` | `InquiryResponseScreen` | - |
+| | `/council/hardware-test` | `HardwareTestScreen` | - |
+| 학생 | `/student` | `StudentHomeScreen` | - |
+| | `/student/entries` | `EntryListScreen` | - |
+| | `/student/entries/detail` | `EntryDetailScreen` | `EntryChain` |
+| | `/student/objection` | `ObjectionScreen` | `EntryModel` |
+| | `/student/sbt` | `MySbtScreen` | - |
+
+- 인자 타입이 틀리면 조용히 기본값으로 넘기지 않고 "화면을 열 수 없어요" 오류 화면을 띄웁니다.
+- 학생 화면 이름은 이승호가 정한 초안이므로 장정아 확인이 필요합니다.
+- 로그인 화면은 `main.dart`의 `home`이라 라우트에 두지 않았습니다.
+
+---
+
 ## 3. 앱 실행 및 시연 매뉴얼 (팀원 공유용)
 
 이 브랜치를 머지하거나 클론받은 팀원이 로컬 환경에서 모바일 앱을 즉시 실행하고 테스트할 수 있는 단계별 가이드입니다.

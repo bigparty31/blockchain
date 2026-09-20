@@ -3,6 +3,7 @@ import 'core/enums.dart';
 import 'core/app_theme.dart';
 import 'screens/student/student_home_screen.dart';
 import 'screens/council/council_home_screen.dart';
+import 'router.dart';
 
 void main() {
   runApp(const StudentCouncilApp());
@@ -18,6 +19,7 @@ class StudentCouncilApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: AppTheme.themeData,
       home: const RoleLoginScreen(),
+      onGenerateRoute: AppRouter.onGenerateRoute,
     );
   }
 }
