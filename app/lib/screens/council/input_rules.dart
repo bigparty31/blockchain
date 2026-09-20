@@ -69,6 +69,26 @@ class InputRules {
     return null;
   }
 
+  /// 0 이상의 정수 — 정정 화면의 「수정 후 올바른 금액」. 전액 취소는 0원이 될 수 있다.
+  ///
+  /// 컨트랙트가 막는 것은 정정 항목의 `amount` 가 0 인 경우(`ZeroAmount`)이고,
+  /// 그 값은 `올바른 금액 − 현재 금액` 이라 화면에서 따로 검사한다.
+  static String? nonNegativeAmount(String? value, {required String fieldName}) {
+    final v = value ?? '';
+    if (v.isEmpty) return '$fieldName${_eulReul(fieldName)} 입력해 주세요';
+    if (!RegExp(r'^[0-9]+$').hasMatch(v)) return '숫자만 입력해 주세요 (쉼표·소수점·부호 불가)';
+    return null;
+  }
+
+  /// 내역 ID — 1 이상의 정수. ID 는 1부터 채번하고 0 은 「없음」으로 예약돼 있다 (HASHING §2.1).
+  static String? entryId(String? value) {
+    final v = value ?? '';
+    if (v.isEmpty) return '내역 ID를 입력해 주세요';
+    if (!RegExp(r'^[0-9]+$').hasMatch(v)) return '숫자만 입력해 주세요';
+    if ((int.tryParse(v) ?? 0) <= 0) return '1 이상의 내역 ID를 입력해 주세요';
+    return null;
+  }
+
   /// 받침 유무에 맞는 목적격 조사 (사유 → 를, 금액 → 을).
   static String _eulReul(String word) {
     if (word.isEmpty) return '을(를)';
