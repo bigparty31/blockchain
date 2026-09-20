@@ -1,5 +1,5 @@
 from typing import List, Optional
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from app.schemas.entry import (
     EntryResponse,
     EntryCreate,
@@ -11,6 +11,13 @@ from app.schemas.entry import (
     OCRStatus,
     BlockReason,
 )
+from app.utils.hashing import (
+    validate_canonical_input,
+    canonical,
+    calculate_meta_hash,
+)
+from app.chain.services import RegistrationRelay, get_registration_relay
+from app.chain.models import ChainRevert, ChainUnavailable
 
 router = APIRouter(prefix="/entries", tags=["Entries"])
 
@@ -121,11 +128,44 @@ async def get_entries():
     status_code=status.HTTP_201_CREATED,
     include_in_schema=False,
 )
+@router.post(
+    "/drafts",
+    response_model=EntryCreateResponse,
+    status_code=status.HTTP_201_CREATED,
+    include_in_schema=False,
+)
 async def create_entry(entry: EntryCreate):
     """임원(총무/회장)이 모바일 앱에서 영수증과 지출 내역을 입력 후 초안을 등록할 때 호출하는 API입니다.
     1단계에서는 온체인 트랜잭션 없이 고유 ID만 발급되며, 2단계 submit 호출을 통해 기기 서명 검증 후 온체인에 기록됩니다.
     """
-    # 영수증 중복 검사
+    # 1차 입력값 검증 (금지 제어문자 및 보이지 않는 공백 차단)
+    try:
+        validate_canonical_input(entry.counterparty)
+        validate_canonical_input(entry.purpose)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"입력값 검증 실패: {e}",
+        )
+
+    # occurred_at KST 자정 검사
+    if entry.occurred_at % 86400 != 54000:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="occurred_at은 사용일의 KST 자정(Unix 초 % 86400 == 54000)이어야 합니다 (docs/HASHING.md §1.3).",
+        )
+
+    # 금액 규칙 (정정이 아닌 경우 양수)
+    if not entry.corrects_entry_id and entry.amount <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="정정 항목이 아닌 경우 금액은 0보다 커야 합니다.",
+        )
+
+    canonical_counterparty = canonical(entry.counterparty)
+    canonical_purpose = canonical(entry.purpose)
+
+    # 영수증 중복 검사 (기존 체인 등록 건 및 열려 있는 초안 모두 포함)
     if entry.ocr_approval_no and entry.ocr_paid_at:
         for existing in DUMMY_ENTRIES:
             if (
@@ -138,19 +178,27 @@ async def create_entry(entry: EntryCreate):
                     detail=f"이미 등록된 영수증입니다 (내역 ID: {existing.id}, 승인번호: {entry.ocr_approval_no}).",
                 )
 
+    computed_meta_hash = calculate_meta_hash(
+        amount=entry.amount,
+        counterparty=canonical_counterparty,
+        purpose=canonical_purpose,
+        occurred_at=entry.occurred_at,
+        receipt_hash=entry.receipt_hash,
+    )
+
     new_id = max([e.id for e in DUMMY_ENTRIES], default=0) + 1
     new_entry = EntryResponse(
         id=new_id,
         term_id=entry.term_id,
         kind=entry.kind,
         amount=entry.amount,
-        counterparty=entry.counterparty,
-        purpose=entry.purpose,
+        counterparty=canonical_counterparty,
+        purpose=canonical_purpose,
         budget_id=entry.budget_id,
         occurred_at=entry.occurred_at,
         receipt_path=entry.receipt_path,
         receipt_hash=entry.receipt_hash,
-        meta_hash=f"0x{new_id:064x}",
+        meta_hash=computed_meta_hash,
         ocr_amount=entry.ocr_amount,
         ocr_approval_no=entry.ocr_approval_no,
         ocr_paid_at=entry.ocr_paid_at,
@@ -177,11 +225,20 @@ async def create_entry(entry: EntryCreate):
 @router.post(
     "/{id}/submit",
     response_model=EntrySubmitResponse,
-    summary="초안 기기 서명 제출 및 온체인 등록 (2단계 목업)",
+    summary="초안 기기 서명 제출 및 온체인 등록 (2단계)",
 )
-async def submit_entry(id: int, req: EntrySubmitRequest):
+@router.post(
+    "/drafts/{id}/submit",
+    response_model=EntrySubmitResponse,
+    include_in_schema=False,
+)
+async def submit_entry(
+    id: int,
+    req: EntrySubmitRequest,
+    relay: RegistrationRelay = Depends(get_registration_relay),
+):
     """1단계에서 발급받은 초안 id에 대해 모바일 기기 서명을 제출하여 블록체인에 등록합니다.
-    현재는 목업 수준으로 고정값을 반환하며, 다음 주에 손종인 ChainClient 실구현으로 교체될 자리입니다.
+    RegistrationRelay(FakeChainClient)를 통해 온체인 트랜잭션을 릴레이합니다.
     """
     target = next((e for e in DUMMY_ENTRIES if e.id == id), None)
     if not target:
@@ -190,27 +247,73 @@ async def submit_entry(id: int, req: EntrySubmitRequest):
             detail=f"ID {id}에 해당하는 초안 내역을 찾을 수 없습니다.",
         )
 
-    target.tx_pending = f"0x{id:064x}"
-
-    # 예산 초과(BLOCKED) 케이스 시뮬레이션: budget_id가 999이거나 금액이 10,000,000 이상인 경우
-    if target.budget_id == 999 or target.amount >= 10_000_000:
-        target.status = EntryStatus.BLOCKED
-        return EntrySubmitResponse(
-            id=id,
-            status=EntryStatus.BLOCKED,
-            tx_pending=target.tx_pending,
-            block_reason=BlockReason.BUDGET_EXCEEDED,
-            message="해당 예산 카테고리의 잔량이 부족하여 지출 등록이 차단(BLOCKED)되었습니다.",
+    if target.status is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"ID {id} 항목은 이미 처리 완료(status={target.status.value})된 내역입니다.",
         )
 
-    # 정상 PENDING 등록 시뮬레이션
-    target.status = EntryStatus.PENDING
+    try:
+        tx_res = await relay.submit_record(target, signature=req.signature, deadline=req.deadline)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"서명 또는 요청 규격 오류: {e}",
+        )
+    except ChainRevert as e:
+        # docs/CHAIN_CLIENT.md §4: ChainRevert 시 온체인에 상태가 남지 않으므로 DB의 status는 NULL 그대로 둔다
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"체인 트랜잭션 Revert ({e.reason.value}): {e.detail or e.reason.value}",
+        )
+    except ChainUnavailable as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"블록체인 노드 일시적 응답 불가: {e}",
+        )
+
+    target.status = tx_res.status
+    target.tx_pending = tx_res.tx_hash
+    if tx_res.block_reason:
+        target.reject_reason = tx_res.block_reason.value
+
+    message = "온체인에 성공적으로 기록되어 감사 승인 대기(PENDING) 상태가 되었습니다."
+    if tx_res.status == EntryStatus.BLOCKED:
+        message = "해당 예산 카테고리의 잔량 부족 등으로 지출 등록이 차단(BLOCKED)되었습니다."
 
     return EntrySubmitResponse(
         id=id,
-        status=EntryStatus.PENDING,
-        tx_pending=target.tx_pending,
-        block_reason=None,
-        message="온체인에 성공적으로 기록되어 감사 승인 대기(PENDING) 상태가 되었습니다.",
+        status=tx_res.status,
+        tx_pending=tx_res.tx_hash,
+        block_reason=tx_res.block_reason,
+        message=message,
     )
 
+
+@router.delete(
+    "/{id}",
+    summary="초안 폐기",
+)
+@router.delete(
+    "/drafts/{id}",
+    include_in_schema=False,
+)
+async def delete_draft(id: int):
+    """서명 제출 전인 미완성 초안(status IS NULL)을 폐기합니다.
+    이미 온체인에 제출된 항목은 삭제할 수 없습니다.
+    """
+    target = next((e for e in DUMMY_ENTRIES if e.id == id), None)
+    if not target:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"ID {id}에 해당하는 초안 내역을 찾을 수 없습니다.",
+        )
+
+    if target.status is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="이미 온체인에 기록된 내역은 삭제할 수 없습니다.",
+        )
+
+    DUMMY_ENTRIES.remove(target)
+    return {"id": id, "message": "초안이 성공적으로 폐기되었습니다."}

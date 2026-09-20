@@ -2,8 +2,13 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 from app.main import app
+from app.chain.services import get_chain_client
+from app.chain.models import BlockReason, RevertReason
+from app.chain.fake import fake_signature
+from app.routers.entries import DUMMY_ENTRIES
 
 client = TestClient(app)
+TREASURER = "0x1111111111111111111111111111111111111111"
 
 
 def test_get_entries():
@@ -19,7 +24,7 @@ def test_get_entries():
 
 
 def test_create_entry_draft_and_submit():
-    """1단계 초안 생성(id만 발급, 목록 미노출) 및 2단계 submit(PENDING 전환, 목록 노출) 검증"""
+    """1단계 초안 생성(id만 발급, 목록 미노출, meta_hash 정확성) 및 2단계 submit(PENDING 전환, 목록 노출) 검증"""
     now = int(time.time())
 
     # 1. 초안 등록 (1단계)
@@ -54,7 +59,7 @@ def test_create_entry_draft_and_submit():
     # 2. 기기 서명 제출 (2단계)
     submit_body = {
         "deadline": now + 600,
-        "signature": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1b",
+        "signature": fake_signature(TREASURER),
     }
     res_submit = client.post(f"/entries/{draft_id}/submit", json=submit_body)
     assert res_submit.status_code == 200
@@ -77,13 +82,16 @@ def test_create_entry_draft_and_submit():
 
 def test_submit_blocked_budget_exceeded():
     """예산 초과 시 2단계 submit에서 BLOCKED 상태, block_reason 및 체인 tx_pending 반환 검증"""
+    chain = get_chain_client()
+    chain.block_next(BlockReason.BUDGET_EXCEEDED)
+
     req_body = {
         "term_id": 1,
         "kind": "EXPENSE",
-        "amount": 15000000,  # 한도 초과 금액
+        "amount": 15000000,
         "counterparty": "대형장비업체",
         "purpose": "축제 음향 장비 렌탈",
-        "budget_id": 999,  # 예산 초과 시뮬레이션용 ID
+        "budget_id": 1,
         "occurred_at": 1788793200,
     }
     res_draft = client.post("/entries", json=req_body)
@@ -92,7 +100,7 @@ def test_submit_blocked_budget_exceeded():
 
     submit_body = {
         "deadline": int(time.time()) + 600,
-        "signature": "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef12345678901b",
+        "signature": fake_signature(TREASURER),
     }
     res_submit = client.post(f"/entries/{draft_id}/submit", json=submit_body)
     assert res_submit.status_code == 200
@@ -132,3 +140,141 @@ def test_ocr_duplication_conflict():
     res = client.post("/entries", json=dup_body)
     assert res.status_code == 409
     assert "이미 등록된 영수증입니다" in res.json()["detail"]
+
+
+def test_forbidden_characters_rejected():
+    """제어문자(탭 등) 및 보이지 않는 공백 입력 시 400 Bad Request 검증"""
+    # 탭 문자 포함
+    req_body_tab = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 10000,
+        "counterparty": "한결\t문구",
+        "purpose": "비품 구매",
+        "budget_id": 1,
+        "occurred_at": 1788793200,
+    }
+    res = client.post("/entries", json=req_body_tab)
+    assert res.status_code == 400
+    assert "보이지 않는 문자 또는 제어문자" in res.json()["detail"]
+
+    # occurred_at KST 자정 미준수
+    req_body_bad_time = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 10000,
+        "counterparty": "한결문구",
+        "purpose": "비품 구매",
+        "budget_id": 1,
+        "occurred_at": 1788793201,  # 1초 어긋남
+    }
+    res2 = client.post("/entries", json=req_body_bad_time)
+    assert res2.status_code == 400
+    assert "KST 자정" in res2.json()["detail"]
+
+
+def test_submit_revert_keeps_status_null():
+    """서명 불일치 등 Revert 발생 시 400 반환 및 초안 status NULL 유지 검증"""
+    chain = get_chain_client()
+    chain.fail_next("record_pending", RevertReason.NOT_REGISTRANT)
+
+    req_body = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 20000,
+        "counterparty": "알파문구",
+        "purpose": "A4 용지 구매",
+        "budget_id": 1,
+        "occurred_at": 1788793200,
+    }
+    res_draft = client.post("/entries", json=req_body)
+    draft_id = res_draft.json()["id"]
+
+    submit_body = {
+        "deadline": int(time.time()) + 600,
+        "signature": fake_signature(TREASURER),
+    }
+    res_submit = client.post(f"/entries/{draft_id}/submit", json=submit_body)
+    assert res_submit.status_code == 400
+    assert "NotRegistrant" in res_submit.json()["detail"]
+
+    # Revert 후에도 초안의 status는 NULL 유지 (CHAIN_CLIENT.md §4)
+    target = next((e for e in DUMMY_ENTRIES if e.id == draft_id), None)
+    assert target is not None
+    assert target.status is None
+    assert target.tx_pending is None
+
+
+def test_delete_draft_lifecycle():
+    """초안 폐기(DELETE) 정상 동작 및 온체인 완료 건 삭제 불가 검증"""
+    # 1. 초안 생성 후 삭제
+    req_body = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 15000,
+        "counterparty": "임시문구",
+        "purpose": "테스트 후 삭제할 내역",
+        "budget_id": 1,
+        "occurred_at": 1788793200,
+    }
+    res_draft = client.post("/entries/drafts", json=req_body)
+    draft_id = res_draft.json()["id"]
+
+    res_del = client.delete(f"/entries/drafts/{draft_id}")
+    assert res_del.status_code == 200
+    assert "폐기되었습니다" in res_del.json()["message"]
+
+    # 삭제 후 재삭제 시 404
+    res_del_again = client.delete(f"/entries/{draft_id}")
+    assert res_del_again.status_code == 404
+
+    # 2. 이미 온체인 처리된 내역(ID=1 CONFIRMED) 삭제 시도 시 400
+    res_del_confirmed = client.delete("/entries/1")
+    assert res_del_confirmed.status_code == 400
+    assert "삭제할 수 없습니다" in res_del_confirmed.json()["detail"]
+
+
+def test_chain_unavailable_handling():
+    """연결 실패 시나리오: landed=False면 503 반환, landed=True면 get_entry로 복구 검증"""
+    chain = get_chain_client()
+
+    # 케이스 1: landed=False (체인 미반영 -> 503)
+    chain.unavailable_next("record_pending", landed=False)
+    req_body1 = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 25000,
+        "counterparty": "네트워크불안문구",
+        "purpose": "노드 장애 테스트",
+        "budget_id": 1,
+        "occurred_at": 1788793200,
+    }
+    res_draft1 = client.post("/entries", json=req_body1)
+    draft_id1 = res_draft1.json()["id"]
+
+    submit_body = {
+        "deadline": int(time.time()) + 600,
+        "signature": fake_signature(TREASURER),
+    }
+    res_submit1 = client.post(f"/entries/{draft_id1}/submit", json=submit_body)
+    assert res_submit1.status_code == 503
+
+    # 케이스 2: landed=True (체인 반영 성공 후 응답만 누락 -> get_entry로 복구되어 200)
+    chain.unavailable_next("record_pending", landed=True)
+    req_body2 = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 28000,
+        "counterparty": "복구테스트문구",
+        "purpose": "노드 응답 누락 복구 테스트",
+        "budget_id": 1,
+        "occurred_at": 1788793200,
+    }
+    res_draft2 = client.post("/entries", json=req_body2)
+    draft_id2 = res_draft2.json()["id"]
+
+    res_submit2 = client.post(f"/entries/{draft_id2}/submit", json=submit_body)
+    assert res_submit2.status_code == 200
+    data2 = res_submit2.json()
+    assert data2["id"] == draft_id2
+    assert data2["status"] == "PENDING"
