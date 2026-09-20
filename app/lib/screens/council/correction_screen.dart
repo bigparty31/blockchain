@@ -428,7 +428,7 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
                         children: [
                           Icon(Icons.attach_file_rounded, color: Colors.white, size: 18),
                           SizedBox(width: 10),
-                          Text('수정 증빙 영수증 첨부 완료'),
+                          Expanded(child: Text('수정 증빙 영수증 첨부 완료')),
                         ],
                       ),
                       backgroundColor: AppTheme.success,
@@ -470,12 +470,15 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
                         ),
                       ),
                       const SizedBox(width: 12),
-                      Text(
-                        _hasCorrectionReceipt ? '수정 증빙 첨부 완료됨 ✓' : '수정 증빙 자료 재첨부 (영수증)',
-                        style: TextStyle(
-                          color: _hasCorrectionReceipt ? AppTheme.success : AppTheme.primary,
-                          fontWeight: FontWeight.w600,
-                          fontSize: 14,
+                      // Expanded: 좁은 화면·큰 글자에서 글자가 넘치지 않고 줄바꿈된다
+                      Expanded(
+                        child: Text(
+                          _hasCorrectionReceipt ? '수정 증빙 첨부 완료됨 ✓' : '수정 증빙 자료 재첨부 (영수증)',
+                          style: TextStyle(
+                            color: _hasCorrectionReceipt ? AppTheme.success : AppTheme.primary,
+                            fontWeight: FontWeight.w600,
+                            fontSize: 14,
+                          ),
                         ),
                       ),
                     ],
@@ -567,11 +570,13 @@ class _InfoRow extends StatelessWidget {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 3),
-      child: Row(
-        children: [
-          Text('$label: ', style: const TextStyle(color: AppTheme.textSub, fontSize: 13)),
-          Expanded(child: Text(value, style: const TextStyle(color: AppTheme.textMain, fontWeight: FontWeight.w600, fontSize: 13))),
-        ],
+      child: Text.rich(
+        TextSpan(
+          children: [
+            TextSpan(text: '$label: ', style: const TextStyle(color: AppTheme.textSub, fontSize: 13)),
+            TextSpan(text: value, style: const TextStyle(color: AppTheme.textMain, fontWeight: FontWeight.w600, fontSize: 13)),
+          ],
+        ),
       ),
     );
   }

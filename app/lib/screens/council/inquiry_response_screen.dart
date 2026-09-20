@@ -63,8 +63,10 @@ class _InquiryResponseScreenState extends State<InquiryResponseScreen> {
                     child: const Icon(Icons.rate_review_rounded, color: AppTheme.success, size: 20),
                   ),
                   const SizedBox(width: 12),
-                  Text('소명 답변 (내역 #${item['entryId']})',
-                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: AppTheme.textMain),
+                  Expanded(
+                    child: Text('소명 답변 (내역 #${item['entryId']})',
+                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: AppTheme.textMain),
+                    ),
                   ),
                 ],
               ),
@@ -137,7 +139,7 @@ class _InquiryResponseScreenState extends State<InquiryResponseScreen> {
                               children: [
                                 Icon(Icons.check_circle_rounded, color: Colors.white, size: 18),
                                 SizedBox(width: 10),
-                                Text('소명 답변이 등록되었습니다.'),
+                                Expanded(child: Text('소명 답변이 등록되었습니다.')),
                               ],
                             ),
                             backgroundColor: AppTheme.success,
@@ -233,14 +235,15 @@ class _InquiryResponseScreenState extends State<InquiryResponseScreen> {
           // 필터 칩
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: Row(
+            // Wrap: 좁은 화면·큰 글자에서 칩이 다음 줄로 내려가 넘치지 않는다
+            child: Wrap(
+              spacing: 8,
+              runSpacing: 8,
               children: [
                 _FilterChip(label: '전체 (${_inquiries.length})', index: 0, selectedIndex: _selectedFilterIndex,
                   onTap: () => setState(() => _selectedFilterIndex = 0)),
-                const SizedBox(width: 8),
                 _FilterChip(label: '답변 대기 ($unansweredCount)', index: 1, selectedIndex: _selectedFilterIndex,
                   color: AppTheme.expense, onTap: () => setState(() => _selectedFilterIndex = 1)),
-                const SizedBox(width: 8),
                 _FilterChip(label: '답변 완료', index: 2, selectedIndex: _selectedFilterIndex,
                   color: AppTheme.success, onTap: () => setState(() => _selectedFilterIndex = 2)),
               ],
@@ -382,8 +385,13 @@ class _InquiryCard extends StatelessWidget {
                   label: isAnswered ? '답변 완료' : '답변 대기',
                   color: isAnswered ? AppTheme.success : AppTheme.expense,
                 ),
-                Text('지출 #${item['entryId']} · ${item['date']}',
-                  style: const TextStyle(color: AppTheme.textSub, fontSize: 12),
+                const SizedBox(width: 8),
+                // Flexible: 큰 글자·좁은 화면에서 넘치지 않고 줄바꿈된다
+                Flexible(
+                  child: Text('지출 #${item['entryId']} · ${item['date']}',
+                    textAlign: TextAlign.end,
+                    style: const TextStyle(color: AppTheme.textSub, fontSize: 12),
+                  ),
                 ),
               ],
             ),
@@ -429,8 +437,10 @@ class _InquiryCard extends StatelessWidget {
                       children: [
                         Icon(Icons.rate_review_rounded, size: 14, color: AppTheme.success),
                         SizedBox(width: 6),
-                        Text('총무단 공식 소명 답변',
-                          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: AppTheme.success),
+                        Expanded(
+                          child: Text('총무단 공식 소명 답변',
+                            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: AppTheme.success),
+                          ),
                         ),
                       ],
                     ),

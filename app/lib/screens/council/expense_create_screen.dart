@@ -67,7 +67,7 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
           children: [
             Icon(Icons.check_circle_rounded, color: Colors.white, size: 18),
             SizedBox(width: 10),
-            Text('영수증 첨부 완료! OCR로 자동 입력되었습니다.'),
+            Expanded(child: Text('영수증 첨부 완료! OCR로 자동 입력되었습니다.')),
           ],
         ),
         backgroundColor: AppTheme.primary,
@@ -138,7 +138,8 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
                 onTap: _simulatePickReceipt,
                 child: AnimatedContainer(
                   duration: const Duration(milliseconds: 300),
-                  height: 160,
+                  // 고정 height 대신 최소 높이 — 큰 글자에서 내용이 커져도 세로로 넘치지 않는다
+                  constraints: const BoxConstraints(minHeight: 160),
                   decoration: BoxDecoration(
                     color: Colors.white,
                     borderRadius: BorderRadius.circular(20),
@@ -285,20 +286,23 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
                     children: [
                       const Icon(Icons.calendar_today_rounded, color: AppTheme.primary, size: 20),
                       const SizedBox(width: 12),
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text('지출 일자 *',
-                            style: TextStyle(color: AppTheme.textSub, fontSize: 12),
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            '${_selectedDate.year}년 ${_selectedDate.month}월 ${_selectedDate.day}일',
-                            style: const TextStyle(color: AppTheme.textMain, fontWeight: FontWeight.w600, fontSize: 15),
-                          ),
-                        ],
+                      // Expanded: 좁은 화면·큰 글자에서 날짜가 넘치지 않고 줄바꿈된다 (Spacer 대신)
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text('지출 일자 *',
+                              style: TextStyle(color: AppTheme.textSub, fontSize: 12),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              '${_selectedDate.year}년 ${_selectedDate.month}월 ${_selectedDate.day}일',
+                              style: const TextStyle(color: AppTheme.textMain, fontWeight: FontWeight.w600, fontSize: 15),
+                            ),
+                          ],
+                        ),
                       ),
-                      const Spacer(),
+                      const SizedBox(width: 8),
                       const Icon(Icons.edit_calendar_rounded, color: AppTheme.textSub, size: 18),
                     ],
                   ),

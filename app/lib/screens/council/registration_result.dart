@@ -86,15 +86,16 @@ Future<bool> showRegistrationResultDialog(
                     for (final (label, value) in rows)
                       Padding(
                         padding: const EdgeInsets.symmetric(vertical: 4),
-                        child: Row(
-                          children: [
-                            Text('$label: ', style: const TextStyle(color: AppTheme.textSub, fontSize: 13)),
-                            Expanded(
-                              child: Text(value,
+                        child: Text.rich(
+                          TextSpan(
+                            children: [
+                              TextSpan(text: '$label: ', style: const TextStyle(color: AppTheme.textSub, fontSize: 13)),
+                              TextSpan(
+                                text: value,
                                 style: const TextStyle(color: AppTheme.textMain, fontWeight: FontWeight.w600, fontSize: 13),
                               ),
-                            ),
-                          ],
+                            ],
+                          ),
                         ),
                       ),
                   ],

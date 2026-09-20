@@ -109,8 +109,8 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('정정 신청 접수 완료!'), findsOneWidget);
-      expect(find.text('₩ 35,000 → ₩ 30,000'), findsOneWidget);
-      expect(find.text('-₩ 5,000'), findsOneWidget, reason: '기록되는 정정 금액은 증감분');
+      expect(find.text('금액 변경: ₩ 35,000 → ₩ 30,000'), findsOneWidget);
+      expect(find.text('기록되는 정정 금액: -₩ 5,000'), findsOneWidget, reason: '기록되는 정정 금액은 증감분');
     });
 
     testWidgets('확정되지 않은 내역·없는 내역은 정정 대상이 될 수 없다', (tester) async {
