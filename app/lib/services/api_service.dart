@@ -106,47 +106,4 @@ class ApiService {
       ),
     ];
   }
-
-  /// 4. POST /entries (신규 지출/수입 등록)
-  Future<Map<String, dynamic>> createEntry({
-    required EntryKind kind,
-    required int amount,
-    required String counterparty,
-    required String purpose,
-    int? budgetId,
-    required int occurredAt,
-    int? correctsEntryId,
-    CorrectionReason? correctionReason,
-  }) async {
-    final payload = {
-      'term_id': 1,
-      'kind': kind.code,
-      'amount': amount,
-      'counterparty': counterparty,
-      'purpose': purpose,
-      if (budgetId != null) 'budget_id': budgetId,
-      'occurred_at': occurredAt,
-      if (correctsEntryId != null) 'corrects_entry_id': correctsEntryId,
-      if (correctionReason != null) 'correction_reason': correctionReason.code,
-    };
-
-    try {
-      final response = await http.post(
-        Uri.parse(ApiConfig.entries),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode(payload),
-      ).timeout(const Duration(seconds: 3));
-
-      if (response.statusCode == 201 || response.statusCode == 200) {
-        return jsonDecode(utf8.decode(response.bodyBytes));
-      }
-    } catch (_) {}
-
-    // 서버 미연결 시 로컬 성공 시뮬레이션 반환
-    return {
-      'id': 99,
-      'status': 'PENDING',
-      'message': '오프라인 시뮬레이션: 내역이 PENDING 상태로 등록되었습니다.',
-    };
-  }
 }
