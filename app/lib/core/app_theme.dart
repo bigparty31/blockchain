@@ -246,12 +246,16 @@ class GradientButton extends StatelessWidget {
                   Icon(icon, color: Colors.white, size: 20),
                   const SizedBox(width: 8),
                 ],
-                Text(label,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 15,
-                    letterSpacing: 0.3,
+                // Flexible: 좁은 화면·큰 글자에서 글자가 넘치지 않고 줄바꿈된다 (RenderFlex overflow 방지).
+                Flexible(
+                  child: Text(label,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 15,
+                      letterSpacing: 0.3,
+                    ),
                   ),
                 ),
               ],

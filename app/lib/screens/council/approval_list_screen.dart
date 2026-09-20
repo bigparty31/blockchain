@@ -609,8 +609,13 @@ class _ApprovalCard extends StatelessWidget {
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 StatusBadge(label: item['category'], color: _categoryColor),
-                Text(item['date'],
-                  style: const TextStyle(color: AppTheme.textSub, fontSize: 12),
+                const SizedBox(width: 8),
+                // Flexible: 큰 글자·좁은 화면에서 날짜가 넘치지 않고 줄바꿈된다
+                Flexible(
+                  child: Text(item['date'],
+                    textAlign: TextAlign.end,
+                    style: const TextStyle(color: AppTheme.textSub, fontSize: 12),
+                  ),
                 ),
               ],
             ),
@@ -623,7 +628,12 @@ class _ApprovalCard extends StatelessWidget {
               children: [
                 const Icon(Icons.storefront_rounded, size: 14, color: AppTheme.textSub),
                 const SizedBox(width: 4),
-                Text(item['merchant'], style: const TextStyle(color: AppTheme.textSub, fontSize: 13)),
+                Flexible(
+                  child: Text(item['merchant'],
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: AppTheme.textSub, fontSize: 13),
+                  ),
+                ),
                 const SizedBox(width: 12),
                 const Icon(Icons.monetization_on_rounded, size: 14, color: AppTheme.textSub),
                 const SizedBox(width: 4),
