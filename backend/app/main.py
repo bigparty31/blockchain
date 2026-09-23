@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from app.routers.auth import router as auth_router
 from app.routers.entries import router as entries_router
 from app.routers.balance import router as balance_router
 from app.routers.budgets import router as budgets_router
@@ -12,6 +13,8 @@ app = FastAPI(
 
 - **목적**: DB 및 블록체인 연동 전, PRD §8 데이터 모델 규격을 준수하는 응답 형태로 앱 화면 개발 지원
 - **산출물 대상**:
+  - `POST /auth/login`: 학번·비밀번호 로그인, 세션 JWT·role 발급
+  - `GET /auth/me`: 로그인한 사용자 정보
   - `GET /entries`: 수입·지출 내역 목록 (더미 3건: 확정 지출, 승인 대기 지출, 확정 수입)
   - `GET /balance`: 장부 잔액, 총 수입, 총 지출 요약
   - `GET /budgets`: 카테고리별 예산 편성액, 잔여액, 집행률
@@ -29,6 +32,7 @@ app.add_middleware(
 )
 
 # 라우터 등록
+app.include_router(auth_router)
 app.include_router(entries_router)
 app.include_router(balance_router)
 app.include_router(budgets_router)
