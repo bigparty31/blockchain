@@ -6,11 +6,8 @@ import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
-from app.auth import User, require_roles, users
+from app.auth import User, require_roles
 from app.schemas.auth import Role
-
-# 시드 계정 id (app/auth/users.py). 숫자를 직접 적지 않고 시드에서 가져온다
-USER_IDS = {u.role: u.id for u in users.SEED_USERS}
 
 roles_app = FastAPI()
 
@@ -41,12 +38,12 @@ client = TestClient(roles_app)
         ("/approve", Role.TREASURER, 403),
     ],
 )
-def test_only_allowed_roles_pass(path, role, expected, auth_header):
+def test_only_allowed_roles_pass(path, role, expected, auth_header, seed_user):
     res = client.post(path, headers=auth_header(role))
     assert res.status_code == expected
     if expected == 200:
         # 통과하면 로그인 사용자를 그대로 돌려준다
-        assert res.json() == {"id": USER_IDS[role]}
+        assert res.json() == {"id": seed_user(role).id}
     else:
         assert res.json() == {"detail": "이 작업을 할 권한이 없습니다."}
 

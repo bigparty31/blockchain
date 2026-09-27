@@ -7,16 +7,27 @@ from app.schemas.auth import Role
 
 
 @pytest.fixture
-def auth_header():
+def seed_user():
+    """역할을 받아 그 역할의 시드 사용자를 돌려준다.
+
+    id 를 숫자로 적지 않고 SEED_USERS 에서 찾으므로 시드 계정이 바뀌어도 따라간다.
+    호출할 때마다 SEED_USERS 를 다시 읽어 monkeypatch 로 추가한 사용자도 보인다.
+    """
+
+    def find(role: Role) -> users.User:
+        return next(u for u in users.SEED_USERS if u.role == role)
+
+    return find
+
+
+@pytest.fixture
+def auth_header(seed_user):
     """역할을 받아 그 역할 시드 사용자의 Authorization 헤더를 돌려준다.
 
         res = client.post("/entries", json=body, headers=auth_header(Role.TREASURER))
-
-    id 는 SEED_USERS 에서 찾으므로 시드 계정이 바뀌어도 따라간다.
     """
 
     def make(role: Role) -> dict:
-        user = next(u for u in users.SEED_USERS if u.role == role)
-        return {"Authorization": f"Bearer {create_access_token(user.id)}"}
+        return {"Authorization": f"Bearer {create_access_token(seed_user(role).id)}"}
 
     return make
