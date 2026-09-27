@@ -291,6 +291,10 @@
 ### 3. 감사 기기 서명 승인 (`POST /entries/{id}/approve`)
 - **설명**: 감사가 기기 생체인증 서명(`ConfirmApproval`)을 제출하여 지출을 `CONFIRMED`로 최종 확정하고 연계 예산을 차감합니다.
 - **제약 (Maker-Checker)**: 작성자(`created_by`)와 승인자(`approved_by`)가 동일할 경우 `403 Forbidden`으로 즉시 거부됩니다.
+  - `detail`: `본인이 등록한 항목은 승인·반려할 수 없습니다.` — 역할 오류(`이 작업을 할 권한이 없습니다.`)와 구분됩니다.
+  - **반려에도 똑같이 적용**됩니다. 컨트랙트가 확정·반려 서명자 모두 등록자와 같으면 revert(`SelfApproval`)하기 때문입니다.
+  - 서버 검사는 서명이 담긴 요청이 온 뒤에 돌기 때문에, 서명 전에 막으려면 **화면에서 먼저** 거릅니다. 승인 목록에서 `GET /auth/me`의 `id`와 항목의 `created_by`가 같으면 승인·반려 버튼을 비활성화합니다.
+  - 서버 구현: `app/auth/approval.py`의 `ensure_not_self_approval(entry.created_by, user)`를 승인·반려 API에서 항목을 불러온 뒤 호출합니다.
 
 **Request**
 ```json
