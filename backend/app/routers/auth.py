@@ -12,10 +12,12 @@ _DUMMY_HASH = SEED_USERS[0].password_hash
 
 
 @router.post("/login", response_model=LoginResponse, summary="로그인 (세션 JWT 발급)")
-async def login(req: LoginRequest):
+def login(req: LoginRequest):
     """학번과 비밀번호로 로그인하고 세션 JWT 와 역할(role)을 발급합니다.
     이후 요청은 `Authorization: Bearer <access_token>` 헤더로 보냅니다.
     """
+    # async 가 아닌 def 로 둔다. bcrypt 검사(~0.2초 CPU)를 FastAPI 가 스레드풀에서 돌려
+    # 그동안 다른 요청이 멈추지 않는다.
     user = get_user_by_student_no(req.student_no)
     password_ok = verify_password(req.password, user.password_hash if user else _DUMMY_HASH)
     if user is None or not password_ok:
