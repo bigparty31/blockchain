@@ -1,5 +1,7 @@
 from typing import List, Optional
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
+from app.auth import User, require_roles
+from app.schemas.auth import Role
 from app.schemas.entry import (
     EntryResponse,
     EntryCreate,
@@ -13,6 +15,9 @@ from app.schemas.entry import (
 )
 
 router = APIRouter(prefix="/entries", tags=["Entries"])
+
+# 등록·서명 제출은 총무만 (컨트랙트 NotRegistrant). 두 API 모두 로그인 사용자를 인자로 받아 쓴다
+treasurer_only = require_roles(Role.TREASURER)
 
 # PRD §8 및 docs/HASHING.md 규격에 맞춘 초기 목업 더미 데이터 3건 (KST 자정 타임스탬프 준수)
 DUMMY_ENTRIES: List[EntryResponse] = [
@@ -121,9 +126,10 @@ async def get_entries():
     status_code=status.HTTP_201_CREATED,
     include_in_schema=False,
 )
-async def create_entry(entry: EntryCreate):
-    """임원(총무/회장)이 모바일 앱에서 영수증과 지출 내역을 입력 후 초안을 등록할 때 호출하는 API입니다.
+async def create_entry(entry: EntryCreate, user: User = Depends(treasurer_only)):
+    """총무가 모바일 앱에서 영수증과 지출 내역을 입력 후 초안을 등록할 때 호출하는 API입니다.
     1단계에서는 온체인 트랜잭션 없이 고유 ID만 발급되며, 2단계 submit 호출을 통해 기기 서명 검증 후 온체인에 기록됩니다.
+    총무(TREASURER)만 호출할 수 있습니다 (컨트랙트 NotRegistrant). 그 외 역할은 403, 토큰이 없으면 401.
     """
     # 영수증 중복 검사
     if entry.ocr_approval_no and entry.ocr_paid_at:
@@ -158,7 +164,7 @@ async def create_entry(entry: EntryCreate):
         category_warning=False,
         warning_ack_reason=None,
         status=None,  # 초안은 status=None (온체인 미등록)
-        created_by=2,
+        created_by=user.id,  # 로그인한 총무 (자기 승인 차단에서 승인자 id 와 비교한다)
         approved_by=None,
         reject_reason=None,
         tx_pending=None,  # 초안은 tx_pending=None
@@ -179,15 +185,24 @@ async def create_entry(entry: EntryCreate):
     response_model=EntrySubmitResponse,
     summary="초안 기기 서명 제출 및 온체인 등록 (2단계 목업)",
 )
-async def submit_entry(id: int, req: EntrySubmitRequest):
+async def submit_entry(id: int, req: EntrySubmitRequest, user: User = Depends(treasurer_only)):
     """1단계에서 발급받은 초안 id에 대해 모바일 기기 서명을 제출하여 블록체인에 등록합니다.
     현재는 목업 수준으로 고정값을 반환하며, 다음 주에 손종인 ChainClient 실구현으로 교체될 자리입니다.
+    초안을 등록한 총무 본인만 호출할 수 있습니다. 그 외 역할·다른 총무는 403, 토큰이 없으면 401.
     """
     target = next((e for e in DUMMY_ENTRIES if e.id == id), None)
     if not target:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"ID {id}에 해당하는 초안 내역을 찾을 수 없습니다.",
+        )
+
+    # 초안을 만든 총무 본인만 서명 제출한다. 다른 사람이 서명하면 체인 등록자와 DB created_by 가
+    # 달라져 학생 앱 검증에서 불일치가 나고, 자기 승인 차단도 엉뚱한 사람을 기준으로 하게 된다
+    if target.created_by != user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="본인이 등록한 초안만 제출할 수 있습니다.",
         )
 
     target.tx_pending = f"0x{id:064x}"

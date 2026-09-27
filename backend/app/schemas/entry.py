@@ -57,7 +57,7 @@ class EntryResponse(BaseModel):
     category_warning: bool = Field(False, description="예산 카테고리 불일치 경고 여부")
     warning_ack_reason: Optional[str] = Field(None, description="경고 무시 승인 사유")
     status: Optional[EntryStatus] = Field(None, description="장부 상태 (초안은 null, 온체인은 PENDING | CONFIRMED | REJECTED | BLOCKED)")
-    created_by: int = Field(..., description="등록자 User ID (총무/회장)")
+    created_by: int = Field(..., description="등록자 User ID (총무)")
     approved_by: Optional[int] = Field(None, description="승인자 User ID (감사)")
     reject_reason: Optional[str] = Field(None, description="반려 사유")
     tx_pending: Optional[str] = Field(None, description="Pending 등록 트랜잭션 해시")

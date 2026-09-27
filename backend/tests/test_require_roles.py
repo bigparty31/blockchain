@@ -1,14 +1,16 @@
-"""require_roles 의존성. 실제 API 에 붙이기 전이라 테스트 전용 라우트로 확인한다."""
+"""require_roles 의존성 자체의 동작. 테스트 전용 라우트로 역할 조합을 확인한다.
+
+실제 API(등록·서명 제출)에 붙은 검사는 test_entries_api.py 에서 확인한다.
+"""
 import pytest
 from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
-from app.auth import User, require_roles
-from app.auth.security import create_access_token
+from app.auth import User, require_roles, users
 from app.schemas.auth import Role
 
-# 시드 계정 id (app/auth/users.py)
-USER_IDS = {Role.STUDENT: 1, Role.TREASURER: 2, Role.AUDITOR: 3, Role.PRESIDENT: 4}
+# 시드 계정 id (app/auth/users.py). 숫자를 직접 적지 않고 시드에서 가져온다
+USER_IDS = {u.role: u.id for u in users.SEED_USERS}
 
 roles_app = FastAPI()
 
@@ -26,10 +28,6 @@ async def approve(user: User = Depends(require_roles(Role.AUDITOR, Role.PRESIDEN
 client = TestClient(roles_app)
 
 
-def bearer(role):
-    return {"Authorization": f"Bearer {create_access_token(USER_IDS[role])}"}
-
-
 @pytest.mark.parametrize(
     "path, role, expected",
     [
@@ -43,8 +41,8 @@ def bearer(role):
         ("/approve", Role.TREASURER, 403),
     ],
 )
-def test_only_allowed_roles_pass(path, role, expected):
-    res = client.post(path, headers=bearer(role))
+def test_only_allowed_roles_pass(path, role, expected, auth_header):
+    res = client.post(path, headers=auth_header(role))
     assert res.status_code == expected
     if expected == 200:
         # 통과하면 로그인 사용자를 그대로 돌려준다
