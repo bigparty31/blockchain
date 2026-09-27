@@ -18,7 +18,9 @@ app = FastAPI(
   - `GET /entries`: 수입·지출 내역 목록 (더미 3건: 확정 지출, 승인 대기 지출, 확정 수입)
   - `GET /balance`: 장부 잔액, 총 수입, 총 지출 요약
   - `GET /budgets`: 카테고리별 예산 편성액, 잔여액, 집행률
-  - `POST /entries`: 지출/수입 등록 요청 시 PENDING 상태 생성 응답
+  - `POST /entries`: 지출/수입 초안 등록 (총무 토큰 필요)
+  - `POST /entries/{id}/submit`: 초안 기기 서명 제출 (초안을 등록한 총무 본인 토큰 필요)
+- **인증**: `POST /auth/login` 으로 받은 토큰을 `Authorization: Bearer <token>` 헤더로 보낸다 (Swagger 우측 상단 Authorize)
     """,
 )
 
