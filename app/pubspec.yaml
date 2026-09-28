@@ -1,0 +1,32 @@
+name: student_council_app
+description: "A blockchain-based student council accounting transparency app."
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  image_picker: ^1.1.2
+  local_auth: ^2.3.0
+  http: ^1.2.1
+  intl: ^0.19.0
+  flutter_secure_storage: ^9.2.2
+  google_fonts: ^6.2.1
+  crypto: ^3.0.3
+  qr_flutter: ^4.1.0
+  # Dart 표준 라이브러리에 유니코드 정규화가 없다 (HASHING.md §6).
+  # String.trim() 은 BOM 처리가 Python 과 달라 쓰지 않는다.
+  unorm_dart: ^0.3.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true
