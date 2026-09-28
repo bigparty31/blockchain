@@ -225,7 +225,7 @@ describe("BudgetToken", function () {
       await expect(f.budgetToken.connect(f.ledgerEoa).spend(1n, 70_001n, 12n))
         .to.be.revertedWithCustomError(f.budgetToken, "InsufficientBudget")
         .withArgs(1n, 70_000n, 70_001n);
-      await expect(f.budgetToken.connect(f.ledgerEoa).spend(1n, 70_000n, 12n)).to.not.be.reverted;
+      await expect(f.budgetToken.connect(f.ledgerEoa).spend(1n, 70_000n, 12n)).to.not.be.revert(ethers);
       expect(await f.budgetToken.remaining(1n)).to.equal(0n);
     });
 
@@ -287,7 +287,7 @@ describe("BudgetToken", function () {
       const f = await loadFixture(unitFixture);
       await f.budgetToken.connect(f.ledgerEoa).spend(1n, 30_000n, 11n);
       await time.increaseTo(f.expiresAt + 1n);
-      await expect(f.budgetToken.connect(f.ledgerEoa).refund(1n, 30_000n, 12n)).to.not.be.reverted;
+      await expect(f.budgetToken.connect(f.ledgerEoa).refund(1n, 30_000n, 12n)).to.not.be.revert(ethers);
       expect((await f.budgetToken.getBudget(1n)).spent).to.equal(0n);
       await assertInvariant(f, 1n);
     });
@@ -299,7 +299,7 @@ describe("BudgetToken", function () {
       await f.budgetToken.connect(f.president).reclaim(1n); // issued 100k → 60k
       expect(await f.budgetToken.remaining(1n)).to.equal(0n);
 
-      await expect(f.budgetToken.connect(f.ledgerEoa).refund(1n, 20_000n, 12n)).to.not.be.reverted;
+      await expect(f.budgetToken.connect(f.ledgerEoa).refund(1n, 20_000n, 12n)).to.not.be.revert(ethers);
       const b = await f.budgetToken.getBudget(1n);
       expect(b.issued).to.equal(60_000n);
       expect(b.spent).to.equal(40_000n);
