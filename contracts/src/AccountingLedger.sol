@@ -46,7 +46,8 @@ contract AccountingLedger is IAccountingLedger, EIP712 {
     function recordPending(RecordRequest calldata r, bytes calldata signature) external {
         // 1~5: 입력 자체로 판정되는 것
         if (block.timestamp > r.deadline) revert SignatureExpired(r.deadline);
-        if (r.id == 0 || _exists[r.id]) revert EntryAlreadyExists(r.id); // 0 은 "없음" 으로 예약
+        if (r.id == 0) revert ReservedId(r.id); // 0 은 "없음" 으로 예약
+        if (_exists[r.id]) revert EntryAlreadyExists(r.id);
         if (r.term == 0) revert TermRequired(r.id);
         if (r.amount == 0) revert ZeroAmount(r.id);
         if (r.amount < 0 && r.correctsId == 0) revert NegativeAmountWithoutCorrection(r.id);
@@ -63,6 +64,8 @@ contract AccountingLedger is IAccountingLedger, EIP712 {
             if (!_exists[r.correctsId]) revert CorrectionTargetNotFound(r.id, r.correctsId);
             Entry storage original = _entries[r.correctsId];
             if (original.status != Status.CONFIRMED) revert CorrectionTargetNotConfirmed(r.id, r.correctsId);
+            if (original.kind != r.kind) revert CorrectionKindMismatch(r.id, original.kind, r.kind);
+            if (!_isCorrectable(original)) revert InvalidCorrectionTarget(r.id, r.correctsId);
             if (r.amount < 0) {
                 if (original.budgetId != r.budgetId) {
                     revert CorrectionBudgetMismatch(r.id, original.budgetId, r.budgetId);
@@ -145,8 +148,9 @@ contract AccountingLedger is IAccountingLedger, EIP712 {
         e.status = Status.CONFIRMED;
         e.approver = approver;
 
-        // 순금액 갱신
-        if (e.amount > 0) {
+        // 순금액 갱신. 자기 순금액을 갖는 것은 원본과 재분류 양수 정정만 (정정 가능 항목).
+        // 같은 예산 양수 정정은 대상의 순금액에 흡수되고, 음수 정정은 대상의 순금액을 줄인다.
+        if (e.amount > 0 && _isCorrectable(e)) {
             _netAmount[a.id] = uint256(e.amount);
         }
         if (e.correctsId != 0 && _entries[e.correctsId].budgetId == e.budgetId) {
@@ -220,7 +224,14 @@ contract AccountingLedger is IAccountingLedger, EIP712 {
         }
     }
 
-    /// @dev 음수 정정 amount 의 절대값이 원본 순금액을 넘으면 revert.
+    /// @dev 정정 가능 항목인가: 원본(정정 아님) 또는 원본과 다른 예산으로 간 양수 정정(재분류).
+    ///      같은 예산 양수 정정과 음수 정정은 정정 대상이 될 수 없고 자기 순금액도 갖지 않는다.
+    function _isCorrectable(Entry storage e) private view returns (bool) {
+        if (e.correctsId == 0) return true;
+        return e.amount > 0 && e.budgetId != _entries[e.correctsId].budgetId;
+    }
+
+    /// @dev 음수 정정 amount 의 절대값이 대상 순금액을 넘으면 revert.
     function _checkCorrectionCap(uint256 id, uint256 correctsId, int256 amount) private view {
         uint256 requested = _abs(amount);
         uint256 net = _netAmount[correctsId];

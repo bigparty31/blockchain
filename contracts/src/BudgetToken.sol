@@ -68,8 +68,8 @@ contract BudgetToken is IBudgetToken {
         uint256 amount,
         uint256 expiresAt
     ) external onlyPresident {
-        // budgetId 0 은 "없음" 으로 예약 (docs/HASHING.md §2.1). 이미 있는 것처럼 다룬다.
-        if (budgetId == 0 || _exists[budgetId]) revert BudgetAlreadyExists(budgetId);
+        if (budgetId == 0) revert ReservedId(budgetId); // "없음" 으로 예약 (docs/HASHING.md §2.1)
+        if (_exists[budgetId]) revert BudgetAlreadyExists(budgetId);
         if (term == 0) revert TermRequired();
         if (amount == 0) revert ZeroAmount();
         if (expiresAt <= block.timestamp) revert BudgetExpired(budgetId, expiresAt);

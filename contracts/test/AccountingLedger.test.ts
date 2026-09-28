@@ -48,6 +48,18 @@ async function turnTreasurerIntoAuditor(f: BudgetFixture) {
   expect(await rm.hasRole(ROLE.TREASURER, f.treasurer.address)).to.equal(false);
 }
 
+/** 예산 불변식: 이벤트 기준 누적 refund ≤ 누적 spend. 모든 정정 시나리오 끝에 확인한다. */
+async function assertRefundLeSpend(f: BudgetFixture, budgetId: bigint) {
+  const sum = async (name: string) => {
+    const logs = await f.budgetToken.queryFilter(f.budgetToken.filters[name](budgetId));
+    return logs.reduce((s: bigint, l: any) => s + BigInt(l.args.amount), 0n);
+  };
+  const spent = await sum("BudgetSpent");
+  const refunded = await sum("BudgetRefunded");
+  expect(refunded <= spent, `budget ${budgetId}: refunded(${refunded}) <= spent(${spent})`).to.equal(true);
+  expect((await f.budgetToken.getBudget(budgetId)).spent).to.equal(spent - refunded);
+}
+
 describe("AccountingLedger", function () {
   describe("배포", function () {
     it("DOMAIN_SEPARATOR 는 EIP-712 도메인(AccountingLedger, 1, chainId, 주소)과 일치한다", async function () {
@@ -127,15 +139,15 @@ describe("AccountingLedger", function () {
       await expect(tx).to.be.revertedWithCustomError(f.ledger, "SignatureExpired").withArgs(past);
     });
 
-    it("2 EntryAlreadyExists: 같은 id 재등록. id 0 은 예약이라 같은 에러", async function () {
+    it("2 ReservedId: id 0 은 예약값 (중복과 구분) / EntryAlreadyExists: 같은 id 재등록", async function () {
       const f = await loadFixture(budgetFixture);
+      await expect((await record(f, { id: 0n, amount: 2_000n })).tx)
+        .to.be.revertedWithCustomError(f.ledger, "ReservedId")
+        .withArgs(0n);
       await (await record(f, { id: 1n, amount: 1_000n })).tx;
       await expect((await record(f, { id: 1n, amount: 2_000n })).tx)
         .to.be.revertedWithCustomError(f.ledger, "EntryAlreadyExists")
         .withArgs(1n);
-      await expect((await record(f, { id: 0n, amount: 2_000n })).tx)
-        .to.be.revertedWithCustomError(f.ledger, "EntryAlreadyExists")
-        .withArgs(0n);
     });
 
     it("3 TermRequired: term == 0 (수입·지출 공통)", async function () {
@@ -533,12 +545,70 @@ describe("AccountingLedger", function () {
       expect(await f.ledger.netAmountOf(2n)).to.equal(0n); // 음수 항목 자체의 순금액은 0
     });
 
-    it("같은 예산 양수 정정 확정은 spend 하고 원본 순금액을 늘린다", async function () {
+    it("같은 예산 양수 정정 확정은 spend 하고 원본 순금액을 늘린다. 자기 순금액은 0 (대상에 흡수)", async function () {
       const f = await loadFixture(budgetFixture);
       await recordAndConfirm(f, { id: 1n, amount: 100_000n });
       await recordAndConfirm(f, { id: 2n, amount: 20_000n, correctsId: 1n });
       expect((await f.budgetToken.getBudget(1n)).spent).to.equal(120_000n);
       expect(await f.ledger.netAmountOf(1n)).to.equal(120_000n);
+      expect(await f.ledger.netAmountOf(2n)).to.equal(0n);
+      await assertRefundLeSpend(f, 1n);
+    });
+
+    it("정정 대상 제한: 같은 예산 양수 정정을 대상으로 한 정정은 InvalidCorrectionTarget (중복 refund 구멍)", async function () {
+      const f = await loadFixture(budgetFixture);
+      await recordAndConfirm(f, { id: 1n, amount: 35_000n }); // 원본 A
+      await recordAndConfirm(f, { id: 2n, amount: 10_000n, correctsId: 1n }); // 같은 예산 +10,000
+      expect(await f.ledger.netAmountOf(1n)).to.equal(45_000n);
+      expect(await f.ledger.netAmountOf(2n)).to.equal(0n);
+      await recordAndConfirm(f, { id: 3n, amount: -45_000n, correctsId: 1n }); // 원본 대상 −45,000 → 통과
+      expect((await f.budgetToken.getBudget(1n)).spent).to.equal(0n);
+      // 네 번째 단계: +10,000 정정을 대상으로 한 −10,000 은 대상이 정정 가능 항목이 아니라 revert
+      await expect((await record(f, { id: 4n, amount: -10_000n, correctsId: 2n })).tx)
+        .to.be.revertedWithCustomError(f.ledger, "InvalidCorrectionTarget")
+        .withArgs(4n, 2n);
+      // 양수 정정도 그 정정을 대상으로 할 수 없다
+      await expect((await record(f, { id: 5n, amount: 1_000n, correctsId: 2n })).tx)
+        .to.be.revertedWithCustomError(f.ledger, "InvalidCorrectionTarget")
+        .withArgs(5n, 2n);
+      await assertRefundLeSpend(f, 1n);
+    });
+
+    it("정정 대상 제한: 음수 정정을 대상으로 한 정정은 InvalidCorrectionTarget", async function () {
+      const f = await loadFixture(budgetFixture);
+      await recordAndConfirm(f, { id: 1n, amount: 100_000n });
+      await recordAndConfirm(f, { id: 2n, amount: -30_000n, correctsId: 1n });
+      await expect((await record(f, { id: 3n, amount: -1_000n, correctsId: 2n })).tx)
+        .to.be.revertedWithCustomError(f.ledger, "InvalidCorrectionTarget")
+        .withArgs(3n, 2n);
+      await expect((await record(f, { id: 4n, amount: 1_000n, correctsId: 2n })).tx)
+        .to.be.revertedWithCustomError(f.ledger, "InvalidCorrectionTarget")
+        .withArgs(4n, 2n);
+    });
+
+    it("정정 대상 제한: 수입 양수 정정은 재분류가 될 수 없어 대상이 못 된다", async function () {
+      const f = await loadFixture(budgetFixture);
+      await recordAndConfirm(f, { id: 1n, amount: 50_000n, kind: Kind.INCOME });
+      await recordAndConfirm(f, { id: 2n, amount: 10_000n, kind: Kind.INCOME, correctsId: 1n, budgetId: 0n });
+      expect(await f.ledger.netAmountOf(1n)).to.equal(60_000n);
+      expect(await f.ledger.netAmountOf(2n)).to.equal(0n);
+      await expect(
+        (await record(f, { id: 3n, amount: -1_000n, kind: Kind.INCOME, correctsId: 2n, budgetId: 0n })).tx,
+      )
+        .to.be.revertedWithCustomError(f.ledger, "InvalidCorrectionTarget")
+        .withArgs(3n, 2n);
+    });
+
+    it("정정 kind: 원본과 kind 가 다르면 CorrectionKindMismatch", async function () {
+      const f = await loadFixture(budgetFixture);
+      await recordAndConfirm(f, { id: 1n, amount: 100_000n }); // EXPENSE
+      await expect((await record(f, { id: 2n, amount: -1_000n, kind: Kind.INCOME, correctsId: 1n, budgetId: 0n })).tx)
+        .to.be.revertedWithCustomError(f.ledger, "CorrectionKindMismatch")
+        .withArgs(2n, Kind.EXPENSE, Kind.INCOME);
+      await recordAndConfirm(f, { id: 3n, amount: 50_000n, kind: Kind.INCOME });
+      await expect((await record(f, { id: 4n, amount: 1_000n, kind: Kind.EXPENSE, correctsId: 3n, budgetId: 1n })).tx)
+        .to.be.revertedWithCustomError(f.ledger, "CorrectionKindMismatch")
+        .withArgs(4n, Kind.INCOME, Kind.EXPENSE);
     });
 
     it("필수 테스트 5: 양수 정정도 잔량 검사 — 등록 시 초과는 BLOCKED, 확정 시 부족은 InsufficientBudget", async function () {
@@ -576,6 +646,7 @@ describe("AccountingLedger", function () {
       await recordAndConfirm(f, { id: 6n, amount: -70_000n, correctsId: 1n });
       expect(await f.ledger.netAmountOf(1n)).to.equal(0n);
       expect((await f.budgetToken.getBudget(1n)).spent).to.equal(0n);
+      await assertRefundLeSpend(f, 1n);
     });
 
     it("원본별 누적 (확정 시 최종 검사): 대기 중 음수 정정 두 건이 순금액을 나눠 쓰면 나중 확정은 revert", async function () {
@@ -618,16 +689,31 @@ describe("AccountingLedger", function () {
       }
       expect(expense).to.equal(100_000n);
       expect(income - expense).to.equal(-100_000n);
+      await assertRefundLeSpend(f, 1n);
+      await assertRefundLeSpend(f, 2n);
     });
 
-    it("한계 우회: 재분류 양수 정정 항목을 원본으로 하는 음수 정정으로 되돌릴 수 있다", async function () {
+    it("재분류 되돌림: 재분류 양수 정정(B)을 대상으로 한 음수 정정(B)은 그 금액 범위 안에서 성공, 초과는 revert", async function () {
       const f = await loadFixture(budgetFixture);
       await recordAndConfirm(f, { id: 1n, amount: 100_000n, budgetId: 1n });
-      await recordAndConfirm(f, { id: 2n, amount: 100_000n, correctsId: 1n, budgetId: 2n });
+      await recordAndConfirm(f, { id: 2n, amount: 100_000n, correctsId: 1n, budgetId: 2n }); // 재분류 양수 → 정정 가능 항목
       expect(await f.ledger.netAmountOf(2n)).to.equal(100_000n);
-      await recordAndConfirm(f, { id: 3n, amount: -100_000n, correctsId: 2n, budgetId: 2n });
+      expect(await f.ledger.netAmountOf(1n)).to.equal(100_000n);
+
+      await recordAndConfirm(f, { id: 3n, amount: -60_000n, correctsId: 2n, budgetId: 2n });
+      expect((await f.budgetToken.getBudget(2n)).spent).to.equal(40_000n);
+      expect(await f.ledger.netAmountOf(2n)).to.equal(40_000n);
+
+      await expect((await record(f, { id: 4n, amount: -40_001n, correctsId: 2n, budgetId: 2n })).tx)
+        .to.be.revertedWithCustomError(f.ledger, "CorrectionExceedsOriginal")
+        .withArgs(4n, 2n, 40_000n, 40_001n);
+      await recordAndConfirm(f, { id: 5n, amount: -40_000n, correctsId: 2n, budgetId: 2n });
       expect((await f.budgetToken.getBudget(2n)).spent).to.equal(0n);
       expect(await f.ledger.netAmountOf(2n)).to.equal(0n);
+      // 원본 순금액은 재분류에 영향받지 않았다
+      expect(await f.ledger.netAmountOf(1n)).to.equal(100_000n);
+      await assertRefundLeSpend(f, 1n);
+      await assertRefundLeSpend(f, 2n);
     });
 
     it("refund 는 마감 뒤에도 된다: 음수 정정은 등록 시 BLOCKED 되지 않고 확정 시 refund 성공", async function () {
@@ -639,6 +725,7 @@ describe("AccountingLedger", function () {
         .and.not.to.emit(f.ledger, "EntryBlocked");
       await expect((await confirm(f, { id: 2n })).tx).to.emit(f.budgetToken, "BudgetRefunded").withArgs(1n, 40_000n, 2n);
       expect((await f.budgetToken.getBudget(1n)).spent).to.equal(60_000n);
+      await assertRefundLeSpend(f, 1n);
     });
 
     it("refund 는 회수 뒤에도 된다", async function () {
@@ -651,6 +738,7 @@ describe("AccountingLedger", function () {
       expect(b.issued).to.equal(100_000n);
       expect(b.spent).to.equal(60_000n);
       expect(await f.budgetToken.remaining(1n)).to.equal(40_000n);
+      await assertRefundLeSpend(f, 1n);
     });
 
     it("수입도 정정할 수 있고 누적 상한이 같이 적용된다", async function () {

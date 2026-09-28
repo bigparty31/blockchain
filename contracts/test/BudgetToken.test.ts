@@ -125,13 +125,13 @@ describe("BudgetToken", function () {
       ).to.be.revertedWithCustomError(f.budgetToken, "ZeroAmount");
     });
 
-    it("같은 budgetId 는 BudgetAlreadyExists. id 0 은 예약이라 같은 에러", async function () {
+    it("같은 budgetId 는 BudgetAlreadyExists. id 0 은 예약값이라 ReservedId (중복과 구분)", async function () {
       const f = await loadFixture(unitFixture);
       await expect(f.budgetToken.connect(f.president).issue(1n, TERM, CATEGORY.사업비, 1n, f.expiresAt))
         .to.be.revertedWithCustomError(f.budgetToken, "BudgetAlreadyExists")
         .withArgs(1n);
       await expect(f.budgetToken.connect(f.president).issue(0n, TERM, CATEGORY.사업비, 1n, f.expiresAt))
-        .to.be.revertedWithCustomError(f.budgetToken, "BudgetAlreadyExists")
+        .to.be.revertedWithCustomError(f.budgetToken, "ReservedId")
         .withArgs(0n);
       expect(await f.budgetToken.exists(0n)).to.equal(false);
     });
