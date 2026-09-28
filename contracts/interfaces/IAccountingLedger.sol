@@ -30,6 +30,9 @@ pragma solidity ^0.8.24;
 ///   (원본 확정 시 = 원본 amount, 정정 확정 시 += 정정 amount), 음수 정정 확정으로 순금액이 0 아래로 가면
 ///   CorrectionExceedsOriginal 로 revert. 등록 시에도 현재 순금액으로 같은 검사를 먼저 해 조기에 걸러낸다
 ///   (대기 중인 다른 정정은 예약하지 않으므로 확정 시 검사가 최종). 수입·지출 모두 적용.
+///   netAmountOf 에는 원본과 같은 budgetId 로 가는 정정만 더한다. 다른 예산으로 가는 양수 정정(재분류)은 더하지 않는다.
+///   재분류 양수 정정이 원본 순금액을 부풀리면 원래 예산에 소모액 이상 refund 가 가능해지기 때문이다.
+///   따라서 재분류로 다른 예산에 들어간 금액은 음수 정정으로 되돌릴 수 없다 (한계).
 ///   한계: 한 쌍 중 한쪽만 확정된 상태가 존재할 수 있다 (사람이 한쪽만 승인하는 경우). 완화는 앱·서버 몫.
 /// - 승인자(confirmEntry / rejectEntry 서명자)는 AUDITOR 또는 PRESIDENT. 등록자 != 승인자는 별도 검사.
 /// - 반려는 reasonHash != 0 필수(ReasonRequired). 확정은 hadWarning == (warningReasonHash != 0) 이어야 한다.
@@ -215,8 +218,9 @@ interface IAccountingLedger {
 
     function exists(uint256 id) external view returns (bool);
 
-    /// @notice 원본 항목의 현재 순금액 = 원본 amount + Σ 확정된 정정 amount (음수 정정은 빼진다).
-    ///         원본이 CONFIRMED 가 아니거나 정정 항목이면 0. 음수 정정의 상한이다.
+    /// @notice 원본 항목의 현재 순금액 = 원본 amount + Σ 확정된 정정 amount (원본과 같은 budgetId 인 정정만).
+    ///         다른 예산으로 가는 양수 정정(재분류)은 더하지 않는다. 원본이 CONFIRMED 가 아니거나 정정 항목이면 0.
+    ///         음수 정정의 상한이다.
     function netAmountOf(uint256 id) external view returns (uint256);
 
     /// @notice EIP-712 도메인 분리자 (백엔드가 서명 만들 때 필요)
