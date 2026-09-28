@@ -86,6 +86,27 @@
         "type": "uint256"
       },
       {
+        "internalType": "enum IAccountingLedger.Kind",
+        "name": "expected",
+        "type": "uint8"
+      },
+      {
+        "internalType": "enum IAccountingLedger.Kind",
+        "name": "actual",
+        "type": "uint8"
+      }
+    ],
+    "name": "CorrectionKindMismatch",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "id",
+        "type": "uint256"
+      },
+      {
         "internalType": "uint256",
         "name": "correctsId",
         "type": "uint256"
@@ -151,6 +172,22 @@
       }
     ],
     "name": "HashMismatch",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "id",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "correctsId",
+        "type": "uint256"
+      }
+    ],
+    "name": "InvalidCorrectionTarget",
     "type": "error"
   },
   {
@@ -237,6 +274,17 @@
       }
     ],
     "name": "ReasonRequired",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "id",
+        "type": "uint256"
+      }
+    ],
+    "name": "ReservedId",
     "type": "error"
   },
   {

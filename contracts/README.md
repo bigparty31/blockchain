@@ -12,7 +12,23 @@ Solidity 컨트랙트. 규칙의 정본은 `interfaces/*.sol`, 요약은 `../doc
 
 ## 도구
 
-Hardhat 3 (ESM, TypeScript), solc 0.8.28, OpenZeppelin 5. Node 22 이상.
+| 도구 | 버전 |
+| --- | --- |
+| Node.js | 22 이상 (22.23 에서 확인) |
+| Hardhat | 3.18.0 |
+| @nomicfoundation/hardhat-toolbox-mocha-ethers | 4.0.0 |
+| ethers | 6.17.0 |
+| mocha / chai | 12.0.2 / 6.2.2 |
+| @openzeppelin/contracts | 5.6.1 |
+| solc | 0.8.28 (evm target cancun) |
+| TypeScript | 5.9 (타입 검사용. 실행은 Node 의 타입 스트리핑) |
+
+> **Hardhat 2 튜토리얼과 다르다.** 웹에 있는 대부분의 예제는 Hardhat 2 기준이다. 이 프로젝트는 Hardhat 3 라서 다음이 다르다.
+> - 설정이 ESM `defineConfig(...)` 다. `require("@nomicfoundation/hardhat-toolbox")` 형태가 아니다.
+> - 테스트·스크립트에서 `hre.ethers` 를 바로 쓰지 않는다. `const { ethers } = await network.getOrCreate()` 로 연결을 얻는다.
+> - chai 매처 이름이 바뀌었다. `.to.be.reverted` 가 아니라 `.to.be.revert(ethers)`, `.revertedWithCustomError(contract, "Name")` 는 그대로.
+> - `hardhat-gas-reporter` 는 Hardhat 2 전용이라 붙지 않는다. 가스는 테스트 안에서 receipt 로 집계한다 (`test/helpers/gas.ts`).
+> - 컨트랙트 소스가 `contracts/contracts/` 가 아니라 `interfaces/` + `src/` 다 (`hardhat.config.ts` 의 `paths.sources`).
 
 ```bash
 npm install

@@ -118,6 +118,17 @@
     "type": "error"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "budgetId",
+        "type": "uint256"
+      }
+    ],
+    "name": "ReservedId",
+    "type": "error"
+  },
+  {
     "inputs": [],
     "name": "TermRequired",
     "type": "error"
