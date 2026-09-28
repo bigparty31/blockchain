@@ -16,7 +16,7 @@
 
 ## 공통 규칙
 
-- ID(`budgetId`, `entryId`, `objectionId`)는 백엔드 DB auto-increment 값을 파라미터로 받는다. 컨트랙트는 중복만 막는다. SBT `tokenId`와 `rotationId`만 온체인 카운터. ID는 1부터 시작한다 (`0`은 "없음").
+- ID(`budgetId`, `entryId`, `objectionId`)는 백엔드 DB auto-increment 값을 파라미터로 받는다. 컨트랙트는 중복만 막는다. SBT `tokenId`와 `changeId`(롤 변경 제안)만 온체인 카운터. ID는 1부터 시작한다 (`0`은 "없음").
 - 금액은 원 단위 정수. `amount`는 `int256`, `correctsId != 0`인 정정 항목만 음수 허용.
 - 이벤트에 기록 시각을 넣지 않는다 (블록에 있음). 발생 시각 `occurredAt`은 파라미터.
 - enum 온체인 순서 = `docs/enums.md` 표 순서. `ocr_status`는 온체인에 올리지 않는다.
@@ -36,6 +36,9 @@
 - **순서는 서버 규칙: 양수 다음 음수.** `spend`는 잔량 부족·마감으로 실패할 수 있지만 `refund`는 원본 소모액 범위 안에서 항상 성공하기 때문이다.
 - 음수 정정의 `budgetId`는 원본의 `budgetId`와 같아야 한다(`CorrectionBudgetMismatch`). `refund`가 엉뚱한 예산으로 가는 것을 막는다.
 - 양수 정정도 일반 지출과 같이 등록 시 잔량 검사, 확정 시 `spend`를 거친다.
+- **차액(`amount`)이 0인 정정은 등록 시 revert**(`ZeroAmount`). 일반 항목과 같은 검사에 걸린다. 새 에러를 두지 않는다.
+- **음수 정정의 범위는 원본별 누적으로 검사한다.** 원본마다 순금액 `netAmountOf(원본 id)`를 저장한다. 원본 확정 시 원본 `amount`로 시작하고, 그 원본을 가리키는 정정이 확정될 때마다 정정 `amount`를 더한다(음수면 빠진다). 음수 정정 확정으로 순금액이 0 아래로 가면 `CorrectionExceedsOriginal`. 등록 시에도 현재 순금액으로 같은 검사를 먼저 해 조기에 걸러내지만, 대기 중인 다른 정정은 예약하지 않으므로 확정 시 검사가 최종이다. 수입·지출 모두 적용.
+- 예산 단위 상한(`RefundExceedsSpent`)과 원본 단위 상한(`CorrectionExceedsOriginal`)은 별개다. 둘 다 통과해야 refund가 실행된다.
 
 ### 예산 (BudgetToken)
 
@@ -49,11 +52,13 @@
 ### 롤 (RoleManager)
 
 - **모든 롤 변경은 임원 2인 승인 경로로만 한다.** 단독으로 부여·회수하는 함수는 없다.
-- 제안 `proposeKeyRotation(role, from, to)`의 `from`·`to` 조합으로 세 가지를 표현한다: `from == 0` 신규 부여, `to == 0` 회수, 둘 다 있으면 교체. 둘 다 0이면 `ZeroAddress`.
-- 제안자와 승인자는 서로 다른 임원(PRESIDENT·TREASURER·AUDITOR 중 어느 롤이든 보유)이어야 한다. 같은 사람이면 `SelfApproval`, 임원이 아니면 `Unauthorized`.
-- 보유 상태 검사는 승인(실행) 시점에 한다. `from`이 롤을 갖고 있지 않으면 `RoleNotGranted`, `to`가 이미 갖고 있으면 `RoleAlreadyGranted`.
-- 첫 회장·총무·감사는 **생성자 인자**로 받는다. 배포자는 어떤 롤도 갖지 않는다. OpenZeppelin AccessControl을 쓰지 않으므로 `DEFAULT_ADMIN_ROLE` 같은 상위 권한도 없다.
-- 실행 결과는 `RoleGranted` / `RoleRevoked`로 남기고, 교체일 때만 `KeyRotated`를 추가로 낸다.
+- 제안 `proposeRoleChange(role, from, to)`의 `from`·`to` 조합으로 세 가지를 표현한다: `from == 0` 신규 부여, `to == 0` 회수, 둘 다 있으면 교체. 둘 다 0이면 `ZeroAddress`.
+- 제안자와 승인자는 서로 다른 임원(PRESIDENT·TREASURER·AUDITOR 중 하나 보유)이어야 한다. 같은 사람이면 `SelfApproval`, 임원이 아니면 `Unauthorized`.
+- **보유 상태 검사는 전부 승인(실행) 시점에 한다.** 제안과 승인 사이에 상태가 바뀔 수 있기 때문이다. 순서: 제안이 존재·미실행인지 → 승인자가 임원인지 → 제안자 ≠ 승인자 → **제안자가 여전히 임원인지**(`ProposerNotOfficer`) → `from`이 롤 보유(`RoleNotGranted`) → `to`가 같은 롤 미보유(`RoleAlreadyGranted`) → `to`가 다른 임원 롤 미보유(`AlreadyOfficer`) → 회수면 실행 후 임원 수 ≥ 2(`TooFewOfficers`).
+- **한 주소는 임원 롤을 하나만 가진다.** `roleOf(account)`로 조회한다. 교체는 임원 수를 바꾸지 않는다.
+- **회수 결과 임원 수가 2명 미만이 되면 revert.** 2인 승인 경로가 막히는 것을 방지한다. `officerCount()`로 조회한다.
+- 첫 회장·총무·감사는 **생성자 인자**로 받는다. 세 주소는 서로 다르고 0이 아니어야 한다. 배포자는 어떤 롤도 갖지 않는다. OpenZeppelin AccessControl을 쓰지 않으므로 `DEFAULT_ADMIN_ROLE` 같은 상위 권한도 없다.
+- 실행 결과는 `RoleGranted` / `RoleRevoked`로 남기고 **제안자와 승인자를 둘 다 담는다.** 교체일 때만 `RoleReplaced`를 추가로 낸다. 같은 트랜잭션의 `RoleRevoked` + `RoleGranted`가 한 변경으로 묶인 것임을 인덱서가 알 수 있게 하기 위함이다.
 
 ### 생성자·배포 순서
 
@@ -113,10 +118,10 @@ meta_hash = SHA256( amount ␟ counterparty ␟ purpose ␟ occurred_at ␟ rece
 
 | 컨트랙트 | 함수 | 호출자 / 서명자 |
 | --- | --- | --- |
-| RoleManager | `hasRole` | view. `role`은 `bytes32` 이름 해시 |
+| RoleManager | `hasRole`, `roleOf`, `officerCount` | view. `role`은 `bytes32` 이름 해시 |
 | RoleManager | `TREASURER()`, `AUDITOR()`, `PRESIDENT()` | view. 롤 식별자 상수 |
-| RoleManager | `proposeKeyRotation(role, from, to)`, `approveKeyRotation(rotationId)` | 임원(세 롤 중 하나 이상). 제안자 ≠ 승인자. 부여·회수·교체 공통 |
-| RoleManager | `getKeyRotation` | view |
+| RoleManager | `proposeRoleChange(role, from, to)`, `approveRoleChange(changeId)` | 임원. 제안자 ≠ 승인자. 부여·회수·교체 공통 |
+| RoleManager | `getRoleChange` | view |
 | BudgetToken | `setLedger` | 배포자, 1회만 |
 | BudgetToken | `issue`, `increase`, `reclaim` | PRESIDENT |
 | BudgetToken | `spend`, `refund` | AccountingLedger 컨트랙트만 |
@@ -124,7 +129,7 @@ meta_hash = SHA256( amount ␟ counterparty ␟ purpose ␟ occurred_at ␟ rece
 | AccountingLedger | `recordPending(RecordRequest, sig)` | 릴레이어 호출, 서명자 = TREASURER |
 | AccountingLedger | `confirmEntry(ConfirmApproval, sig)` | 릴레이어 호출, 서명자 = AUDITOR 또는 PRESIDENT (≠ 등록자) |
 | AccountingLedger | `rejectEntry(RejectDecision, sig)` | 릴레이어 호출, 서명자 = AUDITOR 또는 PRESIDENT (≠ 등록자) |
-| AccountingLedger | `getEntry`, `statusOf`, `exists`, `DOMAIN_SEPARATOR` | view |
+| AccountingLedger | `getEntry`, `statusOf`, `exists`, `netAmountOf`, `DOMAIN_SEPARATOR` | view |
 | MembershipSBT | `mintBatch`, `burn` | PRESIDENT |
 | MembershipSBT | `hasValidMembership`, `tokenOf`, `getMembership`, `nextTokenId` | view |
 | ObjectionRegistry | `raise` | 릴레이어 호출, `raiser`는 SBT 보유자 (릴레이어 신뢰) |
@@ -153,9 +158,9 @@ meta_hash = SHA256( amount ␟ counterparty ␟ purpose ␟ occurred_at ␟ rece
 | `LedgerSet(ledger)` | ledger |
 | `MembershipMinted(tokenId, to, term, commitment)` / `MembershipBurned(tokenId, from, term)` | tokenId, to/from, term |
 | `ObjectionRaised(objectionId, entryId, contentHash, raiser)` / `ObjectionAnswered(objectionId, answerHash, responder)` | objectionId, entryId/responder |
-| `RoleGranted(role, account, actor)` / `RoleRevoked(role, account, actor)` | role, account, actor. `actor`는 승인자 |
-| `KeyRotationProposed(rotationId, role, from, to, proposer)` / `KeyRotationApproved(rotationId, approver)` | rotationId, role/approver, proposer |
-| `KeyRotated(role, from, to)` | role, from, to. 교체일 때만 |
+| `RoleGranted(role, account, proposer, approver)` / `RoleRevoked(role, account, proposer, approver)` | role, account, approver |
+| `RoleReplaced(role, from, to, proposer, approver)` | role, from, to. 교체일 때만 |
+| `RoleChangeProposed(changeId, role, from, to, proposer)` / `RoleChangeApproved(changeId, approver)` | changeId, role/approver, proposer |
 
 ## 에러
 
@@ -169,6 +174,12 @@ meta_hash = SHA256( amount ␟ counterparty ␟ purpose ␟ occurred_at ␟ rece
 | `ReasonRequired` | AccountingLedger | 반려 사유 0, 또는 `hadWarning`인데 사유 0 |
 | `ReasonNotAllowed` | AccountingLedger | `hadWarning` 아닌데 사유 != 0 |
 | `CorrectionBudgetMismatch` | AccountingLedger | 음수 정정의 `budgetId`가 원본과 다름 |
+| `CorrectionExceedsOriginal` | AccountingLedger | 음수 정정 누적이 원본 순금액을 넘음 (등록 시 선검사, 확정 시 최종) |
+| `ZeroAmount` (기존) | AccountingLedger | 차액 0인 정정도 여기에 걸린다. 새 이름 없음 |
+| `AlreadyOfficer` | RoleManager | `to`가 이미 다른 임원 롤 보유 (한 주소 한 롤). 생성자 인자 중복도 같은 에러 |
+| `TooFewOfficers` | RoleManager | 회수 실행 후 임원 수 < 2 |
+| `ProposerNotOfficer` | RoleManager | 승인 시점에 제안자가 더는 임원이 아님 |
+| `ChangeNotFound` / `ChangeAlreadyExecuted` | RoleManager | 옛 `RotationNotFound` / `RotationAlreadyExecuted`의 새 이름 |
 | `BudgetExpired` | BudgetToken (기존) | 확정 시 `spend`에서 마감 경과. `confirmEntry`를 통과해 그대로 올라온다. 백엔드 enum에만 추가 |
 | `LedgerAlreadySet` | BudgetToken | `setLedger` 두 번째 호출 |
 
@@ -190,7 +201,7 @@ nonce가 없으므로 같은 id에 `ConfirmApproval`과 `RejectDecision` 서명�
 ## 한계
 
 - **정정 쌍 중 한쪽만 확정된 상태가 존재할 수 있다** (사람이 한쪽만 승인하는 경우). 그 사이 장부 잔액과 예산 잔량은 이중으로 빠져 보인다. 완화는 앱·서버 몫: 짝이 미확정인 정정은 "재분류 진행 중"으로 표시하고, 음수 정정을 반려할 때 서버가 경고를 띄운다.
-- **서로 다른 두 임원이 담합하면 롤을 바꿀 수 있다.** 모든 변경은 이벤트로 남는다.
+- **서로 다른 두 임원이 담합하면 롤을 바꿀 수 있다.** 모든 변경은 제안자·승인자와 함께 이벤트로 남는다. 임원 수 하한(2명)은 경로가 막히는 것만 방지하고 담합을 막지는 못한다.
 - 수입 항목의 `term`은 총무가 서명한 값일 뿐 체인이 대조하지 못한다. 지출은 예산 `term`과 대조한다.
 - 파일 해시는 "그 뒤로 파일이 안 바뀌었다"만 증명하고 CSV가 진짜인지는 증명하지 못한다 (추후 별도 컨트랙트).
 
@@ -219,4 +230,6 @@ nonce가 없으므로 같은 id에 `ConfirmApproval`과 `RejectDecision` 서명�
 - 회수 → refund → spend 시도 → revert (`BudgetExpired`)
 - `spend`·`refund`를 원장 외 계정이 호출 → revert
 - `setLedger` 두 번째 호출 → revert
-- 롤: 한 사람이 제안하고 같은 사람이 승인 → revert / 임원 아닌 계정의 제안·승인 → revert / 부여·회수·교체 각각 2인 승인으로 성공, 이벤트 발행 / 배포 후 배포자 롤 없음, 생성자로 넣은 세 임원 롤 보유
+- 롤: 한 사람이 제안하고 같은 사람이 승인 → revert / 임원 아닌 계정의 제안·승인 → revert / 부여·회수·교체 각각 2인 승인으로 성공, 이벤트에 제안자·승인자 포함 / 배포 후 배포자 롤 없음, 생성자로 넣은 세 임원 롤 보유
+- 롤 (승인 시점 검사): 제안 후 제안자가 회수되면 승인 → revert (`ProposerNotOfficer`) / 이미 다른 롤을 가진 주소에 부여 → revert (`AlreadyOfficer`) / 임원 3명에서 1명 회수는 성공, 2명에서 1명 회수는 revert (`TooFewOfficers`) / 교체는 임원 수 불변 / 생성자 인자 중복·0 주소 → revert
+- 정정 (원본별 누적): 원본 10만에 음수 정정 −6만 확정 후 −5만 등록 → revert (`CorrectionExceedsOriginal`) / 양수 정정 +3만 확정 후에는 −8만까지 허용 / 차액 0인 정정 등록 → revert (`ZeroAmount`) / `netAmountOf`가 원본 확정·정정 확정마다 기대값과 일치

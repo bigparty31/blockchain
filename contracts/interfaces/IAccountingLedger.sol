@@ -25,6 +25,11 @@ pragma solidity ^0.8.24;
 /// - 정정: 페어 필드는 없다. RECLASSIFY 는 양수 정정(새 예산 spend) + 음수 정정(원래 예산 refund) 2건으로 표현하고
 ///   순서는 서버 규칙(양수 다음 음수). 음수 정정의 budgetId 는 원본의 budgetId 와 같아야 한다(CorrectionBudgetMismatch).
 ///   양수 정정도 일반 지출과 같이 등록 시 잔량 검사·확정 시 spend 를 거친다.
+///   차액(amount)이 0 인 정정은 등록 시 ZeroAmount 로 revert (일반 항목과 같은 검사).
+///   음수 정정의 범위는 원본별 누적으로 검사한다: 원본마다 순금액 netAmountOf(원본 id) 를 저장하고
+///   (원본 확정 시 = 원본 amount, 정정 확정 시 += 정정 amount), 음수 정정 확정으로 순금액이 0 아래로 가면
+///   CorrectionExceedsOriginal 로 revert. 등록 시에도 현재 순금액으로 같은 검사를 먼저 해 조기에 걸러낸다
+///   (대기 중인 다른 정정은 예약하지 않으므로 확정 시 검사가 최종). 수입·지출 모두 적용.
 ///   한계: 한 쌍 중 한쪽만 확정된 상태가 존재할 수 있다 (사람이 한쪽만 승인하는 경우). 완화는 앱·서버 몫.
 /// - 승인자(confirmEntry / rejectEntry 서명자)는 AUDITOR 또는 PRESIDENT. 등록자 != 승인자는 별도 검사.
 /// - 반려는 reasonHash != 0 필수(ReasonRequired). 확정은 hadWarning == (warningReasonHash != 0) 이어야 한다.
@@ -38,7 +43,8 @@ pragma solidity ^0.8.24;
 ///   1 SignatureExpired  2 EntryAlreadyExists  3 TermRequired  4 ZeroAmount
 ///   5 NegativeAmountWithoutCorrection  6 NotRegistrant
 ///   7 INCOME: BudgetIdNotAllowedForIncome
-///   8 correctsId != 0: CorrectionTargetNotFound → CorrectionTargetNotConfirmed → (amount < 0) CorrectionBudgetMismatch
+///   8 correctsId != 0: CorrectionTargetNotFound → CorrectionTargetNotConfirmed
+///     → (amount < 0) CorrectionBudgetMismatch → (amount < 0) CorrectionExceedsOriginal(현재 순금액 기준 선검사)
 ///   9 EXPENSE 이고 예산이 존재하면 TermMismatch
 ///  10 EXPENSE 예산 판정: BUDGET_NOT_FOUND / BUDGET_EXPIRED / BUDGET_EXCEEDED → BLOCKED 저장 (revert 아님)
 ///   budgetId == 0 인 EXPENSE 는 BUDGET_NOT_FOUND 로 BLOCKED (백엔드 FakeChainClient 와 동일).
@@ -164,6 +170,8 @@ interface IAccountingLedger {
     error CorrectionTargetNotConfirmed(uint256 id, uint256 correctsId);
     /// @dev 음수 정정의 budgetId 가 원본(correctsId)의 budgetId 와 다름
     error CorrectionBudgetMismatch(uint256 id, uint256 expected, uint256 actual);
+    /// @dev 음수 정정 누적이 원본의 순금액을 넘음. netAmount 는 현재 순금액, requested 는 이번 정정의 절대값
+    error CorrectionExceedsOriginal(uint256 id, uint256 correctsId, uint256 netAmount, uint256 requested);
     /// @dev 저장된 hash 와 confirm 에 넘긴 hash 불일치
     error HashMismatch(uint256 id, bytes32 expected, bytes32 actual);
     error InvalidSignature();
@@ -206,6 +214,10 @@ interface IAccountingLedger {
     function statusOf(uint256 id) external view returns (Status);
 
     function exists(uint256 id) external view returns (bool);
+
+    /// @notice 원본 항목의 현재 순금액 = 원본 amount + Σ 확정된 정정 amount (음수 정정은 빼진다).
+    ///         원본이 CONFIRMED 가 아니거나 정정 항목이면 0. 음수 정정의 상한이다.
+    function netAmountOf(uint256 id) external view returns (uint256);
 
     /// @notice EIP-712 도메인 분리자 (백엔드가 서명 만들 때 필요)
     function DOMAIN_SEPARATOR() external view returns (bytes32);
