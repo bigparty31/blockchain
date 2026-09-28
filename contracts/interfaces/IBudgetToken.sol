@@ -48,6 +48,8 @@ interface IBudgetToken {
     // --------------------------------------------------------------- errors
 
     error Unauthorized(address caller);
+    /// @dev budgetId == 0. "없음" 으로 예약된 값. 중복(BudgetAlreadyExists)과 구분한다
+    error ReservedId(uint256 budgetId);
     error BudgetAlreadyExists(uint256 budgetId);
     error BudgetNotFound(uint256 budgetId);
     error BudgetExpired(uint256 budgetId, uint256 expiresAt);
@@ -70,7 +72,7 @@ interface IBudgetToken {
     /// @notice 설정된 원장 주소. 미설정이면 address(0)
     function ledger() external view returns (address);
 
-    /// @notice 예산 신규 배정. version = 1. term == 0 이면 TermRequired.
+    /// @notice 예산 신규 배정. version = 1. budgetId == 0 이면 ReservedId, term == 0 이면 TermRequired.
     function issue(
         uint256 budgetId,
         uint256 term,

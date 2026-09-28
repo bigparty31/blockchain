@@ -16,7 +16,7 @@
 
 ## 공통 규칙
 
-- ID(`budgetId`, `entryId`, `objectionId`)는 백엔드 DB auto-increment 값을 파라미터로 받는다. 컨트랙트는 중복만 막는다. SBT `tokenId`와 `changeId`(롤 변경 제안)만 온체인 카운터. ID는 1부터 시작한다 (`0`은 "없음").
+- ID(`budgetId`, `entryId`, `objectionId`)는 백엔드 DB auto-increment 값을 파라미터로 받는다. 컨트랙트는 중복만 막는다. SBT `tokenId`와 `changeId`(롤 변경 제안)만 온체인 카운터. ID는 1부터 시작한다 (`0`은 "없음"). `0`으로 등록·발행하면 `ReservedId`로 revert하며, 중복(`…AlreadyExists`)과 구분된다.
 - 금액은 원 단위 정수. `amount`는 `int256`, `correctsId != 0`인 정정 항목만 음수 허용.
 - 이벤트에 기록 시각을 넣지 않는다 (블록에 있음). 발생 시각 `occurredAt`은 파라미터.
 - enum 온체인 순서 = `docs/enums.md` 표 순서. `ocr_status`는 온체인에 올리지 않는다.
@@ -37,7 +37,10 @@
 - 음수 정정의 `budgetId`는 원본의 `budgetId`와 같아야 한다(`CorrectionBudgetMismatch`). `refund`가 엉뚱한 예산으로 가는 것을 막는다.
 - 양수 정정도 일반 지출과 같이 등록 시 잔량 검사, 확정 시 `spend`를 거친다.
 - **차액(`amount`)이 0인 정정은 등록 시 revert**(`ZeroAmount`). 일반 항목과 같은 검사에 걸린다. 새 에러를 두지 않는다.
-- **음수 정정의 범위는 원본별 누적으로 검사한다.** 원본마다 순금액 `netAmountOf(원본 id)`를 저장한다. 원본 확정 시 원본 `amount`로 시작하고, 그 원본을 가리키는 정정이 확정될 때마다 정정 `amount`를 더한다(음수면 빠진다). **원본과 같은 `budgetId`로 가는 정정만 더한다.** 다른 예산으로 가는 양수 정정(재분류)은 더하지 않는다. 재분류 양수 정정이 원본 순금액을 부풀리면 원래 예산에 소모액 이상 refund가 가능해지기 때문이다. 음수 정정 확정으로 순금액이 0 아래로 가면 `CorrectionExceedsOriginal`. 등록 시에도 현재 순금액으로 같은 검사를 먼저 해 조기에 걸러내지만, 대기 중인 다른 정정은 예약하지 않으므로 확정 시 검사가 최종이다. 수입·지출 모두 적용.
+- **정정의 `kind`는 원본의 `kind`와 같아야 한다**(`CorrectionKindMismatch`).
+- **정정 대상은 "정정 가능 항목"이어야 한다.** 원본(정정이 아닌 항목)이거나, 원본과 다른 `budgetId`로 간 양수 정정(재분류)이다. 같은 예산 양수 정정이나 음수 정정을 대상으로 하면 `InvalidCorrectionTarget`. 같은 금액이 원본과 정정 양쪽의 순금액에 잡혀 소모액보다 많이 refund되는 것을 막는다 (원본 35,000 → 같은 예산 +10,000 → 원본 대상 −45,000 → 정정 대상 −10,000이 모두 통과하던 구멍).
+- **음수 정정의 범위는 대상별 누적으로 검사한다.** 정정 가능 항목마다 순금액 `netAmountOf(id)`를 둔다. 확정 시 자기 `amount`로 시작하고, 그 항목을 대상으로 하는 정정이 확정될 때마다 정정 `amount`를 더한다(음수면 빠진다). 재분류 양수 정정은 원본 순금액에 더하지 않고 자기 순금액을 새로 가진다. 같은 예산 양수 정정은 순금액을 갖지 않는다(대상의 순금액에 흡수). 음수 정정 확정으로 대상 순금액이 0 아래로 가면 `CorrectionExceedsOriginal`. 등록 시에도 현재 순금액으로 같은 검사를 먼저 해 조기에 걸러내지만, 대기 중인 다른 정정은 예약하지 않으므로 확정 시 검사가 최종이다. 수입·지출 모두 적용.
+- 이 규칙들로 **예산별 누적 refund ≤ 누적 spend**가 항상 성립한다. 각 spend 금액은 정확히 하나의 정정 가능 항목의 순금액에 속하고, refund는 그 순금액 안에서만 나가기 때문이다.
 - 예산 단위 상한(`RefundExceedsSpent`)과 원본 단위 상한(`CorrectionExceedsOriginal`)은 별개다. 둘 다 통과해야 refund가 실행된다.
 
 ### 예산 (BudgetToken)
@@ -174,7 +177,10 @@ meta_hash = SHA256( amount ␟ counterparty ␟ purpose ␟ occurred_at ␟ rece
 | `ReasonRequired` | AccountingLedger | 반려 사유 0, 또는 `hadWarning`인데 사유 0 |
 | `ReasonNotAllowed` | AccountingLedger | `hadWarning` 아닌데 사유 != 0 |
 | `CorrectionBudgetMismatch` | AccountingLedger | 음수 정정의 `budgetId`가 원본과 다름 |
-| `CorrectionExceedsOriginal` | AccountingLedger | 음수 정정 누적이 원본 순금액을 넘음 (등록 시 선검사, 확정 시 최종) |
+| `CorrectionExceedsOriginal` | AccountingLedger | 음수 정정 누적이 대상 순금액을 넘음 (등록 시 선검사, 확정 시 최종) |
+| `CorrectionKindMismatch` | AccountingLedger | 정정의 `kind`가 원본과 다름 |
+| `InvalidCorrectionTarget` | AccountingLedger | 정정 대상이 원본도 재분류 양수 정정도 아님 |
+| `ReservedId` | AccountingLedger, BudgetToken | `id == 0` / `budgetId == 0`. 중복이 아니라 예약값 위반 |
 | `ZeroAmount` (기존) | AccountingLedger | 차액 0인 정정도 여기에 걸린다. 새 이름 없음 |
 | `AlreadyOfficer` | RoleManager | `to`가 이미 다른 임원 롤 보유 (한 주소 한 롤). 생성자 인자 중복도 같은 에러 |
 | `TooFewOfficers` | RoleManager | 회수 실행 후 임원 수 < 2 |
@@ -203,7 +209,7 @@ nonce가 없으므로 같은 id에 `ConfirmApproval`과 `RejectDecision` 서명�
 - **정정 쌍 중 한쪽만 확정된 상태가 존재할 수 있다** (사람이 한쪽만 승인하는 경우). 그 사이 장부 잔액과 예산 잔량은 이중으로 빠져 보인다. 완화는 앱·서버 몫: 짝이 미확정인 정정은 "재분류 진행 중"으로 표시하고, 음수 정정을 반려할 때 서버가 경고를 띄운다.
 - **서로 다른 두 임원이 담합하면 롤을 바꿀 수 있다.** 모든 변경은 제안자·승인자와 함께 이벤트로 남는다. 임원 수 하한(2명)은 경로가 막히는 것만 방지하고 담합을 막지는 못한다.
 - **총무가 참여한 2인 승인으로 감사를 교체할 수 있다.** 감사 대상인 총무가 감사 교체에 관여할 수 있다는 뜻이다. 모든 롤 변경은 제안자·승인자와 함께 이벤트로 남는다.
-- **재분류로 다른 예산에 들어간 금액은 음수 정정으로 되돌릴 수 없다.** 원본 순금액에 재분류 양수 정정을 더하지 않기 때문이다. 되돌리려면 재분류 양수 정정 항목을 원본으로 하는 음수 정정을 새로 등록한다.
+- **재분류 금액은 재분류 양수 정정을 대상으로 한 음수 정정으로만 되돌린다.** 원본을 대상으로 한 음수 정정으로는 되돌릴 수 없다. 원본 순금액에 재분류 양수 정정을 더하지 않기 때문이다.
 - 수입 항목의 `term`은 총무가 서명한 값일 뿐 체인이 대조하지 못한다. 지출은 예산 `term`과 대조한다.
 - 파일 해시는 "그 뒤로 파일이 안 바뀌었다"만 증명하고 CSV가 진짜인지는 증명하지 못한다 (추후 별도 컨트랙트).
 
@@ -236,5 +242,10 @@ nonce가 없으므로 같은 id에 `ConfirmApproval`과 `RejectDecision` 서명�
 - `setLedger` 두 번째 호출 → revert
 - 롤: 한 사람이 제안하고 같은 사람이 승인 → revert / 임원 아닌 계정의 제안·승인 → revert / 부여·회수·교체 각각 2인 승인으로 성공, 이벤트에 제안자·승인자 포함 / 배포 후 배포자 롤 없음, 생성자로 넣은 세 임원 롤 보유
 - 롤 (승인 시점 검사): 제안 후 제안자가 회수되면 승인 → revert (`ProposerNotOfficer`) / 이미 다른 롤을 가진 주소에 부여 → revert (`AlreadyOfficer`) / 임원 3명에서 1명 회수는 성공, 2명에서 1명 회수는 revert (`TooFewOfficers`) / 교체는 임원 수 불변 / 생성자 인자 중복·0 주소 → revert
-- 정정 (원본별 누적): 원본 10만에 음수 정정 −6만 확정 후 −5만 등록 → revert (`CorrectionExceedsOriginal`) / 같은 예산 양수 정정 +3만 확정 후에는 −8만까지 허용 / 차액 0인 정정 등록 → revert (`ZeroAmount`) / `netAmountOf`가 원본 확정·정정 확정마다 기대값과 일치
+- 정정 (원본별 누적): 원본 10만에 음수 정정 −6만 확정 후 −5만 등록 → revert (`CorrectionExceedsOriginal`) / 이어서 같은 예산 양수 정정 +3만 확정 → 순금액 7만, −7만은 허용, −8만은 revert / 대기 중 음수 정정 두 건이 순금액을 나눠 쓰면 나중 확정은 revert (확정 시 최종 검사) / 차액 0인 정정 등록 → revert (`ZeroAmount`) / `netAmountOf`가 원본 확정·정정 확정마다 기대값과 일치
 - 정정 (재분류는 순금액에 안 더함): 원본(예산 A) → 재분류 양수(예산 B) 확정 → 재분류 음수(예산 A) 확정 → 추가 음수 정정(예산 A) 등록은 `CorrectionExceedsOriginal`로 revert. `netAmountOf(원본)`은 재분류 양수 확정 뒤에도 원본 금액 그대로
+- 정정 (대상 제한): 원본 35,000 → 같은 예산 +10,000 확정 → 원본 대상 −45,000 확정 → 그 +10,000 정정을 대상으로 한 −10,000 등록은 `InvalidCorrectionTarget`로 revert. 같은 예산 양수 정정의 `netAmountOf`는 0 / 음수 정정을 대상으로 한 정정도 `InvalidCorrectionTarget` / 수입 양수 정정(재분류가 될 수 없음)을 대상으로 한 정정도 `InvalidCorrectionTarget`
+- 정정 (재분류 되돌림): 재분류 양수 정정(B)을 대상으로 한 음수 정정(B)은 그 정정 금액 범위 안에서 성공, 초과는 `CorrectionExceedsOriginal`
+- 정정 (kind): 원본과 `kind`가 다른 정정 등록은 `CorrectionKindMismatch`
+- 예산 불변식: 모든 정정 시나리오 끝에 예산별 Σ `BudgetRefunded` ≤ Σ `BudgetSpent`
+- 예약 id: `recordPending(id = 0)`·`issue(budgetId = 0)`은 `ReservedId`

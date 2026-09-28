@@ -26,13 +26,17 @@ pragma solidity ^0.8.24;
 ///   순서는 서버 규칙(양수 다음 음수). 음수 정정의 budgetId 는 원본의 budgetId 와 같아야 한다(CorrectionBudgetMismatch).
 ///   양수 정정도 일반 지출과 같이 등록 시 잔량 검사·확정 시 spend 를 거친다.
 ///   차액(amount)이 0 인 정정은 등록 시 ZeroAmount 로 revert (일반 항목과 같은 검사).
-///   음수 정정의 범위는 원본별 누적으로 검사한다: 원본마다 순금액 netAmountOf(원본 id) 를 저장하고
-///   (원본 확정 시 = 원본 amount, 정정 확정 시 += 정정 amount), 음수 정정 확정으로 순금액이 0 아래로 가면
-///   CorrectionExceedsOriginal 로 revert. 등록 시에도 현재 순금액으로 같은 검사를 먼저 해 조기에 걸러낸다
-///   (대기 중인 다른 정정은 예약하지 않으므로 확정 시 검사가 최종). 수입·지출 모두 적용.
-///   netAmountOf 에는 원본과 같은 budgetId 로 가는 정정만 더한다. 다른 예산으로 가는 양수 정정(재분류)은 더하지 않는다.
-///   재분류 양수 정정이 원본 순금액을 부풀리면 원래 예산에 소모액 이상 refund 가 가능해지기 때문이다.
-///   따라서 재분류로 다른 예산에 들어간 금액은 음수 정정으로 되돌릴 수 없다 (한계).
+///   정정의 kind 는 원본의 kind 와 같아야 한다(CorrectionKindMismatch).
+///   정정 대상(correctsId)은 "정정 가능 항목" 이어야 한다: 원본(정정이 아닌 항목)이거나,
+///   원본과 다른 budgetId 로 간 양수 정정(재분류)이다. 그 외 정정 항목(같은 예산 양수 정정, 음수 정정)을
+///   대상으로 하면 InvalidCorrectionTarget. 같은 금액이 두 항목의 순금액에 잡혀 소모액보다 많이 refund 되는 것을 막는다.
+///   음수 정정의 범위는 대상별 누적으로 검사한다: 정정 가능 항목마다 순금액 netAmountOf(id) 를 둔다.
+///   확정 시 = 자기 amount(양수), 그 항목을 대상으로 하는 정정이 확정될 때 += 정정 amount (음수면 빠진다).
+///   단 원본과 다른 예산으로 가는 양수 정정(재분류)은 원본 순금액에 더하지 않고 자기 순금액을 새로 가진다.
+///   음수 정정 확정으로 대상 순금액이 0 아래로 가면 CorrectionExceedsOriginal. 등록 시에도 현재 순금액으로
+///   같은 검사를 먼저 해 조기에 걸러낸다 (대기 중인 다른 정정은 예약하지 않으므로 확정 시 검사가 최종). 수입·지출 모두 적용.
+///   같은 예산 양수 정정은 순금액을 갖지 않는다(대상의 순금액에 흡수됨). 재분류 금액은 재분류 양수 정정을 대상으로 한
+///   음수 정정으로만 되돌린다.
 ///   한계: 한 쌍 중 한쪽만 확정된 상태가 존재할 수 있다 (사람이 한쪽만 승인하는 경우). 완화는 앱·서버 몫.
 /// - 승인자(confirmEntry / rejectEntry 서명자)는 AUDITOR 또는 PRESIDENT. 등록자 != 승인자는 별도 검사.
 /// - 반려는 reasonHash != 0 필수(ReasonRequired). 확정은 hadWarning == (warningReasonHash != 0) 이어야 한다.
@@ -43,11 +47,12 @@ pragma solidity ^0.8.24;
 ///   등록자(registrant) == 승인자(signer) 이면 revert.
 ///
 /// recordPending 검사 순서 (revert 는 위에서부터, BLOCKED 판정은 revert 검사가 모두 통과한 뒤):
-///   1 SignatureExpired  2 EntryAlreadyExists  3 TermRequired  4 ZeroAmount
+///   1 SignatureExpired  2 ReservedId(id == 0) → EntryAlreadyExists  3 TermRequired  4 ZeroAmount
 ///   5 NegativeAmountWithoutCorrection  6 NotRegistrant
 ///   7 INCOME: BudgetIdNotAllowedForIncome
-///   8 correctsId != 0: CorrectionTargetNotFound → CorrectionTargetNotConfirmed
-///     → (amount < 0) CorrectionBudgetMismatch → (amount < 0) CorrectionExceedsOriginal(현재 순금액 기준 선검사)
+///   8 correctsId != 0: CorrectionTargetNotFound → CorrectionTargetNotConfirmed → CorrectionKindMismatch
+///     → InvalidCorrectionTarget → (amount < 0) CorrectionBudgetMismatch
+///     → (amount < 0) CorrectionExceedsOriginal(현재 순금액 기준 선검사)
 ///   9 EXPENSE 이고 예산이 존재하면 TermMismatch
 ///  10 EXPENSE 예산 판정: BUDGET_NOT_FOUND / BUDGET_EXPIRED / BUDGET_EXCEEDED → BLOCKED 저장 (revert 아님)
 ///   budgetId == 0 인 EXPENSE 는 BUDGET_NOT_FOUND 로 BLOCKED (백엔드 FakeChainClient 와 동일).
@@ -161,6 +166,8 @@ interface IAccountingLedger {
     // --------------------------------------------------------------- errors
 
     error Unauthorized(address caller);
+    /// @dev id == 0. "없음" 으로 예약된 값 (docs/HASHING.md §2.1). 중복(EntryAlreadyExists)과 구분한다
+    error ReservedId(uint256 id);
     error EntryAlreadyExists(uint256 id);
     error EntryNotFound(uint256 id);
     /// @dev PENDING 이 아닌 항목(BLOCKED 포함)을 확정/반려하려 할 때
@@ -171,6 +178,10 @@ interface IAccountingLedger {
     error CorrectionTargetNotFound(uint256 id, uint256 correctsId);
     /// @dev 정정 대상이 CONFIRMED 가 아님
     error CorrectionTargetNotConfirmed(uint256 id, uint256 correctsId);
+    /// @dev 정정의 kind 가 원본의 kind 와 다름
+    error CorrectionKindMismatch(uint256 id, Kind expected, Kind actual);
+    /// @dev 정정 대상이 원본도, 재분류 양수 정정도 아님 (같은 예산 양수 정정·음수 정정은 대상이 될 수 없다)
+    error InvalidCorrectionTarget(uint256 id, uint256 correctsId);
     /// @dev 음수 정정의 budgetId 가 원본(correctsId)의 budgetId 와 다름
     error CorrectionBudgetMismatch(uint256 id, uint256 expected, uint256 actual);
     /// @dev 음수 정정 누적이 원본의 순금액을 넘음. netAmount 는 현재 순금액, requested 는 이번 정정의 절대값
@@ -218,9 +229,9 @@ interface IAccountingLedger {
 
     function exists(uint256 id) external view returns (bool);
 
-    /// @notice 원본 항목의 현재 순금액 = 원본 amount + Σ 확정된 정정 amount (원본과 같은 budgetId 인 정정만).
-    ///         다른 예산으로 가는 양수 정정(재분류)은 더하지 않는다. 원본이 CONFIRMED 가 아니거나 정정 항목이면 0.
-    ///         음수 정정의 상한이다.
+    /// @notice 정정 가능 항목(원본 또는 재분류 양수 정정)의 현재 순금액
+    ///         = 자기 amount + Σ 그 항목을 대상으로 확정된 정정 amount (재분류 양수 정정은 제외).
+    ///         CONFIRMED 가 아니거나 정정 가능 항목이 아니면 0. 그 항목을 대상으로 하는 음수 정정의 상한이다.
     function netAmountOf(uint256 id) external view returns (uint256);
 
     /// @notice EIP-712 도메인 분리자 (백엔드가 서명 만들 때 필요)
