@@ -40,38 +40,37 @@
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "changeId",
-        "type": "uint256"
-      }
-    ],
-    "name": "ChangeAlreadyExecuted",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "changeId",
-        "type": "uint256"
-      }
-    ],
-    "name": "ChangeNotFound",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "changeId",
+        "name": "expected",
         "type": "uint256"
       },
       {
+        "internalType": "uint256",
+        "name": "actual",
+        "type": "uint256"
+      }
+    ],
+    "name": "InvalidNonce",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "InvalidShortString",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "InvalidSignature",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "address",
-        "name": "proposer",
+        "name": "signer",
         "type": "address"
       }
     ],
-    "name": "ProposerNotOfficer",
+    "name": "NotGovernor",
     "type": "error"
   },
   {
@@ -96,6 +95,28 @@
         "internalType": "bytes32",
         "name": "role",
         "type": "bytes32"
+      }
+    ],
+    "name": "RoleCapacityExceeded",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "role",
+        "type": "bytes32"
+      }
+    ],
+    "name": "RoleMinimumViolated",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "role",
+        "type": "bytes32"
       },
       {
         "internalType": "address",
@@ -109,39 +130,34 @@
   {
     "inputs": [
       {
-        "internalType": "uint256",
-        "name": "changeId",
-        "type": "uint256"
-      }
-    ],
-    "name": "SelfApproval",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "remaining",
-        "type": "uint256"
-      },
-      {
-        "internalType": "uint256",
-        "name": "minimum",
-        "type": "uint256"
-      }
-    ],
-    "name": "TooFewOfficers",
-    "type": "error"
-  },
-  {
-    "inputs": [
-      {
         "internalType": "address",
-        "name": "caller",
+        "name": "signer",
         "type": "address"
       }
     ],
-    "name": "Unauthorized",
+    "name": "SameSigner",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "deadline",
+        "type": "uint256"
+      }
+    ],
+    "name": "SignatureExpired",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "string",
+        "name": "str",
+        "type": "string"
+      }
+    ],
+    "name": "StringTooLong",
     "type": "error"
   },
   {
@@ -162,21 +178,8 @@
   },
   {
     "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "uint256",
-        "name": "changeId",
-        "type": "uint256"
-      },
-      {
-        "indexed": true,
-        "internalType": "address",
-        "name": "approver",
-        "type": "address"
-      }
-    ],
-    "name": "RoleChangeApproved",
+    "inputs": [],
+    "name": "EIP712DomainChanged",
     "type": "event"
   },
   {
@@ -185,7 +188,7 @@
       {
         "indexed": true,
         "internalType": "uint256",
-        "name": "changeId",
+        "name": "nonce",
         "type": "uint256"
       },
       {
@@ -207,13 +210,19 @@
         "type": "address"
       },
       {
-        "indexed": true,
+        "indexed": false,
         "internalType": "address",
         "name": "proposer",
         "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "address",
+        "name": "approver",
+        "type": "address"
       }
     ],
-    "name": "RoleChangeProposed",
+    "name": "RoleChangeExecuted",
     "type": "event"
   },
   {
@@ -245,43 +254,6 @@
       }
     ],
     "name": "RoleGranted",
-    "type": "event"
-  },
-  {
-    "anonymous": false,
-    "inputs": [
-      {
-        "indexed": true,
-        "internalType": "bytes32",
-        "name": "role",
-        "type": "bytes32"
-      },
-      {
-        "indexed": true,
-        "internalType": "address",
-        "name": "from",
-        "type": "address"
-      },
-      {
-        "indexed": true,
-        "internalType": "address",
-        "name": "to",
-        "type": "address"
-      },
-      {
-        "indexed": false,
-        "internalType": "address",
-        "name": "proposer",
-        "type": "address"
-      },
-      {
-        "indexed": false,
-        "internalType": "address",
-        "name": "approver",
-        "type": "address"
-      }
-    ],
-    "name": "RoleReplaced",
     "type": "event"
   },
   {
@@ -330,12 +302,12 @@
   },
   {
     "inputs": [],
-    "name": "MIN_OFFICERS",
+    "name": "DOMAIN_SEPARATOR",
     "outputs": [
       {
-        "internalType": "uint256",
+        "internalType": "bytes32",
         "name": "",
-        "type": "uint256"
+        "type": "bytes32"
       }
     ],
     "stateMutability": "view",
@@ -370,27 +342,6 @@
   {
     "inputs": [
       {
-        "internalType": "uint256",
-        "name": "changeId",
-        "type": "uint256"
-      }
-    ],
-    "name": "approveRoleChange",
-    "outputs": [],
-    "stateMutability": "nonpayable",
-    "type": "function"
-  },
-  {
-    "inputs": [
-      {
-        "internalType": "uint256",
-        "name": "changeId",
-        "type": "uint256"
-      }
-    ],
-    "name": "getRoleChange",
-    "outputs": [
-      {
         "components": [
           {
             "internalType": "bytes32",
@@ -408,19 +359,74 @@
             "type": "address"
           },
           {
-            "internalType": "address",
-            "name": "proposer",
-            "type": "address"
+            "internalType": "uint256",
+            "name": "nonce",
+            "type": "uint256"
           },
           {
-            "internalType": "bool",
-            "name": "executed",
-            "type": "bool"
+            "internalType": "uint256",
+            "name": "deadline",
+            "type": "uint256"
           }
         ],
         "internalType": "struct IRoleManager.RoleChange",
-        "name": "",
+        "name": "c",
         "type": "tuple"
+      },
+      {
+        "internalType": "bytes",
+        "name": "proposerSig",
+        "type": "bytes"
+      },
+      {
+        "internalType": "bytes",
+        "name": "approverSig",
+        "type": "bytes"
+      }
+    ],
+    "name": "changeRole",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "eip712Domain",
+    "outputs": [
+      {
+        "internalType": "bytes1",
+        "name": "fields",
+        "type": "bytes1"
+      },
+      {
+        "internalType": "string",
+        "name": "name",
+        "type": "string"
+      },
+      {
+        "internalType": "string",
+        "name": "version",
+        "type": "string"
+      },
+      {
+        "internalType": "uint256",
+        "name": "chainId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "verifyingContract",
+        "type": "address"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "salt",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint256[]",
+        "name": "extensions",
+        "type": "uint256[]"
       }
     ],
     "stateMutability": "view",
@@ -451,8 +457,14 @@
     "type": "function"
   },
   {
-    "inputs": [],
-    "name": "officerCount",
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "role",
+        "type": "bytes32"
+      }
+    ],
+    "name": "holderCount",
     "outputs": [
       {
         "internalType": "uint256",
@@ -466,30 +478,33 @@
   {
     "inputs": [
       {
-        "internalType": "bytes32",
-        "name": "role",
-        "type": "bytes32"
-      },
-      {
         "internalType": "address",
-        "name": "from",
-        "type": "address"
-      },
-      {
-        "internalType": "address",
-        "name": "to",
+        "name": "account",
         "type": "address"
       }
     ],
-    "name": "proposeRoleChange",
+    "name": "isGovernor",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "nonce",
     "outputs": [
       {
         "internalType": "uint256",
-        "name": "changeId",
+        "name": "",
         "type": "uint256"
       }
     ],
-    "stateMutability": "nonpayable",
+    "stateMutability": "view",
     "type": "function"
   },
   {

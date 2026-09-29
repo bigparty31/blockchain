@@ -15,6 +15,8 @@
  *   [4] relayer    서버 릴레이어. 롤 없음
  *
  * 결과는 deployments/<network>.json 과 deployments/abi/*.json 에 쓴다. 백엔드(손종인)가 읽는 파일이다.
+ * JSON 안의 abi 경로는 그 JSON 파일이 있는 폴더(deployments/) 기준이다.
+ * --network 를 빠뜨리면 엉뚱한 이름의 기록 파일이 생기므로 허용한 네트워크 외에는 멈춘다.
  * Amoy 등 외부 네트워크는 이 스크립트 범위가 아니다.
  */
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -25,10 +27,17 @@ import { deployAll } from "./lib/deployAll.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CONTRACTS = ["RoleManager", "BudgetToken", "AccountingLedger"] as const;
+const ALLOWED_NETWORKS = ["localhost"];
 
 const conn = await network.getOrCreate();
 const { ethers } = conn;
 const networkName = conn.networkName;
+
+if (!ALLOWED_NETWORKS.includes(networkName)) {
+  throw new Error(
+    `배포 대상 네트워크가 "${networkName}" 입니다. --network localhost 로 실행하세요 (허용: ${ALLOWED_NETWORKS.join(", ")}).`,
+  );
+}
 
 const [deployer, president, treasurer, auditor, relayer] = await ethers.getSigners();
 const { chainId } = await ethers.provider.getNetwork();
@@ -61,17 +70,30 @@ for (const who of [deployer, relayer]) {
 assert(await d.roleManager.hasRole(roles.PRESIDENT, president.address), "회장 롤 없음");
 assert(await d.roleManager.hasRole(roles.TREASURER, treasurer.address), "총무 롤 없음");
 assert(await d.roleManager.hasRole(roles.AUDITOR, auditor.address), "감사 롤 없음");
-assert((await d.roleManager.officerCount()) === 3n, "임원 수 != 3");
-assert((await d.budgetToken.ledger()) === d.addresses.AccountingLedger, "setLedger 미반영");
+for (const role of Object.values(roles)) {
+  assert((await d.roleManager.holderCount(role)) === 1n, `${role} 보유자 수 != 1`);
+}
 
-const domainSeparator: string = await d.ledger.DOMAIN_SEPARATOR();
-const expectedDomain = ethers.TypedDataEncoder.hashDomain({
-  name: "AccountingLedger",
-  version: "1",
-  chainId,
-  verifyingContract: d.addresses.AccountingLedger,
-});
-assert(domainSeparator === expectedDomain, "DOMAIN_SEPARATOR 불일치");
+// 서로를 가리키는 주소가 맞는지 (setLedger 도 확인하지만 기록 전에 한 번 더)
+assert((await d.budgetToken.ledger()) === d.addresses.AccountingLedger, "BudgetToken.ledger 불일치");
+assert((await d.budgetToken.roleManager()) === d.addresses.RoleManager, "BudgetToken.roleManager 불일치");
+assert((await d.ledger.roleManager()) === d.addresses.RoleManager, "AccountingLedger.roleManager 불일치");
+assert((await d.ledger.budgetToken()) === d.addresses.BudgetToken, "AccountingLedger.budgetToken 불일치");
+
+// EIP-712 도메인: 서명을 받는 세 컨트랙트 모두
+const eip712: Record<string, object> = {};
+for (const name of CONTRACTS) {
+  const contract = name === "RoleManager" ? d.roleManager : name === "BudgetToken" ? d.budgetToken : d.ledger;
+  const onchain: string = await contract.DOMAIN_SEPARATOR();
+  const expected = ethers.TypedDataEncoder.hashDomain({
+    name,
+    version: "1",
+    chainId,
+    verifyingContract: d.addresses[name],
+  });
+  assert(onchain === expected, `${name} DOMAIN_SEPARATOR 불일치`);
+  eip712[name] = { name, version: "1", chainId: Number(chainId), verifyingContract: d.addresses[name], domainSeparator: onchain };
+}
 
 // ---------------------------------------------------------------- ABI 내보내기
 const outDir = path.join(ROOT, "deployments");
@@ -82,9 +104,8 @@ const abiPaths: Record<string, string> = {};
 for (const name of CONTRACTS) {
   const artifactPath = path.join(ROOT, "artifacts", "src", `${name}.sol`, `${name}.json`);
   const artifact = JSON.parse(await readFile(artifactPath, "utf8"));
-  const rel = path.posix.join("deployments", "abi", `${name}.json`);
   await writeFile(path.join(abiDir, `${name}.json`), JSON.stringify(artifact.abi, null, 2) + "\n", "utf8");
-  abiPaths[name] = rel;
+  abiPaths[name] = path.posix.join("abi", `${name}.json`); // deployments/ 기준
 }
 
 // ---------------------------------------------------------------- 기록
@@ -94,27 +115,14 @@ const record = {
   chainId: Number(chainId),
   deployedAt: new Date((latest?.timestamp ?? 0) * 1000).toISOString(),
   solidity: "0.8.28",
+  pathBase: "abi 경로는 이 파일이 있는 폴더(contracts/deployments/) 기준",
   contracts: Object.fromEntries(
-    CONTRACTS.map((name) => [
-      name,
-      {
-        address: d.addresses[name],
-        deployBlock: d.blocks[name],
-        abi: abiPaths[name],
-      },
-    ]),
+    CONTRACTS.map((name) => [name, { address: d.addresses[name], deployBlock: d.blocks[name], abi: abiPaths[name] }]),
   ),
   setLedgerBlock: d.blocks.setLedger,
-  eip712: {
-    AccountingLedger: {
-      name: "AccountingLedger",
-      version: "1",
-      chainId: Number(chainId),
-      verifyingContract: d.addresses.AccountingLedger,
-      domainSeparator,
-    },
-  },
+  eip712,
   roles,
+  maxAmount: (await d.ledger.MAX_AMOUNT()).toString(),
   accounts: {
     deployer: deployer.address,
     president: president.address,
@@ -128,8 +136,8 @@ const outFile = path.join(outDir, `${networkName}.json`);
 await writeFile(outFile, JSON.stringify(record, null, 2) + "\n", "utf8");
 
 console.log("\n배포 완료");
-console.table(
-  CONTRACTS.map((name) => ({ contract: name, address: d.addresses[name], block: d.blocks[name] })),
-);
-console.log(`DOMAIN_SEPARATOR(AccountingLedger) = ${domainSeparator}`);
+console.table(CONTRACTS.map((name) => ({ contract: name, address: d.addresses[name], block: d.blocks[name] })));
+for (const name of CONTRACTS) {
+  console.log(`DOMAIN_SEPARATOR(${name}) = ${(eip712[name] as any).domainSeparator}`);
+}
 console.log(`→ ${path.relative(ROOT, outFile)}`);

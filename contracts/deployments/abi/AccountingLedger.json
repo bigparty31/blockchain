@@ -23,6 +23,22 @@
         "type": "uint256"
       },
       {
+        "internalType": "int256",
+        "name": "amount",
+        "type": "int256"
+      }
+    ],
+    "name": "AmountOutOfRange",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "id",
+        "type": "uint256"
+      },
+      {
         "internalType": "uint256",
         "name": "budgetId",
         "type": "uint256"
@@ -148,9 +164,46 @@
         "internalType": "uint256",
         "name": "id",
         "type": "uint256"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "expected",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "actual",
+        "type": "bytes32"
+      }
+    ],
+    "name": "EntryCommitMismatch",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "id",
+        "type": "uint256"
       }
     ],
     "name": "EntryNotFound",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "id",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "value",
+        "type": "uint256"
+      }
+    ],
+    "name": "FieldOutOfRange",
     "type": "error"
   },
   {
@@ -358,14 +411,8 @@
     "type": "error"
   },
   {
-    "inputs": [
-      {
-        "internalType": "address",
-        "name": "caller",
-        "type": "address"
-      }
-    ],
-    "name": "Unauthorized",
+    "inputs": [],
+    "name": "ZeroAddress",
     "type": "error"
   },
   {
@@ -395,10 +442,10 @@
         "type": "uint256"
       },
       {
-        "indexed": true,
-        "internalType": "uint256",
-        "name": "budgetId",
-        "type": "uint256"
+        "indexed": false,
+        "internalType": "bytes32",
+        "name": "hash",
+        "type": "bytes32"
       },
       {
         "indexed": false,
@@ -408,9 +455,27 @@
       },
       {
         "indexed": false,
+        "internalType": "uint256",
+        "name": "term",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "budgetId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
         "internalType": "uint8",
         "name": "reason",
         "type": "uint8"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "actor",
+        "type": "address"
       }
     ],
     "name": "EntryBlocked",
@@ -572,10 +637,23 @@
   },
   {
     "inputs": [],
+    "name": "MAX_AMOUNT",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "budgetToken",
     "outputs": [
       {
-        "internalType": "contract IBudgetToken",
+        "internalType": "address",
         "name": "",
         "type": "address"
       }
@@ -595,6 +673,11 @@
           {
             "internalType": "bytes32",
             "name": "hash",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "entryCommit",
             "type": "bytes32"
           },
           {
@@ -679,6 +762,25 @@
         "type": "uint256"
       }
     ],
+    "name": "entryCommitOf",
+    "outputs": [
+      {
+        "internalType": "bytes32",
+        "name": "",
+        "type": "bytes32"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "id",
+        "type": "uint256"
+      }
+    ],
     "name": "exists",
     "outputs": [
       {
@@ -708,9 +810,39 @@
             "type": "bytes32"
           },
           {
-            "internalType": "int256",
+            "internalType": "int128",
             "name": "amount",
-            "type": "int256"
+            "type": "int128"
+          },
+          {
+            "internalType": "uint64",
+            "name": "budgetId",
+            "type": "uint64"
+          },
+          {
+            "internalType": "uint64",
+            "name": "correctsId",
+            "type": "uint64"
+          },
+          {
+            "internalType": "address",
+            "name": "registrant",
+            "type": "address"
+          },
+          {
+            "internalType": "uint64",
+            "name": "occurredAt",
+            "type": "uint64"
+          },
+          {
+            "internalType": "uint32",
+            "name": "term",
+            "type": "uint32"
+          },
+          {
+            "internalType": "address",
+            "name": "approver",
+            "type": "address"
           },
           {
             "internalType": "enum IAccountingLedger.Kind",
@@ -721,36 +853,6 @@
             "internalType": "enum IAccountingLedger.Status",
             "name": "status",
             "type": "uint8"
-          },
-          {
-            "internalType": "uint256",
-            "name": "term",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint256",
-            "name": "occurredAt",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint256",
-            "name": "budgetId",
-            "type": "uint256"
-          },
-          {
-            "internalType": "uint256",
-            "name": "correctsId",
-            "type": "uint256"
-          },
-          {
-            "internalType": "address",
-            "name": "registrant",
-            "type": "address"
-          },
-          {
-            "internalType": "address",
-            "name": "approver",
-            "type": "address"
           }
         ],
         "internalType": "struct IAccountingLedger.Entry",
@@ -885,7 +987,7 @@
     "name": "roleManager",
     "outputs": [
       {
-        "internalType": "contract IRoleManager",
+        "internalType": "address",
         "name": "",
         "type": "address"
       }
