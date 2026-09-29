@@ -1,33 +1,82 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+
 import {IRoleManager} from "../interfaces/IRoleManager.sol";
 
 /// @title RoleManager
 /// @notice 임원 롤 관리 구현. 규칙·검사 순서는 IRoleManager 주석과 docs/CONTRACTS.md "롤" 절이 정본이다.
-/// @dev 자체 매핑. 한 주소 한 롤. 모든 변경은 임원 2인(제안자 ≠ 승인자) 경로로만.
-contract RoleManager is IRoleManager {
+/// @dev 자체 매핑. 한 주소 한 롤. 회장 1·총무 1·감사 1+. 변경은 거버너(회장·감사) 2인 EIP-712 서명 + 릴레이어 제출.
+contract RoleManager is IRoleManager, EIP712 {
     bytes32 public constant TREASURER = keccak256("TREASURER");
     bytes32 public constant AUDITOR = keccak256("AUDITOR");
     bytes32 public constant PRESIDENT = keccak256("PRESIDENT");
 
-    /// @notice 회수 후에도 남아 있어야 하는 최소 임원 수. 2인 승인 경로가 막히지 않게 한다.
-    uint256 public constant MIN_OFFICERS = 2;
+    bytes32 private constant ROLE_CHANGE_TYPEHASH =
+        keccak256("RoleChange(bytes32 role,address from,address to,uint256 nonce,uint256 deadline)");
 
     mapping(address account => bytes32 role) private _roleOf;
-    uint256 private _officerCount;
+    mapping(bytes32 role => uint256) private _holderCount;
+    uint256 private _nonce;
 
-    mapping(uint256 changeId => RoleChange) private _changes;
-    uint256 private _changeCount;
-
-    /// @param president 첫 회장
-    /// @param treasurer 첫 총무
-    /// @param auditor 첫 감사
     /// @dev 세 주소는 서로 다르고 0이 아니어야 한다. 배포자(msg.sender)는 아무 롤도 받지 않는다.
-    constructor(address president, address treasurer, address auditor) {
-        _grant(PRESIDENT, president, address(0), msg.sender);
-        _grant(TREASURER, treasurer, address(0), msg.sender);
-        _grant(AUDITOR, auditor, address(0), msg.sender);
+    constructor(address president, address treasurer, address auditor) EIP712("RoleManager", "1") {
+        _initialGrant(PRESIDENT, president);
+        _initialGrant(TREASURER, treasurer);
+        _initialGrant(AUDITOR, auditor);
+    }
+
+    // ------------------------------------------------------------------ change
+
+    function changeRole(RoleChange calldata c, bytes calldata proposerSig, bytes calldata approverSig) external {
+        // 1~4: 요청 자체
+        if (block.timestamp > c.deadline) revert SignatureExpired(c.deadline);
+        if (c.nonce != _nonce) revert InvalidNonce(_nonce, c.nonce);
+        if (!_isKnownRole(c.role)) revert UnknownRole(c.role);
+        if (c.from == address(0) && c.to == address(0)) revert ZeroAddress();
+
+        // 5~6: 서명자
+        bytes32 digest = _hashTypedDataV4(
+            keccak256(abi.encode(ROLE_CHANGE_TYPEHASH, c.role, c.from, c.to, c.nonce, c.deadline))
+        );
+        address proposer = _recover(digest, proposerSig);
+        address approver = _recover(digest, approverSig);
+        if (!_isGovernor(proposer)) revert NotGovernor(proposer);
+        if (!_isGovernor(approver)) revert NotGovernor(approver);
+        if (proposer == approver) revert SameSigner(proposer);
+
+        // 7~8: 보유 상태
+        if (c.from != address(0) && _roleOf[c.from] != c.role) revert RoleNotGranted(c.role, c.from);
+        if (c.to != address(0)) {
+            bytes32 current = _roleOf[c.to];
+            if (current == c.role) revert RoleAlreadyGranted(c.role, c.to);
+            if (current != bytes32(0)) revert AlreadyOfficer(c.to, current);
+        }
+
+        // 9~10: 롤별 보유자 수
+        if (c.from == address(0) && c.role != AUDITOR && _holderCount[c.role] != 0) {
+            revert RoleCapacityExceeded(c.role);
+        }
+        if (c.to == address(0) && (c.role != AUDITOR || _holderCount[c.role] == 1)) {
+            revert RoleMinimumViolated(c.role);
+        }
+
+        uint256 used = _nonce;
+        _nonce = used + 1;
+
+        if (c.from != address(0)) {
+            delete _roleOf[c.from];
+            _holderCount[c.role] -= 1;
+            emit RoleRevoked(c.role, c.from, proposer, approver);
+        }
+        if (c.to != address(0)) {
+            _roleOf[c.to] = c.role;
+            _holderCount[c.role] += 1;
+            emit RoleGranted(c.role, c.to, proposer, approver);
+        }
+        emit RoleChangeExecuted(used, c.role, c.from, c.to, proposer, approver);
     }
 
     // ------------------------------------------------------------------ views
@@ -40,94 +89,46 @@ contract RoleManager is IRoleManager {
         return _roleOf[account];
     }
 
-    function officerCount() external view returns (uint256) {
-        return _officerCount;
+    function holderCount(bytes32 role) external view returns (uint256) {
+        return _holderCount[role];
     }
 
-    function getRoleChange(uint256 changeId) external view returns (RoleChange memory) {
-        return _changes[changeId];
+    function isGovernor(address account) external view returns (bool) {
+        return _isGovernor(account);
     }
 
-    // -------------------------------------------------------------- propose
-
-    function proposeRoleChange(bytes32 role, address from, address to) external returns (uint256 changeId) {
-        if (!_isOfficer(msg.sender)) revert Unauthorized(msg.sender);
-        if (!_isKnownRole(role)) revert UnknownRole(role);
-        if (from == address(0) && to == address(0)) revert ZeroAddress();
-
-        changeId = ++_changeCount;
-        _changes[changeId] = RoleChange({role: role, from: from, to: to, proposer: msg.sender, executed: false});
-
-        emit RoleChangeProposed(changeId, role, from, to, msg.sender);
+    function nonce() external view returns (uint256) {
+        return _nonce;
     }
 
-    // -------------------------------------------------------------- approve
-
-    function approveRoleChange(uint256 changeId) external {
-        RoleChange storage c = _changes[changeId];
-
-        // 1~5: 제안·승인자 상태
-        if (c.proposer == address(0)) revert ChangeNotFound(changeId);
-        if (c.executed) revert ChangeAlreadyExecuted(changeId);
-        if (!_isOfficer(msg.sender)) revert Unauthorized(msg.sender);
-        if (msg.sender == c.proposer) revert SelfApproval(changeId);
-        if (!_isOfficer(c.proposer)) revert ProposerNotOfficer(changeId, c.proposer);
-
-        bytes32 role = c.role;
-        address from = c.from;
-        address to = c.to;
-
-        // 6: from 은 role 을 갖고 있어야 한다
-        if (from != address(0) && _roleOf[from] != role) revert RoleNotGranted(role, from);
-
-        // 7: to 는 어떤 임원 롤도 없어야 한다 (같은 롤이면 RoleAlreadyGranted, 다른 롤이면 AlreadyOfficer)
-        if (to != address(0)) {
-            bytes32 current = _roleOf[to];
-            if (current == role) revert RoleAlreadyGranted(role, to);
-            if (current != bytes32(0)) revert AlreadyOfficer(to, current);
-        }
-
-        // 8: 회수는 임원 수 하한을 지켜야 한다
-        if (to == address(0)) {
-            uint256 remaining = _officerCount - 1;
-            if (remaining < MIN_OFFICERS) revert TooFewOfficers(remaining, MIN_OFFICERS);
-        }
-
-        c.executed = true;
-        emit RoleChangeApproved(changeId, msg.sender);
-
-        if (from != address(0)) {
-            delete _roleOf[from];
-            _officerCount -= 1;
-            emit RoleRevoked(role, from, c.proposer, msg.sender);
-        }
-        if (to != address(0)) {
-            _roleOf[to] = role;
-            _officerCount += 1;
-            emit RoleGranted(role, to, c.proposer, msg.sender);
-        }
-        if (from != address(0) && to != address(0)) {
-            emit RoleReplaced(role, from, to, c.proposer, msg.sender);
-        }
+    function DOMAIN_SEPARATOR() external view returns (bytes32) {
+        return _domainSeparatorV4();
     }
 
     // ------------------------------------------------------------- internal
 
-    /// @dev 생성자 전용. 실행 경로의 부여는 approveRoleChange 안에 인라인되어 있다.
-    function _grant(bytes32 role, address account, address proposer, address approver) private {
+    /// @dev 생성자 전용. proposer·approver 0 이 최초 부여 표시다.
+    function _initialGrant(bytes32 role, address account) private {
         if (account == address(0)) revert ZeroAddress();
         bytes32 current = _roleOf[account];
         if (current != bytes32(0)) revert AlreadyOfficer(account, current);
         _roleOf[account] = role;
-        _officerCount += 1;
-        emit RoleGranted(role, account, proposer, approver);
+        _holderCount[role] += 1;
+        emit RoleGranted(role, account, address(0), address(0));
     }
 
-    function _isOfficer(address account) private view returns (bool) {
-        return _roleOf[account] != bytes32(0);
+    function _isGovernor(address account) private view returns (bool) {
+        bytes32 r = _roleOf[account];
+        return r == PRESIDENT || r == AUDITOR;
     }
 
     function _isKnownRole(bytes32 role) private pure returns (bool) {
         return role == TREASURER || role == AUDITOR || role == PRESIDENT;
+    }
+
+    function _recover(bytes32 digest, bytes calldata signature) private pure returns (address) {
+        (address signer, ECDSA.RecoverError err, ) = ECDSA.tryRecover(digest, signature);
+        if (err != ECDSA.RecoverError.NoError || signer == address(0)) revert InvalidSignature();
+        return signer;
     }
 }
