@@ -8,12 +8,18 @@
  *
  * 세 임원은 생성자 인자로 들어가므로 별도 롤 부여 단계가 없다.
  * 배포자는 setLedger 를 부른 뒤 어떤 권한도 남지 않는다 (docs/CONTRACTS.md "생성자·배포 순서").
+ *
+ * ledgerContract 로 원장 자리에 다른 컨트랙트(테스트의 MockLedger)를 넣을 수 있다. 생성자 인자는 같다.
  */
 
 export interface Officers {
   president: string;
   treasurer: string;
   auditor: string;
+}
+
+export interface DeployOptions {
+  ledgerContract?: "AccountingLedger" | "MockLedger";
 }
 
 export interface Deployment {
@@ -30,8 +36,14 @@ async function deployedBlock(contract: any): Promise<number> {
   return receipt.blockNumber;
 }
 
-export async function deployAll(ethers: any, officers: Officers, deployer?: any): Promise<Deployment> {
+export async function deployAll(
+  ethers: any,
+  officers: Officers,
+  deployer?: any,
+  opts: DeployOptions = {},
+): Promise<Deployment> {
   const signer = deployer ?? (await ethers.getSigners())[0];
+  const ledgerContract = opts.ledgerContract ?? "AccountingLedger";
 
   const roleManager = await ethers.deployContract(
     "RoleManager",
@@ -44,7 +56,7 @@ export async function deployAll(ethers: any, officers: Officers, deployer?: any)
   await budgetToken.waitForDeployment();
 
   const ledger = await ethers.deployContract(
-    "AccountingLedger",
+    ledgerContract,
     [await roleManager.getAddress(), await budgetToken.getAddress()],
     signer,
   );

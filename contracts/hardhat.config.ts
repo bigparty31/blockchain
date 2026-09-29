@@ -1,7 +1,7 @@
 import { defineConfig } from "hardhat/config";
 import hardhatToolboxMochaEthers from "@nomicfoundation/hardhat-toolbox-mocha-ethers";
 
-// 소스는 두 곳이다. interfaces/ 는 정본 인터페이스(docs 가 이 경로를 참조), src/ 는 구현.
+// 소스는 세 곳이다. interfaces/ 는 정본 인터페이스(docs 가 이 경로를 참조), src/ 는 구현, mocks/ 는 테스트 전용.
 export default defineConfig({
   plugins: [hardhatToolboxMochaEthers],
   solidity: {
@@ -11,7 +11,7 @@ export default defineConfig({
     },
   },
   paths: {
-    sources: ["./interfaces", "./src"],
+    sources: ["./interfaces", "./src", "./mocks"],
     tests: "./test",
   },
   networks: {

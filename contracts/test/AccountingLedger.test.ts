@@ -27,23 +27,29 @@ import {
   makeReject,
   signReject,
   deadlineIn,
+  changeRole,
+  reclaimBudget,
+  issueBudget,
+  computeEntryCommit,
+  entryCommitFromChain,
+  CATEGORY,
+  MAX_AMOUNT,
+  U64_MAX,
+  U32_MAX,
+  INT256_MIN,
 } from "./helpers/fixture.ts";
 import { gas } from "./helpers/gas.ts";
 
 /**
- * 총무(treasurer)를 2 인 승인으로 감사 롤로 바꾼다. 한 주소 한 롤이라, "등록자 == 승인자" 는
+ * 총무(treasurer)를 회장·감사 2 인 서명으로 감사 롤로 바꾼다. 한 주소 한 롤이라, "등록자 == 승인자" 는
  * 등록 뒤 롤이 바뀐 경우에만 생길 수 있다. 그 경로를 만든다.
  */
 async function turnTreasurerIntoAuditor(f: BudgetFixture) {
   const rm = f.roleManager;
-  // 1) 새 총무를 먼저 세운다 (임원 수 유지)
-  const id1 = await rm.connect(f.president).proposeRoleChange.staticCall(ROLE.TREASURER, f.treasurer.address, f.extra1.address);
-  await rm.connect(f.president).proposeRoleChange(ROLE.TREASURER, f.treasurer.address, f.extra1.address);
-  await rm.connect(f.auditor).approveRoleChange(id1);
-  // 2) 옛 총무에게 감사 롤을 준다
-  const id2 = await rm.connect(f.president).proposeRoleChange.staticCall(ROLE.AUDITOR, ZERO_ADDR, f.treasurer.address);
-  await rm.connect(f.president).proposeRoleChange(ROLE.AUDITOR, ZERO_ADDR, f.treasurer.address);
-  await rm.connect(f.auditor).approveRoleChange(id2);
+  // 1) 총무를 새 사람으로 교체한다 (총무는 정확히 1명)
+  await (await changeRole(f, { role: ROLE.TREASURER, from: f.treasurer.address, to: f.extra1.address }, f.president, f.auditor)).tx;
+  // 2) 옛 총무에게 감사 롤을 준다 (감사는 여럿 가능)
+  await (await changeRole(f, { role: ROLE.AUDITOR, from: ZERO_ADDR, to: f.treasurer.address }, f.president, f.auditor)).tx;
   expect(await rm.hasRole(ROLE.AUDITOR, f.treasurer.address)).to.equal(true);
   expect(await rm.hasRole(ROLE.TREASURER, f.treasurer.address)).to.equal(false);
 }
@@ -81,6 +87,16 @@ describe("AccountingLedger", function () {
         .map((x: any) => x.name)
         .sort();
       expect(mutating).to.deep.equal(["confirmEntry", "recordPending", "rejectEntry"]);
+    });
+
+    it("생성자 인자 0 은 ZeroAddress, roleManager()·budgetToken() 이 배포 주소와 같다", async function () {
+      const f = await loadFixture(budgetFixture);
+      expect(await f.ledger.roleManager()).to.equal(f.addresses.RoleManager);
+      expect(await f.ledger.budgetToken()).to.equal(f.addresses.BudgetToken);
+      expect(await f.ledger.MAX_AMOUNT()).to.equal(MAX_AMOUNT);
+      const factory = await ethers.getContractFactory("AccountingLedger");
+      await expect(factory.deploy(ZERO_ADDR, f.addresses.BudgetToken)).to.be.revertedWithCustomError(factory, "ZeroAddress");
+      await expect(factory.deploy(f.addresses.RoleManager, ZERO_ADDR)).to.be.revertedWithCustomError(factory, "ZeroAddress");
     });
   });
 
@@ -121,13 +137,15 @@ describe("AccountingLedger", function () {
       expect(await f.ledger.statusOf(1n)).to.equal(Status.PENDING);
     });
 
-    it("없는 id 의 getEntry 는 0 으로 채운 구조체, exists 는 false (백엔드 CHAIN_CLIENT §3)", async function () {
+    it("없는 id: getEntry 는 0 구조체, exists 는 false, statusOf 는 EntryNotFound (PENDING 으로 오해하지 않게)", async function () {
       const f = await loadFixture(budgetFixture);
       expect(await f.ledger.exists(42n)).to.equal(false);
       const e = await f.ledger.getEntry(42n);
       expect(e.hash).to.equal(ZERO32);
       expect(e.amount).to.equal(0n);
       expect(e.registrant).to.equal(ZERO_ADDR);
+      await expect(f.ledger.statusOf(42n)).to.be.revertedWithCustomError(f.ledger, "EntryNotFound").withArgs(42n);
+      expect(await f.ledger.entryCommitOf(42n)).to.equal(ZERO32);
     });
   });
 
@@ -169,6 +187,37 @@ describe("AccountingLedger", function () {
       await expect((await record(f, { id: 3n, amount: 0n, correctsId: 2n })).tx)
         .to.be.revertedWithCustomError(f.ledger, "ZeroAmount")
         .withArgs(3n);
+    });
+
+    it("4 AmountOutOfRange: |amount| > MAX_AMOUNT, int256 최솟값도 Panic 이 아니라 커스텀 에러", async function () {
+      const f = await loadFixture(budgetFixture);
+      await expect((await record(f, { id: 1n, amount: MAX_AMOUNT + 1n })).tx)
+        .to.be.revertedWithCustomError(f.ledger, "AmountOutOfRange")
+        .withArgs(1n, MAX_AMOUNT + 1n);
+      await recordAndConfirm(f, { id: 2n, amount: 10_000n });
+      await expect((await record(f, { id: 3n, amount: INT256_MIN, correctsId: 2n })).tx)
+        .to.be.revertedWithCustomError(f.ledger, "AmountOutOfRange")
+        .withArgs(3n, INT256_MIN);
+    });
+
+    it("2·3·5 FieldOutOfRange: id·budgetId·correctsId·occurredAt > uint64, term > uint32", async function () {
+      const f = await loadFixture(budgetFixture);
+      const big = U64_MAX + 1n;
+      await expect((await record(f, { id: big, amount: 1n })).tx)
+        .to.be.revertedWithCustomError(f.ledger, "FieldOutOfRange")
+        .withArgs(big, big);
+      await expect((await record(f, { id: 1n, amount: 1n, term: U32_MAX + 1n })).tx)
+        .to.be.revertedWithCustomError(f.ledger, "FieldOutOfRange")
+        .withArgs(1n, U32_MAX + 1n);
+      await expect((await record(f, { id: 1n, amount: 1n, budgetId: big })).tx)
+        .to.be.revertedWithCustomError(f.ledger, "FieldOutOfRange")
+        .withArgs(1n, big);
+      await expect((await record(f, { id: 1n, amount: 1n, correctsId: big })).tx)
+        .to.be.revertedWithCustomError(f.ledger, "FieldOutOfRange")
+        .withArgs(1n, big);
+      await expect((await record(f, { id: 1n, amount: 1n, occurredAt: big })).tx)
+        .to.be.revertedWithCustomError(f.ledger, "FieldOutOfRange")
+        .withArgs(1n, big);
     });
 
     it("5 NegativeAmountWithoutCorrection: 정정이 아닌데 음수", async function () {
@@ -253,6 +302,22 @@ describe("AccountingLedger", function () {
       expect(await f.ledger.exists(2n)).to.equal(false);
     });
 
+    it("8 TermMismatch: 정정의 term 이 원본과 다름 (학기를 옮기는 재분류·수입 정정 차단)", async function () {
+      const f = await loadFixture(budgetFixture);
+      // 다른 학기 예산을 하나 만든다
+      await (await issueBudget(f, { budgetId: 3n, term: OTHER_TERM, category: CATEGORY.행사비, amount: 1_000_000n, expiresAt: f.expiresAt })).tx;
+      await recordAndConfirm(f, { id: 1n, amount: 100_000n }); // TERM, 예산 1
+      // 다른 학기 예산으로의 재분류 양수 정정
+      await expect((await record(f, { id: 2n, amount: 100_000n, correctsId: 1n, budgetId: 3n, term: OTHER_TERM })).tx)
+        .to.be.revertedWithCustomError(f.ledger, "TermMismatch")
+        .withArgs(2n, TERM, OTHER_TERM);
+      // 수입 정정으로 학기 이동
+      await recordAndConfirm(f, { id: 3n, amount: 50_000n, kind: Kind.INCOME });
+      await expect((await record(f, { id: 4n, amount: -10_000n, kind: Kind.INCOME, correctsId: 3n, budgetId: 0n, term: OTHER_TERM })).tx)
+        .to.be.revertedWithCustomError(f.ledger, "TermMismatch")
+        .withArgs(4n, TERM, OTHER_TERM);
+    });
+
     it("수입의 term 은 대조할 예산이 없어 서명된 값 그대로 저장된다", async function () {
       const f = await loadFixture(budgetFixture);
       await (await record(f, { id: 1n, amount: 1_000n, kind: Kind.INCOME, term: OTHER_TERM })).tx;
@@ -266,7 +331,7 @@ describe("AccountingLedger", function () {
       const { tx } = await record(f, { id: 1n, amount: 1_000_001n });
       await expect(gas("AccountingLedger.recordPending (EXPENSE → BLOCKED)", tx))
         .to.emit(f.ledger, "EntryBlocked")
-        .withArgs(1n, 1n, 1_000_001n, BlockReason.BUDGET_EXCEEDED)
+        .withArgs(1n, metaHash("1"), 1_000_001n, TERM, 1n, BlockReason.BUDGET_EXCEEDED, f.treasurer.address)
         .and.not.to.emit(f.ledger, "EntryPending");
       expect(await f.ledger.statusOf(1n)).to.equal(Status.BLOCKED);
       expect((await f.ledger.getEntry(1n)).registrant).to.equal(f.treasurer.address);
@@ -279,6 +344,9 @@ describe("AccountingLedger", function () {
       // 1 번이 대기 중이어도 잔량은 그대로라 2 번도 PENDING
       await (await record(f, { id: 2n, amount: 1_000_000n })).tx;
       expect(await f.ledger.statusOf(2n)).to.equal(Status.PENDING);
+      // 잔량보다 1 원 더는 BLOCKED
+      await (await record(f, { id: 3n, amount: 1_000_001n })).tx;
+      expect(await f.ledger.statusOf(3n)).to.equal(Status.BLOCKED);
     });
 
     it("마감이 지난 예산은 BLOCKED(BUDGET_EXPIRED)", async function () {
@@ -286,7 +354,7 @@ describe("AccountingLedger", function () {
       await time.increaseTo(f.expiresAt + 1n);
       await expect((await record(f, { id: 1n, amount: 1_000n })).tx)
         .to.emit(f.ledger, "EntryBlocked")
-        .withArgs(1n, 1n, 1_000n, BlockReason.BUDGET_EXPIRED);
+        .withArgs(1n, metaHash("1"), 1_000n, TERM, 1n, BlockReason.BUDGET_EXPIRED, f.treasurer.address);
       expect(await f.ledger.statusOf(1n)).to.equal(Status.BLOCKED);
     });
 
@@ -294,10 +362,10 @@ describe("AccountingLedger", function () {
       const f = await loadFixture(budgetFixture);
       await expect((await record(f, { id: 1n, amount: 1_000n, budgetId: 99n })).tx)
         .to.emit(f.ledger, "EntryBlocked")
-        .withArgs(1n, 99n, 1_000n, BlockReason.BUDGET_NOT_FOUND);
+        .withArgs(1n, metaHash("1"), 1_000n, TERM, 99n, BlockReason.BUDGET_NOT_FOUND, f.treasurer.address);
       await expect((await record(f, { id: 2n, amount: 1_000n, budgetId: 0n })).tx)
         .to.emit(f.ledger, "EntryBlocked")
-        .withArgs(2n, 0n, 1_000n, BlockReason.BUDGET_NOT_FOUND);
+        .withArgs(2n, metaHash("2"), 1_000n, TERM, 0n, BlockReason.BUDGET_NOT_FOUND, f.treasurer.address);
     });
 
     it("BLOCKED 항목은 확정도 반려도 InvalidStatus(BLOCKED, PENDING)", async function () {
@@ -382,6 +450,56 @@ describe("AccountingLedger", function () {
         .withArgs(1n, metaHash("1"), wrong);
     });
 
+    it("entryCommitOf 는 문서의 식(keccak256(abi.encode(hash, amount, kind, term, budgetId, correctsId, registrant)))과 같다", async function () {
+      const f = await loadFixture(budgetFixture);
+      const { req, tx } = await record(f, { id: 1n, amount: 12_345n });
+      await tx;
+      const expected = computeEntryCommit({
+        hash: req.hash,
+        amount: 12_345n,
+        kind: Kind.EXPENSE,
+        term: TERM,
+        budgetId: 1n,
+        correctsId: 0n,
+        registrant: f.treasurer.address,
+      });
+      expect(await f.ledger.entryCommitOf(1n)).to.equal(expected);
+      expect(await entryCommitFromChain(f, 1n)).to.equal(expected);
+    });
+
+    it("EntryCommitMismatch: 승인자가 본 예산·종류·학기·정정대상·등록자가 등록 내용과 다르면 revert (리뷰 1)", async function () {
+      const f = await loadFixture(budgetFixture);
+      // 총무가 사업비(예산 2)로 등록했는데 감사 화면에는 행사비(예산 1)로 보였다고 가정
+      const { req, tx } = await record(f, { id: 1n, amount: 50_000n, budgetId: 2n });
+      await tx;
+      const base = {
+        hash: req.hash,
+        amount: 50_000n,
+        kind: Kind.EXPENSE,
+        term: TERM,
+        budgetId: 2n,
+        correctsId: 0n,
+        registrant: f.treasurer.address,
+      };
+      const stored = computeEntryCommit(base);
+      const variants = [
+        { ...base, budgetId: 1n },
+        { ...base, kind: Kind.INCOME },
+        { ...base, term: OTHER_TERM },
+        { ...base, correctsId: 7n },
+        { ...base, registrant: f.outsider.address },
+        { ...base, amount: 50_001n },
+      ];
+      for (const v of variants) {
+        const wrong = computeEntryCommit(v);
+        await expect((await confirm(f, { id: 1n, entryCommit: wrong })).tx)
+          .to.be.revertedWithCustomError(f.ledger, "EntryCommitMismatch")
+          .withArgs(1n, stored, wrong);
+      }
+      expect(await f.ledger.statusOf(1n)).to.equal(Status.PENDING);
+      await expect((await confirm(f, { id: 1n, entryCommit: stored })).tx).to.emit(f.ledger, "EntryConfirmed");
+    });
+
     it("ReasonRequired: hadWarning 인데 사유 0 / ReasonNotAllowed: 경고 아닌데 사유 있음", async function () {
       const f = await loadFixture(budgetFixture);
       await (await record(f, { id: 1n, amount: 1_000n })).tx;
@@ -408,7 +526,7 @@ describe("AccountingLedger", function () {
     it("InvalidSignature: 깨진 서명 바이트", async function () {
       const f = await loadFixture(budgetFixture);
       await (await record(f, { id: 1n, amount: 1_000n })).tx;
-      const approval = await makeConfirm({ id: 1n });
+      const approval = await makeConfirm(f, { id: 1n });
       await expect(f.ledger.connect(f.relayer).confirmEntry(approval, "0xdead")).to.be.revertedWithCustomError(
         f.ledger,
         "InvalidSignature",
@@ -543,6 +661,7 @@ describe("AccountingLedger", function () {
       expect((await f.budgetToken.getBudget(1n)).spent).to.equal(70_000n);
       expect(await f.ledger.netAmountOf(1n)).to.equal(70_000n);
       expect(await f.ledger.netAmountOf(2n)).to.equal(0n); // 음수 항목 자체의 순금액은 0
+      await assertRefundLeSpend(f, 1n);
     });
 
     it("같은 예산 양수 정정 확정은 spend 하고 원본 순금액을 늘린다. 자기 순금액은 0 (대상에 흡수)", async function () {
@@ -616,7 +735,7 @@ describe("AccountingLedger", function () {
       await recordAndConfirm(f, { id: 1n, amount: 900_000n }); // 잔량 100k
       await expect((await record(f, { id: 2n, amount: 100_001n, correctsId: 1n })).tx)
         .to.emit(f.ledger, "EntryBlocked")
-        .withArgs(2n, 1n, 100_001n, BlockReason.BUDGET_EXCEEDED);
+        .withArgs(2n, metaHash("2"), 100_001n, TERM, 1n, BlockReason.BUDGET_EXCEEDED, f.treasurer.address);
 
       await (await record(f, { id: 3n, amount: 100_000n, correctsId: 1n })).tx; // PENDING
       await (await record(f, { id: 4n, amount: 50_000n })).tx; // 일반 지출도 PENDING
@@ -659,6 +778,7 @@ describe("AccountingLedger", function () {
         .to.be.revertedWithCustomError(f.ledger, "CorrectionExceedsOriginal")
         .withArgs(3n, 1n, 0n, 100_000n);
       expect(await f.ledger.statusOf(3n)).to.equal(Status.PENDING);
+      await assertRefundLeSpend(f, 1n);
     });
 
     it("RECLASSIFY: 양수(예산 B) 확정 → 음수(예산 A) 확정 → 두 예산 spent 와 원장 잔액이 기대값. 재분류 양수는 원본 순금액에 안 더한다", async function () {
@@ -732,7 +852,7 @@ describe("AccountingLedger", function () {
       const f = await loadFixture(budgetFixture);
       await recordAndConfirm(f, { id: 1n, amount: 100_000n });
       await time.increaseTo(f.expiresAt + 1n);
-      await f.budgetToken.connect(f.president).reclaim(1n); // issued → 100k
+      await (await reclaimBudget(f, { budgetId: 1n })).tx; // issued → 100k
       await recordAndConfirm(f, { id: 2n, amount: -40_000n, correctsId: 1n });
       const b = await f.budgetToken.getBudget(1n);
       expect(b.issued).to.equal(100_000n);
