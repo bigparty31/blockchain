@@ -1,0 +1,63 @@
+{
+  "network": "localhost",
+  "chainId": 31337,
+  "deployedAt": "2026-09-30T02:25:33.000Z",
+  "solidity": "0.8.28",
+  "pathBase": "abi 경로는 이 파일이 있는 폴더(contracts/deployments/) 기준",
+  "contracts": {
+    "RoleManager": {
+      "address": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+      "deployBlock": 1,
+      "abi": "abi/RoleManager.json"
+    },
+    "BudgetToken": {
+      "address": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
+      "deployBlock": 2,
+      "abi": "abi/BudgetToken.json"
+    },
+    "AccountingLedger": {
+      "address": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
+      "deployBlock": 3,
+      "abi": "abi/AccountingLedger.json"
+    }
+  },
+  "setLedgerBlock": 4,
+  "eip712": {
+    "RoleManager": {
+      "name": "RoleManager",
+      "version": "1",
+      "chainId": 31337,
+      "verifyingContract": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+      "domainSeparator": "0xebbd14b2ace84e519e5d9866354eabd2160af1a8a8675bb913e187e94c7a2a0c"
+    },
+    "BudgetToken": {
+      "name": "BudgetToken",
+      "version": "1",
+      "chainId": 31337,
+      "verifyingContract": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
+      "domainSeparator": "0x1f2905a02b6b82de113d21bf22f98674232314b3d02d77ab6f4bdf7e0c252699"
+    },
+    "AccountingLedger": {
+      "name": "AccountingLedger",
+      "version": "1",
+      "chainId": 31337,
+      "verifyingContract": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
+      "domainSeparator": "0x7887f5ba6910ea3e84a905c6e45288e1cd7b0f62a455182c7bc12b4208109294"
+    }
+  },
+  "roles": {
+    "TREASURER": "0x8d9233e8f9e0681d692bebdd2fd8c8863336d587e831d84b9bff9f403d549b5f",
+    "AUDITOR": "0xd8994f6d76f930dc5ea8c60e38e6334a87bb8539cc3082ac6828681c33316e3d",
+    "PRESIDENT": "0xa76334773fe93cab67e316787a7356fecbc8f22a6b85de9f93e5a93f34799c18"
+  },
+  "maxAmount": "1000000000000000",
+  "recoveryDelaySeconds": 259200,
+  "accounts": {
+    "deployer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+    "president": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+    "treasurer": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+    "auditor": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+    "auditor2": "0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc",
+    "relayer": "0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65"
+  }
+}

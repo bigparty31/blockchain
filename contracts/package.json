@@ -1,0 +1,24 @@
+{
+  "name": "council-ledger-contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "블록체인 기반 학생회 회계 투명성 관리 시스템 — Solidity 컨트랙트",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "node": "hardhat node",
+    "deploy:local": "hardhat run scripts/deploy.ts --network localhost"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox-mocha-ethers": "4.0.0",
+    "@openzeppelin/contracts": "5.6.1",
+    "@types/chai": "5.2.3",
+    "@types/mocha": "10.0.10",
+    "@types/node": "26.6.3",
+    "chai": "6.2.2",
+    "ethers": "6.17.0",
+    "hardhat": "3.18.0",
+    "typescript": "5.9.3"
+  }
+}
