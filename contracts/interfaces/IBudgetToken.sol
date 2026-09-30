@@ -21,6 +21,8 @@ pragma solidity ^0.8.24;
 /// - increase: PRESIDENT 요청 서명 + AUDITOR 승인 서명, 같은 IncreaseRequest 에 (PRD §4.1 "개정 사유 입력과 감사 승인 필수")
 ///             reasonHash 0 금지(ReasonRequired). version 은 현재 예산 version 이어야 해서 한 서명은 한 번만 쓰인다.
 /// - reclaim : PRESIDENT 서명 1개. amount 는 현재 잔량과 같아야 한다(회장이 회수액을 확인하고 서명).
+///             reclaimCount 는 현재 회수 횟수여야 하고 회수마다 1 오르므로 한 서명은 한 번만 쓰인다(ReclaimCountMismatch).
+///             회수 횟수는 version(개정 번호, PRD §4.1 의 v1·v2)과 따로 센다. 회수가 개정 번호를 올리면 학생 화면과 결산 지표가 틀어진다.
 /// - EIP-712 도메인: name = "BudgetToken", version = "1".
 ///
 /// - spend / refund 호출자는 AccountingLedger 하나로 제한한다. 원장 주소는 배포자가 setLedger 로 한 번만 넣고 잠근다.
@@ -30,7 +32,7 @@ pragma solidity ^0.8.24;
 interface IBudgetToken {
     // ---------------------------------------------------------------- types
 
-    /// @dev 3 슬롯으로 묶인다: [category] [issued | spent] [term | expiresAt | version]
+    /// @dev 3 슬롯으로 묶인다: [category] [issued | spent] [term | expiresAt | version | reclaimCount]
     struct Budget {
         bytes32 category; // keccak256("행사비") 형태. 사람이 읽는 이름은 오프체인
         uint128 issued; // 현재 한도 (원). increase 로 오르고 reclaim 으로 spent 까지 내려간다
@@ -38,6 +40,7 @@ interface IBudgetToken {
         uint32 term; // 학기 코드 YYYYS. 0 금지
         uint64 expiresAt; // 집행 마감 (unix seconds)
         uint16 version; // 개정 횟수. issue 시 1, increase 마다 +1. 0 이면 존재하지 않음
+        uint16 reclaimCount; // 회수 횟수. issue 시 0, reclaim 마다 +1. 회수 서명 재사용 방지용
     }
 
     /// @dev typehash:
@@ -63,11 +66,12 @@ interface IBudgetToken {
     }
 
     /// @dev typehash:
-    ///   keccak256("ReclaimRequest(uint256 budgetId,uint256 amount,uint256 deadline)")
-    ///   amount 는 현재 잔량(remaining) 과 같아야 한다.
+    ///   keccak256("ReclaimRequest(uint256 budgetId,uint256 amount,uint256 reclaimCount,uint256 deadline)")
+    ///   amount 는 현재 잔량(remaining), reclaimCount 는 회수 "전" 의 현재 회수 횟수.
     struct ReclaimRequest {
         uint256 budgetId;
         uint256 amount;
+        uint256 reclaimCount;
         uint256 deadline;
     }
 
@@ -125,6 +129,8 @@ interface IBudgetToken {
     error VersionMismatch(uint256 budgetId, uint256 expected, uint256 actual);
     /// @dev ReclaimRequest.amount 가 현재 잔량과 다름
     error ReclaimAmountMismatch(uint256 budgetId, uint256 expected, uint256 actual);
+    /// @dev ReclaimRequest.reclaimCount 가 현재 회수 횟수와 다름 (이미 쓰인 서명)
+    error ReclaimCountMismatch(uint256 budgetId, uint256 expected, uint256 actual);
     error InvalidSignature();
     error SignatureExpired(uint256 deadline);
     /// @dev 서명자가 PRESIDENT 가 아님 (issue·reclaim 서명, increase 요청 서명)

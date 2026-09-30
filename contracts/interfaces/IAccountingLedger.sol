@@ -19,10 +19,13 @@ pragma solidity ^0.8.24;
 ///   SHA-256 32바이트를 bytes32 에 그대로 담는다 (keccak 아님). 영수증은 receipt_hash 로 이미 포함.
 ///   EIP-712 서명 digest 와는 별개 값 — meta_hash 는 서명 대상 struct 의 한 필드다.
 /// - meta_hash 에는 kind·term·budgetId·correctsId 가 없다. 그래서 승인자는 entryCommit 에도 서명한다:
-///     entryCommit = keccak256(abi.encode(bytes32 hash, int256 amount, uint8 kind, uint256 term,
+///     entryCommit = keccak256(abi.encode(bytes32 hash, int256 amount, uint8 kind, uint256 term, uint256 occurredAt,
 ///                                        uint256 budgetId, uint256 correctsId, address registrant))
-///   confirmEntry 는 저장된 항목으로 같은 값을 계산해 다르면 EntryCommitMismatch. entryCommitOf(id) 로 조회할 수 있다.
-///   승인자가 화면에서 본 예산·학기·종류·등록자가 체인에 올라간 값과 같다는 보증이다.
+///   confirmEntry·rejectEntry 는 저장된 항목으로 같은 값을 계산해 다르면 EntryCommitMismatch. entryCommitOf(id) 로 조회할 수 있다.
+///   승인·반려자가 화면에서 본 예산·학기·날짜·종류·등록자가 체인에 올라간 값과 같다는 보증이다.
+/// - hash 는 0 이 아니어야 한다(HashRequired). 학생 앱은 0 해시를 "아직 기록 안 됨" 으로 읽기 때문이다.
+/// - confirmEntry 안에서 BudgetToken 이 낸 InsufficientBudget·BudgetExpired 는 그대로 올라온다.
+///   백엔드가 원장 ABI 하나로 해석할 수 있게 아래에 같은 시그니처로 선언해 둔다 (원장이 직접 내지는 않는다).
 /// - 예산 초과 검사는 등록(recordPending) 시점, 예산 소모(BudgetToken.spend)는 확정(confirmEntry) 시점.
 ///   등록 시 초과·마감·미존재면 revert 하지 않고 BLOCKED 로 저장 + EntryBlocked emit (이벤트를 남기기 위함).
 ///   BLOCKED 항목은 confirmEntry 에서 거부되며 잔액 계산에서도 제외한다.
@@ -57,7 +60,7 @@ pragma solidity ^0.8.24;
 ///
 /// recordPending 검사 순서 (revert 는 위에서부터, BLOCKED 판정은 revert 검사가 모두 통과한 뒤):
 ///   1 SignatureExpired
-///   2 ReservedId(id == 0) → FieldOutOfRange(id) → EntryAlreadyExists
+///   2 ReservedId(id == 0) → FieldOutOfRange(id) → EntryAlreadyExists → HashRequired
 ///   3 TermRequired → FieldOutOfRange(term)
 ///   4 ZeroAmount → AmountOutOfRange
 ///   5 NegativeAmountWithoutCorrection → FieldOutOfRange(occurredAt·budgetId·correctsId)
@@ -75,6 +78,10 @@ pragma solidity ^0.8.24;
 ///   1 SignatureExpired  2 EntryNotFound  3 InvalidStatus  4 HashMismatch  5 EntryCommitMismatch
 ///   6 ReasonRequired / ReasonNotAllowed  7 InvalidSignature → NotApprover → SelfApproval
 ///   8 (음수 정정) CorrectionExceedsOriginal  9 BudgetToken.spend / refund 의 에러가 그대로 올라온다
+///
+/// rejectEntry 검사 순서:
+///   1 SignatureExpired  2 EntryNotFound  3 InvalidStatus  4 EntryCommitMismatch  5 ReasonRequired
+///   6 InvalidSignature → NotApprover → SelfApproval
 interface IAccountingLedger {
     // ---------------------------------------------------------------- types
 
@@ -146,9 +153,11 @@ interface IAccountingLedger {
     }
 
     /// @dev typehash:
-    ///   keccak256("RejectDecision(uint256 id,bytes32 reasonHash,uint256 deadline)")
+    ///   keccak256("RejectDecision(uint256 id,bytes32 entryCommit,bytes32 reasonHash,uint256 deadline)")
+    ///   entryCommit 은 ConfirmApproval 과 같은 식. 반려자가 무엇을 보고 반려했는지 서명으로 남긴다.
     struct RejectDecision {
         uint256 id;
+        bytes32 entryCommit;
         bytes32 reasonHash;
         uint256 deadline;
     }
@@ -227,8 +236,14 @@ interface IAccountingLedger {
     error CorrectionExceedsOriginal(uint256 id, uint256 correctsId, uint256 netAmount, uint256 requested);
     /// @dev 저장된 hash 와 confirm 에 넘긴 hash 불일치
     error HashMismatch(uint256 id, bytes32 expected, bytes32 actual);
-    /// @dev 저장된 항목으로 계산한 entryCommit 과 승인자가 서명한 entryCommit 불일치
+    /// @dev 저장된 항목으로 계산한 entryCommit 과 승인·반려자가 서명한 entryCommit 불일치
     error EntryCommitMismatch(uint256 id, bytes32 expected, bytes32 actual);
+    /// @dev hash == 0
+    error HashRequired(uint256 id);
+    /// @dev BudgetToken 이 confirmEntry 안에서 내는 에러. 원장은 직접 내지 않고, ABI 해석용으로만 선언한다.
+    error InsufficientBudget(uint256 budgetId, uint256 remaining, uint256 requested);
+    /// @dev BudgetToken 이 confirmEntry 안에서 내는 에러. 원장은 직접 내지 않고, ABI 해석용으로만 선언한다.
+    error BudgetExpired(uint256 budgetId, uint256 expiresAt);
     error InvalidSignature();
     error SignatureExpired(uint256 deadline);
     /// @dev 서명자가 등록 권한 롤(TREASURER)이 아님
