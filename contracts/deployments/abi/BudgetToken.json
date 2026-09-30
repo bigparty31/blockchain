@@ -97,6 +97,11 @@
     "type": "error"
   },
   {
+    "inputs": [],
+    "name": "CategoryRequired",
+    "type": "error"
+  },
+  {
     "inputs": [
       {
         "internalType": "uint256",

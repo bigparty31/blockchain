@@ -109,12 +109,18 @@ const abiDir = path.join(outDir, "abi");
 await mkdir(abiDir, { recursive: true });
 
 const abiPaths: Record<string, string> = {};
+const solcVersions = new Set<string>();
 for (const name of CONTRACTS) {
   const artifactPath = path.join(ROOT, "artifacts", "src", `${name}.sol`, `${name}.json`);
   const artifact = JSON.parse(await readFile(artifactPath, "utf8"));
   await writeFile(path.join(abiDir, `${name}.json`), JSON.stringify(artifact.abi, null, 2) + "\n", "utf8");
   abiPaths[name] = path.posix.join("abi", `${name}.json`); // deployments/ 기준
+  // solc 버전은 하드코딩하지 않고 이 아티팩트를 만든 build-info 에서 읽는다
+  const buildInfo = JSON.parse(await readFile(path.join(ROOT, "artifacts", "build-info", `${artifact.buildInfoId}.json`), "utf8"));
+  solcVersions.add(buildInfo.solcVersion);
 }
+assert(solcVersions.size === 1, `컨트랙트마다 solc 버전이 다르다: ${[...solcVersions].join(", ")}`);
+const solcVersion = [...solcVersions][0];
 
 // ---------------------------------------------------------------- 기록
 const latest = await ethers.provider.getBlock("latest");
@@ -122,7 +128,7 @@ const record = {
   network: networkName,
   chainId: Number(chainId),
   deployedAt: new Date((latest?.timestamp ?? 0) * 1000).toISOString(),
-  solidity: "0.8.28",
+  solidity: solcVersion,
   pathBase: "abi 경로는 이 파일이 있는 폴더(contracts/deployments/) 기준",
   contracts: Object.fromEntries(
     CONTRACTS.map((name) => [name, { address: d.addresses[name], deployBlock: d.blocks[name], abi: abiPaths[name] }]),

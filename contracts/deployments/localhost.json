@@ -1,7 +1,7 @@
 {
   "network": "localhost",
   "chainId": 31337,
-  "deployedAt": "2026-09-30T01:49:45.000Z",
+  "deployedAt": "2026-09-30T02:25:33.000Z",
   "solidity": "0.8.28",
   "pathBase": "abi 경로는 이 파일이 있는 폴더(contracts/deployments/) 기준",
   "contracts": {
