@@ -422,13 +422,32 @@ describe("RoleManager", function () {
         .withArgs(f.auditor2.address);
     });
 
-    it("대기 중 회장이 이미 바뀌면 실행은 RoleNotGranted", async function () {
+    it("회장이 일반 교체로 바뀌면 대기 복구가 지워진다. 옛 회장이 돌아와도 되살아나지 않는다 (code-review)", async function () {
+      const f = await loadFixture(deployFixture);
+      const p = await proposeRecovery(f, { from: f.president.address, to: f.extra1.address });
+      await p.tx;
+      expect((await f.roleManager.pendingRecovery()).executableAt).to.not.equal(0n);
+
+      // 회장이 취소 대신 일반 교체로 자리를 넘긴다
+      await (await changeRole(f, { role: ROLE.PRESIDENT, from: f.president.address, to: f.extra2.address }, f.president, f.auditor)).tx;
+      expect((await f.roleManager.pendingRecovery()).executableAt).to.equal(0n);
+
+      // 옛 회장이 다시 회장이 되고 72시간이 지나도 옛 제안은 실행되지 않는다
+      await (await changeRole(f, { role: ROLE.PRESIDENT, from: f.extra2.address, to: f.president.address }, f.extra2, f.auditor)).tx;
+      await time.increase(RECOVERY_DELAY);
+      await expect(f.roleManager.executePresidentRecovery())
+        .to.be.revertedWithCustomError(f.roleManager, "NoPendingRecovery")
+        .withArgs(0n);
+      expect(await f.roleManager.hasRole(ROLE.PRESIDENT, f.president.address)).to.equal(true);
+      expect(await f.roleManager.hasRole(ROLE.PRESIDENT, f.extra1.address)).to.equal(false);
+    });
+
+    it("복구 실행 뒤에도 대기 복구는 남지 않는다 (새 회장을 겨냥한 옛 제안 없음)", async function () {
       const f = await loadFixture(deployFixture);
       await proposeAndWait(f, f.extra1.address);
-      await (await changeRole(f, { role: ROLE.PRESIDENT, from: f.president.address, to: f.extra2.address }, f.president, f.auditor)).tx;
-      await expect(f.roleManager.executePresidentRecovery())
-        .to.be.revertedWithCustomError(f.roleManager, "RoleNotGranted")
-        .withArgs(ROLE.PRESIDENT, f.president.address);
+      await f.roleManager.executePresidentRecovery();
+      expect((await f.roleManager.pendingRecovery()).executableAt).to.equal(0n);
+      await expect(f.roleManager.executePresidentRecovery()).to.be.revertedWithCustomError(f.roleManager, "NoPendingRecovery");
     });
 
     it("대기 중 to 가 임원이 되면 실행은 AlreadyOfficer", async function () {

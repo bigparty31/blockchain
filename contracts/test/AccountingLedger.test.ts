@@ -339,7 +339,7 @@ describe("AccountingLedger", function () {
       const { tx } = await record(f, { id: 1n, amount: 1_000_001n });
       await expect(gas("AccountingLedger.recordPending (EXPENSE → BLOCKED)", tx))
         .to.emit(f.ledger, "EntryBlocked")
-        .withArgs(1n, metaHash("1"), 1_000_001n, TERM, 1n, BlockReason.BUDGET_EXCEEDED, f.treasurer.address)
+        .withArgs(1n, metaHash("1"), 1_000_001n, TERM, 1n, 0n, BlockReason.BUDGET_EXCEEDED, f.treasurer.address)
         .and.not.to.emit(f.ledger, "EntryPending");
       expect(await f.ledger.statusOf(1n)).to.equal(Status.BLOCKED);
       expect((await f.ledger.getEntry(1n)).registrant).to.equal(f.treasurer.address);
@@ -362,7 +362,7 @@ describe("AccountingLedger", function () {
       await time.increaseTo(f.expiresAt + 1n);
       await expect((await record(f, { id: 1n, amount: 1_000n })).tx)
         .to.emit(f.ledger, "EntryBlocked")
-        .withArgs(1n, metaHash("1"), 1_000n, TERM, 1n, BlockReason.BUDGET_EXPIRED, f.treasurer.address);
+        .withArgs(1n, metaHash("1"), 1_000n, TERM, 1n, 0n, BlockReason.BUDGET_EXPIRED, f.treasurer.address);
       expect(await f.ledger.statusOf(1n)).to.equal(Status.BLOCKED);
     });
 
@@ -370,10 +370,10 @@ describe("AccountingLedger", function () {
       const f = await loadFixture(budgetFixture);
       await expect((await record(f, { id: 1n, amount: 1_000n, budgetId: 99n })).tx)
         .to.emit(f.ledger, "EntryBlocked")
-        .withArgs(1n, metaHash("1"), 1_000n, TERM, 99n, BlockReason.BUDGET_NOT_FOUND, f.treasurer.address);
+        .withArgs(1n, metaHash("1"), 1_000n, TERM, 99n, 0n, BlockReason.BUDGET_NOT_FOUND, f.treasurer.address);
       await expect((await record(f, { id: 2n, amount: 1_000n, budgetId: 0n })).tx)
         .to.emit(f.ledger, "EntryBlocked")
-        .withArgs(2n, metaHash("2"), 1_000n, TERM, 0n, BlockReason.BUDGET_NOT_FOUND, f.treasurer.address);
+        .withArgs(2n, metaHash("2"), 1_000n, TERM, 0n, 0n, BlockReason.BUDGET_NOT_FOUND, f.treasurer.address);
     });
 
     it("BLOCKED 항목은 확정도 반려도 InvalidStatus(BLOCKED, PENDING)", async function () {
@@ -786,7 +786,7 @@ describe("AccountingLedger", function () {
       await recordAndConfirm(f, { id: 1n, amount: 900_000n }); // 잔량 100k
       await expect((await record(f, { id: 2n, amount: 100_001n, correctsId: 1n })).tx)
         .to.emit(f.ledger, "EntryBlocked")
-        .withArgs(2n, metaHash("2"), 100_001n, TERM, 1n, BlockReason.BUDGET_EXCEEDED, f.treasurer.address);
+        .withArgs(2n, metaHash("2"), 100_001n, TERM, 1n, 1n, BlockReason.BUDGET_EXCEEDED, f.treasurer.address); // correctsId = 1
 
       await (await record(f, { id: 3n, amount: 100_000n, correctsId: 1n })).tx; // PENDING
       await (await record(f, { id: 4n, amount: 50_000n })).tx; // 일반 지출도 PENDING

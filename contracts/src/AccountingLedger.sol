@@ -91,7 +91,7 @@ contract AccountingLedger is IAccountingLedger, EIP712 {
         });
 
         if (blocked) {
-            emit EntryBlocked(r.id, r.hash, uint256(r.amount), r.term, r.budgetId, uint8(reason), registrant);
+            emit EntryBlocked(r.id, r.hash, uint256(r.amount), r.term, r.budgetId, r.correctsId, uint8(reason), registrant);
         } else {
             emit EntryPending(r.id, r.hash, r.amount, uint8(r.kind), r.term, r.budgetId, r.correctsId, registrant);
         }
@@ -116,10 +116,11 @@ contract AccountingLedger is IAccountingLedger, EIP712 {
         _requireApprover(approver);
         if (approver == e.registrant) revert SelfApproval(a.id, approver);
 
-        _settle(a.id, e);
-
+        // 상태를 먼저 쓰고 외부(BudgetToken)를 부른다. BudgetToken 이 revert 하면 전체가 되돌려진다.
         e.status = Status.CONFIRMED;
         e.approver = approver;
+
+        _settle(a.id, e);
 
         emit EntryConfirmed(
             a.id,
@@ -250,9 +251,11 @@ contract AccountingLedger is IAccountingLedger, EIP712 {
         }
     }
 
-    /// @dev recordPending 9~10 단계. 지출만. 음수 정정은 10 을 건너뛴다 (refund 는 마감·잔량과 무관).
+    /// @dev recordPending 9~10 단계. 지출만. 음수 정정은 둘 다 건너뛴다:
+    ///      refund 는 마감·잔량과 무관하고, term 은 _checkCorrection 이 원본과 같음을 이미 확인했다
+    ///      (원본은 등록 때 자기 예산의 term 과 대조됐고 budgetId 도 원본과 같다). 예산 조회 한 번을 아낀다.
     function _judgeBudget(RecordRequest calldata r) private view returns (bool blocked, BlockReason reason) {
-        if (r.kind != Kind.EXPENSE) return (false, reason);
+        if (r.kind != Kind.EXPENSE || r.amount < 0) return (false, reason);
         IBudgetToken.Budget memory b; // budgetId 0 이면 version 0 = 없음 (호출하지 않는다)
         if (r.budgetId != 0) b = _budgetToken.getBudget(r.budgetId);
         if (b.version != 0) {

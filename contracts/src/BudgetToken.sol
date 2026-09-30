@@ -94,6 +94,7 @@ contract BudgetToken is IBudgetToken, EIP712 {
         if (_budgets[r.budgetId].version != 0) revert BudgetAlreadyExists(r.budgetId);
         if (r.term == 0) revert TermRequired();
         if (r.term > type(uint32).max) revert FieldOutOfRange(r.term);
+        if (r.category == bytes32(0)) revert CategoryRequired();
         if (r.amount == 0) revert ZeroAmount();
         if (r.amount > MAX_AMOUNT) revert AmountOutOfRange(r.amount);
         if (r.expiresAt > type(uint64).max) revert FieldOutOfRange(r.expiresAt);

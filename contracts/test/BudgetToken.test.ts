@@ -170,7 +170,7 @@ describe("BudgetToken", function () {
         .withArgs(TERM, CATEGORY.행사비, 1n);
     });
 
-    it("입력 검사: ReservedId / BudgetAlreadyExists / TermRequired / ZeroAmount / AmountOutOfRange / BudgetExpired / FieldOutOfRange", async function () {
+    it("입력 검사: ReservedId / BudgetAlreadyExists / TermRequired / CategoryRequired / ZeroAmount / AmountOutOfRange / BudgetExpired / FieldOutOfRange", async function () {
       const f = await loadFixture(unitFixture);
       const c = CATEGORY.운영비;
       const ok = { budgetId: 2n, category: c, amount: 1n, expiresAt: f.expiresAt };
@@ -181,6 +181,11 @@ describe("BudgetToken", function () {
         .to.be.revertedWithCustomError(f.budgetToken, "BudgetAlreadyExists")
         .withArgs(1n);
       await expect((await issueBudget(f, { ...ok, term: 0n })).tx).to.be.revertedWithCustomError(f.budgetToken, "TermRequired");
+      await expect((await issueBudget(f, { ...ok, category: ZERO32 })).tx).to.be.revertedWithCustomError(
+        f.budgetToken,
+        "CategoryRequired",
+      );
+      expect(await f.budgetToken.budgetIdOf(TERM, ZERO32)).to.equal(0n);
       await expect((await issueBudget(f, { ...ok, amount: 0n })).tx).to.be.revertedWithCustomError(f.budgetToken, "ZeroAmount");
       await expect((await issueBudget(f, { ...ok, amount: MAX_AMOUNT + 1n })).tx)
         .to.be.revertedWithCustomError(f.budgetToken, "AmountOutOfRange")

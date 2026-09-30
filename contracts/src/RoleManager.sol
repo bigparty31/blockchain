@@ -130,10 +130,8 @@ contract RoleManager is IRoleManager, EIP712 {
         if (_roleOf[p.auditorB] != AUDITOR) revert NotAuditor(p.auditorB);
         _requireNoRole(PRESIDENT, p.to);
 
-        delete _pending;
-        uint256 used = _nonce;
-        _useNonce(used);
-        _apply(used, PRESIDENT, p.from, p.to, p.auditorA, p.auditorB);
+        uint256 used = _nonce++;
+        _apply(used, PRESIDENT, p.from, p.to, p.auditorA, p.auditorB); // _apply 가 _pending 도 지운다
     }
 
     // ------------------------------------------------------------------ views
@@ -193,6 +191,7 @@ contract RoleManager is IRoleManager, EIP712 {
     }
 
     /// @dev 검사를 모두 통과한 변경을 반영한다. usedNonce 는 이 변경이 소비한 nonce.
+    ///      회장이 바뀌면 대기 중인 복구를 지운다. 옛 회장을 겨냥한 제안이 그 사람이 돌아왔을 때 되살아나지 않게.
     function _apply(
         uint256 usedNonce,
         bytes32 role,
@@ -201,6 +200,7 @@ contract RoleManager is IRoleManager, EIP712 {
         address proposer,
         address approver
     ) private {
+        if (role == PRESIDENT && _pending.executableAt != 0) delete _pending;
         if (from != address(0)) {
             delete _roleOf[from];
             _holderCount[role] -= 1;
