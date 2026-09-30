@@ -179,7 +179,7 @@ meta_hash  0xebd26de486f8caba6e4d24662acd1cc671be1c9c60cfd3048da527c9a351ca73
 
 | 해시가 덮는 것 | 해시가 덮지 않는 것 |
 | --- | --- |
-| `amount`, `counterparty`, `purpose`, `occurred_at`, `receipt_hash` | `kind`, `budget_id`, `corrects_entry_id`, `term_id`, `status` |
+| `amount`, `counterparty`, `purpose`, `occurred_at`, `receipt_hash` | `kind`, `budget_id`, `corrects_entry_id`, `term`(학기 코드), `status` |
 
 실측이다. 아래는 `amount=35000`, `counterparty=한결문구`, `purpose=명찰 구매`, `occurred_at=1788793200`, `receipt_hash=NULL` 인 항목이다. `kind`를 EXPENSE에서 INCOME으로 바꿔도, `budget_id`를 2에서 7로 바꿔도 `meta_hash`는 **한 글자도 변하지 않는다.**
 
@@ -191,7 +191,9 @@ budget_id=7 로 변조                      -> d8e7c7ae0471a319b0c7546f…  (불
 
 그러므로 **검증 배지(S4)가 해시만 비교하면 수입·지출 뒤바꾸기와 예산 항목 옮기기를 탐지하지 못한다.**
 
-다행히 이 값들은 **체인에서 직접 읽을 수 있다.** 읽는 방법이 둘이고 쓰임이 다르다.
+다행히 이 값들은 **체인에서 직접 읽을 수 있다.** 게다가 승인·반려자는 이 값들을 묶은 `entryCommit`에도 서명하므로(`docs/CONTRACTS.md` "공통 규칙"), 체인에 올라간 `kind`·`term`·`budgetId`·`correctsId`·`occurredAt`·등록자는 승인자가 화면에서 본 값과 같다는 보증도 있다. 식은 `backend/app/chain/commit.py`, 체인 값은 원장의 `entryCommitOf(id)`로 조회한다.
+
+읽는 방법이 둘이고 쓰임이 다르다.
 
 | 방법 | 쓰는 곳 | 이유 |
 | --- | --- | --- |
@@ -212,8 +214,10 @@ budget_id=7 로 변조                      -> d8e7c7ae0471a319b0c7546f…  (불
 `getEntry(id)`가 돌려주는 `Entry`에 **위 예외를 뺀 나머지**가 모두 들어 있다.
 
 ```
-Entry { hash, amount, kind, status, occurredAt, budgetId, correctsId, registrant, approver }
+Entry { hash, amount, budgetId, correctsId, registrant, occurredAt, term, approver, kind, status }
 ```
+
+순서는 저장 배치(4슬롯)를 따른다. PR #13에서 `term`이 추가되고 순서가 바뀌었으니 **튜플을 위치로 읽지 말고 이름으로 읽는다** (ABI의 필드 이름). 없는 id는 0으로 채운 구조체(`registrant == 0`)라 `exists(id)`를 먼저 본다. `statusOf(id)`는 없는 id면 `EntryNotFound`로 revert한다.
 
 **검증 절차**
 
@@ -230,10 +234,11 @@ Entry { hash, amount, kind, status, occurredAt, budgetId, correctsId, registrant
 | `registrant` | `created_by` | **주소 ↔ user id 매핑 필요** (아래) |
 | `approver` | `approved_by` | 주소 ↔ user id 매핑. 미처리면 `address(0)` ↔ `NULL`. **`REJECTED`는 비교 제외** (아래) |
 | `occurredAt` | `occurred_at` | 해시에도 들어가지만 따로 봐도 된다 |
+| `term` | 학기 코드 (`term_id` → `Term`의 학기 코드) | **DB의 `Term.id`가 아니라 학기 코드 `YYYYS`** (§2.3) |
 
 3. 영수증이 있으면 **내려받은 바이트로 `fileHash`를 재계산해 `receipt_hash`와 비교**한다 (§4)
 
-`term_id`는 이 목록에 없다. 지출은 `budgetId`를 거쳐 확인하고, 수입은 확인할 방법이 없다 (§2.3).
+`term`도 `meta_hash`에 없어서 반드시 직접 비교한다. 빠뜨리면 학기를 바꿔 치기한 항목이 "완전 검증"으로 표시된다 (§2.3).
 
 > 3번을 빠뜨리면 **영수증만 바꿔치기한 위조를 못 잡는다.** `meta_hash`는 `receipt_hash`(파일의 해시)를 덮을 뿐, 그 해시가 실제로 내려온 파일의 것인지는 보증하지 않는다. 학생 앱이 영수증을 열어볼 때 함께 확인하면 된다.
 
@@ -270,20 +275,17 @@ Entry { hash, amount, kind, status, occurredAt, budgetId, correctsId, registrant
 | `REJECTED` | 가능 | 반려는 `PENDING`에서만 가능하므로 `Entry`가 남아 있다 |
 | `BLOCKED` | 가능 | 예산 검사에 걸려도 `Entry`는 저장된다 (`IAccountingLedger`: "revert 하지 않고 BLOCKED 로 저장") |
 
-이벤트만 보면 `EntryRejected`·`EntryBlocked`에 `hash`가 없어 검증이 안 되는 것처럼 보인다. **`getEntry(id)`를 쓰면 네 상태 모두 검증된다.**
+이벤트만 보면 `EntryRejected`에 `hash`가 없어 검증이 안 되는 것처럼 보인다(`EntryBlocked`에는 PR #13부터 `hash`·`term`·등록자가 있다). **`getEntry(id)`를 쓰면 네 상태 모두 검증된다.**
 
 **승인 전 수정은 새 id로 다시 등록된다.** 같은 내용의 항목이 여러 건 남을 수 있으므로, 각 항목은 **자기 id의 체인 값과만** 비교한다. 이전 id의 기록이 체인에 남아 있는 것은 정상이다 (PRD T4 "이전 기록 잔존").
 
-### 2.3 `term` — 지출만 검증된다
+### 2.3 `term` — 체인에 있다 (PR #13)
 
-`term`은 `Entry`에도 이벤트에도 없다. 다만 지출은 예산을 거쳐 도달할 수 있다.
+`term`은 `Entry`와 `EntryPending`·`EntryConfirmed`·`EntryBlocked`에 들어 있다. **수입·지출 모두 `getEntry(id).term`으로 직접 검증한다.**
 
-```
-EXPENSE   entry.budgetId → getBudget(budgetId).term      검증 가능
-INCOME    budgetId = 0 이라 거쳐 갈 예산이 없다            검증 불가
-```
-
-**수입 항목의 학기만 DB 값을 믿는 수밖에 없다.** 학기별 총수입(S1)이 여기 걸린다. 컨트랙트에 `term` 추가를 요청해 둔 상태다 (§8).
+- **값은 학기 코드 `YYYYS`다.** `20261` = 2026년 1학기, `20262` = 2학기, `3`·`4`는 여름·겨울 계절학기. **DB의 `Term.id`(1, 2, …)가 아니다.** 비교하기 전에 `term_id`를 `Term`의 학기 코드로 바꾼다
+- 컨트랙트가 추가로 강제하는 것 — 지출의 `term`은 예산의 `term`과 같고(`TermMismatch`), 정정의 `term`은 원본의 `term`과 같다(`TermMismatch`). 그래서 검증기가 `getBudget(budgetId).term`을 따로 볼 필요는 없다
+- 학기별 합계(S1 총수입 등)는 `EntryConfirmed.term`으로 나눈다
 
 ---
 
@@ -505,6 +507,8 @@ Python과 Node로 독립 구현해 위 샘플 3건이 동일하게 나오는 것
 - `Snapshot` 테이블(PRD §8)에 업로드 파일 해시를 담을 컬럼이 없다
 - **`0x` 접두사 표기가 팀 안에서 엇갈린다.** 병합된 목업 스키마(`backend/app/schemas/entry.py`)는 `0x` 포함인데, 닫힌 PR #5의 API 명세 초안은 `0x` 없이 적혀 있었다. 이 문서 기준(`0x` 포함)으로 김경윤과 정렬 필요
 - 검증용 원본 필드를 내려주는 API(`GET /entries/{id}/verify` 등)가 아직 없다. §2의 이벤트 필드 비교까지 가능한 응답 형태가 필요하다
-- **수입 항목의 `term`을 검증할 방법이 없다.** 지출은 `budgetId → getBudget().term`으로 도달하지만 수입은 `budgetId = 0`이라 거쳐 갈 예산이 없다(§2.3). `Entry`나 이벤트에 `term`을 넣어달라고 장석연에게 요청한다. 이벤트는 배포 후 바꿀 수 없으므로 구현 착수 전에 정리돼야 한다 (PR #3 리뷰로 이미 요청)
+- ~~수입 항목의 `term`을 검증할 방법이 없다~~ → **해결** (PR #13). `Entry`와 이벤트에 `term`이 들어갔다(§2.3)
+- **`Term` 테이블에 학기 코드(`YYYYS`) 컬럼이 없다.** 체인에는 학기 코드를 넘기고 DB에는 `term_id`만 있어서, 비교하려면 대응표가 필요하다. 김경윤 ERD 반영 요청
+- **학생 앱의 단건 검증이 `term`을 비교하지 않는다.** 온체인 모델(`app/lib/models/onchain_entry_model.dart`)과 `GET /entries/{id}/onchain` 응답에 `term`이 없다. 장정아에게 요청
 - **ID 채번을 1부터 시작해야 한다.** `0`을 "없음"으로 예약하기 때문이다(§2.1). 김경윤과 확인
 - **`Entry`에 `rejected_by` 컬럼이 없다.** 컨트랙트의 `approver`는 확정자와 반려자를 겸하는데 DB에는 확정자만 있다. 그래서 `REJECTED` 항목의 서명자를 대조할 수 없다(§2). 김경윤 ERD 반영 요청
