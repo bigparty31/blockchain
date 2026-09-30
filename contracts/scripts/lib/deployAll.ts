@@ -1,12 +1,12 @@
 /**
  * 컨트랙트 4단계 배포 순서를 한 곳에 둔다. 배포 스크립트와 테스트 픽스처가 같은 함수를 쓴다.
  *
- *   RoleManager(president, treasurer, auditor)
+ *   RoleManager(president, treasurer, auditor1, auditor2)
  *   → BudgetToken(roleManager)
  *   → AccountingLedger(roleManager, budgetToken)
  *   → BudgetToken.setLedger(ledger)   // 배포자가 1회 호출, 이후 잠김
  *
- * 세 임원은 생성자 인자로 들어가므로 별도 롤 부여 단계가 없다.
+ * 네 임원(회장·총무·감사 2명)은 생성자 인자로 들어가므로 별도 롤 부여 단계가 없다.
  * 배포자는 setLedger 를 부른 뒤 어떤 권한도 남지 않는다 (docs/CONTRACTS.md "생성자·배포 순서").
  *
  * ledgerContract 로 원장 자리에 다른 컨트랙트(테스트의 MockLedger)를 넣을 수 있다. 생성자 인자는 같다.
@@ -15,7 +15,8 @@
 export interface Officers {
   president: string;
   treasurer: string;
-  auditor: string;
+  auditor1: string;
+  auditor2: string;
 }
 
 export interface DeployOptions {
@@ -47,7 +48,7 @@ export async function deployAll(
 
   const roleManager = await ethers.deployContract(
     "RoleManager",
-    [officers.president, officers.treasurer, officers.auditor],
+    [officers.president, officers.treasurer, officers.auditor1, officers.auditor2],
     signer,
   );
   await roleManager.waitForDeployment();

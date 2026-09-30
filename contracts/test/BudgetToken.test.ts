@@ -73,8 +73,8 @@ describe("BudgetToken", function () {
     });
 
     it("배포자가 아니면 Unauthorized, 0 주소는 ZeroAddress, 다른 BudgetToken 을 가리키는 원장은 LedgerMismatch", async function () {
-      const [deployer, p, t, a, outsider] = await ethers.getSigners();
-      const rm = await ethers.deployContract("RoleManager", [p.address, t.address, a.address], deployer);
+      const [deployer, p, t, a, outsider, a2] = await ethers.getSigners();
+      const rm = await ethers.deployContract("RoleManager", [p.address, t.address, a.address, a2.address], deployer);
       const bt = await ethers.deployContract("BudgetToken", [await rm.getAddress()], deployer);
       const otherBt = await ethers.deployContract("BudgetToken", [await rm.getAddress()], deployer);
       const wrong = await ethers.deployContract("MockLedger", [await rm.getAddress(), await otherBt.getAddress()], deployer);
@@ -290,10 +290,20 @@ describe("BudgetToken", function () {
       );
     });
 
-    it("감액 함수는 ABI 에 없다", async function () {
+    it("감액 함수는 ABI 에 없다 (이름마다 따로 검사 — 2차 리뷰 N8)", async function () {
       const f = await loadFixture(unitFixture);
-      const names = f.budgetToken.interface.fragments.filter((x: any) => x.type === "function").map((x: any) => x.name);
-      expect(names).to.not.include.members(["decrease", "reduce", "setIssued", "setAllocated"]);
+      const names: string[] = f.budgetToken.interface.fragments
+        .filter((x: any) => x.type === "function")
+        .map((x: any) => x.name);
+      for (const forbidden of ["decrease", "reduce", "setIssued", "setAllocated", "setSpent", "setBudget"]) {
+        expect(names, forbidden).to.not.include(forbidden);
+      }
+      // 한도를 바꾸는 상태 변경 함수는 increase 와 reclaim(마감 뒤 잔량 회수)뿐이다
+      const mutating = f.budgetToken.interface.fragments
+        .filter((x: any) => x.type === "function" && x.stateMutability !== "view" && x.stateMutability !== "pure")
+        .map((x: any) => x.name)
+        .sort();
+      expect(mutating).to.deep.equal(["increase", "issue", "reclaim", "refund", "setLedger", "spend"]);
     });
   });
 
@@ -446,6 +456,35 @@ describe("BudgetToken", function () {
         f.budgetToken,
         "ZeroAmount",
       );
+    });
+
+    it("같은 금액 환불 뒤 옛 회수 서명을 다시 제출하면 ReclaimCountMismatch (2차 리뷰 N3)", async function () {
+      const f = await loadFixture(unitFixture);
+      await spend(f, 60_000n);
+      await time.increaseTo(f.expiresAt + 1n);
+      const first = await reclaimBudget(f, { budgetId: 1n }); // 40k 회수, reclaimCount 0
+      await first.tx;
+      await refund(f, 40_000n); // 잔량이 다시 40k — 금액 조건만으로는 옛 서명이 통과했다
+      expect(await f.budgetToken.remaining(1n)).to.equal(40_000n);
+      await expect(f.budgetToken.connect(f.outsider).reclaim(first.req, first.sig))
+        .to.be.revertedWithCustomError(f.budgetToken, "ReclaimCountMismatch")
+        .withArgs(1n, 1n, 0n);
+      // 회장이 새로 서명하면 된다
+      await expect((await reclaimBudget(f, { budgetId: 1n })).tx)
+        .to.emit(f.budgetToken, "BudgetReclaimed")
+        .withArgs(1n, 40_000n, f.president.address);
+    });
+
+    it("회수는 개정 번호(version)를 바꾸지 않고 reclaimCount 만 올린다", async function () {
+      const f = await loadFixture(unitFixture);
+      await spend(f, 10_000n);
+      await time.increaseTo(f.expiresAt + 1n);
+      await (await reclaimBudget(f, { budgetId: 1n })).tx;
+      await refund(f, 5_000n);
+      await (await reclaimBudget(f, { budgetId: 1n })).tx;
+      const b = await f.budgetToken.getBudget(1n);
+      expect(b.version).to.equal(1n);
+      expect(b.reclaimCount).to.equal(2n);
     });
 
     it("회수 금액이 현재 잔량과 다르면 ReclaimAmountMismatch", async function () {

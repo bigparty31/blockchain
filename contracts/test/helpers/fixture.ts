@@ -56,14 +56,15 @@ export function computeEntryCommit(e: {
   amount: bigint;
   kind: number | bigint;
   term: bigint;
+  occurredAt: bigint;
   budgetId: bigint;
   correctsId: bigint;
   registrant: string;
 }): string {
   return ethers.keccak256(
     ethers.AbiCoder.defaultAbiCoder().encode(
-      ["bytes32", "int256", "uint8", "uint256", "uint256", "uint256", "address"],
-      [e.hash, e.amount, e.kind, e.term, e.budgetId, e.correctsId, e.registrant],
+      ["bytes32", "int256", "uint8", "uint256", "uint256", "uint256", "uint256", "address"],
+      [e.hash, e.amount, e.kind, e.term, e.occurredAt, e.budgetId, e.correctsId, e.registrant],
     ),
   );
 }
@@ -71,16 +72,23 @@ export function computeEntryCommit(e: {
 // ---------------------------------------------------------------- 픽스처
 
 export async function deployFixture(opts: DeployOptions = {}) {
-  const [deployer, president, treasurer, auditor, relayer, outsider, extra1, extra2] = await ethers.getSigners();
+  // 순서는 scripts/deploy.ts 의 계정 배치와 같다: [4] 릴레이어, [5] 두 번째 감사
+  const [deployer, president, treasurer, auditor, relayer, auditor2, outsider, extra1, extra2] =
+    await ethers.getSigners();
 
   const d = await deployAll(
     ethers,
-    { president: president.address, treasurer: treasurer.address, auditor: auditor.address },
+    {
+      president: president.address,
+      treasurer: treasurer.address,
+      auditor1: auditor.address,
+      auditor2: auditor2.address,
+    },
     deployer,
     opts,
   );
 
-  return { ...d, deployer, president, treasurer, auditor, relayer, outsider, extra1, extra2 };
+  return { ...d, deployer, president, treasurer, auditor, auditor2, relayer, outsider, extra1, extra2 };
 }
 
 export type Fixture = Awaited<ReturnType<typeof deployFixture>>;
@@ -155,7 +163,55 @@ export async function changeRole(f: Fixture, o: RoleChangeOpts, proposer: any, a
   const change = await makeRoleChange(f.roleManager, o);
   const ps = await signRoleChange(proposer, f.roleManager, change);
   const as = await signRoleChange(approver, f.roleManager, change);
-  return { change, tx: f.roleManager.connect(f.relayer).changeRole(change, ps, as) };
+  return { change, ps, as, tx: f.roleManager.connect(f.relayer).changeRole(change, ps, as) };
+}
+
+export const RECOVERY_TYPES = {
+  PresidentRecovery: [
+    { name: "from", type: "address" },
+    { name: "to", type: "address" },
+    { name: "nonce", type: "uint256" },
+    { name: "deadline", type: "uint256" },
+  ],
+  RecoveryCancel: [
+    { name: "recoveryId", type: "uint256" },
+    { name: "deadline", type: "uint256" },
+  ],
+} as const;
+
+export const RECOVERY_DELAY = 72n * 3600n;
+
+export interface RecoveryOpts {
+  from: string;
+  to: string;
+  nonce?: bigint;
+  deadline?: bigint;
+}
+
+/** 감사 2명 서명으로 회장 복구 제안. 릴레이어가 보낸다. recoveryId = 제안 시점 nonce. */
+export async function proposeRecovery(f: Fixture, o: RecoveryOpts, auditorA: any = f.auditor, auditorB: any = f.auditor2) {
+  const recovery = {
+    from: o.from,
+    to: o.to,
+    nonce: o.nonce ?? (await f.roleManager.nonce()),
+    deadline: o.deadline ?? (await deadlineIn()),
+  };
+  const sa = await sign(auditorA, f.roleManager, "RoleManager", "PresidentRecovery", RECOVERY_TYPES.PresidentRecovery, recovery);
+  const sb = await sign(auditorB, f.roleManager, "RoleManager", "PresidentRecovery", RECOVERY_TYPES.PresidentRecovery, recovery);
+  return {
+    recovery,
+    recoveryId: recovery.nonce,
+    sa,
+    sb,
+    tx: f.roleManager.connect(f.relayer).proposePresidentRecovery(recovery, sa, sb),
+  };
+}
+
+/** 현재 회장(기본) 서명으로 복구 취소. */
+export async function cancelRecovery(f: Fixture, recoveryId: bigint, signer: any = f.president, deadline?: bigint) {
+  const cancel = { recoveryId, deadline: deadline ?? (await deadlineIn()) };
+  const sig = await sign(signer, f.roleManager, "RoleManager", "RecoveryCancel", RECOVERY_TYPES.RecoveryCancel, cancel);
+  return { cancel, tx: f.roleManager.connect(f.relayer).cancelPresidentRecovery(cancel, sig) };
 }
 
 // ---------------------------------------------------------------- BudgetToken
@@ -179,6 +235,7 @@ export const BUDGET_TYPES = {
   ReclaimRequest: [
     { name: "budgetId", type: "uint256" },
     { name: "amount", type: "uint256" },
+    { name: "reclaimCount", type: "uint256" },
     { name: "deadline", type: "uint256" },
   ],
 } as const;
@@ -244,6 +301,7 @@ export async function increaseBudget(
 export interface ReclaimOpts {
   budgetId: bigint;
   amount?: bigint;
+  reclaimCount?: bigint;
   deadline?: bigint;
 }
 
@@ -251,11 +309,12 @@ export async function signReclaim(signer: any, bt: any, req: any) {
   return sign(signer, bt, "BudgetToken", "ReclaimRequest", BUDGET_TYPES.ReclaimRequest, req);
 }
 
-/** 회장 서명(기본)으로 회수. amount 기본값은 현재 잔량. */
+/** 회장 서명(기본)으로 회수. amount 기본값은 현재 잔량, reclaimCount 기본값은 현재 회수 횟수. */
 export async function reclaimBudget(f: Fixture, o: ReclaimOpts, signer: any = f.president) {
   const req = {
     budgetId: o.budgetId,
     amount: o.amount ?? (await f.budgetToken.remaining(o.budgetId)),
+    reclaimCount: o.reclaimCount ?? BigInt((await f.budgetToken.getBudget(o.budgetId)).reclaimCount),
     deadline: o.deadline ?? (await deadlineIn()),
   };
   const sig = await signReclaim(signer, f.budgetToken, req);
@@ -286,6 +345,7 @@ export const LEDGER_TYPES = {
   ],
   RejectDecision: [
     { name: "id", type: "uint256" },
+    { name: "entryCommit", type: "bytes32" },
     { name: "reasonHash", type: "bytes32" },
     { name: "deadline", type: "uint256" },
   ],
@@ -357,6 +417,7 @@ export async function entryCommitFromChain(f: Fixture, id: bigint): Promise<stri
     amount: e.amount,
     kind: e.kind,
     term: e.term,
+    occurredAt: e.occurredAt,
     budgetId: e.budgetId,
     correctsId: e.correctsId,
     registrant: e.registrant,
@@ -392,20 +453,22 @@ export async function confirm(f: Fixture, o: ConfirmOpts, signer: any = f.audito
 
 export interface RejectOpts {
   id: bigint;
+  entryCommit?: string;
   reasonHash?: string;
   deadline?: bigint;
 }
 
-export async function makeReject(o: RejectOpts) {
+export async function makeReject(f: Fixture, o: RejectOpts) {
   return {
     id: o.id,
+    entryCommit: o.entryCommit ?? (await entryCommitFromChain(f, o.id)),
     reasonHash: o.reasonHash ?? textHash("영수증 미첨부"),
     deadline: o.deadline ?? (await deadlineIn()),
   };
 }
 
 export async function reject(f: Fixture, o: RejectOpts, signer: any = f.auditor) {
-  const decision = await makeReject(o);
+  const decision = await makeReject(f, o);
   const sig = await signReject(signer, f.ledger, decision);
   return { decision, tx: f.ledger.connect(f.relayer).rejectEntry(decision, sig) };
 }

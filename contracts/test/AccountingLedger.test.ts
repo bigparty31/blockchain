@@ -189,6 +189,14 @@ describe("AccountingLedger", function () {
         .withArgs(3n);
     });
 
+    it("2 HashRequired: hash 가 0 인 항목은 등록할 수 없다 (2차 리뷰 N7)", async function () {
+      const f = await loadFixture(budgetFixture);
+      await expect((await record(f, { id: 1n, amount: 1_000n, hash: ZERO32 })).tx)
+        .to.be.revertedWithCustomError(f.ledger, "HashRequired")
+        .withArgs(1n);
+      expect(await f.ledger.exists(1n)).to.equal(false);
+    });
+
     it("4 AmountOutOfRange: |amount| > MAX_AMOUNT, int256 최솟값도 Panic 이 아니라 커스텀 에러", async function () {
       const f = await loadFixture(budgetFixture);
       await expect((await record(f, { id: 1n, amount: MAX_AMOUNT + 1n })).tx)
@@ -450,7 +458,7 @@ describe("AccountingLedger", function () {
         .withArgs(1n, metaHash("1"), wrong);
     });
 
-    it("entryCommitOf 는 문서의 식(keccak256(abi.encode(hash, amount, kind, term, budgetId, correctsId, registrant)))과 같다", async function () {
+    it("entryCommitOf 는 문서의 식(keccak256(abi.encode(hash, amount, kind, term, occurredAt, budgetId, correctsId, registrant)))과 같다", async function () {
       const f = await loadFixture(budgetFixture);
       const { req, tx } = await record(f, { id: 1n, amount: 12_345n });
       await tx;
@@ -459,6 +467,7 @@ describe("AccountingLedger", function () {
         amount: 12_345n,
         kind: Kind.EXPENSE,
         term: TERM,
+        occurredAt: OCCURRED_AT,
         budgetId: 1n,
         correctsId: 0n,
         registrant: f.treasurer.address,
@@ -467,7 +476,7 @@ describe("AccountingLedger", function () {
       expect(await entryCommitFromChain(f, 1n)).to.equal(expected);
     });
 
-    it("EntryCommitMismatch: 승인자가 본 예산·종류·학기·정정대상·등록자가 등록 내용과 다르면 revert (리뷰 1)", async function () {
+    it("EntryCommitMismatch: 승인자가 본 예산·종류·학기·날짜·정정대상·등록자가 등록 내용과 다르면 revert (리뷰 1, 2차 N6)", async function () {
       const f = await loadFixture(budgetFixture);
       // 총무가 사업비(예산 2)로 등록했는데 감사 화면에는 행사비(예산 1)로 보였다고 가정
       const { req, tx } = await record(f, { id: 1n, amount: 50_000n, budgetId: 2n });
@@ -477,6 +486,7 @@ describe("AccountingLedger", function () {
         amount: 50_000n,
         kind: Kind.EXPENSE,
         term: TERM,
+        occurredAt: OCCURRED_AT,
         budgetId: 2n,
         correctsId: 0n,
         registrant: f.treasurer.address,
@@ -486,6 +496,7 @@ describe("AccountingLedger", function () {
         { ...base, budgetId: 1n },
         { ...base, kind: Kind.INCOME },
         { ...base, term: OTHER_TERM },
+        { ...base, occurredAt: OCCURRED_AT + 86_400n },
         { ...base, correctsId: 7n },
         { ...base, registrant: f.outsider.address },
         { ...base, amount: 50_001n },
@@ -498,6 +509,25 @@ describe("AccountingLedger", function () {
       }
       expect(await f.ledger.statusOf(1n)).to.equal(Status.PENDING);
       await expect((await confirm(f, { id: 1n, entryCommit: stored })).tx).to.emit(f.ledger, "EntryConfirmed");
+    });
+
+    it("InsufficientBudget·BudgetExpired 는 원장 ABI 하나로 해석된다 (2차 리뷰 N5)", async function () {
+      const f = await loadFixture(budgetFixture);
+      await (await record(f, { id: 1n, amount: 600_000n })).tx;
+      await (await record(f, { id: 2n, amount: 600_000n })).tx;
+      await (await confirm(f, { id: 1n })).tx;
+      const approval = await makeConfirm(f, { id: 2n });
+      const sig = await signConfirm(f.auditor, f.ledger, approval);
+      let data = "";
+      try {
+        await f.ledger.connect(f.relayer).confirmEntry.staticCall(approval, sig);
+      } catch (e: any) {
+        data = e.data;
+      }
+      const parsed = f.ledger.interface.parseError(data);
+      expect(parsed?.name).to.equal("InsufficientBudget");
+      expect(parsed?.args.remaining).to.equal(400_000n);
+      expect(f.ledger.interface.getError("BudgetExpired")).to.not.equal(null);
     });
 
     it("ReasonRequired: hadWarning 인데 사유 0 / ReasonNotAllowed: 경고 아닌데 사유 있음", async function () {
@@ -599,6 +629,27 @@ describe("AccountingLedger", function () {
       expect((await f.budgetToken.getBudget(1n)).spent).to.equal(0n);
     });
 
+    it("EntryCommitMismatch: 반려도 항목 내용에 묶인다 (2차 리뷰 N9)", async function () {
+      const f = await loadFixture(budgetFixture);
+      await (await record(f, { id: 1n, amount: 1_000n, budgetId: 2n })).tx;
+      const stored = await entryCommitFromChain(f, 1n);
+      const e = await f.ledger.getEntry(1n);
+      const wrong = computeEntryCommit({
+        hash: e.hash,
+        amount: e.amount,
+        kind: e.kind,
+        term: e.term,
+        occurredAt: e.occurredAt,
+        budgetId: 1n,
+        correctsId: e.correctsId,
+        registrant: e.registrant,
+      });
+      await expect((await reject(f, { id: 1n, entryCommit: wrong })).tx)
+        .to.be.revertedWithCustomError(f.ledger, "EntryCommitMismatch")
+        .withArgs(1n, stored, wrong);
+      expect(await f.ledger.statusOf(1n)).to.equal(Status.PENDING);
+    });
+
     it("ReasonRequired: 반려 사유 해시가 0", async function () {
       const f = await loadFixture(budgetFixture);
       await (await record(f, { id: 1n, amount: 1_000n })).tx;
@@ -621,7 +672,7 @@ describe("AccountingLedger", function () {
         "SignatureExpired",
       );
       await expect((await reject(f, { id: 9n })).tx).to.be.revertedWithCustomError(f.ledger, "EntryNotFound");
-      const decision = await makeReject({ id: 1n });
+      const decision = await makeReject(f, { id: 1n });
       await expect(f.ledger.connect(f.relayer).rejectEntry(decision, "0x00")).to.be.revertedWithCustomError(
         f.ledger,
         "InvalidSignature",
