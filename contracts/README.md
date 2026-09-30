@@ -51,7 +51,7 @@ npx hardhat node
 npx hardhat run scripts/deploy.ts --network localhost
 ```
 
-배포 순서는 `RoleManager(회장, 총무, 감사)` → `BudgetToken` → `AccountingLedger` → `BudgetToken.setLedger`. 세 임원은 생성자 인자라 롤 부여 단계가 없고, 끝나면 배포자에게 남는 권한이 없다.
+배포 순서는 `RoleManager(회장, 총무, 감사1, 감사2)` → `BudgetToken` → `AccountingLedger` → `BudgetToken.setLedger`. 네 임원은 생성자 인자라 롤 부여 단계가 없고, 끝나면 배포자에게 남는 권한이 없다. 감사는 최소 2명이다. 회장 키를 잃었을 때 감사 둘이 복구하기 위해서다 (`docs/CONTRACTS.md` "롤" 절).
 
 `--network localhost` 를 빠뜨리면 스크립트가 바로 멈춘다. 기록 전에 롤 배치, 컨트랙트끼리 가리키는 주소, 세 컨트랙트의 DOMAIN_SEPARATOR 를 다시 계산해 대조하고, 하나라도 틀리면 기록하지 않는다.
 
@@ -64,8 +64,9 @@ npx hardhat run scripts/deploy.ts --network localhost
 | 0 | 배포자 | `0xf39F…2266` |
 | 1 | 회장 | `0x7099…79C8` |
 | 2 | 총무 | `0x3C44…93BC` |
-| 3 | 감사 | `0x90F7…b906` |
+| 3 | 감사 1 | `0x90F7…b906` |
 | 4 | 릴레이어 (롤 없음) | `0x15d3…6A65` |
+| 5 | 감사 2 | `0x9965…A4dc` |
 
 노드를 새로 띄우면 nonce 가 0 부터라 컨트랙트 주소가 `deployments/localhost.json` 과 같게 나온다. 노드를 띄운 채로 다시 배포하면 주소가 달라지니 파일을 갱신하거나 노드를 재시작한다.
 

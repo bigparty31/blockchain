@@ -4,15 +4,16 @@
  *   터미널 1:  npx hardhat node
  *   터미널 2:  npx hardhat run scripts/deploy.ts --network localhost
  *
- * 순서: RoleManager(회장, 총무, 감사) → BudgetToken → AccountingLedger → setLedger.
- * 세 임원은 생성자 인자다. 별도 롤 부여 단계가 없고, 끝난 뒤 배포자는 어떤 권한도 갖지 않는다.
+ * 순서: RoleManager(회장, 총무, 감사1, 감사2) → BudgetToken → AccountingLedger → setLedger.
+ * 네 임원은 생성자 인자다. 별도 롤 부여 단계가 없고, 끝난 뒤 배포자는 어떤 권한도 갖지 않는다.
  *
  * 계정 배치 (Hardhat 기본 니모닉의 순서. 개인키는 Hardhat 이 공개한 테스트 키라 파일에 두지 않는다):
  *   [0] deployer   배포자. setLedger 까지만 부르고 잠긴다
  *   [1] president  회장
  *   [2] treasurer  총무
- *   [3] auditor    감사
- *   [4] relayer    서버 릴레이어. 롤 없음
+ *   [3] auditor    감사 1
+ *   [4] relayer    서버 릴레이어. 롤 없음 (이전 배치와 같은 번호를 유지한다)
+ *   [5] auditor2   감사 2 (감사 최소 2명 — 회장 키 분실 복구용)
  *
  * 결과는 deployments/<network>.json 과 deployments/abi/*.json 에 쓴다. 백엔드(손종인)가 읽는 파일이다.
  * JSON 안의 abi 경로는 그 JSON 파일이 있는 폴더(deployments/) 기준이다.
@@ -39,17 +40,23 @@ if (!ALLOWED_NETWORKS.includes(networkName)) {
   );
 }
 
-const [deployer, president, treasurer, auditor, relayer] = await ethers.getSigners();
+const [deployer, president, treasurer, auditor, relayer, auditor2] = await ethers.getSigners();
 const { chainId } = await ethers.provider.getNetwork();
 
 console.log(`network=${networkName} chainId=${chainId}`);
 console.log(`deployer=${deployer.address}`);
-console.log(`president=${president.address}\ntreasurer=${treasurer.address}\nauditor=${auditor.address}`);
+console.log(`president=${president.address}\ntreasurer=${treasurer.address}`);
+console.log(`auditor=${auditor.address}\nauditor2=${auditor2.address}`);
 console.log(`relayer=${relayer.address} (롤 없음)`);
 
 const d = await deployAll(
   ethers,
-  { president: president.address, treasurer: treasurer.address, auditor: auditor.address },
+  {
+    president: president.address,
+    treasurer: treasurer.address,
+    auditor1: auditor.address,
+    auditor2: auditor2.address,
+  },
   deployer,
 );
 
@@ -69,10 +76,11 @@ for (const who of [deployer, relayer]) {
 }
 assert(await d.roleManager.hasRole(roles.PRESIDENT, president.address), "회장 롤 없음");
 assert(await d.roleManager.hasRole(roles.TREASURER, treasurer.address), "총무 롤 없음");
-assert(await d.roleManager.hasRole(roles.AUDITOR, auditor.address), "감사 롤 없음");
-for (const role of Object.values(roles)) {
-  assert((await d.roleManager.holderCount(role)) === 1n, `${role} 보유자 수 != 1`);
-}
+assert(await d.roleManager.hasRole(roles.AUDITOR, auditor.address), "감사 1 롤 없음");
+assert(await d.roleManager.hasRole(roles.AUDITOR, auditor2.address), "감사 2 롤 없음");
+assert((await d.roleManager.holderCount(roles.PRESIDENT)) === 1n, "회장 보유자 수 != 1");
+assert((await d.roleManager.holderCount(roles.TREASURER)) === 1n, "총무 보유자 수 != 1");
+assert((await d.roleManager.holderCount(roles.AUDITOR)) === 2n, "감사 보유자 수 != 2");
 
 // 서로를 가리키는 주소가 맞는지 (setLedger 도 확인하지만 기록 전에 한 번 더)
 assert((await d.budgetToken.ledger()) === d.addresses.AccountingLedger, "BudgetToken.ledger 불일치");
@@ -123,11 +131,13 @@ const record = {
   eip712,
   roles,
   maxAmount: (await d.ledger.MAX_AMOUNT()).toString(),
+  recoveryDelaySeconds: Number(await d.roleManager.RECOVERY_DELAY()),
   accounts: {
     deployer: deployer.address,
     president: president.address,
     treasurer: treasurer.address,
     auditor: auditor.address,
+    auditor2: auditor2.address,
     relayer: relayer.address,
   },
 };

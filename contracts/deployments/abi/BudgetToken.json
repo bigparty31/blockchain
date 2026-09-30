@@ -217,6 +217,27 @@
       },
       {
         "internalType": "uint256",
+        "name": "expected",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "actual",
+        "type": "uint256"
+      }
+    ],
+    "name": "ReclaimCountMismatch",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "budgetId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
         "name": "spent",
         "type": "uint256"
       },
@@ -655,6 +676,11 @@
             "internalType": "uint16",
             "name": "version",
             "type": "uint16"
+          },
+          {
+            "internalType": "uint16",
+            "name": "reclaimCount",
+            "type": "uint16"
           }
         ],
         "internalType": "struct IBudgetToken.Budget",
@@ -790,6 +816,11 @@
           {
             "internalType": "uint256",
             "name": "amount",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "reclaimCount",
             "type": "uint256"
           },
           {
