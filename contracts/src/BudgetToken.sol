@@ -2,10 +2,10 @@
 pragma solidity ^0.8.24;
 
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
-import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 import {IBudgetToken} from "../interfaces/IBudgetToken.sol";
 import {IRoleManager} from "../interfaces/IRoleManager.sol";
+import {ROLE_AUDITOR, ROLE_PRESIDENT, MAX_AMOUNT_WON, Signatures} from "./Common.sol";
 
 /// @dev setLedger 가 확인하는 원장 쪽 조회 두 개만. IAccountingLedger 전체에 의존하지 않는다.
 interface ILedgerWiring {
@@ -22,16 +22,17 @@ interface ILedgerWiring {
 /// - 임원 행위(issue·increase·reclaim)는 EIP-712 서명자가 행위자다. msg.sender 는 권한 판단에 쓰지 않는다.
 /// - 예산 존재는 version != 0 으로 판정한다 (issue 가 version = 1 로 시작).
 contract BudgetToken is IBudgetToken, EIP712 {
-    bytes32 private constant PRESIDENT = keccak256("PRESIDENT");
-    bytes32 private constant AUDITOR = keccak256("AUDITOR");
+    bytes32 private constant PRESIDENT = ROLE_PRESIDENT;
+    bytes32 private constant AUDITOR = ROLE_AUDITOR;
 
     bytes32 private constant ISSUE_TYPEHASH =
         keccak256("IssueRequest(uint256 budgetId,uint256 term,bytes32 category,uint256 amount,uint256 expiresAt,uint256 deadline)");
     bytes32 private constant INCREASE_TYPEHASH =
         keccak256("IncreaseRequest(uint256 budgetId,uint256 amount,bytes32 reasonHash,uint256 version,uint256 deadline)");
-    bytes32 private constant RECLAIM_TYPEHASH = keccak256("ReclaimRequest(uint256 budgetId,uint256 amount,uint256 deadline)");
+    bytes32 private constant RECLAIM_TYPEHASH =
+        keccak256("ReclaimRequest(uint256 budgetId,uint256 amount,uint256 reclaimCount,uint256 deadline)");
 
-    uint256 public constant MAX_AMOUNT = 1e15;
+    uint256 public constant MAX_AMOUNT = MAX_AMOUNT_WON;
 
     IRoleManager private immutable _roleManager;
     /// @notice setLedger 를 부를 수 있는 유일한 계정. 잠긴 뒤에는 아무 권한도 없다.
@@ -50,8 +51,9 @@ contract BudgetToken is IBudgetToken, EIP712 {
 
     // -------------------------------------------------------------- modifiers
 
+    /// @dev _ledger 가 0 이면 msg.sender 는 0 일 수 없으므로 이 비교만으로 미설정 상태도 막힌다.
     modifier onlyLedger() {
-        if (msg.sender != _ledger || _ledger == address(0)) revert Unauthorized(msg.sender);
+        if (msg.sender != _ledger) revert Unauthorized(msg.sender);
         _;
     }
 
@@ -107,7 +109,8 @@ contract BudgetToken is IBudgetToken, EIP712 {
             spent: 0,
             term: uint32(r.term),
             expiresAt: uint64(r.expiresAt),
-            version: 1
+            version: 1,
+            reclaimCount: 0
         });
         _budgetIdOf[key] = r.budgetId;
 
@@ -141,17 +144,22 @@ contract BudgetToken is IBudgetToken, EIP712 {
 
     function reclaim(ReclaimRequest calldata r, bytes calldata presidentSig) external {
         if (block.timestamp > r.deadline) revert SignatureExpired(r.deadline);
-        address president = _recover(keccak256(abi.encode(RECLAIM_TYPEHASH, r.budgetId, r.amount, r.deadline)), presidentSig);
+        address president = _recover(
+            keccak256(abi.encode(RECLAIM_TYPEHASH, r.budgetId, r.amount, r.reclaimCount, r.deadline)),
+            presidentSig
+        );
         _requirePresident(president);
 
         Budget storage b = _budgets[r.budgetId];
         if (b.version == 0) revert BudgetNotFound(r.budgetId);
         if (!_isExpired(b)) revert BudgetNotExpired(r.budgetId, b.expiresAt);
+        if (r.reclaimCount != b.reclaimCount) revert ReclaimCountMismatch(r.budgetId, b.reclaimCount, r.reclaimCount);
         uint256 rem = uint256(b.issued) - b.spent;
         if (rem == 0) revert ZeroAmount();
         if (r.amount != rem) revert ReclaimAmountMismatch(r.budgetId, rem, r.amount);
 
         b.issued = b.spent;
+        b.reclaimCount += 1; // version(개정 번호)은 건드리지 않는다
         emit BudgetReclaimed(r.budgetId, rem, president);
     }
 
@@ -215,9 +223,8 @@ contract BudgetToken is IBudgetToken, EIP712 {
         if (!_roleManager.hasRole(PRESIDENT, signer)) revert NotPresident(signer);
     }
 
-    function _recover(bytes32 structHash, bytes calldata signature) private view returns (address) {
-        (address signer, ECDSA.RecoverError err, ) = ECDSA.tryRecover(_hashTypedDataV4(structHash), signature);
-        if (err != ECDSA.RecoverError.NoError || signer == address(0)) revert InvalidSignature();
-        return signer;
+    function _recover(bytes32 structHash, bytes calldata signature) private view returns (address signer) {
+        signer = Signatures.recoverOrZero(_hashTypedDataV4(structHash), signature);
+        if (signer == address(0)) revert InvalidSignature();
     }
 }

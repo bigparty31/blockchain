@@ -2,11 +2,11 @@
 pragma solidity ^0.8.24;
 
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
-import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 import {IAccountingLedger} from "../interfaces/IAccountingLedger.sol";
 import {IBudgetToken} from "../interfaces/IBudgetToken.sol";
 import {IRoleManager} from "../interfaces/IRoleManager.sol";
+import {ROLE_TREASURER, ROLE_AUDITOR, ROLE_PRESIDENT, MAX_AMOUNT_WON, Signatures} from "./Common.sol";
 
 /// @title AccountingLedger
 /// @notice 수입·지출 원장 구현. 규칙·검사 순서는 IAccountingLedger 주석과 docs/CONTRACTS.md 가 정본이다.
@@ -16,9 +16,9 @@ import {IRoleManager} from "../interfaces/IRoleManager.sol";
 /// - 서명 바이트가 깨졌을 때만 InvalidSignature. 다른 값에 대한 서명은 엉뚱한 주소가 복구되어 NotRegistrant / NotApprover 로 난다.
 /// - Entry 는 4 슬롯. 좁히기 전 범위 검사는 recordPending 2~5 단계에서 끝낸다. 항목 존재는 registrant != 0.
 contract AccountingLedger is IAccountingLedger, EIP712 {
-    bytes32 private constant TREASURER = keccak256("TREASURER");
-    bytes32 private constant AUDITOR = keccak256("AUDITOR");
-    bytes32 private constant PRESIDENT = keccak256("PRESIDENT");
+    bytes32 private constant TREASURER = ROLE_TREASURER;
+    bytes32 private constant AUDITOR = ROLE_AUDITOR;
+    bytes32 private constant PRESIDENT = ROLE_PRESIDENT;
 
     bytes32 private constant RECORD_REQUEST_TYPEHASH =
         keccak256(
@@ -29,9 +29,9 @@ contract AccountingLedger is IAccountingLedger, EIP712 {
             "ConfirmApproval(uint256 id,bytes32 hash,bytes32 entryCommit,bool hadWarning,bytes32 warningReasonHash,uint256 deadline)"
         );
     bytes32 private constant REJECT_DECISION_TYPEHASH =
-        keccak256("RejectDecision(uint256 id,bytes32 reasonHash,uint256 deadline)");
+        keccak256("RejectDecision(uint256 id,bytes32 entryCommit,bytes32 reasonHash,uint256 deadline)");
 
-    uint256 public constant MAX_AMOUNT = 1e15;
+    uint256 public constant MAX_AMOUNT = MAX_AMOUNT_WON;
 
     IRoleManager private immutable _roleManager;
     IBudgetToken private immutable _budgetToken;
@@ -54,6 +54,7 @@ contract AccountingLedger is IAccountingLedger, EIP712 {
         if (r.id == 0) revert ReservedId(r.id); // 0 은 "없음" 으로 예약
         if (r.id > type(uint64).max) revert FieldOutOfRange(r.id, r.id);
         if (_exists(r.id)) revert EntryAlreadyExists(r.id);
+        if (r.hash == bytes32(0)) revert HashRequired(r.id);
         if (r.term == 0) revert TermRequired(r.id);
         if (r.term > type(uint32).max) revert FieldOutOfRange(r.id, r.term);
         if (r.amount == 0) revert ZeroAmount(r.id);
@@ -174,6 +175,10 @@ contract AccountingLedger is IAccountingLedger, EIP712 {
         if (!_exists(d.id)) revert EntryNotFound(d.id);
         Entry storage e = _entries[d.id];
         if (e.status != Status.PENDING) revert InvalidStatus(d.id, e.status, Status.PENDING);
+        {
+            bytes32 commit = _entryCommit(e);
+            if (commit != d.entryCommit) revert EntryCommitMismatch(d.id, commit, d.entryCommit);
+        }
         if (d.reasonHash == bytes32(0)) revert ReasonRequired(d.id);
 
         address approver = _recover(_hashRejectDecision(d), signature);
@@ -263,9 +268,8 @@ contract AccountingLedger is IAccountingLedger, EIP712 {
     }
 
     function _requireApprover(address signer) private view {
-        if (!_roleManager.hasRole(AUDITOR, signer) && !_roleManager.hasRole(PRESIDENT, signer)) {
-            revert NotApprover(signer);
-        }
+        bytes32 role = _roleManager.roleOf(signer);
+        if (role != AUDITOR && role != PRESIDENT) revert NotApprover(signer);
     }
 
     /// @dev 정정 가능 항목인가: 원본(정정 아님) 또는 원본과 다른 예산으로 간 양수 정정(재분류).
@@ -291,6 +295,7 @@ contract AccountingLedger is IAccountingLedger, EIP712 {
                     int256(e.amount),
                     uint8(e.kind),
                     uint256(e.term),
+                    uint256(e.occurredAt),
                     uint256(e.budgetId),
                     uint256(e.correctsId),
                     e.registrant
@@ -298,10 +303,9 @@ contract AccountingLedger is IAccountingLedger, EIP712 {
             );
     }
 
-    function _recover(bytes32 structHash, bytes calldata signature) private view returns (address) {
-        (address signer, ECDSA.RecoverError err, ) = ECDSA.tryRecover(_hashTypedDataV4(structHash), signature);
-        if (err != ECDSA.RecoverError.NoError || signer == address(0)) revert InvalidSignature();
-        return signer;
+    function _recover(bytes32 structHash, bytes calldata signature) private view returns (address signer) {
+        signer = Signatures.recoverOrZero(_hashTypedDataV4(structHash), signature);
+        if (signer == address(0)) revert InvalidSignature();
     }
 
     function _hashRecordRequest(RecordRequest calldata r) private pure returns (bytes32) {
@@ -338,6 +342,6 @@ contract AccountingLedger is IAccountingLedger, EIP712 {
     }
 
     function _hashRejectDecision(RejectDecision calldata d) private pure returns (bytes32) {
-        return keccak256(abi.encode(REJECT_DECISION_TYPEHASH, d.id, d.reasonHash, d.deadline));
+        return keccak256(abi.encode(REJECT_DECISION_TYPEHASH, d.id, d.entryCommit, d.reasonHash, d.deadline));
     }
 }
