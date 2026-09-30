@@ -31,7 +31,7 @@
   "token_type": "bearer",
   "role": "TREASURER",
   "name": "김총무",
-  "wallet_address": "0x71C7656EC7ab88b098defB751B7401B5f6d8976F"
+  "wallet_address": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
 }
 ```
 - `wallet_address`: 임원만 값이 있고 학생은 `null`
@@ -70,14 +70,16 @@
 `401` 응답에는 `WWW-Authenticate: Bearer` 헤더가 붙습니다. 앱은 `401`이면 로그인 화면으로, `403`이면 권한 없음 안내로 처리합니다.
 
 ### 4. 테스트 계정 (DB 도입 전 시드)
-비밀번호는 모두 `userPassword123!` 입니다. id는 더미 데이터(`created_by=2`, `approved_by=3`)와 앱 데모 지갑 매핑에 맞췄습니다.
+비밀번호는 모두 `userPassword123!` 입니다. id는 더미 데이터(`created_by=2`, `approved_by=3`)에 맞췄습니다.
+임원 지갑은 로컬 배포의 임원 계정(`contracts/deployments/localhost.json`의 `accounts`, Hardhat 계정 1·2·3·5)과 같습니다. 체인의 등록자·승인자 주소를 사용자와 대조하는 기준이라, 재배포로 계정이 바뀌면 함께 바꿔야 합니다 (`backend/tests/test_seed_wallets.py`가 확인). 감사는 컨트랙트 규칙상 최소 2명입니다.
 
 | id | 학번 | 이름 | role | wallet_address |
 | :--- | :--- | :--- | :--- | :--- |
 | 1 | 20240001 | 김학생 | `STUDENT` | `null` |
-| 2 | 20240002 | 김총무 | `TREASURER` | `0x71C7656EC7ab88b098defB751B7401B5f6d8976F` |
-| 3 | 20240003 | 이감사 | `AUDITOR` | `0x2546BcD3c84621e976D8185a91A922aE77ECEc30` |
-| 4 | 20240004 | 박회장 | `PRESIDENT` | `0xbDA5747bFD65F08deb54cb465eB87D40e51B197E` |
+| 2 | 20240002 | 김총무 | `TREASURER` | `0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC` |
+| 3 | 20240003 | 이감사 | `AUDITOR` | `0x90F79bf6EB2c4f870365E785982E1f101E93b906` |
+| 4 | 20240004 | 박회장 | `PRESIDENT` | `0x70997970C51812dc3A010C7d01b50e0d17dc79C8` |
+| 5 | 20240005 | 최감사 | `AUDITOR` | `0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc` |
 
 ---
 

@@ -17,8 +17,10 @@ class User(BaseModel):
     wallet_address: Optional[str] = None
 
 
-# DB 도입 전 시드 계정. id 는 기존 더미 데이터(entries: created_by=2, approved_by=3)와
-# 앱 데모 지갑 매핑(#2 총무, #3 감사, #4 회장)에 맞춘다. 비밀번호는 docs/API.md 예시값.
+# DB 도입 전 시드 계정. id 는 기존 더미 데이터(entries: created_by=2, approved_by=3)에 맞춘다.
+# 임원 지갑은 로컬 배포의 임원 계정(contracts/deployments/localhost.json "accounts")과 같아야 한다 —
+# 체인의 registrant·approver 를 사용자와 대조하는 기준이다. 감사는 컨트랙트 규칙상 최소 2명.
+# tests/test_seed_wallets.py 가 두 값이 어긋나지 않는지 확인한다. 비밀번호는 docs/API.md 예시값.
 SEED_PASSWORD = "userPassword123!"
 _seed_hash = hash_password(SEED_PASSWORD)
 
@@ -30,7 +32,7 @@ SEED_USERS: List[User] = [
         name="김총무",
         role=Role.TREASURER,
         password_hash=_seed_hash,
-        wallet_address="0x71C7656EC7ab88b098defB751B7401B5f6d8976F",
+        wallet_address="0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",  # Hardhat 계정 2
     ),
     User(
         id=3,
@@ -38,7 +40,7 @@ SEED_USERS: List[User] = [
         name="이감사",
         role=Role.AUDITOR,
         password_hash=_seed_hash,
-        wallet_address="0x2546BcD3c84621e976D8185a91A922aE77ECEc30",
+        wallet_address="0x90F79bf6EB2c4f870365E785982E1f101E93b906",  # Hardhat 계정 3
     ),
     User(
         id=4,
@@ -46,7 +48,15 @@ SEED_USERS: List[User] = [
         name="박회장",
         role=Role.PRESIDENT,
         password_hash=_seed_hash,
-        wallet_address="0xbDA5747bFD65F08deb54cb465eB87D40e51B197E",
+        wallet_address="0x70997970C51812dc3A010C7d01b50e0d17dc79C8",  # Hardhat 계정 1
+    ),
+    User(
+        id=5,
+        student_no="20240005",
+        name="최감사",
+        role=Role.AUDITOR,
+        password_hash=_seed_hash,
+        wallet_address="0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc",  # Hardhat 계정 5
     ),
 ]
 

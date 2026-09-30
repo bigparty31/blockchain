@@ -28,9 +28,10 @@ def bearer(token):
     "student_no, role, name, wallet_address",
     [
         ("20240001", "STUDENT", "김학생", None),
-        ("20240002", "TREASURER", "김총무", "0x71C7656EC7ab88b098defB751B7401B5f6d8976F"),
-        ("20240003", "AUDITOR", "이감사", "0x2546BcD3c84621e976D8185a91A922aE77ECEc30"),
-        ("20240004", "PRESIDENT", "박회장", "0xbDA5747bFD65F08deb54cb465eB87D40e51B197E"),
+        ("20240002", "TREASURER", "김총무", "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"),
+        ("20240003", "AUDITOR", "이감사", "0x90F79bf6EB2c4f870365E785982E1f101E93b906"),
+        ("20240004", "PRESIDENT", "박회장", "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"),
+        ("20240005", "AUDITOR", "최감사", "0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc"),
     ],
 )
 def test_login_returns_token_and_role(student_no, role, name, wallet_address):

@@ -1,4 +1,6 @@
 import time
+from types import SimpleNamespace
+
 import pytest
 from fastapi.testclient import TestClient
 from app.auth import users
@@ -170,10 +172,14 @@ def draft_id(auth_header):
 
 @pytest.fixture
 def second_treasurer(monkeypatch):
-    """시드 총무(id 2) 말고 총무를 하나 더 둔다. 테스트가 끝나면 monkeypatch 가 되돌린다."""
-    user = users.User(id=5, student_no="20240005", name="최총무", role=Role.TREASURER, password_hash="unused")
+    """시드 총무 말고 총무를 하나 더 둔다. 테스트가 끝나면 monkeypatch 가 되돌린다.
+
+    id 는 시드 다음 번호로 정해 시드 계정과 겹치지 않게 한다.
+    """
+    new_id = max(u.id for u in users.SEED_USERS) + 1
+    user = users.User(id=new_id, student_no=f"2099{new_id:04d}", name="최총무", role=Role.TREASURER, password_hash="unused")
     monkeypatch.setattr(users, "SEED_USERS", [*users.SEED_USERS, user])
-    return {"Authorization": f"Bearer {create_access_token(user.id)}"}
+    return SimpleNamespace(id=user.id, headers={"Authorization": f"Bearer {create_access_token(user.id)}"})
 
 
 def get_draft(entry_id):
@@ -205,14 +211,14 @@ def test_write_apis_without_token_are_401(draft_id):
 
 def test_created_by_is_logged_in_treasurer(second_treasurer):
     # 시드 총무 id 가 옛 고정값(2)과 같아서, id 가 다른 총무로 확인한다
-    res = client.post("/entries", json=DRAFT_BODY, headers=second_treasurer)
+    res = client.post("/entries", json=DRAFT_BODY, headers=second_treasurer.headers)
     assert res.status_code == 201
-    assert get_draft(res.json()["id"]).created_by == 5
+    assert get_draft(res.json()["id"]).created_by == second_treasurer.id
 
 
 def test_other_treasurer_cannot_submit_someone_elses_draft(second_treasurer, draft_id):
     # 다른 총무가 서명하면 체인 등록자와 DB created_by 가 달라진다
-    res = client.post(f"/entries/{draft_id}/submit", json=SUBMIT_BODY, headers=second_treasurer)
+    res = client.post(f"/entries/{draft_id}/submit", json=SUBMIT_BODY, headers=second_treasurer.headers)
     assert res.status_code == 403
     assert res.json() == {"detail": "본인이 등록한 초안만 제출할 수 있습니다."}
     assert get_draft(draft_id).status is None
