@@ -51,6 +51,7 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 | `POST` | `/entries/{id}/submit` | 초안 서명 제출 (**등록한 총무 본인 토큰 필요**) | `{ "id": 4, "status": "PENDING", ... }` |
 | `GET` | `/balance` | 장부 잔액 요약 | `{ "balance": 4965000, "income": 5000000, "expense": 35000 }` |
 | `GET` | `/budgets` | 카테고리별 예산 현황 | 행사비, 사업비, 운영비 편성액 및 잔량 |
+| `GET` | `/users/wallets` | user id ↔ 지갑 주소 매핑 (현·전 임원, 검증용) | `{ "2": "0x3C44…93BC", ... }` |
 
 ### 2.1 인증
 - `POST /auth/login` 으로 받은 `access_token` 을 `Authorization: Bearer <token>` 헤더로 보냅니다. Swagger UI 에서는 우측 상단 **Authorize** 에 토큰을 넣으면 됩니다.

@@ -353,3 +353,19 @@
   "is_tampered": false
 }
 ```
+
+### 3. 사용자 지갑 매핑 (`GET /users/wallets`)
+- **설명**: 체인의 `registrant`·`approver`(지갑 주소)를 DB의 `created_by`·`approved_by`(user id)와 대조할 때 쓰는 매핑입니다. 학생 앱 단건 검증 2단계가 읽습니다 (HASHING.md §2, `docs/backend_requests.md` 1-2).
+- **권한**: 토큰 없이 호출할 수 있습니다 (다른 조회 API와 같음). 임원 주소는 체인에 이미 공개된 값입니다.
+- **범위**: 지갑이 등록된 사용자(현·전 임원)가 모두 들어 있습니다. 역할이 아니라 지갑 유무로 고르므로, 임기가 끝난 사람이 등록·승인한 과거 항목도 검증할 수 있습니다. 지갑이 없는 학생은 체인에 서명자로 나오지 않아 빠집니다.
+- **형식**: 키는 user id 문자열, 값은 EIP-55 체크섬 주소입니다. **비교할 때는 양쪽을 소문자로 맞춥니다.** 주소는 로컬 배포의 임원 계정(`contracts/deployments/localhost.json`)과 같습니다.
+
+**Response (`200 OK`)**
+```json
+{
+  "2": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+  "3": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+  "4": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+  "5": "0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc"
+}
+```
