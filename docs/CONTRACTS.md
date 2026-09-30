@@ -16,7 +16,7 @@
 
 ## 공통 규칙
 
-- **임원의 모든 쓰기는 기기 EIP-712 서명 + 서버 릴레이어 제출이다** (PRD §9.2). 임원 지갑이 직접 트랜잭션을 보내는 함수는 없다. 예외는 배포자의 `setLedger` 1회와 릴레이어 신뢰인 `raise`뿐이다.
+- **임원의 모든 쓰기는 기기 EIP-712 서명 + 서버 릴레이어 제출이다** (PRD §9.2). 임원 지갑이 직접 트랜잭션을 보내는 함수는 없다. 서명 없이 부를 수 있는 쓰기는 셋뿐이다: 배포자의 `setLedger` 1회, 릴레이어 신뢰인 `raise`, 대기가 끝난 회장 복구를 실행하는 `executePresidentRecovery`(누구나. 실행 조건은 저장된 감사 2명의 제안이 정한다).
 - ID(`budgetId`, `entryId`, `objectionId`)는 백엔드 DB auto-increment 값을 파라미터로 받는다. 컨트랙트는 중복만 막는다. SBT `tokenId`와 RoleManager `nonce`만 온체인 카운터. ID는 1부터 시작한다 (`0`은 "없음"). `0`으로 등록·발행하면 `ReservedId`로 revert하며, 중복(`…AlreadyExists`)과 구분된다.
 - 금액은 원 단위 정수. 요청의 `amount`는 `int256`, `correctsId != 0`인 정정 항목만 음수 허용. 상한 `MAX_AMOUNT = 10^15`원(`AmountOutOfRange`).
 - 이벤트에 기록 시각을 넣지 않는다 (블록에 있음). 발생 시각 `occurredAt`은 파라미터.
@@ -69,7 +69,7 @@
 - **회수는 회장 서명 1개.** 마감(`expiresAt`) 뒤에만 가능하고 `issued`를 `spent`까지 내린다. 요청의 `amount`는 현재 잔량과 같아야 하고(`ReclaimAmountMismatch`), `reclaimCount`는 현재 회수 횟수여야 한다(`ReclaimCountMismatch`). 회수마다 횟수가 1 오르므로 한 서명은 한 번만 쓰인다. 금액 대조만으로는 같은 금액의 환불 뒤에 옛 서명을 다시 제출할 수 있어서 횟수를 따로 둔다. 회수 횟수는 `version`(개정 번호)과 별개다. 회수가 개정 번호를 올리면 학생 화면의 "v2" 표시와 결산의 개정 횟수 지표가 틀어진다. 재호출 가능. **`issued`는 회수 후 줄어든다. 최초 발행액·누적 증액은 이벤트(`Issued + Increased`)로 계산한다.** 회수된 예산에 refund가 오면 잔량이 다시 생기지만 마감이 지나 `spend`는 막히고, 회수를 다시 하면 된다.
 - PRD §7.2의 `reclaim(uint256 term)`(학기 단위)과 달리 예산 단위로 회수한다. 학기 전환 시 회수·이월은 PRD §14 미결이라 더 세밀한 단위를 두었고, 학기 단위 회수는 서버가 그 학기 예산마다 호출하면 된다.
 - `spend` / `refund` 호출자는 `AccountingLedger` 하나로 제한한다. 원장 주소는 **배포자가 `setLedger`로 한 번만 설정하고 잠근다.** 두 번째 호출은 `LedgerAlreadySet`. 원장의 `roleManager()`·`budgetToken()`이 맞지 않으면 `LedgerMismatch`. 설정 시 `LedgerSet` 이벤트.
-- `issue`의 `term == 0`은 `TermRequired`.
+- `issue`의 `term == 0`은 `TermRequired`, `category == 0`은 `CategoryRequired`. 해시 0은 시스템 전체에서 "없음"이라 예산 키로 쓸 수 없다.
 
 ### 롤 (RoleManager)
 
@@ -95,7 +95,8 @@
 | 실행 | `executePresidentRecovery()` | 없음 (누구나) | 대기가 끝나면 교체 실행 |
 
 - 대기 중인 복구는 한 건뿐이다. 새 제안은 이전 제안을 덮어쓴다. 조건이 깨진 옛 제안 때문에 복구가 잠기지 않게 하기 위함이다.
-- 실행 시점에 다시 검사한다: `from`이 여전히 회장인지(`RoleNotGranted`), 두 제안자가 여전히 감사인지(`NotAuditor`), `to`에 롤이 없는지(`AlreadyOfficer`). 대기가 안 끝났으면 `RecoveryNotReady`, 대기 중인 복구가 없으면 `NoPendingRecovery`.
+- **회장이 바뀌면 대기 중인 복구는 지워진다.** 일반 교체든 복구 실행이든 같다. 옛 회장을 겨냥한 제안이 그 사람이 나중에 다시 회장이 됐을 때 되살아나는 경로를 막는다.
+- 실행 시점에 다시 검사한다: `from`이 여전히 회장인지(`RoleNotGranted`, 위 규칙의 안전망), 두 제안자가 여전히 감사인지(`NotAuditor`), `to`에 롤이 없는지(`AlreadyOfficer`). 대기가 안 끝났으면 `RecoveryNotReady`, 대기 중인 복구가 없으면 `NoPendingRecovery`.
 - 제안은 전역 `nonce`를 소비하고(그 값이 `recoveryId`), 실행도 `nonce`를 1 올린다. 그 사이 받아 둔 일반 변경 서명은 무효가 된다.
 - 실행 결과는 일반 변경과 같은 `RoleRevoked` / `RoleGranted` / `RoleChangeExecuted`로 남고, proposer·approver 자리에 두 감사가 들어간다.
 
@@ -210,7 +211,7 @@ meta_hash = SHA256( amount ␟ counterparty ␟ purpose ␟ occurred_at ␟ rece
 | `EntryPending(id, hash, amount, kind, term, budgetId, correctsId, actor)` | id, budgetId, actor |
 | `EntryConfirmed(id, hash, amount, kind, term, budgetId, hadWarning, warningReasonHash, actor)` | id, budgetId, actor |
 | `EntryRejected(id, reasonHash, actor)` | id, actor |
-| `EntryBlocked(id, hash, attempted, term, budgetId, reason, actor)` | id, budgetId, actor. 학기별 초과 시도 지표용 |
+| `EntryBlocked(id, hash, attempted, term, budgetId, correctsId, reason, actor)` | id, budgetId, actor. 학기별 초과 시도 지표·정정 쌍 대조용 |
 | `BudgetIssued(budgetId, term, category, amount, expiresAt, actor)` | budgetId, term, actor |
 | `BudgetIncreased(budgetId, amount, version, reasonHash, requester, approver)` | budgetId, requester, approver |
 | `BudgetSpent(budgetId, amount, entryId)` / `BudgetRefunded(...)` | budgetId |
@@ -230,6 +231,7 @@ meta_hash = SHA256( amount ␟ counterparty ␟ purpose ␟ occurred_at ␟ rece
 | 에러 | 컨트랙트 | 조건 |
 | --- | --- | --- |
 | `TermRequired` | AccountingLedger, BudgetToken | `term == 0` |
+| `CategoryRequired` | BudgetToken | 발행의 `category == 0` |
 | `TermMismatch` | AccountingLedger | 지출 `term`이 예산 `term`과 다름, 또는 정정 `term`이 원본과 다름 (등록 시점 revert) |
 | `BudgetIdNotAllowedForIncome` | AccountingLedger | INCOME인데 `budgetId != 0` |
 | `ReasonRequired` | AccountingLedger, BudgetToken | 반려 사유 0, `hadWarning`인데 사유 0, 증액 사유 0 |
@@ -347,4 +349,6 @@ nonce가 없으므로 같은 id에 `ConfirmApproval`과 `RejectDecision` 서명�
 - 정정 (kind): 원본과 `kind`가 다른 정정 등록은 `CorrectionKindMismatch`
 - 예산 불변식: **환불이 일어나는 모든 정정 시나리오** 끝에 예산별 Σ `BudgetRefunded` ≤ Σ `BudgetSpent`
 - 예약 id·범위: `recordPending(id = 0)`·`issue(budgetId = 0)`은 `ReservedId` / `int256` 최솟값·상한 초과 금액은 `AmountOutOfRange` / `uint64`를 넘는 id는 `FieldOutOfRange`
-- 조회: 없는 id의 `statusOf`는 `EntryNotFound` / `EntryBlocked`에 hash·term·등록자
+- 조회: 없는 id의 `statusOf`는 `EntryNotFound` / `EntryBlocked`에 hash·term·correctsId·등록자 (차단된 양수 정정은 correctsId != 0)
+- 회장 복구 소멸: 제안 뒤 회장이 일반 교체되면 대기 복구가 지워지고, 옛 회장이 돌아온 뒤 72시간이 지나도 실행은 `NoPendingRecovery`
+- 발행: `category == 0` → `CategoryRequired`

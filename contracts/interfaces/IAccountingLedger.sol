@@ -78,6 +78,7 @@ pragma solidity ^0.8.24;
 ///   1 SignatureExpired  2 EntryNotFound  3 InvalidStatus  4 HashMismatch  5 EntryCommitMismatch
 ///   6 ReasonRequired / ReasonNotAllowed  7 InvalidSignature → NotApprover → SelfApproval
 ///   8 (음수 정정) CorrectionExceedsOriginal  9 BudgetToken.spend / refund 의 에러가 그대로 올라온다
+///   상태(CONFIRMED·approver)는 BudgetToken 을 부르기 전에 쓴다 (checks-effects-interactions). 실패하면 전체가 되돌려진다.
 ///
 /// rejectEntry 검사 순서:
 ///   1 SignatureExpired  2 EntryNotFound  3 InvalidStatus  4 EntryCommitMismatch  5 ReasonRequired
@@ -196,13 +197,15 @@ interface IAccountingLedger {
 
     event EntryRejected(uint256 indexed id, bytes32 reasonHash, address indexed actor);
 
-    /// @notice 등록 시점 예산 판정으로 차단된 시도. 학기별 초과 시도 지표를 이벤트만으로 낼 수 있게 term·등록자를 담는다.
+    /// @notice 등록 시점 예산 판정으로 차단된 시도. 학기별 초과 시도 지표와 정정 쌍 대조를 이벤트만으로 할 수 있게
+    ///         term·correctsId·등록자를 담는다. 차단된 양수 정정(재분류)은 correctsId != 0 이다.
     event EntryBlocked(
         uint256 indexed id,
         bytes32 hash,
         uint256 attempted,
         uint256 term,
         uint256 indexed budgetId,
+        uint256 correctsId,
         uint8 reason,
         address indexed actor
     );

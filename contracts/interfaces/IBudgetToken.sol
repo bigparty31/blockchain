@@ -119,6 +119,8 @@ interface IBudgetToken {
     error ZeroAmount();
     /// @dev issue 에 term == 0
     error TermRequired();
+    /// @dev issue 에 category == 0. 해시 0 은 시스템 전체에서 "없음" 이다
+    error CategoryRequired();
     /// @dev 금액이 MAX_AMOUNT 를 넘거나, 증액 후 한도가 MAX_AMOUNT 를 넘음
     error AmountOutOfRange(uint256 amount);
     /// @dev budgetId·term·expiresAt 이 저장 필드 폭을 넘음
@@ -153,7 +155,7 @@ interface IBudgetToken {
 
     function roleManager() external view returns (address);
 
-    /// @notice 예산 신규 배정. 회장 서명. version = 1.
+    /// @notice 예산 신규 배정. 회장 서명. version = 1. term == 0 은 TermRequired, category == 0 은 CategoryRequired.
     function issue(IssueRequest calldata request, bytes calldata presidentSig) external;
 
     /// @notice 예산 개정(증액). 회장 요청 서명 + 감사 승인 서명. version++. issued 에 더한다.
