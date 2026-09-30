@@ -51,11 +51,13 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 | `POST` | `/entries/{id}/submit` | 초안 서명 제출 (**등록한 총무 본인 토큰 필요**) | `{ "id": 4, "status": "PENDING", ... }` |
 | `GET` | `/balance` | 장부 잔액 요약 | `{ "balance": 4965000, "income": 5000000, "expense": 35000 }` |
 | `GET` | `/budgets` | 카테고리별 예산 현황 | 행사비, 사업비, 운영비 편성액 및 잔량 |
+| `GET` | `/chain/domains` | 앱이 서명할 EIP-712 도메인 (컨트랙트별) | `{ "chainId": 31337, "domains": { ... } }` |
 | `GET` | `/users/wallets` | user id ↔ 지갑 주소 매핑 (현·전 임원, 검증용) | `{ "2": "0x3C44…93BC", ... }` |
 
 ### 2.1 인증
 - `POST /auth/login` 으로 받은 `access_token` 을 `Authorization: Bearer <token>` 헤더로 보냅니다. Swagger UI 에서는 우측 상단 **Authorize** 에 토큰을 넣으면 됩니다.
 - 테스트 계정: `20240001`(학생) · `20240002`(총무) · `20240003`(감사) · `20240004`(회장) · `20240005`(감사 2), 비밀번호는 모두 `userPassword123!` (자세한 내용은 `docs/API.md` 「인증」)
+- 배포 기록 위치는 환경변수 `DEPLOYMENTS_FILE` 로 바꿀 수 있습니다. 없으면 저장소의 `contracts/deployments/localhost.json` 을 읽습니다 (`GET /chain/domains`, 릴레이어가 사용).
 - 토큰 서명 키는 환경변수 `JWT_SECRET` 으로 설정합니다. 없으면 개발용 기본 키를 쓰고 시작 로그에 경고가 뜹니다 — **배포 환경에서는 반드시 설정하세요.**
 
 ---

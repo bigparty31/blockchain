@@ -369,3 +369,56 @@
   "5": "0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc"
 }
 ```
+
+---
+
+## 체인
+
+### 1. EIP-712 서명 도메인 (`GET /chain/domains`)
+- **설명**: 앱이 서명할 때 쓸 EIP-712 도메인을 배포 기록(`contracts/deployments/localhost.json`)에서 읽어 내려줍니다. 재배포하면 주소와 도메인이 바뀌므로 **앱은 값을 하드코딩하지 말고 이 API를 씁니다.**
+- **권한**: 토큰 없이 호출할 수 있습니다.
+- **도메인 고르기**: 서명을 받는 컨트랙트마다 도메인이 따로 있습니다 (`docs/CONTRACTS.md` 「EIP-712」).
+
+| 서명 | 도메인 |
+| :--- | :--- |
+| 등록 `RecordRequest`, 승인 `ConfirmApproval`, 반려 `RejectDecision` | `AccountingLedger` |
+| 예산 발행 `IssueRequest`, 증액 `IncreaseRequest`, 회수 `ReclaimRequest` | `BudgetToken` |
+| 롤 변경 `RoleChange`, 회장 복구 `PresidentRecovery`·`RecoveryCancel` | `RoleManager` |
+
+- **검산**: `domainSeparator`는 컨트랙트의 `DOMAIN_SEPARATOR()`입니다. 앱이 나머지 네 필드로 계산한 도메인 해시와 비교하면, 체인 id나 주소를 잘못 쓴 것을 서명 전에 잡을 수 있습니다.
+- 키 이름은 EIP-712 도메인 필드 그대로(`chainId`, `verifyingContract`)라 서명 라이브러리에 바로 넘길 수 있습니다. `domainSeparator`는 도메인 필드가 아니니 넘기기 전에 뺍니다.
+
+**Response (`200 OK`)**
+```json
+{
+  "chainId": 31337,
+  "domains": {
+    "RoleManager": {
+      "name": "RoleManager",
+      "version": "1",
+      "chainId": 31337,
+      "verifyingContract": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+      "domainSeparator": "0xebbd14b2ace84e519e5d9866354eabd2160af1a8a8675bb913e187e94c7a2a0c"
+    },
+    "BudgetToken": {
+      "name": "BudgetToken",
+      "version": "1",
+      "chainId": 31337,
+      "verifyingContract": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
+      "domainSeparator": "0x1f2905a02b6b82de113d21bf22f98674232314b3d02d77ab6f4bdf7e0c252699"
+    },
+    "AccountingLedger": {
+      "name": "AccountingLedger",
+      "version": "1",
+      "chainId": 31337,
+      "verifyingContract": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
+      "domainSeparator": "0x7887f5ba6910ea3e84a905c6e45288e1cd7b0f62a455182c7bc12b4208109294"
+    }
+  }
+}
+```
+
+**배포 기록이 없거나 앞뒤가 맞지 않을 때 (`503 Service Unavailable`)** — 도메인의 `chainId`·`verifyingContract`가 같은 파일의 체인·주소와 다르거나, `domainSeparator`가 네 필드로 계산한 값과 다르면 반쯤 갱신되거나 잘못된 기록으로 보고 내려주지 않습니다. 틀린 `domainSeparator`를 내려주면 앱의 검산이 모든 서명을 막기 때문입니다.
+```json
+{ "detail": "배포 기록이 없습니다 (localhost.json). 컨트랙트를 배포했는지 확인하세요" }
+```

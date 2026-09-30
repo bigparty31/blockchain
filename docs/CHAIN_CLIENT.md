@@ -139,7 +139,7 @@ chain.unavailable_next("confirm_entry", landed=True)                # 체인엔 
 
 - `deadline` 값 — 서명 후 릴레이까지 얼마나 유효한가
 - 한 id에 확정·반려 서명을 둘 다 릴레이하지 않는 장치 — ChainClient 안인지 서비스 계층인지 (`docs/CONTRACTS.md` EIP-712 절의 서버 규칙)
-- 앱이 서명에 쓸 EIP-712 도메인을 내려주는 경로 — 도메인은 이제 **3개**(`AccountingLedger`·`BudgetToken`·`RoleManager`)이고 값은 `contracts/deployments/localhost.json`의 `eip712`에 있다. 앱이 서명 대상에 맞는 도메인을 고르게 API로 내려준다
+- ~~앱이 서명에 쓸 EIP-712 도메인을 내려주는 경로~~ → `GET /chain/domains` (API.md 「체인」). 배포 기록은 `app/chain/deployment.py`가 읽고, 실제 릴레이어도 여기서 주소를 읽는다
 - ③에서 서버가 서명자를 먼저 복구해 확인할지 — revert만으로는 서명 불일치와 권한 없음을 구분할 수 없다 (§4)
 - 예산·롤 릴레이 — `BudgetToken`(발행·증액·회수)과 `RoleManager`(롤 변경·회장 복구)도 서명 + 릴레이어 방식이다. 같은 모양으로 메서드를 더한다. 두 컨트랙트에는 원장과 이름이 같은 에러(`TermRequired`·`ReservedId` 등)가 있어 **어느 컨트랙트에서 났는지까지** 보고 분류한다
 - ~~반려 사유·경고 사유 필수 검사~~ → `REASON_REQUIRED`·`REASON_NOT_ALLOWED`로 반영됨
