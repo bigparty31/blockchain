@@ -45,7 +45,7 @@ class EntryResponse(BaseModel):
     amount: int = Field(..., description="금액 (원 단위, int256 호환 정수)")
     counterparty: str = Field(..., description="거래처 또는 납부자")
     purpose: str = Field(..., description="지출 목적 또는 수입 사유")
-    budget_id: Optional[int] = Field(None, description="연관 예산 항목 ID (지출 시 필수, 수입 시 null)")
+    budget_id: Optional[int] = Field(None, description="연관 예산 항목 ID (수입 시 null, 지출 시 선택/예산 미배정 시 체인에서 BLOCKED)")
     occurred_at: int = Field(..., description="거래 발생 일시 (Unix Timestamp 초 단위)")
     receipt_path: Optional[str] = Field(None, description="영수증 이미지 파일 저장 경로")
     receipt_hash: Optional[str] = Field(None, description="영수증 원본 SHA-256 해시 (0x...)")

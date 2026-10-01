@@ -18,27 +18,28 @@
 
 ### 1.1 핵심 주의사항 2대 원칙 (Mandatory Constraints)
 
-1. **예산 개정은 Row 추가 + `version` 증가 (덮어쓰기 절대 금지)**
-   - **원칙**: 예산 조정 및 개정 발생 시 기존 row의 `planned_amount`를 직접 `UPDATE`하지 않고, 동일한 `(term_id, category)`에 대해 `version`을 1씩 증가시키며 **새로운 row를 `INSERT`**합니다.
-   - **근거 (FR-BUD-06, FR-RPT-05)**:
-     - 결산 메타지표의 핵심인 **「예산 개정 N회, 그중 초과 집행 이후 개정 M회」** 및 **「개정 사유 추적」**은 이전 버전의 레코드가 그대로 보존되어야만 산출 가능합니다.
-     - 기존 row를 덮어쓰면 초기 편성액과 중간 개정 이력이 영구 유실되어 감사의 불변성이 훼손됩니다.
-   - **DB 구현**: `UNIQUE (term_id, category, version)` 복합 제약조건과 `CHECK (version = 1 OR revision_reason IS NOT NULL)`을 부여하여 개정(v2+) 시 개정 사유 입력을 강제합니다.
+1. **예산 개정은 `budgets` 고정 + `budget_versions`에 버전 Row 추가 (체인 budgetId 불변성 보장)**
+   - **원칙**: 온체인 컨트랙트(`IBudgetToken.sol`)는 `budgetId`로 DB의 auto-increment 값을 그대로 사용하며, `(term, category)` 쌍마다 하나의 예산만 존재합니다(`BudgetAlreadyIssued` 규칙). 예산 개정은 동일한 `budgetId`에 버전만 올리는 증액(`IncreaseRequest`)으로 수행됩니다.
+   - **DB 구현**:
+     - `budgets (id = 체인 budgetId, term_id, category, expires_at, tx_issue) UNIQUE (term_id, category)`
+     - `budget_versions (budget_id, version, planned_amount, revision_reason, approved_by, tx_hash) UNIQUE (budget_id, version)`
+     - 개정 시 기존 row를 UPDATE하지 않고 `budget_versions`에 `version=2+`인 새 row를 `INSERT`하여 「개정은 덮어쓰지 않는다」는 불변성 원칙과 체인 `budgetId` 일치성을 동시에 보장합니다.
 
 2. **금액은 원 단위 정수형 통일 (`BIGINT`, 컨트랙트 `int256` 1:1 대응)**
    - **원칙**: 모든 금액 관련 컬럼은 소수점이 없는 **원 단위 정수(`BIGINT`)**로 통일합니다.
    - **근거 (PRD §8, FR-EXP-02, FR-INC-01)**:
      - 스마트 컨트랙트가 `int256` / `uint256` 기반 정수 연산을 수행하므로, DB에서 `FLOAT`나 `DECIMAL` 소수점을 사용할 경우 부동소수점 오차나 반올림 불일치로 인해 온체인 검증 배지가 깨집니다.
      - 대한민국 원화(KRW)는 소수점 전표가 없으므로 정수 표현이 가장 안전하고 정확합니다.
-   - **적용 컬럼**: `budgets.planned_amount`, `entries.amount`, `entries.ocr_amount`, `snapshots.bank_balance`.
+     - 정정 항목(`corrects_entry_id IS NOT NULL`)의 경우 컨트랙트 환불/재분류 규격에 따라 음수 금액이 허용됩니다.
+   - **적용 컬럼**: `budget_versions.planned_amount`, `entries.amount`, `entries.ocr_amount`, `snapshots.bank_balance`.
 
 ### 1.2 회계 무결성 및 체인 규칙의 DB 선제 강제
 
 1. **등록자 ≠ 승인자 분리 (Maker-Checker Rule, FR-EXP-12)**:
    - 스마트 컨트랙트의 `AccountingLedger`는 등록자와 승인자가 동일 주소일 경우 트랜잭션을 `revert`합니다.
    - DB 수준에서도 `CHECK (approved_by IS NULL OR created_by != approved_by)` 제약조건을 부여하여 총무의 셀프 승인을 원천 차단합니다.
-2. **영수증 중복 청구 탐지 (FR-OCR-03)**:
-   - `(ocr_approval_no, ocr_paid_at, amount)` 조건부 유니크 인덱스를 구축하여 동일 영수증의 이중 제출을 탐지 및 방지합니다.
+2. **영수증 중복 탐지 (PRD §6)**:
+   - `(ocr_approval_no, ocr_paid_at, amount)` 일반 인덱스를 구축하고 서버 등록 시 중복 여부를 사전 조회하여, 중복 시 `ocr_status = 'DUPLICATE'` 경고를 부여하고 승인 시 사유 입력을 강제합니다.
 3. **정정 분개 원칙 (FR-COR-01 ~ 04)**:
    - 마감 및 확정된 지출은 UPDATE/DELETE가 불가하며, `corrects_entry_id` 자기참조 외래키와 4종 사유(`INPUT_ERROR`, `RECEIPT_RECHECK`, `REFUND`, `RECLASSIFY`)를 가진 새 Entry를 등록하여 정정합니다.
 
@@ -55,7 +56,7 @@ erDiagram
     TERM ||--o{ SNAPSHOT : "통장 잔액 스냅샷"
     TERM ||--o{ MEMBERSHIP : "학기 회비 납부 SBT"
 
-    USER ||--o{ BUDGET : "예산 승인 (approved_by)"
+    USER ||--o{ BUDGET_VERSION : "예산 버전 승인 (approved_by)"
     USER ||--o{ BUDGET_REVISION_REQUEST : "개정 요청자 (requested_by)"
     USER ||--o{ BUDGET_REVISION_REQUEST : "개정 처리자 (resolved_by)"
     USER ||--o{ ENTRY : "수입 및 지출 등록 (created_by)"
@@ -66,6 +67,7 @@ erDiagram
     USER ||--o{ OBJECTION : "이의 제기 (user_id)"
     USER ||--o{ OBJECTION : "이의 답변 (answered_by)"
 
+    BUDGET ||--o{ BUDGET_VERSION : "버전별 편성 이력 (budget_id)"
     BUDGET ||--o{ BUDGET_REVISION_REQUEST : "대상 예산 개정 신청 (budget_id)"
     BUDGET ||--o{ ENTRY : "예산 토큰 소모 (budget_id)"
 
@@ -77,7 +79,8 @@ erDiagram
 
     USER {
         bigserial id PK "고유 ID"
-        varchar student_no UK "학번 (UNIQUE)"
+        varchar student_no UK "학번 (UNIQUE, 로그인 키)"
+        varchar password_hash "비밀번호 bcrypt 해시"
         varchar name "이름"
         varchar role "STUDENT, TREASURER, AUDITOR, PRESIDENT"
         integer wallet_index "학생 HD월렛 파생 인덱스"
@@ -93,16 +96,21 @@ erDiagram
     }
 
     BUDGET {
-        bigserial id PK "고유 ID"
+        bigserial id PK "체인 budgetId (1부터 시작)"
         bigint term_id FK "학기 ID (복합UK 참여)"
         varchar category "예산 항목 (복합UK 참여)"
-        bigint planned_amount "편성액 (원 단위 정수 int256)"
-        integer version UK "개정 버전 (term_id+category+version 복합UK)"
         timestamptz expires_at "집행 만료 일시"
+        varchar tx_issue "v1 최초 토큰 발행 TX 해시"
+    }
+
+    BUDGET_VERSION {
+        bigserial id PK "고유 ID"
+        bigint budget_id FK "예산 ID (복합UK 참여)"
+        integer version UK "개정 버전 (budget_id+version 복합UK)"
+        bigint planned_amount "편성액 (원 단위 정수 int256)"
         text revision_reason "개정 사유 (v2+ 필수)"
         bigint approved_by FK "승인자 ID"
-        varchar tx_issue "최초 발행 TX 해시"
-        varchar tx_increase "증액 개정 TX 해시"
+        varchar tx_hash "온체인 발행/증액 TX 해시"
     }
 
     BUDGET_REVISION_REQUEST {
@@ -124,10 +132,10 @@ erDiagram
         bigserial id PK "고유 ID"
         bigint term_id FK "학기 ID"
         varchar kind "INCOME, EXPENSE"
-        bigint amount "금액 (원 단위 정수, 복합UK 참여)"
+        bigint amount "금액 (원 단위 정수, 정정은 음수 가능)"
         varchar counterparty "거래처 상호"
         text purpose "지출 목적"
-        bigint budget_id FK "예산 항목 ID (지출 시 필수)"
+        bigint budget_id FK "예산 항목 ID (지출 선택/수입 NULL)"
         bigint occurred_at "결제 일자 (KST 자정 Unix초)"
         varchar receipt_path "영수증 이미지 경로"
         varchar receipt_hash "영수증 SHA256 해시"
@@ -205,12 +213,13 @@ erDiagram
 
 ### 3.1 `users` (사용자 관리)
 - **요구사항 매핑**: FR-AUTH-01(로그인), FR-AUTH-02(역할 분기), FR-AUTH-04(학생 지갑 파생), FR-AUTH-05/06(임원 키스토어)
-- **설명**: 학생과 학생회 임원(총무, 감사, 회장)의 기본 프로필 및 블록체인 키 관리 매핑 테이블입니다.
+- **설명**: 학생과 학생회 임원(총무, 감사, 회장)의 기본 프로필, 인증 정보(비밀번호 bcrypt 해시) 및 블록체인 키 관리 매핑 테이블입니다.
 
 | 컬럼명 | 데이터 타입 | Null | 기본값 | 제약조건 / 설명 |
 | :--- | :--- | :---: | :---: | :--- |
 | `id` | `BIGSERIAL` | N | Auto | **PK** |
-| `student_no` | `VARCHAR(20)` | N | - | **UNIQUE**, 학번 |
+| `student_no` | `VARCHAR(20)` | N | - | **UNIQUE**, 학번 (로그인 식별자) |
+| `password_hash`| `VARCHAR(255)`| N | - | 비밀번호 bcrypt 단방향 해시 |
 | `name` | `VARCHAR(50)` | N | - | 사용자 성명 |
 | `role` | `VARCHAR(20)` | N | - | Enum: `STUDENT`, `TREASURER`, `AUDITOR`, `PRESIDENT` |
 | `wallet_index` | `INTEGER` | Y | NULL | **UNIQUE(NULL 제외)**, 학생 HD 월렛 파생 인덱스 (`m/44'/60'/0'/0/{index}`) |
@@ -251,69 +260,81 @@ erDiagram
 
 ---
 
-### 3.3 `budgets` (예산 관리 및 개정 이력)
-- **요구사항 매핑**: FR-BUD-01(예산 편성), FR-BUD-02(토큰 발행), FR-BUD-04(초과 차단), FR-BUD-06(개정 이력 보존), FR-BUD-07(개정 사유/승인), FR-BUD-08(개정 토큰 추가발행)
-- **설명**: 학기별 항목(행사비, 비품비, 식비 등)의 예산 편성액 및 개정 이력을 관리합니다.
+### 3.3 `budgets` (온체인 예산 엔티티)
+- **요구사항 매핑**: FR-BUD-01(예산 편성), FR-BUD-02(토큰 최초 발행), IBudgetToken.sol 호환
+- **설명**: 학기별 항목(행사비, 비품비 등)마다 온체인 `budgetId`와 1:1로 영구 매핑되는 단일 예산 엔티티입니다. 컨트랙트 규격상 (term, category)마다 예산이 오직 하나만 존재하며(`BudgetAlreadyIssued` revert 방지), 개정되더라도 체인의 `budgetId`가 바뀌지 않고 불변으로 유지됩니다.
 
-> [!IMPORTANT]
-> **핵심 원칙 1: 개정 시 Row 추가 + `version` 증가**
-> - 본 테이블은 온체인 `BudgetToken`과 1:1로 대응되는 **"확정된 예산 버전 원장"**만을 저장합니다.
-> - 개정 신청, 대기(`PENDING`), 반려(`REJECTED`)의 라이프사이클은 `budget_revision_requests` 테이블에서 분리 관리되며, 승인 시 본 테이블에 새 버전(`version = 이전+1`) row가 삽입됩니다.
-> - 이전 버전의 `planned_amount`가 그대로 보존되므로 결산 시 개정 전/후 비교 및 통계 지표 산출이 완벽히 지원됩니다.
+| 컬럼명 | 데이터 타입 | Null | 기본값 | 제약조건 / 설명 |
+| :--- | :--- | :---: | :---: | :--- |
+| `id` | `BIGSERIAL` | N | Auto | **PK**, 스마트 컨트랙트의 `budgetId`와 1:1 일치 |
+| `term_id` | `BIGINT` | N | - | **FK** -> `terms(id)` ON DELETE RESTRICT |
+| `category` | `VARCHAR(50)` | N | - | 예산 항목명 (행사비, 비품비, 학생복지비 등) |
+| `expires_at` | `TIMESTAMPTZ` | N | - | 예산 집행 유효 만료일 (`IBudgetToken.expiresAt`) |
+| `tx_issue` | `VARCHAR(66)` | Y | NULL | v1 최초 토큰 발행 트랜잭션 해시 (`0x...`) |
+| `created_at` | `TIMESTAMPTZ` | N | `now()` | 등록 일시 |
+
+- **테이블 제약조건**:
+  - `CONSTRAINT uq_budgets_term_category UNIQUE (term_id, category)` (컨트랙트 BudgetAlreadyIssued와 동일한 불변 규칙)
+- **인덱스**:
+  - `idx_budgets_lookup ON budgets (term_id, category)`
+
+---
+
+### 3.3-1 `budget_versions` (예산 버전 및 개정 이력)
+- **요구사항 매핑**: FR-BUD-06(개정 이력 보존), FR-BUD-07(개정 사유/승인), FR-BUD-08(개정 증액)
+- **설명**: 예산 개정 시 기존 row를 UPDATE하지 않고 새 버전 row를 INSERT하여 개정 이력과 사유를 영구 보존합니다.
 
 | 컬럼명 | 데이터 타입 | Null | 기본값 | 제약조건 / 설명 |
 | :--- | :--- | :---: | :---: | :--- |
 | `id` | `BIGSERIAL` | N | Auto | **PK** |
-| `term_id` | `BIGINT` | N | - | **FK** -> `terms(id)` ON DELETE RESTRICT |
-| `category` | `VARCHAR(50)` | N | - | 예산 항목명 (행사비, 비품비, 학생복지비 등) |
+| `budget_id` | `BIGINT` | N | - | **FK** -> `budgets(id)` ON DELETE RESTRICT |
+| `version` | `INTEGER` | N | 1 | 예산 버전 (1: 최초 편성, 2+: 증액 개정) |
 | `planned_amount`| `BIGINT` | N | - | **원 단위 정수 (int256 대응)**, 편성 금액 |
-| `version` | `INTEGER` | N | 1 | 예산 버전 (1: 최초 편성, 2+: 개정 버전) |
-| `expires_at` | `TIMESTAMPTZ` | N | - | 예산 집행 유효 만료일 (`BudgetToken.expiresAt`) |
 | `revision_reason`| `TEXT` | Y | NULL | 개정 사유 (**버전 2 이상일 때 필수**) |
 | `approved_by` | `BIGINT` | Y | NULL | **FK** -> `users(id)` ON DELETE RESTRICT (승인한 감사/회장) |
-| `tx_issue` | `VARCHAR(66)` | Y | NULL | v1 최초 토큰 발행 트랜잭션 해시 (`0x...`) |
-| `tx_increase` | `VARCHAR(66)` | Y | NULL | v2+ 개정 증액 토큰 발행 트랜잭션 해시 (`0x...`) |
-| `created_at` | `TIMESTAMPTZ` | N | `now()` | 레코드 생성 일시 |
+| `tx_hash` | `VARCHAR(66)` | Y | NULL | 온체인 발행/증액 TX 해시 (v1: issue, v2+: increase) |
+| `created_at` | `TIMESTAMPTZ` | N | `now()` | 등록 일시 |
 
 - **테이블 제약조건**:
-  - `CONSTRAINT uq_budgets_term_category_version UNIQUE (term_id, category, version)` (동일 학기/카테고리 내 버전 중복 방지)
-  - `CONSTRAINT ck_budgets_amount CHECK (planned_amount >= 0)` (편성액은 0원 이상 정수)
-  - `CONSTRAINT ck_budgets_version CHECK (version >= 1)` (버전은 1부터 시작)
-  - `CONSTRAINT ck_budgets_revision_reason CHECK (version = 1 OR revision_reason IS NOT NULL)` (개정 시 사유 필수)
+  - `CONSTRAINT uq_budget_versions_budget_version UNIQUE (budget_id, version)`
+  - `CONSTRAINT ck_budget_versions_amount CHECK (planned_amount >= 0)`
+  - `CONSTRAINT ck_budget_versions_version CHECK (version >= 1)`
+  - `CONSTRAINT ck_budget_versions_revision_reason CHECK (version = 1 OR revision_reason IS NOT NULL)`
 - **인덱스**:
-  - `idx_budgets_lookup ON budgets (term_id, category, version DESC)` (최신 예산 버전 고속 조회용 복합 인덱스)
-  - `idx_budgets_approved_by ON budgets (approved_by)`
+  - `idx_budget_versions_lookup ON budget_versions (budget_id, version)`
+  - `idx_budget_versions_approved_by ON budget_versions (approved_by)`
 
 ---
 
 ### 3.4 `entries` (수입·지출 원장)
 - **요구사항 매핑**: FR-INC-01/02(수입 등록/승인), FR-EXP-01~13(지출 전체), FR-COR-01~05(정정), FR-OCR-01~08(영수증 OCR 판독 및 경고)
-- **설명**: 시스템의 핵심 회계 장부 테이블입니다. 1단계 초안(`status IS NULL`) 생성 후 2단계 기기 서명 제출 시 온체인 `Pending` 해시가 기록되고, 감사 승인 시 `Confirmed`로 확정됩니다. 예산 초과 시 감사 추적을 위해 `Blocked` 상태로 등록됩니다.
+- **설명**: 시스템의 핵심 회계 장부 테이블입니다. 1단계 초안(`status IS NULL`) 생성 후 2단계 기기 서명 제출 시 온체인 `Pending` 해시가 기록되고, 감사 승인 시 `Confirmed`로 확정됩니다. 예산 없는 지출이나 예산 초과 시 감사 추적을 위해 `Blocked` 상태로 등록됩니다.
 
 > [!IMPORTANT]
-> **핵심 원칙 2: 금액의 원 단위 정수형(`BIGINT`) 및 타임스탬프 규격 통일**
+> **핵심 원칙 2: 금액의 원 단위 정수형(`BIGINT`), 정정 항목 음수 허용 및 타임스탬프 규격**
 > - `amount`, `ocr_amount`는 모두 `BIGINT` 타입으로 지정되어 소수점 절삭이나 오차를 원천 차단합니다.
-> - `occurred_at`은 거래 사용일의 **KST 00:00:00 기준 Unix 초(정수)**(`ts % 86400 == 54000`)로 고정하여 클라이언트/서버 간 시각 편차로 인한 해시 불일치를 방지합니다. (영수증 시·분·초는 `ocr_paid_at`에 보존)
+> - 정정 항목(`corrects_entry_id IS NOT NULL`)은 환불 및 재분류(RECLASSIFY)를 위해 **음수 금액이 허용**됩니다 (`CHECK (amount != 0 AND (amount > 0 OR corrects_entry_id IS NOT NULL))`).
+> - `occurred_at`은 거래 사용일의 **KST 00:00:00 기준 Unix 초(정수)**(`ts % 86400 == 54000`)로 고정하여 클라이언트/서버 간 시각 편차로 인한 해시 불일치를 방지합니다.
 
 | 컬럼명 | 데이터 타입 | Null | 기본값 | 제약조건 / 설명 |
 | :--- | :--- | :---: | :---: | :--- |
 | `id` | `BIGSERIAL` | N | Auto | **PK** (스마트 컨트랙트 규격 1부터 시작) |
 | `term_id` | `BIGINT` | N | - | **FK** -> `terms(id)` ON DELETE RESTRICT |
 | `kind` | `VARCHAR(20)` | N | - | Enum: `INCOME`, `EXPENSE` |
-| `amount` | `BIGINT` | N | - | **원 단위 정수 (int256 대응)**, `CHECK (amount > 0)` |
+| `amount` | `BIGINT` | N | - | **원 단위 정수 (int256 대응)**, 일반 항목 양수 / 정정 항목 음수 가능 |
 | `counterparty` | `VARCHAR(100)`| N | - | 사용처 / 입금자 상호 (예: 청년피자, 한결문구) |
 | `purpose` | `TEXT` | N | - | 사용 목적 / 내용 요약 |
-| `budget_id` | `BIGINT` | Y | NULL | **FK** -> `budgets(id)` ON DELETE RESTRICT (지출 시 필수 바인딩) |
+| `budget_id` | `BIGINT` | Y | NULL | **FK** -> `budgets(id)` ON DELETE RESTRICT (수입은 항상 NULL, 지출은 선택/미배정 시 체인에서 BLOCKED) |
 | `occurred_at` | `BIGINT` | N | - | 거래 발생 일자 (**KST 00:00:00 기준 Unix 초 정수**) |
 | `receipt_path` | `VARCHAR(255)`| Y | NULL | 영수증 이미지 파일 오프체인 저장 경로 |
 | `receipt_hash` | `VARCHAR(66)` | Y | NULL | 영수증 원본의 SHA256 해시 (`0x` + 64 hex 소문자) |
-| `meta_hash` | `VARCHAR(66)` | Y | NULL | `SHA256(amount\|counterparty\|purpose\|occurred_at\|receipt_hash)` |
-| `hash_version` | `INTEGER` | N | 1 | 해시 계산 규칙 버전 (규칙 변경 시 배지 호환성 보존) |
+| `meta_hash` | `VARCHAR(66)` | Y | NULL | 메타데이터 SHA256 해시 ([docs/HASHING.md](file:///c:/Users/gyoon/blockchain/docs/HASHING.md) 규격 참조: `U+001F` 단위 구분자 사용) |
+| `hash_version` | `INTEGER` | N | 1 | 해시 계산 규칙 버전 (기본값 1) |
 | `ocr_amount` | `BIGINT` | Y | NULL | OCR 판독 결제 금액 (원 단위 정수) |
 | `ocr_approval_no`| `VARCHAR(50)`| Y | NULL | OCR 판독 카드 승인번호 |
 | `ocr_paid_at` | `BIGINT` | Y | NULL | OCR 판독 실제 결제 일시 (Unix 초 정수) |
 | `ocr_status` | `VARCHAR(20)` | Y | NULL | Enum: `MATCH`, `MISMATCH`, `DUPLICATE`, `NO_NUMBER`, `UNREADABLE` |
-| `category_warning`| `BOOLEAN` | N | FALSE | 용도 불일치 의심 경고 여부 |
+| `category_warning`| `BOOLEAN` | N | FALSE | 용도 불일치 의심 경고 여부 (기본값 FALSE) |
 | `warning_ack_reason`| `TEXT` | Y | NULL | 경고 상태로 승인 시 감사가 입력한 소명 사유 |
 | `status` | `VARCHAR(20)` | Y | NULL | 초안은 `NULL(DRAFT)`, 체인: `PENDING`, `CONFIRMED`, `REJECTED`, `BLOCKED` |
 | `block_reason` | `VARCHAR(30)` | Y | NULL | Enum: `BUDGET_EXCEEDED`, `BUDGET_EXPIRED`, `BUDGET_NOT_FOUND` |
@@ -322,32 +343,32 @@ erDiagram
 | `rejected_by` | `BIGINT` | Y | NULL | **FK** -> `users(id)` ON DELETE RESTRICT (반려자: 감사/회장) |
 | `reject_reason`| `TEXT` | Y | NULL | 반려 사유 (`status = 'REJECTED'` 시 필수) |
 | `tx_pending` | `VARCHAR(66)` | Y | NULL | 온체인 Pending/Blocked 기록 TX 해시 (`0x...`) |
-| `tx_confirm` | `VARCHAR(66)` | Y | NULL | 온체인 Confirmed 확정 TX 해시 (`0x...`) |
+| `tx_confirm` | `VARCHAR(66)` | Y | NULL | 온체인 Confirmed 확정 및 반려(`rejectEntry`) 공용 기록 TX 해시 (`0x...`) |
 | `corrects_entry_id`| `BIGINT` | Y | NULL | **FK** -> `entries(id)` ON DELETE RESTRICT (정정 대상 원본 Entry ID) |
 | `correction_reason`| `VARCHAR(30)`| Y | NULL | Enum: `INPUT_ERROR`, `RECEIPT_RECHECK`, `REFUND`, `RECLASSIFY` |
 | `created_at` | `TIMESTAMPTZ` | N | `now()` | 시스템 등록 일시 |
 
 - **테이블 제약조건**:
   - `CONSTRAINT ck_entries_kind CHECK (kind IN ('INCOME', 'EXPENSE'))`
-  - `CONSTRAINT ck_entries_amount CHECK (amount > 0)`
+  - `CONSTRAINT ck_entries_amount CHECK (amount != 0 AND (amount > 0 OR corrects_entry_id IS NOT NULL))` (정정만 음수 허용)
+  - `CONSTRAINT ck_entries_income_no_budget CHECK (kind = 'EXPENSE' OR budget_id IS NULL)` (수입에는 예산 배정 불가, 컨트랙트 BudgetIdNotAllowedForIncome 대응)
   - `CONSTRAINT ck_entries_ocr_amount CHECK (ocr_amount IS NULL OR ocr_amount >= 0)`
   - `CONSTRAINT ck_entries_status CHECK (status IS NULL OR status IN ('PENDING', 'CONFIRMED', 'REJECTED', 'BLOCKED'))`
   - `CONSTRAINT ck_entries_block_reason CHECK (block_reason IS NULL OR block_reason IN ('BUDGET_EXCEEDED', 'BUDGET_EXPIRED', 'BUDGET_NOT_FOUND'))`
   - `CONSTRAINT ck_entries_ocr_status CHECK (ocr_status IS NULL OR ocr_status IN ('MATCH', 'MISMATCH', 'DUPLICATE', 'NO_NUMBER', 'UNREADABLE'))`
   - `CONSTRAINT ck_entries_correction_reason CHECK (correction_reason IS NULL OR correction_reason IN ('INPUT_ERROR', 'RECEIPT_RECHECK', 'REFUND', 'RECLASSIFY'))`
-  - `CONSTRAINT ck_entries_expense_budget CHECK (kind = 'INCOME' OR budget_id IS NOT NULL)` (지출은 예산 매핑 필수)
   - `CONSTRAINT ck_entries_maker_checker CHECK (approved_by IS NULL OR created_by != approved_by)` (**등록자 ≠ 승인자 분리 강제**)
   - `CONSTRAINT ck_entries_rejected_maker CHECK (rejected_by IS NULL OR created_by != rejected_by)` (**등록자 ≠ 반려자 분리**)
   - `CONSTRAINT ck_entries_no_self_correct CHECK (corrects_entry_id IS NULL OR corrects_entry_id != id)` (자기 자신 정정 금지)
   - `CONSTRAINT ck_entries_correct_reason_req CHECK (corrects_entry_id IS NULL OR correction_reason IS NOT NULL)` (정정 등록 시 사유 필수)
   - `CONSTRAINT ck_entries_reject_reason CHECK (status != 'REJECTED' OR reject_reason IS NOT NULL)` (반려 시 사유 필수)
 - **인덱스**:
-  - **영수증 중복 청구 방지 조건부 유니크 인덱스 (FR-OCR-03, PRD §8)**:
+  - **영수증 중복 판정 일반 인덱스 (PRD §6)**:
     ```sql
-    CREATE UNIQUE INDEX uq_entries_ocr_dup 
-    ON entries (ocr_approval_no, ocr_paid_at, amount) 
-    WHERE ocr_approval_no IS NOT NULL AND status != 'REJECTED';
+    CREATE INDEX idx_entries_ocr_dup 
+    ON entries (ocr_approval_no, ocr_paid_at, amount);
     ```
+    *(등록 시 서버에서 동일 승인번호/결제시각/금액 조합을 조회하여 존재할 경우 `ocr_status = 'DUPLICATE'` 부여 및 승인 시 소명 강제)*
   - `idx_entries_dashboard ON entries (term_id, kind, status)` (잔액 및 집행률 산출 최적화)
   - `idx_entries_budget_id ON entries (budget_id)` (예산별 소모액 집계 최적화)
   - `idx_entries_occurred_at ON entries (occurred_at DESC)` (목록 최신순 페이징)
@@ -537,6 +558,7 @@ BEGIN;
 CREATE TABLE users (
     id BIGSERIAL PRIMARY KEY,
     student_no VARCHAR(20) NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
     name VARCHAR(50) NOT NULL,
     role VARCHAR(20) NOT NULL,
     wallet_index INTEGER NULL,
@@ -573,34 +595,47 @@ CREATE INDEX idx_terms_dates ON terms (started_at, ended_at);
 
 
 -- 3. 예산 테이블 (budgets)
--- 주의 1: 예산 개정은 row 추가 + version 증가 (기존 row UPDATE 금지)
--- 주의 2: planned_amount는 소수점 없는 원 단위 정수 (BIGINT, int256 호환)
+-- 주의: 체인 budgetId 불변 고정. (term, category)마다 오직 1개 발행
 CREATE TABLE budgets (
     id BIGSERIAL PRIMARY KEY,
     term_id BIGINT NOT NULL,
     category VARCHAR(50) NOT NULL,
-    planned_amount BIGINT NOT NULL,
-    version INTEGER NOT NULL DEFAULT 1,
     expires_at TIMESTAMPTZ NOT NULL,
-    revision_reason TEXT NULL,
-    approved_by BIGINT NULL,
     tx_issue VARCHAR(66) NULL,
-    tx_increase VARCHAR(66) NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT fk_budgets_term FOREIGN KEY (term_id) REFERENCES terms(id) ON DELETE RESTRICT,
-    CONSTRAINT fk_budgets_approver FOREIGN KEY (approved_by) REFERENCES users(id) ON DELETE RESTRICT,
-    CONSTRAINT uq_budgets_term_category_version UNIQUE (term_id, category, version),
-    CONSTRAINT ck_budgets_amount CHECK (planned_amount >= 0),
-    CONSTRAINT ck_budgets_version CHECK (version >= 1),
-    CONSTRAINT ck_budgets_revision_reason CHECK (version = 1 OR revision_reason IS NOT NULL)
+    CONSTRAINT uq_budgets_term_category UNIQUE (term_id, category)
 );
 
-CREATE INDEX idx_budgets_lookup ON budgets (term_id, category, version DESC);
-CREATE INDEX idx_budgets_approved_by ON budgets (approved_by);
+CREATE INDEX idx_budgets_lookup ON budgets (term_id, category);
+
+
+-- 3-1. 예산 버전 테이블 (budget_versions)
+-- 주의 1: 예산 개정은 row 추가 + version 증가 (기존 row UPDATE 금지)
+-- 주의 2: planned_amount는 소수점 없는 원 단위 정수 (BIGINT, int256 호환)
+CREATE TABLE budget_versions (
+    id BIGSERIAL PRIMARY KEY,
+    budget_id BIGINT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    planned_amount BIGINT NOT NULL,
+    revision_reason TEXT NULL,
+    approved_by BIGINT NULL,
+    tx_hash VARCHAR(66) NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_budget_versions_budget FOREIGN KEY (budget_id) REFERENCES budgets(id) ON DELETE RESTRICT,
+    CONSTRAINT fk_budget_versions_approver FOREIGN KEY (approved_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CONSTRAINT uq_budget_versions_budget_version UNIQUE (budget_id, version),
+    CONSTRAINT ck_budget_versions_amount CHECK (planned_amount >= 0),
+    CONSTRAINT ck_budget_versions_version CHECK (version >= 1),
+    CONSTRAINT ck_budget_versions_revision_reason CHECK (version = 1 OR revision_reason IS NOT NULL)
+);
+
+CREATE INDEX idx_budget_versions_lookup ON budget_versions (budget_id, version);
+CREATE INDEX idx_budget_versions_approved_by ON budget_versions (approved_by);
 
 
 -- 4. 수입·지출 항목 테이블 (entries)
--- 주의 1: amount 및 ocr_amount는 원 단위 정수 (BIGINT, int256 호환)
+-- 주의 1: amount 및 ocr_amount는 원 단위 정수 (BIGINT, int256 호환, 정정 항목만 음수 허용)
 -- 주의 2: occurred_at은 사용일 KST 자정 Unix초 정수 (ts % 86400 == 54000)
 CREATE TABLE entries (
     id BIGSERIAL PRIMARY KEY,
@@ -639,13 +674,13 @@ CREATE TABLE entries (
     CONSTRAINT fk_entries_rejecter FOREIGN KEY (rejected_by) REFERENCES users(id) ON DELETE RESTRICT,
     CONSTRAINT fk_entries_corrects FOREIGN KEY (corrects_entry_id) REFERENCES entries(id) ON DELETE RESTRICT,
     CONSTRAINT ck_entries_kind CHECK (kind IN ('INCOME', 'EXPENSE')),
-    CONSTRAINT ck_entries_amount CHECK (amount > 0),
+    CONSTRAINT ck_entries_amount CHECK (amount != 0 AND (amount > 0 OR corrects_entry_id IS NOT NULL)),
+    CONSTRAINT ck_entries_income_no_budget CHECK (kind = 'EXPENSE' OR budget_id IS NULL),
     CONSTRAINT ck_entries_ocr_amount CHECK (ocr_amount IS NULL OR ocr_amount >= 0),
     CONSTRAINT ck_entries_status CHECK (status IS NULL OR status IN ('PENDING', 'CONFIRMED', 'REJECTED', 'BLOCKED')),
     CONSTRAINT ck_entries_block_reason CHECK (block_reason IS NULL OR block_reason IN ('BUDGET_EXCEEDED', 'BUDGET_EXPIRED', 'BUDGET_NOT_FOUND')),
     CONSTRAINT ck_entries_ocr_status CHECK (ocr_status IS NULL OR ocr_status IN ('MATCH', 'MISMATCH', 'DUPLICATE', 'NO_NUMBER', 'UNREADABLE')),
     CONSTRAINT ck_entries_correction_reason CHECK (correction_reason IS NULL OR correction_reason IN ('INPUT_ERROR', 'RECEIPT_RECHECK', 'REFUND', 'RECLASSIFY')),
-    CONSTRAINT ck_entries_expense_budget CHECK (kind = 'INCOME' OR budget_id IS NOT NULL),
     CONSTRAINT ck_entries_maker_checker CHECK (approved_by IS NULL OR created_by != approved_by),
     CONSTRAINT ck_entries_rejected_maker CHECK (rejected_by IS NULL OR created_by != rejected_by),
     CONSTRAINT ck_entries_no_self_correct CHECK (corrects_entry_id IS NULL OR corrects_entry_id != id),
@@ -653,10 +688,9 @@ CREATE TABLE entries (
     CONSTRAINT ck_entries_reject_reason CHECK (status != 'REJECTED' OR reject_reason IS NOT NULL)
 );
 
--- OCR 영수증 중복 청구 방지 조건부 유니크 인덱스 (PRD §8, FR-OCR-03)
-CREATE UNIQUE INDEX uq_entries_ocr_dup 
-ON entries (ocr_approval_no, ocr_paid_at, amount) 
-WHERE ocr_approval_no IS NOT NULL AND status != 'REJECTED';
+-- OCR 영수증 중복 판정 일반 인덱스 (PRD §6)
+CREATE INDEX idx_entries_ocr_dup 
+ON entries (ocr_approval_no, ocr_paid_at, amount);
 
 CREATE INDEX idx_entries_dashboard ON entries (term_id, kind, status);
 CREATE INDEX idx_entries_budget_id ON entries (budget_id);

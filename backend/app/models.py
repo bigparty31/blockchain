@@ -39,6 +39,7 @@ class User(Base):
 
     id = Column(ID_TYPE, primary_key=True, autoincrement=True, doc="고유 ID (1부터 시작)")
     student_no = Column(String(20), nullable=False, unique=True, index=True, doc="학번 (UNIQUE, 로그인 키)")
+    password_hash = Column(String(255), nullable=False, doc="비밀번호 bcrypt 해시")
     name = Column(String(50), nullable=False, doc="사용자 성명")
     role = Column(String(20), nullable=False, index=True, doc="STUDENT, TREASURER, AUDITOR, PRESIDENT")
     wallet_index = Column(Integer, nullable=True, unique=True, doc="학생 HD 월렛 인덱스")
@@ -49,7 +50,7 @@ class User(Base):
     entries_created = relationship("Entry", foreign_keys="Entry.created_by", back_populates="creator")
     entries_approved = relationship("Entry", foreign_keys="Entry.approved_by", back_populates="approver")
     entries_rejected = relationship("Entry", foreign_keys="Entry.rejected_by", back_populates="rejecter")
-    budgets_approved = relationship("Budget", foreign_keys="Budget.approved_by", back_populates="approver")
+    budget_versions_approved = relationship("BudgetVersion", foreign_keys="BudgetVersion.approved_by", back_populates="approver")
     budget_revisions_requested = relationship("BudgetRevisionRequest", foreign_keys="BudgetRevisionRequest.requested_by", back_populates="requester")
     budget_revisions_resolved = relationship("BudgetRevisionRequest", foreign_keys="BudgetRevisionRequest.resolved_by", back_populates="resolver")
     snapshots_uploaded = relationship("Snapshot", foreign_keys="Snapshot.uploaded_by", back_populates="uploader")
@@ -61,6 +62,7 @@ class User(Base):
         CheckConstraint("role IN ('STUDENT', 'TREASURER', 'AUDITOR', 'PRESIDENT')", name="ck_users_role"),
         CheckConstraint("role != 'STUDENT' OR wallet_index IS NOT NULL", name="ck_users_student_wallet"),
         CheckConstraint("role = 'STUDENT' OR wallet_address IS NOT NULL", name="ck_users_council_wallet"),
+        CheckConstraint("wallet_address IS NULL OR wallet_address = lower(wallet_address)", name="ck_users_wallet_address_lower"),
     )
 
 
@@ -92,38 +94,62 @@ class Term(Base):
 
 
 # =============================================================================
+# =============================================================================
 # 3. 예산 (budgets)
-# 주의 1: 예산 개정은 row 추가 + version 증가 (기존 row UPDATE 금지)
-# 주의 2: planned_amount는 소수점 없는 원 단위 정수 (BIGINT, int256 호환)
+# 주의: 한 (term, category)마다 체인 budgetId 1개 대응. 개정 시 row를 추가하지 않고
+#       budget_versions에 버전을 기록하여 id 불변성을 보장함 (IBudgetToken.sol 호환)
 # =============================================================================
 class Budget(Base):
     __tablename__ = "budgets"
 
-    id = Column(ID_TYPE, primary_key=True, autoincrement=True, doc="고유 ID")
+    id = Column(ID_TYPE, primary_key=True, autoincrement=True, doc="체인 budgetId (1부터 시작)")
     term_id = Column(BigInteger, ForeignKey("terms.id", ondelete="RESTRICT"), nullable=False, doc="학기 ID")
     category = Column(String(50), nullable=False, doc="예산 항목명")
-    planned_amount = Column(BigInteger, nullable=False, doc="편성 금액 (원 단위 정수)")
-    version = Column(Integer, nullable=False, default=1, doc="예산 버전 (1: 최초, 2+: 개정)")
     expires_at = Column(DateTime(timezone=True), nullable=False, doc="예산 집행 유효 만료일")
-    revision_reason = Column(Text, nullable=True, doc="개정 사유 (버전 2 이상 필수)")
-    approved_by = Column(BigInteger, ForeignKey("users.id", ondelete="RESTRICT"), nullable=True, doc="승인한 감사/회장")
     tx_issue = Column(String(66), nullable=True, doc="v1 최초 토큰 발행 트랜잭션 해시")
-    tx_increase = Column(String(66), nullable=True, doc="v2+ 개정 증액 토큰 발행 트랜잭션 해시")
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), doc="생성 일시")
 
     # 관계 정의
     term = relationship("Term", back_populates="budgets")
-    approver = relationship("User", foreign_keys=[approved_by], back_populates="budgets_approved")
     entries = relationship("Entry", back_populates="budget")
     revision_requests = relationship("BudgetRevisionRequest", back_populates="budget")
+    versions = relationship("BudgetVersion", back_populates="budget", cascade="all, delete-orphan")
 
     __table_args__ = (
-        UniqueConstraint("term_id", "category", "version", name="uq_budgets_term_category_version"),
-        CheckConstraint("planned_amount >= 0", name="ck_budgets_amount"),
-        CheckConstraint("version >= 1", name="ck_budgets_version"),
-        CheckConstraint("version = 1 OR revision_reason IS NOT NULL", name="ck_budgets_revision_reason"),
-        Index("idx_budgets_lookup", "term_id", "category", "version"),
-        Index("idx_budgets_approved_by", "approved_by"),
+        UniqueConstraint("term_id", "category", name="uq_budgets_term_category"),
+        Index("idx_budgets_lookup", "term_id", "category"),
+        {"sqlite_autoincrement": True},
+    )
+
+
+# =============================================================================
+# 3-1. 예산 버전 이력 (budget_versions)
+# 주의 1: 예산 개정 시 새 버전 row 추가 (기존 row UPDATE 금지)
+# 주의 2: planned_amount는 소수점 없는 원 단위 정수 (BIGINT, int256 호환)
+# =============================================================================
+class BudgetVersion(Base):
+    __tablename__ = "budget_versions"
+
+    id = Column(ID_TYPE, primary_key=True, autoincrement=True, doc="고유 ID")
+    budget_id = Column(BigInteger, ForeignKey("budgets.id", ondelete="RESTRICT"), nullable=False, doc="예산 ID")
+    version = Column(Integer, nullable=False, server_default=text("1"), default=1, doc="예산 버전 (1: 최초, 2+: 개정)")
+    planned_amount = Column(BigInteger, nullable=False, doc="편성 금액 (원 단위 정수)")
+    revision_reason = Column(Text, nullable=True, doc="개정 사유 (버전 2 이상 필수)")
+    approved_by = Column(BigInteger, ForeignKey("users.id", ondelete="RESTRICT"), nullable=True, doc="승인한 감사/회장")
+    tx_hash = Column(String(66), nullable=True, doc="온체인 발행/증액 TX 해시 (v1: issue, v2+: increase)")
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), doc="등록 일시")
+
+    # 관계 정의
+    budget = relationship("Budget", back_populates="versions")
+    approver = relationship("User", foreign_keys=[approved_by], back_populates="budget_versions_approved")
+
+    __table_args__ = (
+        UniqueConstraint("budget_id", "version", name="uq_budget_versions_budget_version"),
+        CheckConstraint("planned_amount >= 0", name="ck_budget_versions_amount"),
+        CheckConstraint("version >= 1", name="ck_budget_versions_version"),
+        CheckConstraint("version = 1 OR revision_reason IS NOT NULL", name="ck_budget_versions_revision_reason"),
+        Index("idx_budget_versions_lookup", "budget_id", "version"),
+        Index("idx_budget_versions_approved_by", "approved_by"),
     )
 
 
@@ -141,7 +167,7 @@ class BudgetRevisionRequest(Base):
     reason = Column(Text, nullable=False, doc="개정 요청 사유")
     requested_by = Column(BigInteger, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, doc="요청 총무 ID")
     requested_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), doc="요청 일시")
-    status = Column(String(20), nullable=False, default="PENDING", doc="PENDING, APPROVED, REJECTED")
+    status = Column(String(20), nullable=False, server_default=text("'PENDING'"), default="PENDING", doc="PENDING, APPROVED, REJECTED")
     resolved_by = Column(BigInteger, ForeignKey("users.id", ondelete="RESTRICT"), nullable=True, doc="처리 감사/회장 ID")
     resolved_at = Column(DateTime(timezone=True), nullable=True, doc="처리 일시")
     reject_reason = Column(Text, nullable=True, doc="반려 사유 (서버 전용)")
@@ -178,20 +204,20 @@ class Entry(Base):
     id = Column(ID_TYPE, primary_key=True, autoincrement=True, doc="고유 ID (1부터 시작)")
     term_id = Column(BigInteger, ForeignKey("terms.id", ondelete="RESTRICT"), nullable=False, doc="학기 ID")
     kind = Column(String(20), nullable=False, doc="INCOME, EXPENSE")
-    amount = Column(BigInteger, nullable=False, doc="금액 (원 단위 양의 정수)")
+    amount = Column(BigInteger, nullable=False, doc="금액 (원 단위, 정정 항목만 음수 가능)")
     counterparty = Column(String(100), nullable=False, doc="거래처 상호 또는 납부자")
     purpose = Column(Text, nullable=False, doc="지출 목적 / 내용")
-    budget_id = Column(BigInteger, ForeignKey("budgets.id", ondelete="RESTRICT"), nullable=True, doc="배정 예산 ID (지출 시 필수)")
+    budget_id = Column(BigInteger, ForeignKey("budgets.id", ondelete="RESTRICT"), nullable=True, doc="배정 예산 ID (수입은 NULL, 지출은 선택/체인에서 예산 없으면 BLOCKED)")
     occurred_at = Column(BigInteger, nullable=False, doc="거래 발생 일자 (KST 자정 Unix초)")
     receipt_path = Column(String(255), nullable=True, doc="영수증 이미지 경로")
     receipt_hash = Column(String(66), nullable=True, doc="영수증 파일 SHA256 (0x...)")
     meta_hash = Column(String(66), nullable=True, doc="메타데이터 SHA256 (0x...)")
-    hash_version = Column(Integer, nullable=False, default=1, doc="해시 규칙 버전 (기본값 1)")
+    hash_version = Column(Integer, nullable=False, server_default=text("1"), default=1, doc="해시 규칙 버전 (기본값 1)")
     ocr_amount = Column(BigInteger, nullable=True, doc="OCR 판독 금액 (원 단위 정수)")
     ocr_approval_no = Column(String(50), nullable=True, doc="OCR 카드 승인번호")
     ocr_paid_at = Column(BigInteger, nullable=True, doc="OCR 결제 시각 (Unix 초)")
     ocr_status = Column(String(20), nullable=True, doc="MATCH, MISMATCH, DUPLICATE 등")
-    category_warning = Column(Boolean, nullable=False, default=False, doc="용도 불일치 의심 경고")
+    category_warning = Column(Boolean, nullable=False, server_default=text("false"), default=False, doc="용도 불일치 의심 경고")
     warning_ack_reason = Column(Text, nullable=True, doc="경고 승인 사유")
     status = Column(String(20), nullable=True, doc="초안은 NULL, 체인: PENDING, CONFIRMED, REJECTED, BLOCKED")
     block_reason = Column(String(30), nullable=True, doc="BUDGET_EXCEEDED, BUDGET_EXPIRED, BUDGET_NOT_FOUND")
@@ -217,13 +243,13 @@ class Entry(Base):
 
     __table_args__ = (
         CheckConstraint("kind IN ('INCOME', 'EXPENSE')", name="ck_entries_kind"),
-        CheckConstraint("amount > 0", name="ck_entries_amount"),
+        CheckConstraint("amount != 0 AND (amount > 0 OR corrects_entry_id IS NOT NULL)", name="ck_entries_amount"),
         CheckConstraint("ocr_amount IS NULL OR ocr_amount >= 0", name="ck_entries_ocr_amount"),
         CheckConstraint("status IS NULL OR status IN ('PENDING', 'CONFIRMED', 'REJECTED', 'BLOCKED')", name="ck_entries_status"),
         CheckConstraint("block_reason IS NULL OR block_reason IN ('BUDGET_EXCEEDED', 'BUDGET_EXPIRED', 'BUDGET_NOT_FOUND')", name="ck_entries_block_reason"),
         CheckConstraint("ocr_status IS NULL OR ocr_status IN ('MATCH', 'MISMATCH', 'DUPLICATE', 'NO_NUMBER', 'UNREADABLE')", name="ck_entries_ocr_status"),
         CheckConstraint("correction_reason IS NULL OR correction_reason IN ('INPUT_ERROR', 'RECEIPT_RECHECK', 'REFUND', 'RECLASSIFY')", name="ck_entries_correction_reason"),
-        CheckConstraint("kind = 'INCOME' OR budget_id IS NOT NULL", name="ck_entries_expense_budget"),
+        CheckConstraint("kind = 'EXPENSE' OR budget_id IS NULL", name="ck_entries_income_no_budget"),
         CheckConstraint("approved_by IS NULL OR created_by != approved_by", name="ck_entries_maker_checker"),
         CheckConstraint("rejected_by IS NULL OR created_by != rejected_by", name="ck_entries_rejected_maker"),
         CheckConstraint("corrects_entry_id IS NULL OR corrects_entry_id != id", name="ck_entries_no_self_correct"),
@@ -236,15 +262,9 @@ class Entry(Base):
         Index("idx_entries_approved_by", "approved_by"),
         Index("idx_entries_rejected_by", "rejected_by"),
         Index("idx_entries_corrects_entry_id", "corrects_entry_id"),
-        # 영수증 중복 청구 방지 조건부 유니크 인덱스 (FR-OCR-03, PRD §8)
-        Index(
-            "uq_entries_ocr_dup",
-            "ocr_approval_no",
-            "ocr_paid_at",
-            "amount",
-            unique=True,
-            postgresql_where=text("ocr_approval_no IS NOT NULL AND status != 'REJECTED'"),
-        ),
+        # 영수증 중복 판정 인덱스 (PRD §6: DUPLICATE 경고 조회용 일반 인덱스)
+        Index("idx_entries_ocr_dup", "ocr_approval_no", "ocr_paid_at", "amount"),
+        {"sqlite_autoincrement": True},
     )
 
 
@@ -307,6 +327,7 @@ class BankTransaction(Base):
             "matched_entry_id",
             unique=True,
             postgresql_where=text("matched_entry_id IS NOT NULL"),
+            sqlite_where=text("matched_entry_id IS NOT NULL"),
         ),
         Index("idx_bank_tran_unmatched", "snapshot_id", "matched_entry_id"),
     )
@@ -339,6 +360,7 @@ class Membership(Base):
             "term_id",
             unique=True,
             postgresql_where=text("burned_at IS NULL"),
+            sqlite_where=text("burned_at IS NULL"),
         ),
         Index("idx_memberships_lookup", "user_id", "term_id"),
         Index("idx_memberships_commit_hash", "commit_hash"),
@@ -357,7 +379,7 @@ class Objection(Base):
     content = Column(Text, nullable=False, doc="이의 질문 본문")
     answer = Column(Text, nullable=True, doc="학생회 공식 답변 본문")
     answered_by = Column(BigInteger, ForeignKey("users.id", ondelete="RESTRICT"), nullable=True, doc="답변한 임원 ID")
-    status = Column(String(20), nullable=False, default="OPEN", doc="OPEN, ANSWERED")
+    status = Column(String(20), nullable=False, server_default=text("'OPEN'"), default="OPEN", doc="OPEN, ANSWERED")
     raised_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), doc="제기 일시")
     answered_at = Column(DateTime(timezone=True), nullable=True, doc="답변 완료 일시")
     tx_raise = Column(String(66), nullable=True, doc="이의 제기 온체인 TX 해시")

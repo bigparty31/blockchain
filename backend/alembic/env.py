@@ -22,8 +22,13 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 # 환경 변수나 database.py의 DATABASE_URL을 alembic 설정에 동적 주입
-db_url = os.getenv("DATABASE_URL", DATABASE_URL)
-config.set_main_option("sqlalchemy.url", db_url)
+raw_url = config.get_main_option("sqlalchemy.url")
+if not raw_url or raw_url.startswith("driver://"):
+    db_url = os.getenv("DATABASE_URL", DATABASE_URL)
+    if db_url:
+        config.set_main_option("sqlalchemy.url", db_url.replace("%", "%%"))
+else:
+    config.set_main_option("sqlalchemy.url", raw_url.replace("%", "%%"))
 
 target_metadata = Base.metadata
 
@@ -49,13 +54,20 @@ def run_migrations_online() -> None:
     url = config.get_main_option("sqlalchemy.url")
     is_sqlite = url.startswith("sqlite") if url else False
 
+    configuration = config.get_section(config.config_ini_section, {})
+    if url:
+        configuration["sqlalchemy.url"] = url
+
     connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
+        configuration,
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
 
     with connectable.connect() as connection:
+        if is_sqlite:
+            connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
