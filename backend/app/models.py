@@ -70,7 +70,8 @@ class User(Base):
 class Term(Base):
     __tablename__ = "terms"
 
-    id = Column(ID_TYPE, primary_key=True, autoincrement=True, doc="고유 ID")
+    id = Column(ID_TYPE, primary_key=True, autoincrement=True, doc="고유 ID (1부터 시작)")
+    term_code = Column(Integer, nullable=False, unique=True, index=True, doc="온체인 학기 코드 (YYYYS 형식, 예: 20261, uint32 호환)")
     name = Column(String(50), nullable=False, unique=True, doc="학기 명칭 (예: 2026-2학기)")
     started_at = Column(DateTime(timezone=True), nullable=False, doc="학기 시작 일시")
     ended_at = Column(DateTime(timezone=True), nullable=False, doc="학기 종료 일시")
@@ -85,6 +86,7 @@ class Term(Base):
 
     __table_args__ = (
         CheckConstraint("started_at < ended_at", name="ck_terms_dates"),
+        CheckConstraint("term_code > 0", name="ck_terms_code"),
         Index("idx_terms_dates", "started_at", "ended_at"),
     )
 

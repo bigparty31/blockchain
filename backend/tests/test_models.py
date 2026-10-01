@@ -81,6 +81,13 @@ def test_mandatory_columns_present():
         u.columns.contains(users_table.c.student_no) for u in users_table.constraints if getattr(u, 'columns', None)
     )
 
+    # 5. terms.term_code (학기 코드 YYYYS, UNIQUE)
+    terms_table = Base.metadata.tables["terms"]
+    assert "term_code" in terms_table.c
+    assert terms_table.c.term_code.unique is True or any(
+        u.columns.contains(terms_table.c.term_code) for u in terms_table.constraints if getattr(u, 'columns', None)
+    )
+
 
 def test_crud_and_relationships(db_session):
     """실제 레코드 생성 및 외래키/관계 정합성 검증"""
@@ -89,6 +96,7 @@ def test_crud_and_relationships(db_session):
 
     # 1. 학기 생성
     term = Term(
+        term_code=20262,
         name="2026-2학기",
         started_at=now,
         ended_at=term_end,

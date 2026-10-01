@@ -86,6 +86,7 @@ erDiagram
 
     TERM {
         bigserial id PK "고유 ID"
+        integer term_code UK "온체인 학기 코드 (YYYYS, 예: 20261)"
         varchar name UK "학기명"
         timestamptz started_at "시작 일시"
         timestamptz ended_at "종료 일시"
@@ -232,15 +233,20 @@ erDiagram
 
 | 컬럼명 | 데이터 타입 | Null | 기본값 | 제약조건 / 설명 |
 | :--- | :--- | :---: | :---: | :--- |
-| `id` | `BIGSERIAL` | N | Auto | **PK** |
+| `id` | `BIGSERIAL` | N | Auto | **PK** (스마트 컨트랙트 규격 1부터 시작) |
+| `term_code` | `INTEGER` | N | - | **UNIQUE**, 온체인 학기 코드 (`YYYYS` 형식, 예: `20261`, `uint32` 호환) |
 | `name` | `VARCHAR(50)` | N | - | **UNIQUE**, 학기 명칭 (예: "2026-2학기") |
 | `started_at` | `TIMESTAMPTZ` | N | - | 학기 시작 일시 |
 | `ended_at` | `TIMESTAMPTZ` | N | - | 학기 종료 일시 |
 | `created_at` | `TIMESTAMPTZ` | N | `now()` | 등록 일시 |
 
 - **테이블 제약조건**:
+  - `CONSTRAINT uq_terms_term_code UNIQUE (term_code)`
+  - `CONSTRAINT uq_terms_name UNIQUE (name)`
   - `CONSTRAINT ck_terms_dates CHECK (started_at < ended_at)` (시작일은 종료일보다 이전)
+  - `CONSTRAINT ck_terms_code CHECK (term_code > 0)` (학기 코드는 양의 정수)
 - **인덱스**:
+  - `idx_terms_term_code ON terms (term_code)`
   - `idx_terms_dates ON terms (started_at, ended_at)`
 
 ---
@@ -551,14 +557,18 @@ CREATE INDEX idx_users_student_no ON users (student_no);
 -- 2. 학기 테이블 (terms)
 CREATE TABLE terms (
     id BIGSERIAL PRIMARY KEY,
+    term_code INTEGER NOT NULL,
     name VARCHAR(50) NOT NULL,
     started_at TIMESTAMPTZ NOT NULL,
     ended_at TIMESTAMPTZ NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_terms_term_code UNIQUE (term_code),
     CONSTRAINT uq_terms_name UNIQUE (name),
-    CONSTRAINT ck_terms_dates CHECK (started_at < ended_at)
+    CONSTRAINT ck_terms_dates CHECK (started_at < ended_at),
+    CONSTRAINT ck_terms_code CHECK (term_code > 0)
 );
 
+CREATE UNIQUE INDEX idx_terms_term_code ON terms (term_code);
 CREATE INDEX idx_terms_dates ON terms (started_at, ended_at);
 
 
@@ -800,6 +810,7 @@ COMMIT;
 | **주의점 1: 예산 개정 이력** | `2주차 할일.md`, FR-BUD-06 | Row 추가 + `version` 증가, `UNIQUE(term_id, category, version)`, `CHECK(version=1 OR revision_reason IS NOT NULL)` | **PASS** |
 | **주의점 2: 금액 정수형** | `2주차 할일.md`, PRD §8 | 컨트랙트 `int256` 대응 원 단위 `BIGINT` 통일 (부동소수점 배제) | **PASS** |
 | **등록자 ≠ 승인자/반려자 분리** | PRD §3, FR-EXP-12 | `CHECK (created_by != approved_by)`, `CHECK (created_by != rejected_by)` DB 강제 | **PASS** |
+| **온체인 학기 코드 규격** | IAccountingLedger, 3주차 계획 | `terms.term_code` 컬럼(`YYYYS`, `uint32` 대응, `UNIQUE`) 추가로 서명 및 온체인 등록 정합성 확보 | **PASS** |
 | **타임스탬프 규격 엄수** | `docs/HASHING.md §1.3` | `occurred_at`: KST 00:00:00 Unix 초(`ts % 86400 == 54000`), `ocr_paid_at`: 실제 시각 보존 분리 | **PASS** |
 | **영수증 중복 청구 방지** | PRD §8, FR-OCR-03 | `UNIQUE (ocr_approval_no, ocr_paid_at, amount)` 조건부 인덱스 | **PASS** |
 | **통장 CSV 대조 매칭** | `docs/BANK_CSV.md` | 원본 파일 해시 보존 및 `bank_transactions` 1:1 소모식 대조 매칭 모델 완성 | **PASS** |
