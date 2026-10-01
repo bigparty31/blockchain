@@ -29,9 +29,18 @@ def test_alembic_upgrade_and_insert_autoincrement(tmp_path):
     alembic_cfg.set_main_option("sqlalchemy.url", db_url)
     command.upgrade(alembic_cfg, "head")
 
-    # 2. Raw SQLite 연결로 직접 INSERT (id 없이 채번 테스트)
+    # alembic_version 버전 테이블이 정상 커밋되었는지 검증 및 재실행/check 멱등성 검증
+    command.check(alembic_cfg)
+    command.upgrade(alembic_cfg, "head")  # 재실행 시 중복 테이블 에러 없이 성공해야 함
+
+    # 2. Raw SQLite 연결로 alembic_version 확인 및 직접 INSERT (id 없이 채번 테스트)
     conn = sqlite3.connect(db_file)
     cur = conn.cursor()
+
+    cur.execute("SELECT version_num FROM alembic_version;")
+    mig_version_row = cur.fetchone()
+    assert mig_version_row is not None
+    assert mig_version_row[0] is not None and len(mig_version_row[0]) > 0
 
     # terms INSERT (피드백 5번 재현 사례)
     cur.execute(

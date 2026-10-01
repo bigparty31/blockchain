@@ -67,6 +67,7 @@ def run_migrations_online() -> None:
     with connectable.connect() as connection:
         if is_sqlite:
             connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+            connection.commit()
 
         context.configure(
             connection=connection,

@@ -328,7 +328,7 @@ erDiagram
 | `occurred_at` | `BIGINT` | N | - | 거래 발생 일자 (**KST 00:00:00 기준 Unix 초 정수**) |
 | `receipt_path` | `VARCHAR(255)`| Y | NULL | 영수증 이미지 파일 오프체인 저장 경로 |
 | `receipt_hash` | `VARCHAR(66)` | Y | NULL | 영수증 원본의 SHA256 해시 (`0x` + 64 hex 소문자) |
-| `meta_hash` | `VARCHAR(66)` | Y | NULL | 메타데이터 SHA256 해시 ([docs/HASHING.md](file:///c:/Users/gyoon/blockchain/docs/HASHING.md) 규격 참조: `U+001F` 단위 구분자 사용) |
+| `meta_hash` | `VARCHAR(66)` | Y | NULL | 메타데이터 SHA256 해시 ([HASHING.md](HASHING.md) 규격 참조: `U+001F` 단위 구분자 사용) |
 | `hash_version` | `INTEGER` | N | 1 | 해시 계산 규칙 버전 (기본값 1) |
 | `ocr_amount` | `BIGINT` | Y | NULL | OCR 판독 결제 금액 (원 단위 정수) |
 | `ocr_approval_no`| `VARCHAR(50)`| Y | NULL | OCR 판독 카드 승인번호 |
