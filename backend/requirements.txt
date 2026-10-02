@@ -6,6 +6,7 @@ PyJWT>=2.10.0
 bcrypt>=4.0.0
 python-dotenv>=1.0.0  # 저장소 루트 .env 읽기 (app/env.py)
 eth-hash[pycryptodome]>=0.7.0
+web3>=7.0.0  # 릴레이어 (app/chain/web3_client.py). eth-account 도 함께 설치된다 (app/chain/eip712.py)
 pytest>=8.0.0
 httpx>=0.27.0  # fastapi.testclient.TestClient 가 쓴다
 sqlalchemy>=2.0.0
