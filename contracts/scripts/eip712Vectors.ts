@@ -8,7 +8,9 @@
  * 노드가 필요 없다 — 도메인은 deployments/localhost.json 에서 읽고, 계정은 Hardhat 기본 니모닉에서 유도한다
  * (scripts/deploy.ts 의 계정 배치와 같은 번호. 공개된 테스트 키라 파일에 두지 않는다).
  *
- * 타입은 test/helpers/fixture.ts 의 LEDGER_TYPES 와 같다. 컨트랙트를 재배포해 주소가 바뀌면 다시 돌린다
+ * 타입과 entryCommit 식은 test/helpers/fixture.ts 의 LEDGER_TYPES·computeEntryCommit 을 옮겨 적은 것이다.
+ * fixture.ts 는 맨 위에서 hardhat 네트워크를 띄워서 노드 없이 도는 이 스크립트가 import 할 수 없다.
+ * 원장 struct 를 바꾸면 양쪽을 같이 고치고 이 스크립트를 다시 돌린다. 컨트랙트를 재배포해 주소가 바뀌어도 다시 돌린다
  * (backend/tests/test_eip712.py 가 벡터의 도메인과 배포 기록이 다르면 알려준다).
  */
 import { readFile, writeFile, mkdir } from "node:fs/promises";
@@ -50,13 +52,19 @@ const TYPES = {
     { name: "warningReasonHash", type: "bytes32" },
     { name: "deadline", type: "uint256" },
   ],
+  RejectDecision: [
+    { name: "id", type: "uint256" },
+    { name: "entryCommit", type: "bytes32" },
+    { name: "reasonHash", type: "bytes32" },
+    { name: "deadline", type: "uint256" },
+  ],
 } as const;
 
 const INCOME = 0;
 const EXPENSE = 1;
 const TERM = 20262n;
 const OCCURRED_AT = 1790694000n; // 2026-09-30 00:00 KST (docs/HASHING.md §1.3: % 86400 == 54000)
-const DEADLINE = 1790700000n; // 서명 시한. 복구에는 영향이 없고 digest 에만 들어간다
+const DEADLINE = 1790700000n; // 서명 시한. 서명 대상의 한 필드라 바꾸면 digest 와 복구되는 서명자가 모두 바뀐다
 
 function computeEntryCommit(e: {
   hash: string;
@@ -148,15 +156,33 @@ const cases: { name: string; primaryType: keyof typeof TYPES; signer: HDNodeWall
       deadline: DEADLINE,
     },
   },
+  {
+    name: "reject_expense",
+    primaryType: "RejectDecision",
+    signer: auditor,
+    message: {
+      id: expense.id,
+      entryCommit: computeEntryCommit({ ...expense, registrant: treasurer.address }),
+      reasonHash: sha256(toUtf8Bytes("vector:reject-reason")),
+      deadline: DEADLINE,
+    },
+  },
 ];
 
-// JSON 에는 bigint 를 넣을 수 없다. 10진 문자열이 아니라 숫자로 적되, 2^53 을 넘는 값은 없다 (금액·id·시각 모두 작다)
-const plain = (m: Record<string, unknown>) =>
-  Object.fromEntries(Object.entries(m).map(([k, v]) => [k, typeof v === "bigint" ? Number(v) : v]));
+// JSON 에는 bigint 를 넣을 수 없어 숫자로 적는다. 2^53 을 넘으면 반올림돼 서명한 값과 달라지므로 멈춘다
+function plain(m: Record<string, unknown>) {
+  return Object.fromEntries(
+    Object.entries(m).map(([k, v]) => {
+      if (typeof v !== "bigint") return [k, v];
+      if (!Number.isSafeInteger(Number(v))) throw new Error(`${k} = ${v} 는 JSON 숫자로 정확히 적을 수 없다`);
+      return [k, Number(v)];
+    }),
+  );
+}
 
 const vectors = [];
 for (const c of cases) {
-  const types = { [c.primaryType]: TYPES[c.primaryType] };
+  const types = { [c.primaryType]: [...TYPES[c.primaryType]] }; // ethers 는 readonly 배열을 받지 않는다
   const signature = await c.signer.signTypedData(domain, types, c.message);
   vectors.push({
     name: c.name,

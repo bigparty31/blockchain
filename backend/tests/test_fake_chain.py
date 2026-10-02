@@ -107,6 +107,14 @@ def test_record_then_reject(chain):
     assert run(chain.get_entry(1)).approver.lower() == AUDITOR
 
 
+def test_signer_of_is_the_fake_signature_address(chain):
+    # 서비스가 릴레이 전에 서명자를 대조하는 흐름(ChainClient.signer_of)을 가짜로도 돌릴 수 있어야 한다
+    assert chain.signer_of(record(1), fake_signature(TREASURER)) == TREASURER
+    assert chain.signer_of(reject(chain, 1), fake_signature(AUDITOR.lower())) == AUDITOR
+    with pytest.raises(ValueError):
+        chain.signer_of(record(1), "0x1234")
+
+
 def test_unknown_entry_is_none(chain):
     assert run(chain.get_entry(999)) is None
 

@@ -14,7 +14,7 @@
 import hashlib
 import secrets
 import time
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 
 from eth_utils import to_checksum_address
 
@@ -90,6 +90,10 @@ class FakeChainClient:
         self._block = reason
 
     # ------------------------------------------------------------ ChainClient
+
+    def signer_of(self, payload: Union[RecordRequest, ConfirmApproval, RejectDecision], signature: str) -> str:
+        """fake_signature 가 담은 주소. payload 는 보지 않는다 — 가짜 서명은 값에 묶여 있지 않다."""
+        return _signer(check_signature(signature))
 
     async def record_pending(self, request: RecordRequest, signature: str) -> TxResult:
         signature = check_signature(signature)

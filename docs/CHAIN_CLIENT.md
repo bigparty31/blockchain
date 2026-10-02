@@ -20,10 +20,11 @@
 ① 앱 → 서버   입력값          서버: 검증 · 정규화(HASHING §1.1) · DB 저장 · id 채번  →  id 반환
 ② 앱          id·term(학기 코드) 을 넣은 RecordRequest 구성, meta_hash 직접 계산, 생체인증 서명
 ③ 앱 → 서버   서명 + deadline  서버: 앱이 보낸 hash == 서버가 계산한 hash 확인
+                              ·  signer_of(request, 서명) == 등록한 총무의 지갑 확인
                               →  record_pending  →  PENDING 또는 BLOCKED 저장
 ```
 
-③에서 해시를 먼저 대조하는 이유 — 어긋나면 체인에 올리기 전에 400으로 끝낼 수 있다. 가스도 안 쓰고, 원인도 등록 시점에 드러난다. API 이름·경로는 김경윤이 정한다.
+③에서 해시와 서명자를 먼저 대조하는 이유 — 어긋나면 체인에 올리기 전에 400으로 끝낼 수 있다. 가스도 안 쓰고, 원인도 등록 시점에 드러난다. API 이름·경로는 김경윤이 정한다.
 
 ## 2. 아직 제출 안 된 항목의 status는 NULL
 
@@ -41,6 +42,7 @@
 | `confirm_entry(approval, signature)` | `confirmEntry` | `CONFIRMED` |
 | `reject_entry(decision, signature)` | `rejectEntry` | `REJECTED` |
 | `get_entry(entry_id)` | `getEntry` | 없으면 `None` |
+| `signer_of(payload, signature)` | 부르지 않음 | 서명자 주소 (§4). 동기 메서드 |
 
 `getEntry`는 없는 id에도 0으로 채운 구조체(`registrant == 0`)를 돌려주고, status 0은 `PENDING`이다. 그대로 옮기면 없는 항목이 `PENDING`으로 보이므로 실제 구현은 `exists(id)`를 먼저 확인해 없으면 `None`을 돌려준다. (`statusOf`는 없는 id면 `EntryNotFound`로 revert한다.) 반환 튜플 순서는 저장 배치를 따르므로 **위치가 아니라 필드 이름으로 읽는다** (HASHING §2).
 
@@ -73,8 +75,9 @@
 
 | 상황 | 모양 | DB 처리 |
 | --- | --- | --- |
-| 서명 불일치 (등록) | `ChainRevert(NOT_REGISTRANT)` | `status` NULL 유지 |
-| 서명 불일치 (확정·반려) | `ChainRevert(NOT_APPROVER)` | `PENDING` 유지 |
+| 앱이 다른 값에 서명함 (등록·확정·반려) | `signer_of` 결과 ≠ 기대 지갑. **체인에 보내지 않는다** | 400. `status` NULL·`PENDING` 그대로 |
+| 서명자는 맞는데 등록 권한 없음 | `ChainRevert(NOT_REGISTRANT)` | `status` NULL 유지 |
+| 서명자는 맞는데 승인 권한 없음 | `ChainRevert(NOT_APPROVER)` | `PENDING` 유지 |
 | 등록 시 예산 초과 | `TxResult(status=BLOCKED, block_reason=BUDGET_EXCEEDED)` | `BLOCKED` 저장, 사유 표시 |
 | 확정 시 잔량 부족 | `ChainRevert(INSUFFICIENT_BUDGET)` | `PENDING` 유지, 반려 흐름으로 |
 | 확정 시 예산 마감 경과 | `ChainRevert(BUDGET_EXPIRED)` | `PENDING` 유지, 반려 흐름으로 |
@@ -82,7 +85,7 @@
 
 `INSUFFICIENT_BUDGET`·`BUDGET_EXPIRED`는 `BudgetToken`이 `confirmEntry` 안에서 내는 에러지만, 원장 ABI에도 같은 시그니처로 선언돼 있어 **원장 ABI 하나로 해석된다.** `RESERVED_ID`(id 0)는 중복(`ENTRY_ALREADY_EXISTS`)과 다른 에러다 — 재시도 판정에 쓰지 않는다.
 
-**서명 불일치는 `INVALID_SIGNATURE`로 오지 않는다.** EIP-712 서명은 형식만 맞으면 다른 데이터에 대한 서명이어도 실패하지 않고 엉뚱한 주소를 복구해 낸다. 컨트랙트에는 권한 없는 사람이 서명한 것으로 보여서 `NOT_REGISTRANT`·`NOT_APPROVER`가 난다. `INVALID_SIGNATURE`는 서명 바이트 자체가 깨졌을 때만 난다. 그래서 revert만으로는 "앱이 다른 값에 서명함"과 "정말 권한이 없는 사람"을 구분할 수 없다 (§7).
+**서명 불일치는 `INVALID_SIGNATURE`로 오지 않는다.** EIP-712 서명은 형식만 맞으면 다른 데이터에 대한 서명이어도 실패하지 않고 엉뚱한 주소를 복구해 낸다. 컨트랙트에는 권한 없는 사람이 서명한 것으로 보여서 `NOT_REGISTRANT`·`NOT_APPROVER`가 난다. `INVALID_SIGNATURE`는 서명 바이트 자체가 깨졌을 때만 난다. 그래서 revert만으로는 "앱이 다른 값에 서명함"과 "정말 권한이 없는 사람"을 구분할 수 없다. **그래서 서버가 릴레이 전에 `signer_of`로 서명자를 복구해 기대 지갑(등록은 `created_by`의 지갑, 확정·반려는 요청한 감사·회장의 지갑)과 소문자로 맞춰 비교한다.** 이 검사를 통과한 뒤에 오는 `NOT_REGISTRANT`·`NOT_APPROVER`는 서명자의 롤 문제다 (등록 뒤 롤이 바뀐 경우 등).
 
 `RevertReason`의 값은 Solidity 에러 이름 그대로다 (`"InvalidSignature"` 등). 전체 목록은 `backend/app/chain/models.py`.
 
@@ -90,6 +93,9 @@
 
 - 모델 생성 시 — 해시·`entry_commit`이 `0x` + 소문자 hex 64자가 아님, `id`가 0 이하, `occurred_at`이 음수이거나 KST 자정이 아님 (HASHING §1.3, §5), `term`이 학기 코드 `YYYYS`가 아님 (DB `Term.id`를 넘기는 실수를 여기서 막는다)
 - 메서드 호출 시 — 서명이 `0x` + hex 130자가 아님. 대소문자 모두 받고 소문자로 바꿔 쓴다
+- 서비스가 `signer_of`로 — 서명자가 기대 지갑과 다름(400). 실제 구현은 컨트랙트가 `INVALID_SIGNATURE`로 거부할 서명(v가 27·28·0·1이 아님, high-s)과 EIP-712 타입 범위를 넘는 값(uint256·int256)도 여기서 `ValueError`로 막는다
+
+실제 구현의 쓰기 메서드는 보내기 전에 서명을 컨트랙트가 받는 모양(v 27·28, low-s)으로 맞춘다. 호출자는 앱이 준 서명을 그대로 넘긴다.
 
 서명 검사의 `ValueError`는 `ChainError`가 아니다. `ChainError`만 잡으면 500으로 새어 나가므로 API 입력 검증에서 먼저 막거나 따로 잡는다.
 
@@ -122,7 +128,7 @@ sig = fake_signature(TREASURER)  # TREASURER 가 서명한 것으로 취급. 부
 
 chain.block_next(BlockReason.BUDGET_EXCEEDED)                       # 다음 지출 등록을 BLOCKED 로
 chain.fail_next("confirm_entry", RevertReason.INSUFFICIENT_BUDGET)  # 다음 확정을 revert
-chain.fail_next("record_pending", RevertReason.NOT_REGISTRANT)      # 서명 불일치 (§4)
+chain.fail_next("record_pending", RevertReason.NOT_REGISTRANT)      # 서명자의 등록 권한 없음 (§4)
 chain.unavailable_next("record_pending")                            # 연결 실패. 체인에 안 들어감
 chain.unavailable_next("confirm_entry", landed=True)                # 체인엔 들어갔는데 응답만 못 받음
 ```
@@ -132,6 +138,7 @@ chain.unavailable_next("confirm_entry", landed=True)                # 체인엔 
 - 메서드 이름은 파이썬 이름(`record_pending`, `confirm_entry`, `reject_entry`)이다. 다른 값이면 `ValueError`
 - `block_next`는 예산 id가 0이 아닌 **양수** 지출에만 적용된다. 수입과 음수 정정(환불)은 예산 판정을 건너뛴다
 - 서명자는 서명의 앞 20바이트다. **같은 주소로 만든 서명으로 등록·확정하면 `SELF_APPROVAL`**이 난다. 테스트에서는 `fake_signature`로 서명을 만든다
+- `signer_of`는 그 주소를 돌려준다. 가짜 서명은 값에 묶여 있지 않아 payload는 보지 않는다 — "앱이 다른 값에 서명함"을 흉내 내려면 다른 주소로 `fake_signature`를 만든다
 - 실제 체인은 승인 권한을 먼저 보므로, **지금 총무인 사람**이 자기 건을 승인하면 `SELF_APPROVAL`이 아니라 `NOT_APPROVER`가 난다. `SELF_APPROVAL`은 등록 뒤 롤이 바뀐 경우에만 난다. 롤을 모르는 Fake는 이 둘을 구분하지 못하니 `NOT_APPROVER`는 `fail_next`로 지정한다
 - `clock`을 넘기지 않으면 현재 시각으로 `deadline`을 판정한다. 고정된 `deadline`을 쓰는 테스트는 `clock`도 고정한다
 
@@ -140,6 +147,6 @@ chain.unavailable_next("confirm_entry", landed=True)                # 체인엔 
 - `deadline` 값 — 서명 후 릴레이까지 얼마나 유효한가
 - 한 id에 확정·반려 서명을 둘 다 릴레이하지 않는 장치 — ChainClient 안인지 서비스 계층인지 (`docs/CONTRACTS.md` EIP-712 절의 서버 규칙)
 - ~~앱이 서명에 쓸 EIP-712 도메인을 내려주는 경로~~ → `GET /chain/domains` (API.md 「체인」). 배포 기록은 `app/chain/deployment.py`가 읽고, 실제 릴레이어도 여기서 주소를 읽는다
-- ③에서 서버가 서명자를 먼저 복구해 확인할지 — revert만으로는 서명 불일치와 권한 없음을 구분할 수 없다 (§4)
+- ~~③에서 서버가 서명자를 먼저 복구해 확인할지~~ → 확인한다. 서비스가 `ChainClient.signer_of`로 복구한 주소를 기대 지갑과 비교하고, 다르면 체인에 보내지 않는다 (§4). 서비스가 `app/chain/eip712.py`를 직접 부르지 않는 이유는 FakeChainClient로도 같은 흐름을 테스트하기 위해서다
 - 예산·롤 릴레이 — `BudgetToken`(발행·증액·회수)과 `RoleManager`(롤 변경·회장 복구)도 서명 + 릴레이어 방식이다. 같은 모양으로 메서드를 더한다. 두 컨트랙트에는 원장과 이름이 같은 에러(`TermRequired`·`ReservedId` 등)가 있어 **어느 컨트랙트에서 났는지까지** 보고 분류한다
 - ~~반려 사유·경고 사유 필수 검사~~ → `REASON_REQUIRED`·`REASON_NOT_ALLOWED`로 반영됨

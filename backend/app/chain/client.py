@@ -6,13 +6,27 @@
 
 서명은 여기서 만들지 않는다. 임원 기기가 서명한 값을 받아 릴레이만 한다 (PRD §9.2).
 모든 쓰기 메서드는 트랜잭션이 블록에 들어갈 때까지 기다린 뒤 최종 상태를 돌려준다.
+호출자는 앱이 준 서명을 그대로 넘긴다. 컨트랙트가 받는 모양(v 27·28, low-s)으로 맞추는 것은 실제 구현이 보내기 전에 한다.
 """
-from typing import Optional, Protocol
+from typing import Optional, Protocol, Union
 
 from app.chain.models import ChainEntry, ConfirmApproval, RecordRequest, RejectDecision, TxResult
 
 
 class ChainClient(Protocol):
+    def signer_of(self, payload: Union[RecordRequest, ConfirmApproval, RejectDecision], signature: str) -> str:
+        """payload 에 대한 signature 의 서명자 주소 (EIP-55 체크섬). 체인에 보내지 않는다.
+
+        서비스는 릴레이 전에 이 주소를 기대 지갑(등록은 created_by 의 지갑, 확정·반려는 요청한 감사·회장의 지갑)과
+        소문자로 맞춰 비교하고, 다르면 체인에 보내지 않고 400 으로 끝낸다. 컨트랙트는 다른 값에 대한 서명을
+        NotRegistrant·NotApprover 로만 거부해서 revert 로는 "앱이 다른 값에 서명함" 과 "권한 없음" 을 가를 수 없다.
+        실제 구현은 배포 기록의 도메인으로 EIP-712 복구를 하고(app/chain/eip712.py), 가짜는 fake_signature 의 주소를 돌려준다.
+
+        Raises:
+            ValueError: 서명 형식이 틀렸거나 복구할 수 없다. 실제 구현은 컨트랙트가 거부할 v·high-s 서명도 여기서 막는다.
+        """
+        ...
+
     async def record_pending(self, request: RecordRequest, signature: str) -> TxResult:
         """AccountingLedger.recordPending 을 릴레이한다.
 
