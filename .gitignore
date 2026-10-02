@@ -37,6 +37,8 @@ env/
 .ruff_cache/
 .coverage
 htmlcov/
+*.db
+*.sqlite*
 
 # Dart / Flutter
 .dart_tool/
