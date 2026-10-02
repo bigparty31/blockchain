@@ -88,7 +88,10 @@ def test_login_with_password_over_72_bytes_is_401_not_500(student_no, password):
     assert login(student_no, password).status_code == 401
 
 
-@pytest.mark.parametrize("sub", [" 2 ", "+2", "0002", "\u0662", "2\n", 2, [2]])
+@pytest.mark.parametrize(
+    "sub",
+    [" 2 ", "+2", "0002", "\u0662", "2\n", 2, [2], pytest.param("1" * 21, id="21-digits"), pytest.param("1" * 5000, id="5000-digits")],
+)
 def test_me_with_non_canonical_sub_is_401(sub):
     # 올바른 키로 서명됐어도 sub 가 str(user_id) 형식이 아니면 거부한다
     token = jwt.encode({"sub": sub, "exp": 9999999999}, JWT_SECRET, algorithm=JWT_ALGORITHM)
@@ -120,3 +123,39 @@ def test_set_jwt_secret_has_no_warning():
     result = import_security("x" * 32)
     assert int(result.stdout) == 32
     assert "JWT_SECRET 미설정" not in result.stderr
+
+
+def run_security(env):
+    """주어진 환경변수만으로 새 프로세스에서 security 를 불러와 JWT_SECRET 길이와 stderr 를 돌려준다."""
+    code = "from app.auth.security import JWT_SECRET; print(len(JWT_SECRET))"
+    result = subprocess.run(
+        [sys.executable, "-c", code], cwd=Path(__file__).resolve().parents[1],
+        env=env, capture_output=True, text=True, check=True,
+    )
+    return int(result.stdout), result.stderr
+
+
+def test_jwt_secret_is_read_from_env_file(tmp_path):
+    # .env.example 을 .env 로 복사해 채운 경우. README 대로 uvicorn 을 띄워도 이 값을 써야 한다
+    env_file = tmp_path / ".env"
+    env_file.write_text("JWT_SECRET=" + "x" * 33 + "\n")
+    env = {k: v for k, v in os.environ.items() if k != "JWT_SECRET"}
+    length, stderr = run_security({**env, "ENV_FILE": str(env_file)})
+    assert length == 33
+    assert "JWT_SECRET 미설정" not in stderr
+
+
+def test_real_env_wins_over_env_file(tmp_path):
+    # 배포 환경에서 주입한 값을 .env 가 덮어쓰지 않는다
+    env_file = tmp_path / ".env"
+    env_file.write_text("JWT_SECRET=" + "x" * 33 + "\n")
+    length, _ = run_security({**os.environ, "ENV_FILE": str(env_file), "JWT_SECRET": "y" * 40})
+    assert length == 40
+
+
+def test_seed_hash_matches_seed_password():
+    # 시드 해시는 미리 계산해 둔 상수다. 비밀번호를 바꾸고 해시를 안 바꾸면 여기서 드러난다
+    from app.auth.security import verify_password
+    from app.auth.users import _seed_hash
+
+    assert verify_password(SEED_PASSWORD, _seed_hash)

@@ -1,7 +1,12 @@
 """테스트 공용 도우미."""
-import pytest
+import os
 
-from app.auth import users
+# 개발자의 .env(JWT_SECRET, DEPLOYMENTS_FILE 등)가 테스트 결과를 바꾸지 않게, app 을 import 하기 전에 빈 파일을 가리킨다
+os.environ["ENV_FILE"] = os.devnull
+
+import pytest  # noqa: E402
+
+from app.auth import users  # noqa: E402
 from app.auth.security import create_access_token
 from app.schemas.auth import Role
 

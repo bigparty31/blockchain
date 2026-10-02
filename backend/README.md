@@ -57,6 +57,7 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ### 2.1 인증
 - `POST /auth/login` 으로 받은 `access_token` 을 `Authorization: Bearer <token>` 헤더로 보냅니다. Swagger UI 에서는 우측 상단 **Authorize** 에 토큰을 넣으면 됩니다.
 - 테스트 계정: `20240001`(학생) · `20240002`(총무) · `20240003`(감사) · `20240004`(회장) · `20240005`(감사 2), 비밀번호는 모두 `userPassword123!` (자세한 내용은 `docs/API.md` 「인증」)
+- 설정은 환경변수로 줍니다. 저장소 루트의 `.env.example` 을 `.env` 로 복사해 채우면 서버가 시작할 때 읽습니다 (`app/env.py`). 이미 설정된 실제 환경변수가 우선합니다.
 - 배포 기록 위치는 환경변수 `DEPLOYMENTS_FILE` 로 바꿀 수 있습니다. 없으면 저장소의 `contracts/deployments/localhost.json` 을 읽습니다 (`GET /chain/domains`, 릴레이어가 사용).
 - 토큰 서명 키는 환경변수 `JWT_SECRET` 으로 설정합니다. 없으면 개발용 기본 키를 쓰고 시작 로그에 경고가 뜹니다 — **배포 환경에서는 반드시 설정하세요.**
 

@@ -15,12 +15,17 @@ from typing import Optional
 from eth_utils import keccak
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from app.chain import abi
+
 DEFAULT_PATH = Path(__file__).resolve().parents[3] / "contracts" / "deployments" / "localhost.json"
 
-_DOMAIN_TYPEHASH = keccak(text="EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)")
+# 백엔드가 릴레이하고 앱이 서명하는 컨트랙트. 하나라도 도메인이 없으면 그 서명을 만들 수 없다
+REQUIRED_DOMAINS = ("AccountingLedger", "BudgetToken", "RoleManager")
 
-_ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}")
+_DOMAIN_TYPEHASH = keccak(text="EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)")
 _BYTES32 = re.compile(r"0x[0-9a-fA-F]{64}")
+# chainId 는 EIP-712 에서 uint256 이다. 0 이하·범위 밖이면 도메인 해시를 만들 수 없다
+_CHAIN_ID = dict(gt=0, lt=2**256)
 
 
 class DeploymentError(Exception):
@@ -37,7 +42,7 @@ class Eip712Domain(_Model):
 
     name: str = Field(..., description="컨트랙트명")
     version: str = Field(..., description='도메인 버전. 지금은 "1"')
-    chain_id: int = Field(..., alias="chainId")
+    chain_id: int = Field(..., alias="chainId", **_CHAIN_ID)
     verifying_contract: str = Field(..., alias="verifyingContract", description="컨트랙트 주소 (EIP-55)")
     domain_separator: str = Field(
         ..., alias="domainSeparator", description="컨트랙트의 DOMAIN_SEPARATOR(). 앱이 계산한 도메인 해시와 비교해 검산한다"
@@ -46,16 +51,15 @@ class Eip712Domain(_Model):
     @field_validator("verifying_contract")
     @classmethod
     def _address(cls, v: str) -> str:
-        if not _ADDRESS.fullmatch(v):
-            raise ValueError("verifyingContract 는 0x + hex 40자여야 한다")
-        return v
+        return abi.check_address(v)
 
     @field_validator("domain_separator")
     @classmethod
     def _bytes32(cls, v: str) -> str:
         if not _BYTES32.fullmatch(v):
             raise ValueError("domainSeparator 는 0x + hex 64자여야 한다")
-        return v
+        # 앱은 keccak 결과(소문자 hex)와 문자열로 비교한다. 대문자로 적힌 파일도 같은 값으로 내려주도록 소문자로 맞춘다
+        return v.lower()
 
 
 class DeployedContract(_Model):
@@ -66,7 +70,7 @@ class DeployedContract(_Model):
 
 class Deployment(_Model):
     network: str
-    chain_id: int = Field(..., alias="chainId")
+    chain_id: int = Field(..., alias="chainId", **_CHAIN_ID)
     contracts: dict[str, DeployedContract]
     eip712: dict[str, Eip712Domain]
 
@@ -77,9 +81,8 @@ def domain_separator(domain: Eip712Domain) -> str:
         _DOMAIN_TYPEHASH
         + keccak(text=domain.name)
         + keccak(text=domain.version)
-        + domain.chain_id.to_bytes(32, "big")
-        + bytes(12)
-        + bytes.fromhex(domain.verifying_contract[2:])
+        + abi.uint256(domain.chain_id)
+        + abi.address(domain.verifying_contract)
     )
     return "0x" + keccak(encoded).hex()
 
@@ -99,18 +102,25 @@ def load_deployment(path: Optional[Path] = None) -> Deployment:
     except OSError as e:
         # str(e) 에는 서버의 절대 경로가 들어간다. 응답으로 나가는 메시지라 원인만 남긴다
         raise DeploymentError(f"배포 기록을 읽을 수 없습니다 ({path.name}): {e.strerror or type(e).__name__}")
+    except UnicodeDecodeError:
+        raise DeploymentError(f"배포 기록을 읽을 수 없습니다 ({path.name}): UTF-8 이 아님")
     except json.JSONDecodeError as e:
         raise DeploymentError(f"배포 기록을 읽을 수 없습니다 ({path.name}): JSON 형식 오류 ({e.msg}, {e.lineno}행)")
     try:
         deployment = Deployment.model_validate(raw)
     except ValidationError as e:
-        raise DeploymentError(f"배포 기록 형식이 맞지 않습니다 ({path.name}): {e.errors()[0]['msg']}")
+        first = e.errors()[0]
+        where = ".".join(str(part) for part in first["loc"])  # 예: contracts.BudgetToken.deployBlock
+        raise DeploymentError(f"배포 기록 형식이 맞지 않습니다 ({path.name}): {where} — {first['msg']}")
     _check_consistency(deployment, path.name)
     return deployment
 
 
 def _check_consistency(d: Deployment, file_name: str) -> None:
     """반쯤 갱신된 배포 기록을 앱에 내려주지 않게, 도메인이 같은 파일의 체인·주소와 맞는지 본다."""
+    missing = [name for name in REQUIRED_DOMAINS if name not in d.eip712]
+    if missing:
+        raise DeploymentError(f"배포 기록에 서명 도메인이 없습니다 ({file_name}): {', '.join(missing)}")
     for key, domain in d.eip712.items():
         problem = None
         if domain.name != key:
@@ -121,7 +131,7 @@ def _check_consistency(d: Deployment, file_name: str) -> None:
             problem = "contracts 에 같은 이름의 컨트랙트가 없음"
         elif domain.verifying_contract.lower() != d.contracts[key].address.lower():
             problem = "verifyingContract 가 contracts 의 주소와 다름"
-        elif domain.domain_separator.lower() != domain_separator(domain):
+        elif domain.domain_separator != domain_separator(domain):
             # 앱은 이 값으로 검산한다. 틀린 값을 내려주면 도메인이 맞아도 모든 서명이 앱에서 막힌다
             problem = "domainSeparator 가 네 필드로 계산한 값과 다름"
         if problem:

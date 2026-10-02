@@ -1,7 +1,6 @@
 from typing import List, Optional
 from pydantic import BaseModel
 
-from app.auth.security import hash_password
 from app.schemas.auth import Role
 
 
@@ -22,7 +21,9 @@ class User(BaseModel):
 # 체인의 registrant·approver 를 사용자와 대조하는 기준이다. 감사는 컨트랙트 규칙상 최소 2명.
 # tests/test_seed_wallets.py 가 두 값이 어긋나지 않는지 확인한다. 비밀번호는 docs/API.md 예시값.
 SEED_PASSWORD = "userPassword123!"
-_seed_hash = hash_password(SEED_PASSWORD)
+# SEED_PASSWORD 의 bcrypt(cost 12) 해시를 미리 계산해 둔 값. import 할 때마다 해시하면 서버 시작·reload·pytest 마다
+# 약 0.25초가 든다. 비밀번호를 바꾸면 hash_password 로 다시 뽑는다 (tests/test_auth_api.py 가 둘이 맞는지 확인한다)
+_seed_hash = "$2b$12$9Zc4eRdESnfVfjsmQeu4TuqvtygpI4x/XSACfPfjjsjHJYZrYjcdG"
 
 SEED_USERS: List[User] = [
     User(id=1, student_no="20240001", name="김학생", role=Role.STUDENT, password_hash=_seed_hash, wallet_index=0),

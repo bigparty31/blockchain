@@ -12,13 +12,13 @@
 주소는 web3.py 처럼 EIP-55 체크섬 형식으로 돌려준다.
 """
 import hashlib
-import re
 import secrets
 import time
 from typing import Callable, Optional
 
 from eth_utils import to_checksum_address
 
+from app.chain.abi import check_address
 from app.chain.commit import entry_commit_of
 from app.chain.models import (
     MAX_AMOUNT,
@@ -40,14 +40,10 @@ from app.schemas.entry import EntryKind, EntryStatus
 
 WRITE_METHODS = ("record_pending", "confirm_entry", "reject_entry")
 
-_ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}")
-
 
 def fake_signature(address: str) -> str:
     """address 가 서명한 것으로 취급되는 가짜 서명. 부를 때마다 다른 문자열이 나온다."""
-    if not _ADDRESS.fullmatch(address):
-        raise ValueError("주소는 0x + hex 40자여야 한다")
-    return "0x" + address[2:].lower() + secrets.token_hex(45)
+    return "0x" + check_address(address)[2:].lower() + secrets.token_hex(45)
 
 
 def _signer(signature: str) -> str:
@@ -227,7 +223,8 @@ class FakeChainClient:
         forced = self._fail.pop(method, None)
         if forced is not None:
             raise ChainRevert(forced, "fail_next 로 지정")
-        if deadline < self._clock():
+        # 컨트랙트는 초 단위 정수 block.timestamp > deadline 로 본다. 소수점 시각과 비교하면 같은 초가 만료로 잡힌다
+        if deadline < int(self._clock()):
             raise ChainRevert(RevertReason.SIGNATURE_EXPIRED, f"deadline={deadline}")
 
     def _pending_entry(self, entry_id: int) -> ChainEntry:

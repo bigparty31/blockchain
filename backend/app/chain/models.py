@@ -27,7 +27,6 @@ _KST_MIDNIGHT_REMAINDER = 54000  # KST 00:00 = UTC 15:00 → Unix 초 % 86400
 # 원장의 저장 필드 폭과 금액 상한 (IAccountingLedger "저장 필드 폭", MAX_AMOUNT). 넘으면 체인이 revert 한다
 MAX_AMOUNT = 10**15
 UINT64_MAX = 2**64 - 1
-UINT32_MAX = 2**32 - 1
 # 학기 코드 YYYYS 의 학기 자리: 1·2 정규, 3 여름, 4 겨울 (docs/CONTRACTS.md "공통 규칙")
 _TERM_SEMESTERS = (1, 2, 3, 4)
 

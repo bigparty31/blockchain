@@ -16,7 +16,8 @@ if JWT_SECRET == _DEV_SECRET:
     # 배포 전에는 기본값을 없애고 키가 없으면 서버가 뜨지 않게 바꾼다. 그때까지는 로그로 드러낸다
     logger.warning(
         "JWT_SECRET 미설정: 저장소에 공개된 개발용 키로 토큰을 서명합니다. "
-        "이 키로 누구나 토큰을 위조할 수 있으니 배포 환경에서는 반드시 JWT_SECRET 을 설정하세요."
+        "이 키로 누구나 토큰을 위조할 수 있으니 배포 환경에서는 반드시 JWT_SECRET 을 설정하세요 "
+        "(환경변수 또는 저장소 루트의 .env)."
     )
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_TTL = timedelta(hours=12)
@@ -24,8 +25,9 @@ ACCESS_TOKEN_TTL = timedelta(hours=12)
 # bcrypt 는 72바이트까지만 본다. 5.x 는 넘으면 ValueError 를 던진다 (4.x 는 조용히 잘랐다)
 BCRYPT_MAX_BYTES = 72
 
-# sub 는 우리가 str(user_id) 로만 만든다. " 2 ", "+2", "0002", "٢" 같은 변형은 거부한다
-_USER_ID_PATTERN = re.compile(r"[1-9][0-9]*")
+# sub 는 우리가 str(user_id) 로만 만든다. " 2 ", "+2", "0002", "٢" 같은 변형은 거부한다.
+# 길이도 20자리(uint64 최댓값 자릿수)로 막는다 — 파이썬 int() 는 4300자리를 넘으면 ValueError 를 던진다
+_USER_ID_PATTERN = re.compile(r"[1-9][0-9]{0,19}")
 
 
 def hash_password(password: str) -> str:

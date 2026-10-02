@@ -453,6 +453,13 @@ def test_deadline_exactly_now_still_passes(chain):
     assert run(chain.record_pending(record(1, deadline=NOW), fake_signature(TREASURER))).status == EntryStatus.PENDING
 
 
+def test_deadline_in_the_same_second_passes_with_fractional_clock():
+    """실제 시계는 소수점이 있다(time.time). 컨트랙트는 초 단위 block.timestamp 로 보므로 같은 초면 통과해야 한다."""
+    chain = FakeChainClient(clock=lambda: NOW + 0.4)
+    assert run(chain.record_pending(record(1, deadline=NOW), fake_signature(TREASURER))).status == EntryStatus.PENDING
+    expect_revert(chain.record_pending(record(2, deadline=NOW - 1), fake_signature(TREASURER)), RevertReason.SIGNATURE_EXPIRED)
+
+
 # ---------------------------------------------------------------- 시나리오 훅
 
 
