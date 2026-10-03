@@ -1,5 +1,11 @@
-from fastapi import FastAPI
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+from app.chain import ChainSetupError
+from app.chain.provider import close_chain_client
 from app.routers.auth import router as auth_router
 from app.routers.entries import router as entries_router
 from app.routers.balance import router as balance_router
@@ -7,7 +13,15 @@ from app.routers.budgets import router as budgets_router
 from app.routers.users import router as users_router
 from app.routers.chain import router as chain_router
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    await close_chain_client()  # 릴레이어의 RPC 연결을 닫는다
+
+
 app = FastAPI(
+    lifespan=lifespan,
     title="학생회비 투명성 관리 시스템 - Mock API",
     version="0.1.0",
     description="""
@@ -36,6 +50,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+
+@app.exception_handler(ChainSetupError)
+async def chain_setup_error(request: Request, exc: ChainSetupError):
+    # 노드·배포 기록·릴레이어 키가 릴레이할 수 없는 상태 (배포 기록 문제 DeploymentError 포함).
+    # 요청이 아니라 서버 설정 문제라 503 이다. 메시지에는 키·절대 경로가 들어가지 않는다
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
+
 
 # 라우터 등록
 app.include_router(auth_router)

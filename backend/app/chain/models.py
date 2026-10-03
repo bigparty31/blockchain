@@ -227,3 +227,10 @@ class ChainRevert(ChainError):
 
 class ChainUnavailable(ChainError):
     """RPC 연결 실패·타임아웃. revert 와 달리 트랜잭션이 들어갔는지 알 수 없다."""
+
+
+class ChainSetupError(ChainError):
+    """릴레이할 수 없는 설정 상태 — 노드 연결, 배포 기록, 릴레이어 키 문제. 트랜잭션은 보내지 않았다.
+
+    API 는 503 으로 바꾼다 (app/main.py). 배포 기록 파일 문제(DeploymentError)도 이 하위 클래스다.
+    """

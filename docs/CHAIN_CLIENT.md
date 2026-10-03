@@ -150,3 +150,29 @@ chain.unavailable_next("confirm_entry", landed=True)                # 체인엔 
 - ~~③에서 서버가 서명자를 먼저 복구해 확인할지~~ → 확인한다. 서비스가 `ChainClient.signer_of`로 복구한 주소를 기대 지갑과 비교하고, 다르면 체인에 보내지 않는다 (§4). 서비스가 `app/chain/eip712.py`를 직접 부르지 않는 이유는 FakeChainClient로도 같은 흐름을 테스트하기 위해서다
 - 예산·롤 릴레이 — `BudgetToken`(발행·증액·회수)과 `RoleManager`(롤 변경·회장 복구)도 서명 + 릴레이어 방식이다. 같은 모양으로 메서드를 더한다. 두 컨트랙트에는 원장과 이름이 같은 에러(`TermRequired`·`ReservedId` 등)가 있어 **어느 컨트랙트에서 났는지까지** 보고 분류한다
 - ~~반려 사유·경고 사유 필수 검사~~ → `REASON_REQUIRED`·`REASON_NOT_ALLOWED`로 반영됨
+
+## 8. 클라이언트 받기 — provider
+
+API에서는 구현을 직접 만들지 않고 의존성으로 받는다. Fake와 실제 구현이 환경변수로 갈린다.
+
+```python
+from fastapi import Depends
+from app.chain import ChainClient
+from app.chain.provider import get_chain_client
+
+@router.post("/entries/{id}/submit")
+async def submit(id: int, req: ..., chain: ChainClient = Depends(get_chain_client)):
+    ...
+```
+
+| 환경변수 | 비었을 때 | 있을 때 |
+| --- | --- | --- |
+| `CHAIN_RPC_URL` | `FakeChainClient` + **경고 로그** (가짜 서명이 통과하므로 개발·테스트 전용) | `Web3ChainClient` (예: `http://127.0.0.1:8545`) |
+| `RELAYER_PRIVATE_KEY` | — | 릴레이어 전용 키 (로컬은 Hardhat 계정 4). **임원 키를 넣으면 시작을 거부한다** (PRD §9.2) |
+
+- 실제 클라이언트는 **첫 요청 때** 연결하고 재사용한다. 노드가 꺼져 있어도 체인을 쓰지 않는 API는 돈다
+- 연결할 때 점검한다 — 체인 id, 원장 코드 존재, `DOMAIN_SEPARATOR`, 원장의 RoleManager·BudgetToken, 릴레이어에 롤 없음, 릴레이어 잔액
+- 점검·연결 실패는 `ChainSetupError`(배포 기록 문제는 하위 클래스 `DeploymentError`)이고 **API는 503**을 돌려준다 (`app/main.py`). 메시지에 원인과 해결 방법이 있다 — 예: "원장 주소에 컨트랙트가 없다 … `npm run deploy:local`"
+- 요청마다 배포 기록·ABI 파일과 원장 코드를 확인해, 재배포나 노드 재시작이 있었으면 다시 연결한다. **서버를 다시 켤 필요가 없다**
+- 릴레이어 키 하나로 트랜잭션을 보내므로 **uvicorn 워커는 1개**로 띄운다 (`--workers` 를 주지 않는 기본값)
+- 테스트는 `reset_chain_client()`로 만들어 둔 클라이언트를 버리고, 실제 연결은 `close_chain_client()`로 닫는다
