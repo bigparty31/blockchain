@@ -68,6 +68,18 @@ class _Error:
         return ", ".join(f"{i.get('name') or f'arg{n}'}={_show(v, i)}" for n, (i, v) in enumerate(zip(self.inputs, values)))
 
 
+def rpc_error_of(e: BaseException) -> dict:
+    """Web3RPCError 의 JSON-RPC error 를 {code, message, data} 로. 노드 에러를 읽는 곳은 모두 이것을 쓴다.
+
+    규격은 error 를 객체로 주지만 문자열만 주는 노드·프록시도 있다. message 는 없으면 예외 문자열이다.
+    """
+    response = getattr(e, "rpc_response", None)
+    error = response.get("error") if isinstance(response, dict) else None
+    if not isinstance(error, dict):
+        error = {"message": str(error or e)}
+    return {"code": error.get("code"), "message": str(error.get("message") or ""), "data": error.get("data")}
+
+
 def _to_bytes(data: Union[str, bytes, None]) -> Optional[bytes]:
     """revert 데이터를 바이트로. 데이터가 없으면 b"", 형식이 틀리면 None."""
     if data is None or data == "" or data == _MISSING_DATA:
@@ -135,13 +147,11 @@ class RevertDecoder:
         if isinstance(e, ContractLogicError):  # ContractCustomError·ContractPanicError 도 이 하위 클래스다
             data, message = e.data, e.message
         elif isinstance(e, Web3RPCError):
-            error = e.rpc_response.get("error") if isinstance(e.rpc_response, dict) else None
-            if not isinstance(error, dict):  # JSON-RPC 규격은 객체지만 문자열만 주는 노드·프록시도 있다
-                error = {"message": str(error or e)}
-            message = str(error.get("message") or "")
-            if error.get("code") != _RPC_REVERTED and "revert" not in message.lower():
+            error = rpc_error_of(e)
+            message = error["message"]
+            if error["code"] != _RPC_REVERTED and "revert" not in message.lower():
                 return None
-            data = error.get("data")
+            data = error["data"]
         else:
             return None
         if isinstance(data, dict):

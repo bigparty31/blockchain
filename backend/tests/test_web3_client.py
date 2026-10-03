@@ -176,6 +176,27 @@ def test_malformed_abi_is_a_deployment_error_before_connecting(tmp_path, bad_ite
         connect(RELAYER_KEY, path, rpc_url=UNREACHABLE)
 
 
+@pytest.mark.parametrize(
+    "edit, problem",
+    [
+        (lambda abi: [item for item in abi if item.get("name") != "getEntry"], "getEntry 가 없습니다"),
+        (
+            lambda abi: [
+                {**item, "outputs": [{**item["outputs"][0], "components": [
+                    {**c, "name": "occurredOn" if c["name"] == "occurredAt" else c["name"]} for c in item["outputs"][0]["components"]
+                ]}]} if item.get("name") == "getEntry" else item
+                for item in abi
+            ],
+            "읽는 필드가 없습니다: occurredAt",
+        ),
+    ],
+)
+def test_get_entry_shape_is_checked_before_connecting(tmp_path, edit, problem):
+    # 조회 때 KeyError·StopIteration 으로 500 이 되지 않게, 연결할 때 배포 문제(503)로 막는다
+    with pytest.raises(DeploymentError, match=problem):
+        connect(RELAYER_KEY, deployment_variant(tmp_path, change_abi=edit_abi(LEDGER, edit)), rpc_url=UNREACHABLE)
+
+
 def test_abi_without_a_known_error_is_refused_before_connecting(tmp_path):
     # 컨트랙트 에러 이름이 바뀌면 revert 가 전부 UNKNOWN 이 된다. 노드에 붙기 전에 막는다
     drop = edit_abi(LEDGER, lambda abi: [item for item in abi if item.get("name") != "SignatureExpired"])

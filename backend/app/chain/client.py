@@ -8,9 +8,19 @@
 모든 쓰기 메서드는 트랜잭션이 블록에 들어갈 때까지 기다린 뒤 최종 상태를 돌려준다.
 호출자는 앱이 준 서명을 그대로 넘긴다. 컨트랙트가 받는 모양(v 27·28, low-s)으로 맞추는 것은 실제 구현이 보내기 전에 한다.
 """
-from typing import Optional, Protocol, Union
+from typing import Awaitable, Callable, Optional, Protocol, Union
 
 from app.chain.models import ChainEntry, ConfirmApproval, RecordRequest, RejectDecision, TxResult
+
+# 트랜잭션에 서명해 hash 가 정해진 뒤, 체인에 보내기 직전에 그 hash 로 불린다 (쓰기 메서드의 before_broadcast).
+# 서비스는 여기서 DB 의 tx_pending(확정·반려는 tx_confirm)을 조건부 UPDATE 로 선점한다 — 처리 중 상태를 보내기 전에 남겨,
+# 같은 항목을 두 번 보내지 않게 하고 응답을 잃어도 어느 트랜잭션인지 알 수 있게 한다.
+# 예외를 던지면 보내지 않고 그 예외가 그대로 올라간다 (선점 실패 = 다른 요청이 이미 처리 중).
+# 검사에서 걸리는 요청(시뮬레이션 revert)이나 보내기 전 연결 실패는 hash 가 정해지기 전에 끝나 불리지 않는다.
+# 그래서 서비스는 자기 콜백이 불렸을 때만 선점을 다룬다 — 불린 뒤 ChainRevert·ChainSetupError 면 비우고,
+# ChainUnavailable 이면 둔 채 get_entry 로 확인한다 (CHAIN_CLIENT §3).
+# 콜백은 릴레이어 lock 을 쥔 채 불린다. 그 안에서 같은 클라이언트로 다시 보내거나 닫으면 RuntimeError 다.
+BeforeBroadcast = Callable[[str], Awaitable[None]]
 
 
 class ChainClient(Protocol):
@@ -27,11 +37,15 @@ class ChainClient(Protocol):
         """
         ...
 
-    async def record_pending(self, request: RecordRequest, signature: str) -> TxResult:
+    async def record_pending(
+        self, request: RecordRequest, signature: str, before_broadcast: Optional[BeforeBroadcast] = None
+    ) -> TxResult:
         """AccountingLedger.recordPending 을 릴레이한다.
 
         status 는 PENDING 또는 BLOCKED 다. BLOCKED 는 예외가 아니다 — 트랜잭션은 성공했고
         예산 조건 위반이 기록된 것이다. 사유는 block_reason 에 있다.
+        before_broadcast 는 BeforeBroadcast 설명대로 보내기 직전에 불린다. 그 뒤 ChainRevert(Hardhat 은 revert 하는
+        트랜잭션도 블록에 넣는다)나 ChainSetupError(전송 거절)가 나면 체인에 남은 것이 없으니 선점한 tx_pending 을 비운다.
 
         Raises:
             ValueError: 서명 형식이 틀렸다 (0x + hex 130자 아님). 체인에 보내기 전에 막힌다.
@@ -43,11 +57,15 @@ class ChainClient(Protocol):
             ChainUnavailable: 트랜잭션이 들어갔는지 모른다. get_entry 로 먼저 확인한 뒤 재시도한다.
                               None 이 아니면 이미 들어간 것이다. 확인 없이 재시도하면
                               이미 들어간 경우 ENTRY_ALREADY_EXISTS 로 revert 된다.
+            ChainSetupError: 릴레이어가 보낼 수 없는 상태다 — 노드·배포 기록 문제, 릴레이어 잔액 부족,
+                             다른 프로세스가 같은 키로 보냄(nonce). 트랜잭션은 들어가지 않았다. API 는 503.
         """
         ...
 
-    async def confirm_entry(self, approval: ConfirmApproval, signature: str) -> TxResult:
-        """AccountingLedger.confirmEntry 를 릴레이한다. status 는 CONFIRMED.
+    async def confirm_entry(
+        self, approval: ConfirmApproval, signature: str, before_broadcast: Optional[BeforeBroadcast] = None
+    ) -> TxResult:
+        """AccountingLedger.confirmEntry 를 릴레이한다. status 는 CONFIRMED. before_broadcast 는 record_pending 과 같다.
 
         Raises:
             ValueError: record_pending 과 같다.
@@ -62,8 +80,10 @@ class ChainClient(Protocol):
         """
         ...
 
-    async def reject_entry(self, decision: RejectDecision, signature: str) -> TxResult:
-        """AccountingLedger.rejectEntry 를 릴레이한다. status 는 REJECTED.
+    async def reject_entry(
+        self, decision: RejectDecision, signature: str, before_broadcast: Optional[BeforeBroadcast] = None
+    ) -> TxResult:
+        """AccountingLedger.rejectEntry 를 릴레이한다. status 는 REJECTED. before_broadcast 는 record_pending 과 같다.
 
         Raises:
             ValueError: record_pending 과 같다.

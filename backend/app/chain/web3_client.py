@@ -18,25 +18,35 @@ import json
 import re
 import time
 from pathlib import Path
-from typing import Optional, Union
+from typing import NoReturn, Optional, Union
 
 import aiohttp
 from eth_account import Account
 from eth_account.signers.local import LocalAccount
 from web3 import AsyncHTTPProvider, AsyncWeb3
-from web3.exceptions import ProviderConnectionError, Web3Exception
+from web3.exceptions import ProviderConnectionError, TimeExhausted, Web3Exception, Web3RPCError
+from web3.logs import DISCARD
 
 from app.chain import eip712
 from app.chain.deployment import Deployment, DeploymentError, deployment_path, load_abi, load_deployment
+from app.chain.client import BeforeBroadcast
 from app.chain.models import (
+    BLOCK_REASON_ORDER,
+    KIND_ORDER,
+    STATUS_ORDER,
+    ZERO_ADDRESS,
     ChainEntry,
+    ChainRevert,
     ChainSetupError,
+    ChainUnavailable,
     ConfirmApproval,
     RecordRequest,
     RejectDecision,
+    RevertReason,
     TxResult,
 )
-from app.chain.revert import RevertDecoder
+from app.schemas.entry import EntryStatus
+from app.chain.revert import RevertDecoder, rpc_error_of
 
 LEDGER = "AccountingLedger"
 ROLE_MANAGER = "RoleManager"
@@ -46,6 +56,7 @@ CONTRACTS = (LEDGER, ROLE_MANAGER, BUDGET_TOKEN)
 RPC_TIMEOUT_SECONDS = 10
 RECEIPT_TIMEOUT_SECONDS = 30  # 쓰기 메서드가 receipt 를 기다리는 한도. 넘으면 ChainUnavailable
 CODE_CHECK_SECONDS = 5  # is_current 가 원장 코드를 다시 확인하는 간격. 그 사이 요청은 RPC 없이 통과한다
+GAS_MARGIN = 1.2  # 시뮬레이션 추정치에 곱하는 여유분. 추정과 실제 실행의 작은 차이를 흡수한다 (튜닝이 아니다)
 
 # 노드에 닿지 못한 실패
 CONNECTION_ERRORS = (aiohttp.ClientError, OSError, ProviderConnectionError)  # asyncio·aiohttp 타임아웃은 OSError 계열
@@ -59,6 +70,16 @@ _NO_ROLE = b"\x00" * 32
 
 # 릴레이어 주소 → (이벤트 루프, lock). asyncio.Lock 은 루프에 묶이니 루프가 바뀌면 새로 만든다
 _send_locks: dict[str, tuple[asyncio.AbstractEventLoop, asyncio.Lock]] = {}
+# 릴레이어 주소 → lock 을 쥐고 보내는 중인 task. before_broadcast 는 lock 을 쥔 채 불리니, 그 안에서 같은 릴레이어로
+# 다시 보내거나 닫으면 영원히 기다린다. 그 경우를 알아보고 바로 오류를 낸다
+_send_owners: dict[str, asyncio.Task] = {}
+
+
+def _refuse_reentry(address: str) -> None:
+    if _send_owners.get(address) is asyncio.current_task():
+        raise RuntimeError(
+            "before_broadcast 안에서 같은 릴레이어로 보내거나 닫을 수 없다 — 릴레이어 lock 을 쥔 채 불려 영원히 기다린다"
+        )
 
 
 def _send_lock_for(address: str) -> asyncio.Lock:
@@ -120,6 +141,55 @@ def _link_problem(d: Deployment, links: dict) -> Optional[str]:
     return None
 
 
+# 노드가 전송 자체를 거절한 경우. revert 가 아니고 트랜잭션은 들어가지 않았다. 메시지는 노드마다 달라 소문자 부분 일치로 본다
+_REJECTIONS = (
+    (("insufficient funds", "enough funds"), "릴레이어 잔액이 부족해 가스를 낼 수 없다. 릴레이어 계정에 잔액을 채운다"),
+    (("nonce too low",), "다른 프로세스가 같은 릴레이어 키로 보내고 있다. uvicorn 워커를 1개로 띄운다"),
+)
+# 같은 트랜잭션이 이미 노드의 대기열에 있다. 보낸 것과 같으니 receipt 를 기다리면 된다.
+# "known transaction" 은 "rlp: unknown transaction type" 같은 확정 거절에도 들어 있어 앞에 글자가 없을 때만 본다
+_ALREADY_KNOWN = re.compile(r"\balready known\b|(?<![a-z])known transaction")
+
+
+def _send_failure(e: BaseException, decoder: RevertDecoder) -> Optional[BaseException]:
+    """전송(eth_sendRawTransaction) 실패를 결과에 맞는 예외로. None 이면 이미 보낸 것이라 receipt 를 기다린다.
+
+    revert → ChainRevert (Hardhat 은 revert 하는 트랜잭션도 블록에 넣는다 — 상태는 그대로, nonce 만 쓰였다).
+    잔액 부족·nonce → ChainSetupError (들어가지 않음). 그 밖과 연결 실패 → ChainUnavailable (들어갔는지 모름).
+    """
+    revert = decoder.from_web3_error(e)
+    if revert is not None:
+        return revert
+    if isinstance(e, Web3RPCError):
+        message = rpc_error_of(e)["message"].lower()
+        if _ALREADY_KNOWN.search(message):
+            return None
+        for markers, explanation in _REJECTIONS:
+            if any(marker in message for marker in markers):
+                return ChainSetupError(explanation)
+    return ChainUnavailable(f"전송 응답을 받지 못했다 ({type(e).__name__})")
+
+
+# get_entry 가 읽는 getEntry 구조체 필드. 컨트랙트에서 이름이 바뀌면 연결할 때 막는다 (조회 때 KeyError 로 500 이 되지 않게)
+_ENTRY_FIELDS = {"hash", "amount", "budgetId", "correctsId", "registrant", "occurredAt", "term", "approver", "kind", "status"}
+
+
+def _entry_fields(ledger_abi: list) -> list:
+    """getEntry 반환 튜플의 필드 이름(순서대로). 순서는 저장 배치를 따르므로 위치가 아니라 이름으로 읽는다 (CHAIN_CLIENT §3)."""
+    for item in ledger_abi:
+        if item.get("type") == "function" and item.get("name") == "getEntry":
+            outputs = item.get("outputs") or [{}]
+            names = [c.get("name") for c in outputs[0].get("components") or []]
+            missing = sorted(_ENTRY_FIELDS - set(names))
+            if missing:
+                raise DeploymentError(
+                    f"원장 ABI 의 getEntry 에 백엔드가 읽는 필드가 없습니다: {', '.join(missing)}. "
+                    "컨트랙트의 Entry 구조체가 바뀌었으면 backend/app/chain/web3_client.py 도 맞추세요"
+                )
+            return names
+    raise DeploymentError("원장 ABI 에 getEntry 가 없습니다. contracts 에서 다시 배포해 ABI 를 갱신하세요")
+
+
 def _stamp(path: Path) -> Optional[tuple]:
     try:
         stat = path.stat()
@@ -149,6 +219,7 @@ class Web3ChainClient:
         self._role_manager = contracts.get(ROLE_MANAGER)
         self._budget_token = contracts.get(BUDGET_TOKEN)
         self._reverts = RevertDecoder(self._ledger.abi)
+        self._entry_fields = _entry_fields(self._ledger.abi)
         self._stamps = self._file_stamps()
         self._code_checked_at = time.monotonic()
         self._closed = False
@@ -195,6 +266,7 @@ class Web3ChainClient:
 
     async def close(self) -> None:
         """보내던 트랜잭션이 끝난 뒤 연결을 닫는다. 닫힌 클라이언트는 다시 쓰지 않는다 (is_current 가 False)."""
+        _refuse_reentry(self.relayer_address)
         async with self._send_lock:
             self._closed = True
             await self._w3.provider.disconnect()
@@ -323,13 +395,152 @@ class Web3ChainClient:
         return eip712.recover_signer(eip712.typed_data_for(payload, self._deployment.eip712[LEDGER]), signature)
 
     async def get_entry(self, entry_id: int) -> Optional[ChainEntry]:
-        raise NotImplementedError("get_entry 는 아직 구현되지 않았다")
+        self._ensure_open()
+        if not 0 <= entry_id < 2**256:
+            return None  # 체인에 있을 수 없는 id. FakeChainClient 와 같다
+        try:
+            raw = await self._ledger.functions.getEntry(entry_id).call()
+        except Exception as e:
+            self._raise_call_failure(e)
+        fields = dict(zip(self._entry_fields, raw))
+        # getEntry 는 없는 id 에도 0 으로 채운 구조체(status 0 = PENDING)를 준다. 원장의 exists() 와 같은 기준으로 가른다
+        if fields["registrant"] == ZERO_ADDRESS:
+            return None
+        return ChainEntry(
+            id=entry_id,
+            hash="0x" + bytes(fields["hash"]).hex(),
+            amount=fields["amount"],
+            kind=KIND_ORDER[fields["kind"]],
+            status=STATUS_ORDER[fields["status"]],
+            term=fields["term"],
+            occurred_at=fields["occurredAt"],
+            budget_id=fields["budgetId"],
+            corrects_id=fields["correctsId"],
+            registrant=fields["registrant"],
+            approver=fields["approver"],
+        )
 
-    async def record_pending(self, request: RecordRequest, signature: str) -> TxResult:
-        raise NotImplementedError("record_pending 은 아직 구현되지 않았다")
+    async def record_pending(
+        self, request: RecordRequest, signature: str, before_broadcast: Optional[BeforeBroadcast] = None
+    ) -> TxResult:
+        self._ensure_open()
+        # 구조체는 서명 대상과 같은 typed data 의 message 로 만든다 — 필드 순서·인코딩의 정본이 한 곳이다
+        message = eip712.record_request_typed_data(request, self._deployment.eip712[LEDGER])["message"]
+        call = self._ledger.functions.recordPending(message, bytes.fromhex(eip712.normalize_signature(signature)[2:]))
+        tx_hash, receipt = await self._relay(call, before_broadcast)
+        return await self._record_result(tx_hash, receipt, request.id)
 
-    async def confirm_entry(self, approval: ConfirmApproval, signature: str) -> TxResult:
+    async def confirm_entry(
+        self, approval: ConfirmApproval, signature: str, before_broadcast: Optional[BeforeBroadcast] = None
+    ) -> TxResult:
         raise NotImplementedError("confirm_entry 는 아직 구현되지 않았다")
 
-    async def reject_entry(self, decision: RejectDecision, signature: str) -> TxResult:
+    async def reject_entry(
+        self, decision: RejectDecision, signature: str, before_broadcast: Optional[BeforeBroadcast] = None
+    ) -> TxResult:
         raise NotImplementedError("반려 릴레이는 이번 범위가 아니다")
+
+    # ------------------------------------------------------------ 전송
+
+    async def _relay(self, call, before_broadcast: Optional[BeforeBroadcast]) -> tuple:
+        """시뮬레이션 → 로컬 서명 → before_broadcast → 전송 → receipt. (tx hash, 성공한 receipt) 를 돌려준다.
+
+        lock 은 시뮬레이션부터 receipt 까지 잡는다. Hardhat 은 바로 채굴해 대기가 짧고, nonce 순서가 꼬일 여지가 없다.
+        시뮬레이션은 다음 블록(pending) 기준이다 — 최신 블록 기준이면 블록이 한동안 없을 때 시각이 낡아, 만료된 서명이
+        시뮬레이션을 통과하고 채굴에서 revert 한다 (nonce 를 쓰고 콜백도 불린 뒤). 서로 기다릴 필요 없는 조회는 함께 보낸다.
+        """
+        eth = self._w3.eth
+        sender = {"from": self.relayer_address}
+        _refuse_reentry(self.relayer_address)
+        async with self._send_lock:
+            _send_owners[self.relayer_address] = asyncio.current_task()
+            try:
+                tx_hash, receipt = await self._send_locked(call, before_broadcast, eth, sender)
+            finally:
+                del _send_owners[self.relayer_address]
+        if receipt["status"] != 1:
+            raise await self._replay_failure(call, tx_hash, receipt)
+        return tx_hash, receipt
+
+    async def _send_locked(self, call, before_broadcast: Optional[BeforeBroadcast], eth, sender: dict) -> tuple:
+        """_relay 의 lock 안쪽. (tx hash, receipt) — receipt 가 실패(status 0)일 수도 있다."""
+        self._ensure_open()  # lock 을 기다리는 동안 교체됐을 수 있다
+        gas, nonce, priority_fee, block = await asyncio.gather(
+            _attempt(lambda: call.estimate_gas(sender, block_identifier="pending")),
+            _attempt(lambda: eth.get_transaction_count(self.relayer_address, "pending")),
+            _attempt(lambda: eth.max_priority_fee),
+            _attempt(lambda: eth.get_block("pending")),
+            return_exceptions=True,
+        )
+        # revert 할 요청은 시뮬레이션에서 가스 없이 걸린다 (만료·권한·중복 등). 판정은 시뮬레이션이 먼저다
+        for result in (gas, nonce, priority_fee, block):
+            if isinstance(result, BaseException):
+                self._raise_call_failure(result)
+        # web3 의 기본 계산과 같은 식(기본 수수료 2배 + 우선 수수료). pending 블록을 주지 않는 노드나
+        # EIP-1559 가 아닌 노드면 web3 가 채우게 둔다
+        fees = (
+            {"maxPriorityFeePerGas": priority_fee, "maxFeePerGas": 2 * block["baseFeePerGas"] + priority_fee}
+            if block is not None and "baseFeePerGas" in block
+            else {}
+        )
+        try:
+            tx = await call.build_transaction(
+                {**sender, **fees, "nonce": nonce, "gas": int(gas * GAS_MARGIN), "chainId": self._deployment.chain_id}
+            )
+        except Exception as e:
+            self._raise_call_failure(e)
+        signed = self._account.sign_transaction(tx)
+        tx_hash = "0x" + bytes(signed.hash).hex()
+        if before_broadcast is not None:
+            await before_broadcast(tx_hash)  # 예외면 보내지 않는다
+        try:
+            await eth.send_raw_transaction(signed.raw_transaction)
+        except (*UNREACHABLE, Web3Exception) as e:
+            # 예상하지 못한 예외(코드 결함)는 잡지 않는다 — "들어갔는지 모름" 으로 가리지 않는다
+            failure = _send_failure(e, self._reverts)
+            if failure is not None:
+                raise failure from e
+        try:
+            receipt = await eth.wait_for_transaction_receipt(tx_hash, timeout=RECEIPT_TIMEOUT_SECONDS)
+        except (TimeExhausted, *UNREACHABLE, Web3Exception) as e:
+            raise ChainUnavailable(f"receipt 를 받지 못했다 ({type(e).__name__}, tx={tx_hash})") from e
+        return tx_hash, receipt
+
+    def _raise_call_failure(self, e: BaseException) -> NoReturn:
+        """읽기·시뮬레이션 호출의 실패를 올린다. revert 면 ChainRevert, 노드에 닿지 못했으면 ChainUnavailable.
+
+        예상하지 못한 예외(코드 결함)는 바꾸지 않고 그대로 올린다 — 원인 체인을 자기 자신으로 만들지 않는다.
+        """
+        revert = self._reverts.from_web3_error(e)
+        if revert is not None:
+            raise revert from e
+        if isinstance(e, (*UNREACHABLE, Web3Exception)):
+            raise ChainUnavailable(f"노드 호출이 실패했다 ({type(e).__name__})") from e
+        raise e
+
+    async def _replay_failure(self, call, tx_hash: str, receipt: dict) -> ChainRevert:
+        """receipt 가 실패(status 0)면 그 블록 직전 상태로 다시 호출해 revert 사유를 얻는다 (Hardhat 외 노드)."""
+        try:
+            await call.call({"from": self.relayer_address}, block_identifier=receipt["blockNumber"] - 1)
+        except Exception as e:
+            revert = self._reverts.from_web3_error(e)
+            if revert is not None:
+                return revert
+        return ChainRevert(RevertReason.UNKNOWN, f"트랜잭션이 실패했지만 사유를 재현하지 못했다 (tx={tx_hash})")
+
+    async def _record_result(self, tx_hash: str, receipt: dict, entry_id: int) -> TxResult:
+        """receipt 의 이 원장·이 id 이벤트로 결과를 정한다. EntryPending → PENDING, EntryBlocked → BLOCKED."""
+        events = self._ledger.events
+        for log in events.EntryBlocked().process_receipt(receipt, errors=DISCARD):
+            if log["address"] == self._ledger.address and log["args"]["id"] == entry_id:
+                return TxResult(
+                    tx_hash=tx_hash, status=EntryStatus.BLOCKED, block_reason=BLOCK_REASON_ORDER[log["args"]["reason"]]
+                )
+        for log in events.EntryPending().process_receipt(receipt, errors=DISCARD):
+            if log["address"] == self._ledger.address and log["args"]["id"] == entry_id:
+                return TxResult(tx_hash=tx_hash, status=EntryStatus.PENDING)
+        # 성공한 트랜잭션인데 이벤트가 없다. 체인 상태로 확인하고, PENDING 이 아니면 단정하지 않는다
+        entry = await self.get_entry(entry_id)
+        if entry is not None and entry.status is EntryStatus.PENDING:
+            return TxResult(tx_hash=tx_hash, status=EntryStatus.PENDING)
+        raise ChainUnavailable(f"등록 결과 이벤트를 찾지 못했다 (tx={tx_hash})")

@@ -4,6 +4,7 @@
 노드를 쓰는 테스트는 conftest 의 node 픽스처를 받는다 — 노드가 없으면 건너뛴다.
 """
 import json
+import time
 import urllib.request
 
 from eth_account import Account
@@ -40,3 +41,25 @@ def node_available() -> bool:
     except OSError:
         return False
     return True
+
+
+async def chain_now(w3) -> int:
+    """체인이 다음 블록에 쓸 시각. deadline 을 정할 때 쓴다.
+
+    Hardhat 은 블록이 없으면 최신 블록 시각이 마지막 블록(예: 배포)에 머물고, 다음 블록은 실제 시각으로 채굴한다.
+    pending 블록 시각이 그 "다음 채굴 시각" 이다 — evm_increaseTime 으로 앞당긴 양도 들어 있다.
+    pending 블록을 주지 않는 노드면 최신 블록 시각과 실제 시각 중 늦은 쪽으로 대신한다.
+    """
+    pending = await w3.eth.get_block("pending")
+    if pending is not None:
+        return pending["timestamp"]
+    return max((await w3.eth.get_block("latest"))["timestamp"], int(time.time()))
+
+
+async def in_snapshot(w3, body):
+    """body() 를 실행하고 체인 상태를 되돌린다. 실제로 보내는 테스트가 노드를 오염시키지 않게 한다."""
+    snapshot = (await w3.provider.make_request("evm_snapshot", []))["result"]
+    try:
+        return await body()
+    finally:
+        await w3.provider.make_request("evm_revert", [snapshot])

@@ -524,12 +524,13 @@ def test_unavailable_landed_applies_then_raises(chain):
     expect_revert(chain.confirm_entry(confirm(chain, 1), fake_signature(AUDITOR)), RevertReason.INVALID_STATUS)
 
 
-def test_unavailable_landed_but_reverted_leaves_state(chain):
-    """체인까지 갔지만 revert 된 경우. 부른 쪽은 revert 였는지 알 수 없고, 상태는 그대로다."""
+def test_revert_input_is_caught_before_sending_and_keeps_unavailable_next(chain):
+    """실제 구현은 revert 할 입력을 시뮬레이션에서 ChainRevert 로 끝낸다. 보내지 않았으니 지정은 다음 호출에 남는다."""
     chain.unavailable_next("record_pending", landed=True)
-    with pytest.raises(ChainUnavailable):
-        run(chain.record_pending(record(1, amount=0), fake_signature(TREASURER)))
+    expect_revert(chain.record_pending(record(1, amount=0), fake_signature(TREASURER)), RevertReason.ZERO_AMOUNT)
     assert run(chain.get_entry(1)) is None
+    with pytest.raises(ChainUnavailable):
+        run(chain.record_pending(record(1), fake_signature(TREASURER)))
 
 
 def test_unavailable_applies_once(chain):
@@ -544,3 +545,116 @@ def test_tx_hashes_differ(chain):
     second = run(chain.record_pending(record(2), fake_signature(TREASURER))).tx_hash
     assert first != second
     assert len(first) == 66 and first.startswith("0x")
+
+
+# ---------------------------------------------------------------- before_broadcast
+
+
+def test_before_broadcast_gets_the_result_hash(chain):
+    seen = []
+
+    async def claim(tx_hash):
+        seen.append((tx_hash, await chain.get_entry(1)))  # 아직 기록 전이다
+
+    result = run(chain.record_pending(record(1), fake_signature(TREASURER), claim))
+    assert seen == [(result.tx_hash, None)]
+
+
+def test_failing_before_broadcast_leaves_state_and_block_next(chain):
+    # 선점 실패면 보내지 않는다. 지정해 둔 block_next 도 쓰이지 않고 다음 지출에 남는다
+    class Claimed(Exception):
+        pass
+
+    async def claim(tx_hash):
+        raise Claimed()
+
+    chain.block_next(BlockReason.BUDGET_EXCEEDED)
+    with pytest.raises(Claimed):
+        run(chain.record_pending(record(1), fake_signature(TREASURER), claim))
+    assert run(chain.get_entry(1)) is None
+    assert run(chain.record_pending(record(1), fake_signature(TREASURER))).status == EntryStatus.BLOCKED
+
+
+def test_revert_does_not_call_before_broadcast(chain):
+    # 실제 구현은 시뮬레이션에서 걸리면 hash 가 정해지기 전에 끝난다
+    called = []
+
+    async def claim(tx_hash):
+        called.append(tx_hash)
+
+    expect_revert(chain.record_pending(record(1, amount=0), fake_signature(TREASURER), claim), RevertReason.ZERO_AMOUNT)
+    assert called == []
+
+
+def test_unavailable_still_calls_before_broadcast(chain):
+    # 보낸 뒤 응답을 못 받은 경우다. 선점한 tx_pending 으로 나중에 어느 트랜잭션인지 확인한다
+    called = []
+
+    async def claim(tx_hash):
+        called.append(tx_hash)
+
+    chain.unavailable_next("record_pending")
+    with pytest.raises(ChainUnavailable):
+        run(chain.record_pending(record(1), fake_signature(TREASURER), claim))
+    assert len(called) == 1 and run(chain.get_entry(1)) is None
+
+
+def test_unavailable_before_sending_does_not_call_before_broadcast(chain):
+    # 시뮬레이션·nonce 조회 중에 끊긴 경우. tx_pending 을 선점하지 않은 채로 ChainUnavailable 이 온다
+    called = []
+
+    async def claim(tx_hash):
+        called.append(tx_hash)
+
+    chain.unavailable_next("record_pending", sent=False)
+    with pytest.raises(ChainUnavailable):
+        run(chain.record_pending(record(1), fake_signature(TREASURER), claim))
+    assert called == [] and run(chain.get_entry(1)) is None
+
+
+def test_unsent_transaction_cannot_land(chain):
+    with pytest.raises(ValueError):
+        chain.unavailable_next("record_pending", landed=True, sent=False)
+
+
+def test_failing_before_broadcast_keeps_unavailable_next(chain):
+    # 보내지 않은 호출이 지정을 써 버리면, 재시도가 연결 실패를 만나야 하는 테스트가 그냥 성공한다
+    class Claimed(Exception):
+        pass
+
+    async def claim(tx_hash):
+        raise Claimed()
+
+    chain.unavailable_next("record_pending")
+    with pytest.raises(Claimed):
+        run(chain.record_pending(record(1), fake_signature(TREASURER), claim))
+    with pytest.raises(ChainUnavailable):
+        run(chain.record_pending(record(1), fake_signature(TREASURER)))
+
+
+def test_concurrent_writes_are_serialized_like_the_chain(chain):
+    # 실제 구현은 lock 안에서 시뮬레이션부터 전송까지 한다. 같은 id 를 동시에 보내면 두 번째는 중복이다
+    async def claim(tx_hash):
+        await asyncio.sleep(0)  # DB 쓰기처럼 다른 작업에 차례를 넘긴다
+
+    async def twice():
+        return await asyncio.gather(
+            *(chain.record_pending(record(1), fake_signature(TREASURER), claim) for _ in range(2)), return_exceptions=True
+        )
+
+    first, second = run(twice())
+    assert first.status == EntryStatus.PENDING
+    assert isinstance(second, ChainRevert) and second.reason == RevertReason.ENTRY_ALREADY_EXISTS
+
+
+def test_writing_from_inside_before_broadcast_fails_fast(chain):
+    # 콜백은 lock 을 쥔 채 불린다. 그 안에서 다시 쓰면 영원히 기다리는 대신 바로 오류다 (실제 구현과 같다)
+    async def nested(tx_hash):
+        await chain.record_pending(record(2), fake_signature(TREASURER))
+
+    async def outer():
+        return await asyncio.wait_for(chain.record_pending(record(1), fake_signature(TREASURER), nested), 1)
+
+    with pytest.raises(RuntimeError, match="before_broadcast 안에서"):
+        run(outer())
+    assert run(chain.get_entry(1)) is None and run(chain.get_entry(2)) is None

@@ -5,6 +5,7 @@ RevertReason 하나라도 빠지면 드러난다. @pytest.mark.chain 테스트�
 eth_call 은 시뮬레이션이라 체인 상태를 바꾸지 않는다.
 """
 import asyncio
+from typing import Optional
 
 import pytest
 from eth_abi import encode
@@ -19,7 +20,7 @@ from app.chain.eip712 import typed_data_for
 from app.chain.revert import RevertDecoder
 from app.chain.web3_client import LEDGER, Web3ChainClient
 from app.schemas.entry import EntryKind
-from chain_support import RELAYER, RELAYER_KEY, RPC_URL
+from chain_support import RELAYER, RELAYER_KEY, RPC_URL, chain_now
 
 DEPLOYMENT = load_deployment(DEFAULT_PATH)
 LEDGER_ABI = load_abi(DEPLOYMENT.contracts[LEDGER], DEFAULT_PATH)
@@ -231,15 +232,13 @@ def request(deadline: int, **override) -> RecordRequest:
 def simulate(build):
     """eth_call 로 원장 함수를 시뮬레이션하고, revert 를 해석해 돌려준다.
 
-    build(ledger 함수들, 최신 블록 시각) 이 호출을 만든다. deadline 은 벽시계가 아니라 블록 시각 기준으로 정한다 —
-    같은 노드에서 evm_increaseTime 을 쓰면 블록 시각이 실제 시각보다 앞선다.
+    build(ledger 함수들, 체인 시각) 이 호출을 만든다. deadline 은 chain_now 기준으로 정한다 (tests/chain_support.py).
     """
 
     async def run():
         client = await Web3ChainClient.connect(RPC_URL, RELAYER_KEY, DEFAULT_PATH)
         try:
-            block_time = (await client._w3.eth.get_block("latest"))["timestamp"]
-            await build(client._ledger.functions, block_time).call({"from": client.relayer_address})
+            await build(client._ledger.functions, await chain_now(client._w3)).call({"from": client.relayer_address})
         except Exception as e:
             return client._reverts.from_web3_error(e)
         finally:
@@ -249,8 +248,10 @@ def simulate(build):
     return asyncio.run(run())
 
 
-def record_struct(req: RecordRequest, kind: int = 0) -> tuple:
-    return (req.id, bytes.fromhex(req.hash[2:]), req.amount, kind, req.term, req.occurred_at, req.budget_id, req.corrects_id, req.deadline)
+def record_struct(req: RecordRequest, kind: Optional[int] = None) -> dict:
+    """서명 대상과 같은 typed data message 로 만든다. kind 를 주면 그 값으로 바꾼다 (enum 밖 값을 보내 보는 테스트용)."""
+    message = typed_data_for(req, DEPLOYMENT.eip712[LEDGER])["message"]
+    return message if kind is None else {**message, "kind": kind}
 
 
 def sign(req: RecordRequest, key: str) -> bytes:
