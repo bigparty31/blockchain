@@ -5,8 +5,19 @@ import 'reason_dialog.dart';
 
 /// 경고가 있는 항목인가 — OCR 이 일치하지 않으면(`MATCH` 가 아니면) 경고다.
 /// 경고를 무시하고 승인하려면 사유가 필수다 (`hadWarning` + `warningReasonHash`).
-/// 카테고리 경고(`category_warning`)는 서버 연동 후 함께 본다.
-bool _hasWarning(Map<String, dynamic> item) => item['ocrStatus'] != OcrStatus.MATCH;
+/// OCR 불일치·중복뿐 아니라 카테고리 경고(`category_warning`)도 경고다 —
+/// 빼면 카테고리 경고 건이 사유 없이 승인된다.
+bool _hasWarning(Map<String, dynamic> item) =>
+    item['ocrStatus'] != OcrStatus.MATCH || item['categoryWarning'] == true;
+
+/// 경고 원인 문구. OCR·카테고리가 겹치면 둘 다 적는다.
+String _warningLabel(Map<String, dynamic> item) {
+  final parts = <String>[
+    if (item['ocrStatus'] != OcrStatus.MATCH) 'OCR ${(item['ocrStatus'] as OcrStatus).label}',
+    if (item['categoryWarning'] == true) '카테고리 경고',
+  ];
+  return parts.join('·');
+}
 
 /// 확정이 예산 문제로 실패했을 때 반려 흐름으로 넘기는 `fail_reason` (RELAY §9).
 const _budgetFailReasons = {
@@ -63,6 +74,18 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
       'status': EntryStatus.PENDING,
       'ocrStatus': OcrStatus.MISMATCH, // 경고 → 승인 시 사유 필수
       'receiptInfo': '카드 매출전표 (OCR 금액 80,000원)',
+    },
+    {
+      'id': 7,
+      'title': '학과 MT 레크리에이션 소품',
+      'merchant': '다이소',
+      'amount': 22000,
+      'category': '운영비',
+      'date': '2026-09-14 11:20',
+      'status': EntryStatus.PENDING,
+      'ocrStatus': OcrStatus.MATCH,
+      'categoryWarning': true, // OCR 은 일치해도 카테고리 경고면 사유 필수
+      'receiptInfo': '카드 매출전표 (승인번호: 55021877)',
     },
     {
       'id': 1,
@@ -184,7 +207,7 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
       warningReason = await showReasonDialog(
         context,
         title: '경고 무시 승인 사유',
-        description: 'OCR 판독 결과(${(item['ocrStatus'] as OcrStatus).label})가 등록 내용과 다릅니다. '
+        description: '${_warningLabel(item)} — 등록 내용에 확인이 필요한 항목이 있습니다. '
             '그래도 승인하려면 사유를 남겨 주세요.',
         confirmLabel: '다음',
         accent: AppTheme.pending,
@@ -658,7 +681,7 @@ class _ApprovalCard extends StatelessWidget {
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
-                        'OCR ${(item['ocrStatus'] as OcrStatus).label} — 승인하려면 경고 무시 사유가 필요해요',
+                        '${_warningLabel(item)} — 승인하려면 경고 무시 사유가 필요해요',
                         style: const TextStyle(fontSize: 11, height: 1.3, color: Color(0xFF7C4700)),
                       ),
                     ),
