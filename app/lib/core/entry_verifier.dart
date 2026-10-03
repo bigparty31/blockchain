@@ -146,16 +146,30 @@ class EntryVerifier {
         local: e.kind.code,
         note: '해시에 들어가지 않는 값이다',
       ),
-      FieldCheck.compare(
-        label: '상태',
-        chain: c.status.code,
-        local: e.status.code,
-      ),
+      // 체인 상태를 못 읽었으면 「모름」으로 남긴다. 예전처럼 PENDING 으로
+      // 채워 놓고 대조하면 확정된 항목이 전부 어긋난다.
+      if (c.status == null)
+        FieldCheck(
+          label: '상태',
+          chain: '(읽지 못함)',
+          local: e.status.code,
+          state: CheckState.unavailable,
+          note: '온체인 응답에 status 가 없다',
+        )
+      else
+        FieldCheck.compare(
+          label: '상태',
+          chain: c.status!.code,
+          local: e.status.code,
+        ),
       FieldCheck.compare(
         label: '사용일',
         chain: '${c.occurredAt}',
         local: '${e.occurredAt}',
       ),
+      // 학기 — 체인에는 있지만 meta_hash 에는 없다. 빼면 **학기가 바뀐 항목도
+      // 「검증됨」으로 뜬다** (IAccountingLedger `Entry.term`).
+      _compareTerm(chainTerm: c.term, localTermCode: e.termCode),
       FieldCheck.compare(
         label: '예산 항목',
         chain: '${c.budgetId}',
@@ -201,6 +215,43 @@ class EntryVerifier {
     }
 
     return checks;
+  }
+
+  /// 학기 대조 — **양쪽 모두 학기 코드(`YYYYS`)여야 한다.**
+  ///
+  /// 체인의 `Entry.term` 은 `20262` 같은 학기 코드이고 DB 의 `term_id` 는 1부터
+  /// 매긴 행 번호다. 둘을 그냥 비교하면 `1 != 20262` 로 **모든 항목이 변조
+  /// 판정된다.** 그래서 대조 상대는 [EntryModel.termId] 가 아니라
+  /// [EntryModel.termCode] 이며, 아직 `EntryResponse` 에 그 필드가 없어
+  /// 당분간은 「모름」으로 남는다.
+  static FieldCheck _compareTerm({
+    required int? chainTerm,
+    required int? localTermCode,
+  }) {
+    if (chainTerm == null) {
+      return FieldCheck(
+        label: '학기',
+        chain: '(읽지 못함)',
+        local: localTermCode == null ? '(없음)' : '$localTermCode',
+        state: CheckState.unavailable,
+        note: '온체인 응답에 term 이 없다',
+      );
+    }
+    if (localTermCode == null) {
+      return FieldCheck(
+        label: '학기',
+        chain: '$chainTerm',
+        local: '(없음)',
+        state: CheckState.unavailable,
+        note: 'EntryResponse 에 term_code 가 아직 없다 (term_id 와 비교하면 안 된다)',
+      );
+    }
+    return FieldCheck.compare(
+      label: '학기',
+      chain: '$chainTerm',
+      local: '$localTermCode',
+      note: '해시에 들어가지 않는 값이다',
+    );
   }
 
   /// 지갑 주소와 user id 를 매핑을 거쳐 대조한다.
@@ -289,7 +340,8 @@ class EntryVerifier {
         fields.any((f) => f.state == CheckState.failed);
     if (anyFailed) return VerificationStatus.tampered;
 
-    if (hashState == CheckState.unavailable) return VerificationStatus.unavailable;
+    if (hashState == CheckState.unavailable)
+      return VerificationStatus.unavailable;
 
     // 세 단계를 다 못 돌았으면 초록을 주지 않는다.
     // 「확인 못 함」을 「이상 없음」으로 보여주면 검증의 의미가 없다.
@@ -301,7 +353,9 @@ class EntryVerifier {
         receiptState == CheckState.unavailable ||
         fields.any((f) => f.state == CheckState.unavailable);
 
-    return incomplete ? VerificationStatus.partial : VerificationStatus.verified;
+    return incomplete
+        ? VerificationStatus.partial
+        : VerificationStatus.verified;
   }
 }
 

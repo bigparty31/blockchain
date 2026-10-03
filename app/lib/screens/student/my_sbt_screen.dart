@@ -22,7 +22,7 @@ class _MySbtScreenState extends State<MySbtScreen> {
   final _api = StudentApiService();
 
   bool _loading = true;
-  MembershipModel? _membership;
+  MembershipResult? _result;
 
   @override
   void initState() {
@@ -31,35 +31,90 @@ class _MySbtScreenState extends State<MySbtScreen> {
   }
 
   Future<void> _load() async {
-    final m = await _api.fetchMyMembership();
+    if (mounted) setState(() => _loading = true);
+    final r = await _api.fetchMyMembership();
     if (!mounted) return;
     setState(() {
-      _membership = m;
+      _result = r;
       _loading = false;
     });
   }
 
   @override
   Widget build(BuildContext context) {
+    final result = _result;
+
     return Scaffold(
       backgroundColor: AppTheme.bgPage,
       appBar: AppTheme.gradientAppBar(title: '내 SBT · QR'),
-      body: _loading
+      body: _loading || result == null
           ? const Center(child: CircularProgressIndicator())
-          : ListView(
-              padding: const EdgeInsets.fromLTRB(20, 20, 20, 32),
-              children: [
-                if (_membership == null || !_membership!.isValid)
-                  _buildNoMembership()
-                else ...[
-                  _buildQrCard(_membership!),
-                  const SizedBox(height: 16),
-                  _buildDetailCard(_membership!),
-                ],
-                const SizedBox(height: 16),
-                _buildNotice(),
-              ],
-            ),
+          // 조회가 안 된 것은 「없음」이 아니다. 보유 여부를 모르는 상태라
+          // 미보유 안내 대신 다시 시도할 길을 준다 (스토리보드 6 ②).
+          : result.failed
+              ? _buildLookupFailed()
+              : ListView(
+                  padding: const EdgeInsets.fromLTRB(20, 20, 20, 32),
+                  children: [
+                    if (!result.held)
+                      _buildNoMembership()
+                    else ...[
+                      _buildQrCard(result.membership!),
+                      const SizedBox(height: 16),
+                      _buildDetailCard(result.membership!),
+                    ],
+                    const SizedBox(height: 16),
+                    _buildNotice(),
+                  ],
+                ),
+    );
+  }
+
+  /// 체인 조회 실패 (스토리보드 6 ②·④)
+  Widget _buildLookupFailed() {
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(20, 20, 20, 32),
+      children: [
+        Container(
+          padding: const EdgeInsets.all(28),
+          decoration: AppTheme.cardDecoration,
+          child: Column(
+            children: [
+              Icon(Icons.cloud_off_rounded,
+                  size: 48, color: AppTheme.textSub.withOpacity(0.5)),
+              const SizedBox(height: 14),
+              const Text(
+                '확인할 수 없습니다',
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                  color: AppTheme.textMain,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                '멤버십 정보를 불러오지 못했습니다. 보유하지 않았다는 뜻이 아니라 '
+                '지금 확인이 안 된다는 뜻입니다.',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: AppTheme.textSub.withOpacity(0.95),
+                  height: 1.5,
+                ),
+              ),
+              const SizedBox(height: 18),
+              SizedBox(
+                width: double.infinity,
+                child: GradientButton(
+                  onPressed: _load,
+                  label: '다시 시도',
+                  icon: Icons.refresh_rounded,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 
@@ -185,7 +240,7 @@ class _MySbtScreenState extends State<MySbtScreen> {
               size: 48, color: AppTheme.textSub.withOpacity(0.5)),
           const SizedBox(height: 14),
           const Text(
-            '보유한 멤버십이 없습니다',
+            '학생회비 납부 확인이 필요합니다',
             style: TextStyle(
               fontSize: 16,
               fontWeight: FontWeight.bold,

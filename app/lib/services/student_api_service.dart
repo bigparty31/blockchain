@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 import '../core/api_config.dart';
 import '../core/enums.dart';
 import '../core/hashing.dart';
+import '../core/term_info.dart';
 import '../models/balance_model.dart';
 import '../models/budget_model.dart';
 import '../models/entry_model.dart';
@@ -11,6 +12,35 @@ import '../models/membership_model.dart';
 import '../models/objection_model.dart';
 import '../models/onchain_entry_model.dart';
 import '../models/snapshot_model.dart';
+
+/// 이의 제기가 서버에 닿지 못했을 때.
+///
+/// 실패를 조용히 삼키면 접수되지 않은 이의가 「접수되었습니다」로 뜬다.
+class ObjectionFailed implements Exception {
+  const ObjectionFailed();
+  @override
+  String toString() => 'ObjectionFailed';
+}
+
+/// SBT 조회 결과 — **미보유와 조회 실패를 구분한다** (스토리보드 6 ②·③).
+///
+/// 둘을 뭉개면 조회가 안 됐을 뿐인데 SBT 를 가진 학생에게 「없다」고 말하게 되고,
+/// 그 학생은 이의 제기 버튼까지 회색으로 막힌다.
+class MembershipResult {
+  /// 조회 자체가 안 된 경우. 이때 [membership] 은 「없음」이 아니라 「모름」이다.
+  final bool failed;
+
+  /// 조회된 멤버십. 발급받은 적이 없으면 null.
+  final MembershipModel? membership;
+
+  const MembershipResult.ok(this.membership) : failed = false;
+  const MembershipResult.failed()
+      : failed = true,
+        membership = null;
+
+  /// 유효한 SBT 를 들고 있는지. 조회 실패는 보유로 치지 않는다.
+  bool get held => !failed && membership != null && membership!.isValid;
+}
 
 /// 학생 화면 전용 API 서비스 (`screens/student/`)
 ///
@@ -57,11 +87,19 @@ class StudentApiService {
   }
 
   /// GET /entries — 수입·지출 목록 (S2)
+  ///
+  /// **초안은 걸러낸다.** 총무가 저장만 하고 체인에 올리지 않은 건은 `status` 가
+  /// 없는 상태로 내려오는데(스토리보드 3 「화면 전체 규칙」), [EntryModel.fromJson]
+  /// 이 그것을 `PENDING` 으로 채워 넣어서 그냥 두면 **학생 목록에 「승인대기」로
+  /// 섞여 보인다.** 아직 아무 데도 올라가지 않아 검증할 대상조차 없는 건이다.
   Future<List<EntryModel>> fetchEntries() async {
     final json = await _getJson(ApiConfig.entries);
     if (json is List) {
       _usingDemoData = false;
-      return json.map((e) => EntryModel.fromJson(e)).toList();
+      return json
+          .where((e) => e is! Map || e['status'] != null)
+          .map((e) => EntryModel.fromJson(e))
+          .toList();
     }
     _usingDemoData = true;
     return _demoEntries();
@@ -158,6 +196,11 @@ class StudentApiService {
   ///
   /// 본문의 정본화·해시는 백엔드가 한다 (HASHING.md §1.1, §3).
   /// 학생 앱은 쓰기 권한이 없어 직접 서명하지 않는다 (PRD §9.2).
+  ///
+  /// 서버 원장을 보고 있는데 전송이 실패하면 [ObjectionFailed] 를 던진다.
+  /// 조용히 로컬 폴백으로 넘어가면 **접수되지도 않은 이의가 「접수되었습니다」로
+  /// 뜬다** — 학생은 답변을 기다리지만 학생회에는 아무것도 가 있지 않다
+  /// (스토리보드 5 ③ 「실패: 서버 무응답 → 토스트 · 입력 내용은 남겨둔다」).
   Future<ObjectionModel> raiseObjection({
     required int entryId,
     required String content,
@@ -174,6 +217,8 @@ class StudentApiService {
         return ObjectionModel.fromJson(jsonDecode(utf8.decode(res.bodyBytes)));
       }
     } catch (_) {}
+
+    if (!_usingDemoData) throw const ObjectionFailed();
 
     // 서버가 없을 때. 만들어서 돌려주기만 하면 화면을 나가는 순간 사라지므로
     // 세션 동안 들고 있는다.
@@ -194,10 +239,32 @@ class StudentApiService {
   }
 
   /// GET /memberships/me — 본인 SBT 보유 여부와 QR 페이로드 (S5)
-  Future<MembershipModel?> fetchMyMembership() async {
-    final json = await _getJson('${ApiConfig.baseUrl}/memberships/me');
-    if (json is Map<String, dynamic>) return MembershipModel.fromJson(json);
-    return _demoMembership();
+  ///
+  /// **조회 실패와 미보유는 다르다** (스토리보드 6 ②·③). 미보유는 서버가
+  /// 대답한 결과라 「학생회비 납부 확인이 필요합니다」로 안내하면 되지만, 조회가
+  /// 안 된 것은 보유 여부 자체를 모르는 상태다. 못 받았는데 「미보유」라고 하면
+  /// SBT 를 가진 학생에게 없다고 말하는 셈이 된다.
+  ///
+  /// 못 받았으면 null 을 돌려준다 — 다른 조회들과 같은 규칙으로, 데모 데이터는
+  /// 데모 모드일 때만 끼워 넣는다 ([fetchOnChainEntry] 참고).
+  Future<MembershipResult> fetchMyMembership() async {
+    try {
+      final res = await http
+          .get(Uri.parse('${ApiConfig.baseUrl}/memberships/me'))
+          .timeout(_timeout);
+      if (res.statusCode == 200) {
+        return MembershipResult.ok(
+          MembershipModel.fromJson(jsonDecode(utf8.decode(res.bodyBytes))),
+        );
+      }
+      // 404 는 「발급받은 적 없음」이다. 서버가 분명히 대답한 것이므로
+      // 조회 실패가 아니라 미보유로 다룬다.
+      if (res.statusCode == 404) return const MembershipResult.ok(null);
+    } catch (_) {}
+
+    return _usingDemoData
+        ? MembershipResult.ok(_demoMembership())
+        : const MembershipResult.failed();
   }
 
   // ── 미확인 항목 뱃지 카운트 (S12) ──────────────────────────
@@ -244,11 +311,17 @@ class StudentApiService {
   static final int _d0911 = Hashing.kstMidnightOf(2026, 9, 11);
   static final int _d0912 = Hashing.kstMidnightOf(2026, 9, 12);
 
-  /// 데모용 지갑 매핑. user #2 총무, #3 감사, #4 회장.
+  /// 데모용 지갑 매핑 — `GET /users/wallets` 가 내려주는 것과 같은 값이다.
+  ///
+  /// 컨트랙트 병합으로 임원 주소가 정해졌다
+  /// (`contracts/deployments/localhost.json` 의 `accounts` 와 일치).
+  /// 역할이 아니라 **지갑이 등록된 사용자**가 들어 있어서, 임기가 끝난 사람이
+  /// 등록·승인한 과거 항목도 검증된다.
   static const Map<int, String> _demoWallets = {
-    2: '0x71C7656EC7ab88b098defB751B7401B5f6d8976F',
-    3: '0x2546BcD3c84621e976D8185a91A922aE77ECEc30',
-    4: '0xbDA5747bFD65F08deb54cb465eB87D40e51B197E',
+    2: '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC', // 총무
+    3: '0x90F79bf6EB2c4f870365E785982E1f101E93b906', // 감사
+    4: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8', // 회장
+    5: '0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc', // 감사 2
   };
 
   /// 항목별 데모 영수증 바이트. 실제 이미지 대신 구분 가능한 더미를 쓴다.
@@ -275,6 +348,7 @@ class StudentApiService {
     String? ocrApprovalNo,
     bool categoryWarning = false,
     String? warningAckReason,
+    int termCode = TermInfo.currentTermCode,
     EntryStatus status = EntryStatus.CONFIRMED,
     int? correctsEntryId,
     CorrectionReason? correctionReason,
@@ -284,6 +358,7 @@ class StudentApiService {
     return EntryModel(
       id: id,
       termId: 1,
+      termCode: termCode,
       kind: kind,
       amount: amount,
       counterparty: counterparty,
@@ -407,6 +482,7 @@ class StudentApiService {
       EntryModel(
         id: 6,
         termId: 1,
+        termCode: TermInfo.currentTermCode,
         kind: EntryKind.EXPENSE,
         amount: 45000,
         counterparty: '한빛인쇄',
@@ -469,10 +545,14 @@ class StudentApiService {
       // #7 은 체인에 행사비(1)로 올라가 있는데 API 는 운영비(3)라고 말한다.
       budgetId: entryId == 7 ? 1 : (e.budgetId ?? 0),
       correctsId: e.correctsEntryId ?? 0,
-      registrant: '0x71C7656EC7ab88b098defB751B7401B5f6d8976F',
+      term: e.termCode,
+      // **주소를 여기에 따로 적지 않는다.** 지갑 매핑과 두 군데에 적어 두면
+      // 한쪽만 바뀌는 순간 데모 전체가 「등록자 불일치 = 변조 감지」로 뒤집힌다.
+      // 실제로 컨트랙트 병합 때 주소가 바뀌면서 그럴 뻔했다.
+      registrant: _demoWallets[e.createdBy] ?? OnChainEntry.zeroAddress,
       approver: e.approvedBy == null
           ? OnChainEntry.zeroAddress
-          : '0x2546BcD3c84621e976D8185a91A922aE77ECEc30',
+          : (_demoWallets[e.approvedBy] ?? OnChainEntry.zeroAddress),
     );
   }
 
