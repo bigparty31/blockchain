@@ -35,14 +35,14 @@ def domain_separator(domain: dict) -> str:
 @pytest.fixture
 def deployment_file(tmp_path, monkeypatch):
     """저장소 배포 기록을 복사해 고칠 수 있게 하고, API 가 그 파일을 읽게 한다."""
-    data = json.loads(DEFAULT_PATH.read_text())
+    data = json.loads(DEFAULT_PATH.read_text(encoding="utf-8"))
     path = tmp_path / "localhost.json"
 
     def write(mutate=None):
         copy = json.loads(json.dumps(data))
         if mutate:
             mutate(copy)
-        path.write_text(json.dumps(copy))
+        path.write_text(json.dumps(copy), encoding="utf-8")
         return copy
 
     monkeypatch.setenv("DEPLOYMENTS_FILE", str(path))
@@ -52,7 +52,7 @@ def deployment_file(tmp_path, monkeypatch):
 def test_returns_domains_from_deployment_file():
     res = client.get("/chain/domains")  # 토큰 없이 부른다
     assert res.status_code == 200
-    data = json.loads(DEFAULT_PATH.read_text())
+    data = json.loads(DEFAULT_PATH.read_text(encoding="utf-8"))
     assert res.json() == {"chainId": data["chainId"], "domains": data["eip712"]}
     assert set(res.json()["domains"]) == SIGNING_CONTRACTS
 
@@ -176,7 +176,7 @@ def test_out_of_range_chain_id_is_503_not_500(deployment_file, chain_id):
 def test_non_utf8_file_is_503_not_500(monkeypatch, tmp_path):
     # UTF-16 으로 저장했거나 쓰다 끊긴 파일
     path = tmp_path / "localhost.json"
-    path.write_bytes(DEFAULT_PATH.read_text().encode("utf-16"))
+    path.write_bytes(DEFAULT_PATH.read_text(encoding="utf-8").encode("utf-16"))
     monkeypatch.setenv("DEPLOYMENTS_FILE", str(path))
     res = client.get("/chain/domains")
     assert res.status_code == 503

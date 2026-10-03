@@ -27,7 +27,7 @@ ACCOUNT_ROLES = {
 def accounts():
     if not DEPLOYMENT.exists():
         pytest.skip(f"{DEPLOYMENT} 없음 — develop(PR #13)을 받아 온 뒤 실행된다")
-    return json.loads(DEPLOYMENT.read_text())["accounts"]
+    return json.loads(DEPLOYMENT.read_text(encoding="utf-8"))["accounts"]
 
 
 def wallets_by_role(pairs):
