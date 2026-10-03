@@ -111,10 +111,15 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
                     const SizedBox(height: 24),
                     _sectionTitle('예산 집행 현황', '항목별 잔량과 집행률'),
                     const SizedBox(height: 12),
-                    ..._budgets.map((b) => Padding(
-                          padding: const EdgeInsets.only(bottom: 12),
-                          child: _BudgetCard(budget: b),
-                        )),
+                    // 편성 전에는 빈 자리를 두지 않고 그렇다고 말한다 — 아무것도
+                    // 없으면 「불러오는 중인가」와 구분되지 않는다 (스토리보드 2 ⑤).
+                    if (_budgets.isEmpty)
+                      const _EmptyBudgets()
+                    else
+                      ..._budgets.map((b) => Padding(
+                            padding: const EdgeInsets.only(bottom: 12),
+                            child: _BudgetCard(budget: b),
+                          )),
                     const SizedBox(height: 12),
                     _buildCategoryChart(),
                   ]),
@@ -147,7 +152,8 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                     decoration: BoxDecoration(
                       color: Colors.white.withOpacity(0.2),
                       borderRadius: BorderRadius.circular(20),
@@ -280,14 +286,18 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
   }
 
   Widget _buildQuickActions() {
+    // 장부에 아무것도 없으면 들어가 봐야 빈 화면이다 (스토리보드 2 ④).
+    final hasLedger = _entries.isNotEmpty;
+
     return Row(
       children: [
         Expanded(
           child: _ActionTile(
             icon: Icons.receipt_long_rounded,
             label: '수입·지출 내역',
-            sublabel: '${_entries.length}건',
+            sublabel: hasLedger ? '${_entries.length}건' : '아직 없음',
             badgeCount: _unseen,
+            enabled: hasLedger,
             onTap: _openEntries,
           ),
         ),
@@ -297,6 +307,7 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
             icon: Icons.qr_code_2_rounded,
             label: '내 SBT · QR',
             sublabel: '행사 입장용',
+            enabled: hasLedger,
             onTap: () => Navigator.push(
               context,
               MaterialPageRoute(builder: (_) => const MySbtScreen()),
@@ -334,7 +345,8 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
     // 정정 항목은 증감분이므로 그대로 더하면 최종값이 된다.
     final byCategory = <String, int>{};
     for (final e in _entries) {
-      if (e.status != EntryStatus.CONFIRMED || e.kind != EntryKind.EXPENSE) continue;
+      if (e.status != EntryStatus.CONFIRMED || e.kind != EntryKind.EXPENSE)
+        continue;
       final matched = _budgets.where((b) => b.id == e.budgetId);
       final name = matched.isEmpty ? '미분류' : matched.first.category;
       byCategory[name] = (byCategory[name] ?? 0) + e.amount;
@@ -347,7 +359,12 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
     // 될 수 있다. 목록이 비었는지만 보고 합계를 그대로 나누면 `~/ 0` 으로 앱이 죽는다.
     // 합계가 0 이하면 비율 막대 자체가 뜻을 잃으므로 차트를 내린다.
     if (total <= 0) return const SizedBox.shrink();
-    final palette = [AppTheme.primary, AppTheme.income, AppTheme.pending, AppTheme.info];
+    final palette = [
+      AppTheme.primary,
+      AppTheme.income,
+      AppTheme.pending,
+      AppTheme.info
+    ];
     final items = byCategory.entries.toList();
 
     return Container(
@@ -398,7 +415,8 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
                   Expanded(
                     child: Text(
                       items[i].key,
-                      style: const TextStyle(fontSize: 13, color: AppTheme.textMain),
+                      style: const TextStyle(
+                          fontSize: 13, color: AppTheme.textMain),
                     ),
                   ),
                   Text(
@@ -486,6 +504,9 @@ class _ActionTile extends StatelessWidget {
   final String label;
   final String sublabel;
   final int badgeCount;
+
+  /// false 면 회색으로 그리고 눌리지 않는다.
+  final bool enabled;
   final VoidCallback onTap;
 
   const _ActionTile({
@@ -493,50 +514,93 @@ class _ActionTile extends StatelessWidget {
     required this.label,
     required this.sublabel,
     this.badgeCount = 0,
+    this.enabled = true,
     required this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(20),
-        child: Container(
-          padding: const EdgeInsets.all(18),
-          decoration: AppTheme.cardDecoration,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              UnseenCountBadge(
-                count: badgeCount,
-                child: Container(
-                  padding: const EdgeInsets.all(10),
-                  decoration: BoxDecoration(
-                    color: AppTheme.primaryLight,
-                    borderRadius: BorderRadius.circular(12),
+    return Opacity(
+      opacity: enabled ? 1 : 0.45,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: enabled ? onTap : null,
+          borderRadius: BorderRadius.circular(20),
+          child: Container(
+            padding: const EdgeInsets.all(18),
+            decoration: AppTheme.cardDecoration,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                UnseenCountBadge(
+                  count: badgeCount,
+                  child: Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: AppTheme.primaryLight,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Icon(icon, size: 20, color: AppTheme.primary),
                   ),
-                  child: Icon(icon, size: 20, color: AppTheme.primary),
                 ),
-              ),
-              const SizedBox(height: 12),
-              Text(
-                label,
-                style: const TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.bold,
-                  color: AppTheme.textMain,
+                const SizedBox(height: 12),
+                Text(
+                  label,
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                    color: AppTheme.textMain,
+                  ),
                 ),
-              ),
-              const SizedBox(height: 2),
-              Text(
-                sublabel,
-                style: const TextStyle(fontSize: 11, color: AppTheme.textSub),
-              ),
-            ],
+                const SizedBox(height: 2),
+                Text(
+                  sublabel,
+                  style: const TextStyle(fontSize: 11, color: AppTheme.textSub),
+                ),
+              ],
+            ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// 예산이 아직 편성되지 않았을 때 (스토리보드 2 ⑤)
+class _EmptyBudgets extends StatelessWidget {
+  const _EmptyBudgets();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(vertical: 28, horizontal: 18),
+      decoration: AppTheme.cardDecoration,
+      child: Column(
+        children: [
+          Icon(Icons.inbox_rounded,
+              size: 36, color: AppTheme.textSub.withOpacity(0.4)),
+          const SizedBox(height: 10),
+          const Text(
+            '편성된 예산이 없습니다',
+            style: TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+              color: AppTheme.textMain,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            '학생회가 예산을 편성하면 항목별 잔량과 집행률이 여기에 표시됩니다.',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 11,
+              color: AppTheme.textSub.withOpacity(0.95),
+              height: 1.4,
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -623,7 +687,8 @@ class _BankDiffCard extends StatelessWidget {
                     Expanded(
                       child: Text(
                         '${Fmt.date(t.occurredAt)} · ${t.counterparty}',
-                        style: const TextStyle(fontSize: 12, color: AppTheme.textSub),
+                        style: const TextStyle(
+                            fontSize: 12, color: AppTheme.textSub),
                       ),
                     ),
                     Text(
@@ -654,11 +719,13 @@ class _BankDiffCard extends StatelessWidget {
     );
   }
 
-  Widget _row(String label, String value, {bool emphasize = false, Color? color}) {
+  Widget _row(String label, String value,
+      {bool emphasize = false, Color? color}) {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
-        Text(label, style: const TextStyle(fontSize: 12, color: AppTheme.textSub)),
+        Text(label,
+            style: const TextStyle(fontSize: 12, color: AppTheme.textSub)),
         Text(
           value,
           style: TextStyle(
@@ -756,7 +823,8 @@ class _BudgetCard extends StatelessWidget {
               ),
               child: Row(
                 children: [
-                  const Icon(Icons.history_rounded, size: 14, color: AppTheme.info),
+                  const Icon(Icons.history_rounded,
+                      size: 14, color: AppTheme.info),
                   const SizedBox(width: 6),
                   Expanded(
                     child: Text(

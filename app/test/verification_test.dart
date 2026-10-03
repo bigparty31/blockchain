@@ -5,6 +5,7 @@ import 'package:student_council_app/core/entry_merge.dart';
 import 'package:student_council_app/core/entry_verifier.dart';
 import 'package:student_council_app/core/enums.dart';
 import 'package:student_council_app/core/hashing.dart';
+import 'package:student_council_app/core/term_info.dart';
 import 'package:student_council_app/models/entry_model.dart';
 import 'package:student_council_app/models/onchain_entry_model.dart';
 
@@ -104,8 +105,9 @@ void main() {
     const approver = '0x2546BcD3c84621e976D8185a91A922aE77ECEc30';
     const wallets = {2: registrant, 3: approver};
 
-    EntryModel soundEntry() => _entry(
+    EntryModel soundEntry({int? termCode = TermInfo.currentTermCode}) => _entry(
           id: 2,
+          termCode: termCode,
           amount: 35000,
           counterparty: '한결문구',
           purpose: '신입생 환영회 명찰 및 필기구 구매',
@@ -121,6 +123,7 @@ void main() {
           kind: e.kind,
           status: e.status,
           occurredAt: e.occurredAt,
+          term: e.termCode,
           budgetId: budgetId ?? e.budgetId ?? 0,
           correctsId: e.correctsEntryId ?? 0,
           registrant: '0x71C7656EC7ab88b098defB751B7401B5f6d8976F',
@@ -226,6 +229,59 @@ void main() {
       expect(r.mismatches.map((m) => m.label), contains('예산 항목'));
     });
 
+    group('학기 (Entry.term) — 해시가 덮지 않아 따로 대조한다', () {
+      test('학기가 어긋나면 해시가 통과해도 변조 감지다', () {
+        final e = soundEntry();
+        final other = OnChainEntry(
+          hash: e.metaHash,
+          amount: e.amount,
+          kind: e.kind,
+          status: e.status,
+          occurredAt: e.occurredAt,
+          term: 20261, // 체인은 지난 학기라고 말한다
+          budgetId: e.budgetId ?? 0,
+          correctsId: 0,
+          registrant: registrant,
+          approver: approver,
+        );
+
+        final r = EntryVerifier.verify(e,
+            onChain: other, receiptBytes: receiptBytes, walletByUserId: wallets);
+
+        expect(r.hashState, CheckState.passed,
+            reason: 'term 은 meta_hash 에 들어가지 않아 해시로는 안 잡힌다');
+        expect(r.status, VerificationStatus.tampered);
+        expect(r.mismatches.map((f) => f.label), contains('학기'));
+      });
+
+      test('학기를 대조하지 못하면 초록을 주지 않는다', () {
+        // `EntryResponse` 에 아직 term_code 가 없는 지금 상태.
+        final e = soundEntry(termCode: null);
+        final r = EntryVerifier.verify(e,
+            onChain: chainOf(e),
+            receiptBytes: receiptBytes,
+            walletByUserId: wallets);
+
+        expect(r.status, VerificationStatus.partial,
+            reason: '확인 못 한 것을 「완전 검증」으로 보여주면 안 된다');
+      });
+
+      test('DB 의 term_id 가 아니라 term_code 와 대조한다', () {
+        // term_id 는 1, 학기 코드는 20262 다. 체인 값(20262)과 맞아야 한다 —
+        // term_id 를 보고 비교하면 1 != 20262 로 멀쩡한 항목이 전부 어긋난다.
+        final e = soundEntry();
+        expect(e.termId, 1);
+        expect(e.termCode, 20262);
+
+        final r = EntryVerifier.verify(e,
+            onChain: chainOf(e),
+            receiptBytes: receiptBytes,
+            walletByUserId: wallets);
+
+        expect(r.status, VerificationStatus.verified);
+      });
+    });
+
     test('수입·지출을 뒤바꿔도 해시는 통과하지만 필드 대조가 잡는다', () {
       final e = soundEntry();
       final swapped = OnChainEntry(
@@ -234,6 +290,7 @@ void main() {
         kind: EntryKind.INCOME, // 체인은 수입이라고 말한다
         status: e.status,
         occurredAt: e.occurredAt,
+        term: e.termCode,
         budgetId: e.budgetId ?? 0,
         correctsId: 0,
         registrant: '0x71C7656EC7ab88b098defB751B7401B5f6d8976F',
@@ -328,6 +385,7 @@ void main() {
             kind: e.kind,
             status: e.status,
             occurredAt: e.occurredAt,
+            term: e.termCode,
             budgetId: e.budgetId ?? 0,
             correctsId: 0,
             registrant: registrant,
@@ -452,6 +510,7 @@ void main() {
         kind: rejected.kind,
         status: rejected.status,
         occurredAt: rejected.occurredAt,
+        term: rejected.termCode,
         budgetId: 2,
         correctsId: 0,
         registrant: '0x71C7656EC7ab88b098defB751B7401B5f6d8976F',
@@ -556,6 +615,7 @@ EntryModel _entry({
   EntryKind kind = EntryKind.EXPENSE,
   int? budgetId,
   String? receiptHash,
+  int? termCode = TermInfo.currentTermCode,
   EntryStatus status = EntryStatus.CONFIRMED,
   int? correctsEntryId,
   CorrectionReason? correctionReason,
@@ -565,6 +625,7 @@ EntryModel _entry({
   return EntryModel(
     id: id,
     termId: 1,
+    termCode: termCode,
     kind: kind,
     amount: amount,
     counterparty: counterparty,

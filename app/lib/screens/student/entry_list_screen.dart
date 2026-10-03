@@ -31,10 +31,27 @@ class _EntryListScreenState extends State<EntryListScreen> {
   final Map<int, VerificationReport> _reports = {};
   _Filter _filter = _Filter.all;
 
+  /// 필터를 바꿀 때 목록 맨 위로 되돌리기 위한 것 (스토리보드 3 ①).
+  final _scroll = ScrollController();
+
   @override
   void initState() {
     super.initState();
     _load();
+  }
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  /// 필터를 바꾼다. **스크롤은 맨 위로 되돌린다** — 그대로 두면 짧아진 목록의
+  /// 중간에 떨어져서, 바뀐 결과의 첫 줄을 못 보고 「아무것도 없다」고 읽게 된다.
+  void _selectFilter(_Filter f) {
+    if (_filter == f) return;
+    setState(() => _filter = f);
+    if (_scroll.hasClients) _scroll.jumpTo(0);
   }
 
   Future<void> _load() async {
@@ -134,6 +151,7 @@ class _EntryListScreenState extends State<EntryListScreen> {
                     child: _visible.isEmpty
                         ? _buildEmpty()
                         : ListView.separated(
+                            controller: _scroll,
                             padding: const EdgeInsets.fromLTRB(20, 8, 20, 28),
                             itemCount: _visible.length,
                             separatorBuilder: (_, __) => const SizedBox(height: 12),
@@ -175,7 +193,7 @@ class _EntryListScreenState extends State<EntryListScreen> {
           return Padding(
             padding: const EdgeInsets.only(right: 8),
             child: GestureDetector(
-              onTap: () => setState(() => _filter = f),
+              onTap: () => _selectFilter(f),
               child: AnimatedContainer(
                 duration: const Duration(milliseconds: 180),
                 padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),

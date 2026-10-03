@@ -44,13 +44,31 @@ class _EntryDetailScreenState extends State<EntryDetailScreen> {
   /// 검증 배지가 붙어 있는 화면에서 그러면 배지가 거짓말을 하는 셈이 된다.
   Uint8List? _receiptBytes;
 
+  /// 본인 SBT 보유 여부 — 이의 제기 버튼의 활성 조건이다 (스토리보드 4 ⑤).
+  ///
+  /// 조회 전/실패는 null 이다. 「없음」으로 넘겨짚지 않는다 — 조회가 안 됐을 뿐인데
+  /// 버튼을 막으면 납부한 학생이 이의를 제기하지 못한다.
+  MembershipResult? _membership;
+
   EntryModel get _entry => widget.chain.original;
+
+  /// 이의를 제기할 수 있는 상태인지 (스토리보드 5 「화면 전체 규칙」).
+  ///
+  /// 확정된 항목이어야 하고, SBT 를 들고 있어야 한다. 아직 확인 중이면 막지 않는다.
+  bool get _canObject =>
+      widget.chain.isConfirmed && (_membership == null || _membership!.held);
 
   @override
   void initState() {
     super.initState();
     _loadObjections();
+    _loadMembership();
     _verify();
+  }
+
+  Future<void> _loadMembership() async {
+    final r = await _api.fetchMyMembership();
+    if (mounted) setState(() => _membership = r);
   }
 
   /// HASHING.md §2 의 세 단계를 **원본과 정정 항목 모두에** 돌린다.
@@ -92,6 +110,16 @@ class _EntryDetailScreenState extends State<EntryDetailScreen> {
   Future<void> _loadObjections() async {
     final list = await _api.fetchObjections(entryId: _entry.id);
     if (mounted) setState(() => _objections = list);
+  }
+
+  /// SBT 가 없어 이의를 제기할 수 없을 때 (스토리보드 4 ⑤ 「실패」).
+  void _warnNoMembership() {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('학생회비 납부 확인이 필요합니다'),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
   }
 
   Future<void> _openObjection() async {
@@ -754,11 +782,27 @@ class _EntryDetailScreenState extends State<EntryDetailScreen> {
         SizedBox(
           width: double.infinity,
           child: GradientButton(
-            onPressed: _openObjection,
-            label: '이 ${_entry.kind.label}에 대해 질문하기',
+            // 확정 전에는 아예 눌리지 않고(null), SBT 가 없을 때는 눌리되
+            // 왜 안 되는지 토스트로 알려준다 — 회색 버튼만 두면 학생은 이유를
+            // 알 길이 없다 (스토리보드 4 ⑤).
+            onPressed: !widget.chain.isConfirmed
+                ? null
+                : (_canObject ? _openObjection : _warnNoMembership),
+            enabled: _canObject,
+            label: '이의 제기',
             icon: Icons.help_outline_rounded,
           ),
         ),
+        if (!widget.chain.isConfirmed) ...[
+          const SizedBox(height: 6),
+          Text(
+            '확정된 항목에만 이의를 제기할 수 있습니다.',
+            style: TextStyle(
+              fontSize: 11,
+              color: AppTheme.textSub.withOpacity(0.9),
+            ),
+          ),
+        ],
         const SizedBox(height: 8),
         Text(
           '이의를 제기해도 원장은 수정되지 않습니다. 설명이 기록으로 쌓이고, '

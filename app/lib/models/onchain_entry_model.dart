@@ -3,8 +3,8 @@ import '../core/enums.dart';
 /// `AccountingLedger.getEntry(id)` 가 돌려주는 온체인 Entry (HASHING.md §2)
 ///
 /// ```
-/// Entry { hash, amount, kind, status, occurredAt, budgetId, correctsId,
-///         registrant, approver }
+/// Entry { hash, amount, budgetId, correctsId, registrant, occurredAt,
+///         term, approver, kind, status }
 /// ```
 ///
 /// **해시 비교만으로는 검증이 반쪽이다.** `kind` 와 `budget_id` 는 `meta_hash` 에
@@ -20,8 +20,23 @@ class OnChainEntry {
   final String? hash;
   final int amount;
   final EntryKind kind;
-  final EntryStatus status;
+
+  /// 체인에서 읽은 상태. 응답에 없으면 null — **「대기」가 아니라 「모름」이다.**
+  ///
+  /// 예전에는 `?? 'PENDING'` 으로 채웠는데, 그러면 지어낸 PENDING 과 대조하게 되어
+  /// **확정된 항목이 「상태 불일치」로 뜬다.** 대조하지 못한 것은 불일치가 아니다.
+  final EntryStatus? status;
   final int occurredAt;
+
+  /// 온체인 학기 코드 `YYYYS` (예: 20262 = 2026년 2학기). 응답에 없으면 null.
+  ///
+  /// **DB 의 `term_id`(1, 2…)와 비교하면 안 된다** — 인터페이스가 "DB 의 Term.id 가
+  /// 아니다"라고 못박은 값이다. 대조 상대는 [EntryModel.termCode] 다.
+  ///
+  /// `meta_hash` 에는 들어가지 않으므로(IAccountingLedger: "meta_hash 에는
+  /// kind·term·budgetId·correctsId 가 없다") 해시 검증으로는 학기 바꿔치기를
+  /// 잡지 못한다. 그래서 `kind`·`budgetId` 와 같이 따로 대조한다.
+  final int? term;
 
   /// 없으면 `0`. DB 의 `budget_id = NULL` 에 대응한다 (§2.1).
   final int budgetId;
@@ -46,6 +61,7 @@ class OnChainEntry {
     required this.kind,
     required this.status,
     required this.occurredAt,
+    this.term,
     required this.budgetId,
     required this.correctsId,
     required this.registrant,
@@ -96,8 +112,12 @@ class OnChainEntry {
       hash: _hashOrNull(json['hash']),
       amount: json['amount'] ?? 0,
       kind: EntryKind.fromCode(json['kind'] ?? 'EXPENSE'),
-      status: EntryStatus.fromCode(json['status'] ?? 'PENDING'),
+      // 없으면 null 로 둔다. 지어낸 PENDING 과 대조하면 멀쩡한 항목이 어긋난다.
+      status: json['status'] == null
+          ? null
+          : EntryStatus.fromCode(json['status'] as String),
       occurredAt: json['occurred_at'] ?? 0,
+      term: json['term'],
       budgetId: json['budget_id'] ?? 0,
       correctsId: json['corrects_id'] ?? 0,
       registrant: json['registrant'] ?? zeroAddress,
