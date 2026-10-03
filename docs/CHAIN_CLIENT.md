@@ -82,12 +82,19 @@
 | 확정 시 잔량 부족 | `ChainRevert(INSUFFICIENT_BUDGET)` | `PENDING` 유지, 반려 흐름으로 |
 | 확정 시 예산 마감 경과 | `ChainRevert(BUDGET_EXPIRED)` | `PENDING` 유지, 반려 흐름으로 |
 | 승인·반려자가 본 값 ≠ 등록 값 | `ChainRevert(ENTRY_COMMIT_MISMATCH)` | `PENDING` 유지. 앱에 최신 항목 값을 다시 내려준다 (§5) |
+| 체인이 거부했지만 원인을 해석할 수 없음 | `ChainRevert(UNKNOWN)` | 상태 그대로. **500 + 서버 로그** (`detail`에 원본) |
 
 `INSUFFICIENT_BUDGET`·`BUDGET_EXPIRED`는 `BudgetToken`이 `confirmEntry` 안에서 내는 에러지만, 원장 ABI에도 같은 시그니처로 선언돼 있어 **원장 ABI 하나로 해석된다.** `RESERVED_ID`(id 0)는 중복(`ENTRY_ALREADY_EXISTS`)과 다른 에러다 — 재시도 판정에 쓰지 않는다.
 
 **서명 불일치는 `INVALID_SIGNATURE`로 오지 않는다.** EIP-712 서명은 형식만 맞으면 다른 데이터에 대한 서명이어도 실패하지 않고 엉뚱한 주소를 복구해 낸다. 컨트랙트에는 권한 없는 사람이 서명한 것으로 보여서 `NOT_REGISTRANT`·`NOT_APPROVER`가 난다. `INVALID_SIGNATURE`는 서명 바이트 자체가 깨졌을 때만 난다. 그래서 revert만으로는 "앱이 다른 값에 서명함"과 "정말 권한이 없는 사람"을 구분할 수 없다. **그래서 서버가 릴레이 전에 `signer_of`로 서명자를 복구해 기대 지갑(등록은 `created_by`의 지갑, 확정·반려는 요청한 감사·회장의 지갑)과 소문자로 맞춰 비교한다.** 이 검사를 통과한 뒤에 오는 `NOT_REGISTRANT`·`NOT_APPROVER`는 서명자의 롤 문제다 (등록 뒤 롤이 바뀐 경우 등).
 
-`RevertReason`의 값은 Solidity 에러 이름 그대로다 (`"InvalidSignature"` 등). 전체 목록은 `backend/app/chain/models.py`.
+`RevertReason`의 값은 Solidity 에러 이름 그대로다 (`"InvalidSignature"` 등). 전체 목록은 `backend/app/chain/models.py`. 해석은 `backend/app/chain/revert.py`가 원장 ABI로 한다.
+
+**예외는 `UNKNOWN` 하나다.** revert는 확실하지만(온체인 상태 그대로) 원인을 해석할 수 없을 때 쓴다 — 원장 ABI에 없는 에러(BudgetToken 고유 에러 등), `RevertReason`에 없는 원장 에러(생성자 전용), 빈 revert 데이터, `Panic`, `Error(string)`. 원본은 `detail`에 남는다. 연결 실패와는 다르다 — 그쪽은 `ChainUnavailable`이고 트랜잭션이 들어갔는지 모른다. `detail`은 `id=5, current=BLOCKED, expected=PENDING`처럼 인자를 ABI 이름으로 적은 로그·디버깅용 문자열이고 화면 문구로 쓰지 않는다.
+
+revert는 시뮬레이션(`eth_call`)뿐 아니라 **전송 응답**으로도 온다 — Hardhat은 revert하는 트랜잭션도 블록에 넣고 `eth_sendRawTransaction`에 에러를 돌려준다. 둘 다 결과가 확정된 `ChainRevert`다. 반면 노드가 전송 자체를 거절한 경우(릴레이어 잔액 부족, nonce)는 revert가 아니고 트랜잭션도 들어가지 않았다. 이 구분은 전송 경로가 한다.
+
+연결할 때 `RevertReason`이 전부 원장 ABI에 있는지 확인한다. 컨트랙트 에러 이름이 바뀌면 revert가 모두 `UNKNOWN`이 되므로, 그 전에 `ChainSetupError`로 막는다.
 
 **체인 호출 전에 막는 것**
 
@@ -173,6 +180,8 @@ async def submit(id: int, req: ..., chain: ChainClient = Depends(get_chain_clien
 - 실제 클라이언트는 **첫 요청 때** 연결하고 재사용한다. 노드가 꺼져 있어도 체인을 쓰지 않는 API는 돈다
 - 연결할 때 점검한다 — 체인 id, 원장 코드 존재, `DOMAIN_SEPARATOR`, 원장의 RoleManager·BudgetToken, 릴레이어에 롤 없음, 릴레이어 잔액
 - 점검·연결 실패는 `ChainSetupError`(배포 기록 문제는 하위 클래스 `DeploymentError`)이고 **API는 503**을 돌려준다 (`app/main.py`). 메시지에 원인과 해결 방법이 있다 — 예: "원장 주소에 컨트랙트가 없다 … `npm run deploy:local`"
-- 요청마다 배포 기록·ABI 파일과 원장 코드를 확인해, 재배포나 노드 재시작이 있었으면 다시 연결한다. **서버를 다시 켤 필요가 없다**
-- 릴레이어 키 하나로 트랜잭션을 보내므로 **uvicorn 워커는 1개**로 띄운다 (`--workers` 를 주지 않는 기본값)
+- 요청마다 재배포·노드 재시작을 확인해, 있었으면 다시 연결한다. **서버를 다시 켤 필요가 없다.** 배포 기록·ABI 파일은 수정 시각이 바뀌었을 때만 다시 읽고, 원장 코드는 5초 간격으로만 확인한다
+- **확실히 낡았을 때만** 교체한다. 노드에 닿지 못해 확인할 수 없으면 그대로 쓰고, 실제 호출이 실패를 알린다 — 일시적 실패로 교체하면 보내던 트랜잭션과 엇갈린다
+- 연결할 때 컨트랙트끼리 가리키는 주소(원장↔BudgetToken↔RoleManager)와 세 컨트랙트의 `DOMAIN_SEPARATOR`·코드 존재를 확인한다. 일부만 다시 배포된 조합은 시작을 거부한다
+- 릴레이어 키 하나로 트랜잭션을 보내므로 전송은 **릴레이어 주소마다 lock 하나**로 직렬화한다. 클라이언트를 교체해도 같은 lock을 쓰고, 교체된 클라이언트는 보내던 트랜잭션이 끝난 뒤 닫힌다. 다른 프로세스와는 나누지 못하니 **uvicorn 워커는 1개**로 띄운다 (`--workers` 를 주지 않는 기본값)
 - 테스트는 `reset_chain_client()`로 만들어 둔 클라이언트를 버리고, 실제 연결은 `close_chain_client()`로 닫는다

@@ -36,3 +36,22 @@ def auth_header(seed_user):
         return {"Authorization": f"Bearer {create_access_token(seed_user(role).id)}"}
 
     return make
+
+
+# ---------------------------------------------------------------- 체인 테스트
+
+
+@pytest.fixture
+def node():
+    """로컬 Hardhat 노드가 필요한 테스트. 노드가 없으면 건너뛴다."""
+    import chain_support
+
+    if not chain_support.node_available():
+        pytest.skip("로컬 Hardhat 노드가 없다 (contracts 에서 npx hardhat node → npm run deploy:local)")
+
+
+@pytest.fixture
+def clean_chain_env(monkeypatch):
+    """셸의 체인 설정(CHAIN_RPC_URL·RELAYER_PRIVATE_KEY·DEPLOYMENTS_FILE)이 체인 테스트 결과를 바꾸지 않게 지운다."""
+    for name in ("CHAIN_RPC_URL", "RELAYER_PRIVATE_KEY", "DEPLOYMENTS_FILE"):
+        monkeypatch.delenv(name, raising=False)

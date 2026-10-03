@@ -17,11 +17,14 @@ from typing import Optional
 
 from app.chain.client import ChainClient
 from app.chain.fake import FakeChainClient
+from app.chain.models import ChainSetupError
 
 logger = logging.getLogger(__name__)
 
 _client: Optional[ChainClient] = None
-_failure: Optional[tuple[float, BaseException]] = None  # (실패한 시각, 예외)
+# (실패한 시각, 예외 종류, 메시지). 예외 객체를 들고 있으면 traceback 과 요청 프레임이 다음 성공까지 살아 있고,
+# 기다리던 요청들이 같은 객체를 다시 던질 때마다 traceback 이 길어진다. 종류와 메시지만 두고 매번 새로 만든다
+_failure: Optional[tuple[float, type, str]] = None
 _lock: Optional[asyncio.Lock] = None
 _lock_loop: Optional[asyncio.AbstractEventLoop] = None
 
@@ -62,21 +65,24 @@ async def _create() -> ChainClient:
 async def get_chain_client() -> ChainClient:
     global _client, _failure
     seen = _client
-    if seen is not None and await _is_current(seen):
+    # 확인하는 동안 다른 요청이 교체했을 수 있다. 버려진(닫힌) 클라이언트를 돌려주지 않는다
+    if seen is not None and await _is_current(seen) and _client is seen:
         return seen
     arrived = time.monotonic()
     async with _loop_lock():
         if _client is not None and _client is not seen:
             return _client  # 기다리는 동안 다른 요청이 새로 만들었다
         if _failure is not None and _failure[0] >= arrived:
-            raise _failure[1]  # 기다리는 동안 다른 요청이 연결을 시도했다가 실패했다. 같은 결과를 받는다
+            # 기다리는 동안 다른 요청이 연결을 시도했다가 실패했다. 같은 결과를 받는다
+            _, kind, message = _failure
+            raise (kind if issubclass(kind, ChainSetupError) else ChainSetupError)(message)
         stale, _client = _client, None
         if stale is not None:
             await _close(stale)
         try:
             _client = await _create()
         except Exception as e:
-            _failure = (time.monotonic(), e)
+            _failure = (time.monotonic(), type(e), str(e))
             raise
         _failure = None
         return _client

@@ -210,6 +210,9 @@ class RevertReason(str, Enum):
     # BudgetToken 이 confirmEntry 안에서 내는 것. 항목은 PENDING 그대로라 반려 흐름으로 넘긴다
     INSUFFICIENT_BUDGET = "InsufficientBudget"
     BUDGET_EXPIRED = "BudgetExpired"
+    # Solidity 에러 이름이 아닌 유일한 값. revert 는 확실하지만(온체인 상태 그대로) 원인을 해석할 수 없다 —
+    # 원장 ABI 에 없는 에러, 빈 revert 데이터, Panic, Error(string). 원본은 detail 에 있다 (app/chain/revert.py)
+    UNKNOWN = "Unknown"
 
 
 class ChainError(Exception):

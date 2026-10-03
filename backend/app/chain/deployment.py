@@ -135,9 +135,37 @@ def load_abi(contract: DeployedContract, path: Optional[Path] = None) -> list:
     """배포 기록의 abi 경로에서 ABI 를 읽는다. 경로는 배포 기록 파일(path)이 있는 폴더 기준이다. 릴레이어가 쓴다."""
     path = path or deployment_path()
     abi_list = _read_json(path.parent / contract.abi, "ABI 파일", contract.abi)
-    if not isinstance(abi_list, list):
-        raise DeploymentError(f"ABI 파일 형식이 맞지 않습니다 ({contract.abi}): 배열이 아님")
+    problem = _abi_problem(abi_list)
+    if problem:
+        # 깨진 ABI 가 web3·해석기 안에서 KeyError 등으로 터지면 503 이 아니라 500 이 된다. 읽을 때 막는다
+        raise DeploymentError(f"ABI 파일 형식이 맞지 않습니다 ({contract.abi}): {problem}")
     return abi_list
+
+
+def _abi_problem(abi_list) -> Optional[str]:
+    """릴레이어가 쓰는 만큼의 ABI 구조 검사. 문제가 있으면 설명, 없으면 None. 메시지에 파일 내용은 넣지 않는다."""
+    if not isinstance(abi_list, list):
+        return "배열이 아님"
+    for n, item in enumerate(abi_list):
+        if not isinstance(item, dict) or not isinstance(item.get("type"), str):
+            return f"{n}번째 항목에 type 이 없음"
+        if item["type"] in ("function", "event", "error") and (not isinstance(item.get("name"), str) or not item["name"]):
+            return f"{n}번째 {item['type']} 에 name 이 없음"
+        # inputs 는 호출·에러 인자를 만들 때, outputs 는 호출 결과를 해석할 때 쓴다
+        for key in ("inputs", "outputs"):
+            if not _params_ok(item.get(key, [])):
+                return f"{n}번째 {item['type']} 의 {key} 형식이 맞지 않음"
+    return None
+
+
+def _params_ok(params) -> bool:
+    """ABI 인자 목록. 튜플은 components 까지 본다."""
+    return isinstance(params, list) and all(
+        isinstance(p, dict)
+        and isinstance(p.get("type"), str)
+        and (not p["type"].startswith("tuple") or _params_ok(p.get("components")))
+        for p in params
+    )
 
 
 def _check_consistency(d: Deployment, file_name: str) -> None:
