@@ -10,11 +10,11 @@ DUMMY_BUDGETS: List[BudgetResponse] = [
         term_id=1,
         category="행사비",
         planned_amount=2500000,
-        remaining_amount=2500000,
-        execution_rate=0.0,
-        version=1,
-        expires_at=1767196799,
-        revision_reason=None,
+        remaining_amount=2470000,
+        execution_rate=0.012,
+        version=2,
+        expires_at=1797260399,  # 2026-12-14 23:59:59 KST
+        revision_reason="참가인원 증가",
     ),
     BudgetResponse(
         id=2,
@@ -24,7 +24,7 @@ DUMMY_BUDGETS: List[BudgetResponse] = [
         remaining_amount=1465000,
         execution_rate=0.023,
         version=1,
-        expires_at=1767196799,
+        expires_at=1797260399,  # 2026-12-14 23:59:59 KST
         revision_reason=None,
     ),
     BudgetResponse(
@@ -35,7 +35,7 @@ DUMMY_BUDGETS: List[BudgetResponse] = [
         remaining_amount=1000000,
         execution_rate=0.0,
         version=1,
-        expires_at=1767196799,
+        expires_at=1797260399,  # 2026-12-14 23:59:59 KST
         revision_reason=None,
     ),
 ]
