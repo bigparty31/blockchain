@@ -17,12 +17,12 @@ from app.chain.models import BlockReason
 from app.chain.revert import RevertDecoder
 from app.chain.web3_client import LEDGER, Web3ChainClient, _send_failure
 from app.schemas.entry import EntryKind, EntryStatus
-from chain_support import RELAYER_KEY, RPC_URL, TREASURER_KEY, chain_now, in_snapshot, sign_as_app
+from chain_support import RELAYER_KEY, RPC_URL, TEST_ID_BASE, TREASURER, TREASURER_KEY, chain_now, in_snapshot, sign_as_app
 
 DEPLOYMENT = load_deployment(DEFAULT_PATH)
 DECODER = RevertDecoder(load_abi(DEPLOYMENT.contracts[LEDGER], DEFAULT_PATH))
-TREASURER = Account.from_key(TREASURER_KEY).address
 KST_MIDNIGHT = 1790694000
+R = TEST_ID_BASE + 100_000  # 항목 id. 공용 노드의 실제 기록과 겹치지 않는 구간 (chain_support)
 
 
 @pytest.fixture(autouse=True)
@@ -74,8 +74,8 @@ async def nonce(client) -> int:
 @pytest.mark.chain
 def test_income_is_recorded_as_pending(node):
     async def body(client, now):
-        result = await client.record_pending(request(1001, now + 600), sign(request(1001, now + 600)))
-        return result, await client.get_entry(1001)
+        result = await client.record_pending(request(R + 1001, now + 600), sign(request(R + 1001, now + 600)))
+        return result, await client.get_entry(R + 1001)
 
     result, entry = on_chain(body)
     assert result.status is EntryStatus.PENDING and result.block_reason is None
@@ -87,8 +87,8 @@ def test_income_is_recorded_as_pending(node):
 def test_expense_without_budget_is_blocked_not_an_error(node):
     # BLOCKED 는 예외가 아니다. 트랜잭션은 성공했고 예산 위반이 기록됐다 (CHAIN_CLIENT §4)
     async def body(client, now):
-        req = request(1002, now + 600, kind=EntryKind.EXPENSE, amount=35_000)
-        return await client.record_pending(req, sign(req)), await client.get_entry(1002)
+        req = request(R + 1002, now + 600, kind=EntryKind.EXPENSE, amount=35_000)
+        return await client.record_pending(req, sign(req)), await client.get_entry(R + 1002)
 
     result, entry = on_chain(body)
     assert (result.status, result.block_reason) == (EntryStatus.BLOCKED, BlockReason.BUDGET_NOT_FOUND)
@@ -98,13 +98,13 @@ def test_expense_without_budget_is_blocked_not_an_error(node):
 @pytest.mark.chain
 def test_get_entry_reads_every_field_by_name(node):
     async def body(client, now):
-        req = request(1003, now + 600, kind=EntryKind.EXPENSE, amount=12_345, budget_id=0)
+        req = request(R + 1003, now + 600, kind=EntryKind.EXPENSE, amount=12_345, budget_id=0)
         await client.record_pending(req, sign(req))
-        return req, await client.get_entry(1003)
+        return req, await client.get_entry(R + 1003)
 
     req, entry = on_chain(body)
     assert entry.model_dump() == {
-        "id": 1003,
+        "id": R + 1003,
         "hash": req.hash,
         "amount": 12_345,
         "kind": EntryKind.EXPENSE,
@@ -141,7 +141,7 @@ def test_before_broadcast_gets_the_hash_before_sending(node):
         async def claim(tx_hash):
             seen.append((tx_hash, await nonce(client)))  # 아직 보내지 않았으면 nonce 가 그대로다
 
-        result = await client.record_pending(request(1004, now + 600), sign(request(1004, now + 600)), claim)
+        result = await client.record_pending(request(R + 1004, now + 600), sign(request(R + 1004, now + 600)), claim)
         return before, result
 
     before, result = on_chain(body)
@@ -161,8 +161,8 @@ def test_failing_callback_means_nothing_is_sent(node):
             raise Claimed()
 
         with pytest.raises(Claimed):
-            await client.record_pending(request(1005, now + 600), sign(request(1005, now + 600)), claim)
-        return before, await nonce(client), await client.get_entry(1005)
+            await client.record_pending(request(R + 1005, now + 600), sign(request(R + 1005, now + 600)), claim)
+        return before, await nonce(client), await client.get_entry(R + 1005)
 
     before, after, entry = on_chain(body)
     assert after == before and entry is None
@@ -182,7 +182,7 @@ def test_revert_in_simulation_costs_nothing_and_skips_the_callback(node):
             called.append(tx_hash)
 
         with pytest.raises(ChainRevert) as error:
-            await client.record_pending(request(1006, 1), sign(request(1006, 1)), claim)
+            await client.record_pending(request(R + 1006, 1), sign(request(R + 1006, 1)), claim)
         return error.value, before, await nonce(client)
 
     revert, before, after = on_chain(body)
@@ -193,7 +193,7 @@ def test_revert_in_simulation_costs_nothing_and_skips_the_callback(node):
 @pytest.mark.chain
 def test_same_id_twice_is_entry_already_exists(node):
     async def body(client, now):
-        req = request(1007, now + 600)
+        req = request(R + 1007, now + 600)
         await client.record_pending(req, sign(req))
         with pytest.raises(ChainRevert) as error:
             await client.record_pending(req, sign(req))
@@ -205,7 +205,7 @@ def test_same_id_twice_is_entry_already_exists(node):
 @pytest.mark.chain
 def test_signature_from_someone_without_the_role_is_not_registrant(node):
     async def body(client, now):
-        req = request(1008, now + 600)
+        req = request(R + 1008, now + 600)
         with pytest.raises(ChainRevert) as error:
             await client.record_pending(req, sign(req, RELAYER_KEY))
         return error.value
@@ -230,8 +230,8 @@ def test_revert_after_sending_is_still_a_revert(node, monkeypatch):
             called.append(tx_hash)
 
         with pytest.raises(ChainRevert) as error:
-            await client.record_pending(request(1009, 1), sign(request(1009, 1)), claim)
-        return error.value, before, await nonce(client), await client.get_entry(1009)
+            await client.record_pending(request(R + 1009, 1), sign(request(R + 1009, 1)), claim)
+        return error.value, before, await nonce(client), await client.get_entry(R + 1009)
 
     revert, before, after, entry = on_chain(body)
     assert revert.reason is RevertReason.SIGNATURE_EXPIRED
@@ -246,7 +246,7 @@ def test_concurrent_records_get_consecutive_nonces(node):
     # 릴레이어 키 하나로 동시에 보내면 nonce 가 겹친다. lock 으로 한 줄로 세운다
     async def body(client, now):
         before = await nonce(client)
-        reqs = [request(1010 + i, now + 600) for i in range(3)]
+        reqs = [request(R + 1010 + i, now + 600) for i in range(3)]
         results = await asyncio.gather(*(client.record_pending(r, sign(r)) for r in reqs))
         return results, before, await nonce(client)
 
@@ -397,7 +397,7 @@ def test_simulation_uses_the_next_block_time(node):
             called.append(tx_hash)
 
         with pytest.raises(ChainRevert) as error:
-            await client.record_pending(request(1020, expired), sign(request(1020, expired)), claim)
+            await client.record_pending(request(R + 1020, expired), sign(request(R + 1020, expired)), claim)
         return error.value, before, await nonce(client)
 
     revert, before, after = on_chain(body)
@@ -415,13 +415,13 @@ def test_using_the_relayer_from_inside_before_broadcast_fails_fast(node, inside)
     async def body(client, now):
         async def nested(tx_hash):
             if inside == "record":
-                await client.record_pending(request(1031, now + 600), sign(request(1031, now + 600)))
+                await client.record_pending(request(R + 1031, now + 600), sign(request(R + 1031, now + 600)))
             else:
                 await client.close()
 
         with pytest.raises(RuntimeError, match="before_broadcast 안에서"):
-            await asyncio.wait_for(client.record_pending(request(1030, now + 600), sign(request(1030, now + 600)), nested), 5)
-        return await client.get_entry(1030)
+            await asyncio.wait_for(client.record_pending(request(R + 1030, now + 600), sign(request(R + 1030, now + 600)), nested), 5)
+        return await client.get_entry(R + 1030)
 
     assert on_chain(body) is None  # 콜백이 실패했으니 보내지 않았다
 
@@ -438,7 +438,7 @@ def test_code_defect_while_sending_is_not_hidden_as_unavailable(node, monkeypatc
 
     async def body(client, now):
         with pytest.raises(TypeError, match="defect"):
-            await client.record_pending(request(1032, now + 600), sign(request(1032, now + 600)))
+            await client.record_pending(request(R + 1032, now + 600), sign(request(R + 1032, now + 600)))
 
     on_chain(body)
 
@@ -458,7 +458,7 @@ def test_node_without_a_pending_block_still_records(node, monkeypatch):
     monkeypatch.setattr(AsyncEth, "get_block", no_pending)
 
     async def body(client, now):
-        req = request(1033, now + 600)
+        req = request(R + 1033, now + 600)
         return await client.record_pending(req, sign(req))
 
     assert on_chain(body).status is EntryStatus.PENDING

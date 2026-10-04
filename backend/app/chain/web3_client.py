@@ -36,6 +36,7 @@ from app.chain.models import (
     STATUS_ORDER,
     ZERO_ADDRESS,
     ChainEntry,
+    ChainError,
     ChainRevert,
     ChainSetupError,
     ChainUnavailable,
@@ -423,17 +424,29 @@ class Web3ChainClient:
     async def record_pending(
         self, request: RecordRequest, signature: str, before_broadcast: Optional[BeforeBroadcast] = None
     ) -> TxResult:
-        self._ensure_open()
-        # 구조체는 서명 대상과 같은 typed data 의 message 로 만든다 — 필드 순서·인코딩의 정본이 한 곳이다
-        message = eip712.record_request_typed_data(request, self._deployment.eip712[LEDGER])["message"]
-        call = self._ledger.functions.recordPending(message, bytes.fromhex(eip712.normalize_signature(signature)[2:]))
-        tx_hash, receipt = await self._relay(call, before_broadcast)
-        return await self._record_result(tx_hash, receipt, request.id)
+        events = self._ledger.events
+        return await self._relay_signed(
+            self._ledger.functions.recordPending,
+            request,
+            signature,
+            before_broadcast,
+            # BLOCKED 를 먼저 본다 — 차단도 성공한 트랜잭션이고 사유는 이벤트에만 있다
+            ((events.EntryBlocked, EntryStatus.BLOCKED), (events.EntryPending, EntryStatus.PENDING)),
+        )
 
     async def confirm_entry(
         self, approval: ConfirmApproval, signature: str, before_broadcast: Optional[BeforeBroadcast] = None
     ) -> TxResult:
-        raise NotImplementedError("confirm_entry 는 아직 구현되지 않았다")
+        # entryCommit 은 앱이 체인 값으로 계산해 서명한 값 그대로 보낸다. 등록된 값과 다르면 시뮬레이션에서
+        # ENTRY_COMMIT_MISMATCH 로 걸린다 (가스 0, CHAIN_CLIENT §5)
+        events = self._ledger.events
+        return await self._relay_signed(
+            self._ledger.functions.confirmEntry,
+            approval,
+            signature,
+            before_broadcast,
+            ((events.EntryConfirmed, EntryStatus.CONFIRMED),),
+        )
 
     async def reject_entry(
         self, decision: RejectDecision, signature: str, before_broadcast: Optional[BeforeBroadcast] = None
@@ -441,6 +454,19 @@ class Web3ChainClient:
         raise NotImplementedError("반려 릴레이는 이번 범위가 아니다")
 
     # ------------------------------------------------------------ 전송
+
+    async def _relay_signed(
+        self, function, payload, signature: str, before_broadcast: Optional[BeforeBroadcast], outcomes: tuple
+    ) -> TxResult:
+        """서명된 구조체를 원장 함수로 릴레이하고 결과 이벤트로 판정한다 (등록·확정 공용).
+
+        구조체는 서명 대상과 같은 typed data 의 message 로 만든다 — 필드 순서·인코딩의 정본이 한 곳이다.
+        """
+        self._ensure_open()
+        message = eip712.typed_data_for(payload, self._deployment.eip712[LEDGER])["message"]
+        call = function(message, bytes.fromhex(eip712.normalize_signature(signature)[2:]))
+        tx_hash, receipt = await self._relay(call, before_broadcast)
+        return await self._event_result(tx_hash, receipt, payload.id, outcomes)
 
     async def _relay(self, call, before_broadcast: Optional[BeforeBroadcast]) -> tuple:
         """시뮬레이션 → 로컬 서명 → before_broadcast → 전송 → receipt. (tx hash, 성공한 receipt) 를 돌려준다.
@@ -528,19 +554,24 @@ class Web3ChainClient:
                 return revert
         return ChainRevert(RevertReason.UNKNOWN, f"트랜잭션이 실패했지만 사유를 재현하지 못했다 (tx={tx_hash})")
 
-    async def _record_result(self, tx_hash: str, receipt: dict, entry_id: int) -> TxResult:
-        """receipt 의 이 원장·이 id 이벤트로 결과를 정한다. EntryPending → PENDING, EntryBlocked → BLOCKED."""
-        events = self._ledger.events
-        for log in events.EntryBlocked().process_receipt(receipt, errors=DISCARD):
-            if log["address"] == self._ledger.address and log["args"]["id"] == entry_id:
-                return TxResult(
-                    tx_hash=tx_hash, status=EntryStatus.BLOCKED, block_reason=BLOCK_REASON_ORDER[log["args"]["reason"]]
-                )
-        for log in events.EntryPending().process_receipt(receipt, errors=DISCARD):
-            if log["address"] == self._ledger.address and log["args"]["id"] == entry_id:
-                return TxResult(tx_hash=tx_hash, status=EntryStatus.PENDING)
-        # 성공한 트랜잭션인데 이벤트가 없다. 체인 상태로 확인하고, PENDING 이 아니면 단정하지 않는다
-        entry = await self.get_entry(entry_id)
-        if entry is not None and entry.status is EntryStatus.PENDING:
-            return TxResult(tx_hash=tx_hash, status=EntryStatus.PENDING)
-        raise ChainUnavailable(f"등록 결과 이벤트를 찾지 못했다 (tx={tx_hash})")
+    async def _event_result(self, tx_hash: str, receipt: dict, entry_id: int, outcomes: tuple) -> TxResult:
+        """receipt 의 이 원장·이 id 이벤트로 결과를 정한다. outcomes 는 (이벤트, status) 를 볼 순서대로.
+
+        등록은 EntryBlocked → BLOCKED(사유 포함), EntryPending → PENDING. 확정은 EntryConfirmed → CONFIRMED.
+        """
+        for event, status in outcomes:
+            for log in event().process_receipt(receipt, errors=DISCARD):
+                if log["address"] == self._ledger.address and log["args"]["id"] == entry_id:
+                    reason = BLOCK_REASON_ORDER[log["args"]["reason"]] if status is EntryStatus.BLOCKED else None
+                    return TxResult(tx_hash=tx_hash, status=status, block_reason=reason)
+        # 성공한 트랜잭션인데 이벤트가 없다. 체인 상태로 확인하되, 사유가 이벤트에만 있는 BLOCKED 는 단정하지 않는다
+        try:
+            entry = await self.get_entry(entry_id)
+        except ChainError as e:
+            # 트랜잭션은 이미 들어갔다. lock 이 풀린 뒤라 교체로 닫혔을 수 있는데(ChainSetupError), 그걸 그대로 올리면
+            # 서비스는 "보내지 않음" 으로 보고 선점을 비운다 (CHAIN_CLIENT §3). 들어갔지만 결과를 모르는 것이다
+            raise ChainUnavailable(f"트랜잭션은 들어갔지만 결과를 확인하지 못했다 ({type(e).__name__}, tx={tx_hash})") from e
+        expected = {status for _, status in outcomes} - {EntryStatus.BLOCKED}
+        if entry is not None and entry.status in expected:
+            return TxResult(tx_hash=tx_hash, status=entry.status)
+        raise ChainUnavailable(f"결과 이벤트를 찾지 못했다 (tx={tx_hash})")

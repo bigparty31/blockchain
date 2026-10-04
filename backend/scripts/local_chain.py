@@ -8,8 +8,10 @@ import time
 from eth_account import Account
 from eth_account.messages import encode_typed_data
 
+from app.chain.commit import entry_commit_of
 from app.chain.deployment import Eip712Domain
 from app.chain.eip712 import SignedPayload, typed_data_for
+from app.chain.models import ZERO_BYTES32, ChainEntry, ConfirmApproval
 
 LOCAL_CHAIN_ID = 31337
 LOCAL_RPC_URL = "http://127.0.0.1:8545"
@@ -25,10 +27,30 @@ def hardhat_key(index: int) -> str:
     return "0x" + bytes(Account.from_mnemonic(HARDHAT_MNEMONIC, account_path=f"m/44'/60'/0'/0/{index}").key).hex()
 
 
+def sign_typed_data(typed: dict, key: str) -> str:
+    """typed data(eth_signTypedData_v4 모양)에 키로 서명한다."""
+    return "0x" + bytes(Account.sign_message(encode_typed_data(full_message=typed), key).signature).hex()
+
+
 def sign_as_app(payload: SignedPayload, domain: Eip712Domain, key: str) -> str:
     """앱이 하는 EIP-712 서명. 화면에 보여준 값으로 typed data 를 만들어 임원 키로 서명한다."""
-    typed = typed_data_for(payload, domain)
-    return "0x" + bytes(Account.sign_message(encode_typed_data(full_message=typed), key).signature).hex()
+    return sign_typed_data(typed_data_for(payload, domain), key)
+
+
+def approval_from_entry(entry: ChainEntry, deadline: int, **override) -> ConfirmApproval:
+    """앱이 만드는 확정 요청. 체인에 등록된 값(get_entry)으로 hash·entryCommit 을 채운다 (CHAIN_CLIENT §5).
+
+    기본은 경고 없는 승인이다. override 로 경고·사유나 값을 바꿔 본다.
+    """
+    fields = dict(
+        id=entry.id,
+        hash=entry.hash,
+        entry_commit=entry_commit_of(entry),
+        had_warning=False,
+        warning_reason_hash=ZERO_BYTES32,
+        deadline=deadline,
+    )
+    return ConfirmApproval(**{**fields, **override})
 
 
 async def chain_now(w3) -> int:

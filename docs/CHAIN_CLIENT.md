@@ -6,7 +6,7 @@
 
 | 지금 | 다음 |
 | --- | --- |
-| `AccountingLedger` 등록·확정·반려, `getEntry` 조회. 실제 릴레이어(`Web3ChainClient`)는 등록(`record_pending`)·조회(`get_entry`)까지, 배포 기록 읽기, 중복 전송 방지(`before_broadcast`), deadline 결정(§7) | 실제 릴레이어의 확정·반려, 한 id에 확정·반려 서명을 동시에 발급하지 않는 서버 규칙, 재시도. 예산(`BudgetToken`)·롤(`RoleManager`) 릴레이 — 둘 다 서명 + 릴레이어 방식이 됐다. 이의·SBT는 컨트랙트가 아직 없다 |
+| `AccountingLedger` 등록·확정·반려, `getEntry` 조회. 실제 릴레이어(`Web3ChainClient`)는 등록(`record_pending`)·확정(`confirm_entry`)·조회(`get_entry`)까지, 배포 기록 읽기, 중복 전송 방지(`before_broadcast`), deadline 결정(§7) | 실제 릴레이어의 반려, 한 id에 확정·반려 서명을 동시에 발급하지 않는 서버 규칙, 재시도. 예산(`BudgetToken`)·롤(`RoleManager`) 릴레이 — 둘 다 서명 + 릴레이어 방식이 됐다. 이의·SBT는 컨트랙트가 아직 없다 |
 
 서명은 ChainClient가 만들지 않는다. 임원 기기가 서명한 값을 받아 릴레이만 한다 (PRD §9.2).
 
@@ -127,6 +127,7 @@ revert는 시뮬레이션(`eth_call`)뿐 아니라 **전송 응답**으로도 �
 | nonce가 낮음 (다른 프로세스가 같은 키로 보냄 — 워커 2개 이상) | `ChainSetupError` → 503 | 들어가지 않음 |
 | 같은 트랜잭션이 이미 노드에 있음 ("already known") | receipt를 기다려 정상 처리 | — |
 | 연결 실패, receipt 30초 초과, 그 밖 | `ChainUnavailable` | 모름 → `get_entry` |
+| 들어갔는데 receipt에서 결과 이벤트를 찾지 못함 (ABI 불일치 등) | 체인 상태(`get_entry`)로 판정한다. `BLOCKED`(사유가 이벤트에만 있음)이거나 확인하지 못하면 — 그 사이 교체로 클라이언트가 닫힌 경우 포함 — `ChainUnavailable`. 들어간 뒤에는 `ChainSetupError`를 내지 않는다 | 들어감 → `get_entry` |
 
 receipt가 실패(`status` 0)로 오는 노드(Hardhat 외)에서는 그 블록 직전 상태로 다시 불러 revert 사유를 얻는다.
 
@@ -144,7 +145,7 @@ entry_commit_of(chain_entry)  # get_entry 결과로 계산. 원장의 entryCommi
 ```
 
 - 서버는 승인 화면에 **체인에 등록된 값**(`get_entry`)을 내려주고, 앱은 그 값으로 `entry_commit`을 직접 계산해 화면 내용과 함께 서명한다
-- 릴레이 전에 서버가 `approval.entry_commit == entry_commit_of(get_entry(id))`를 먼저 확인하면, 어긋날 때 가스를 쓰지 않고 400으로 끝낼 수 있다
+- 서버가 릴레이 전에 `entry_commit_of(get_entry(id))`로 따로 대조하지 않아도 된다. 실제 구현은 보내기 전에 시뮬레이션하므로(§4) 어긋나면 가스 없이, 콜백 전에 `ChainRevert(ENTRY_COMMIT_MISMATCH)`가 온다. 그때 400으로 끝내고 앱에 최신 값을 내려준다
 - 기대값은 `backend/tests/test_entry_commit.py`에 ethers로 뽑은 값으로 고정돼 있다. 식을 바꾸면 기대값도 ethers로 다시 뽑는다
 
 ## 6. FakeChainClient
@@ -222,6 +223,8 @@ async def submit(id: int, req: ..., chain: ChainClient = Depends(get_chain_clien
 cd backend && .venv/bin/python -m scripts.relayer_smoke
 ```
 
-- 등록 API와 같은 순서(앱 서명 → 서명자가 체인의 총무인지 대조 → `record_pending`)로 수입(PENDING)과 예산 없는 지출(BLOCKED)을 **실제로 기록**하고, 체인에서 다시 읽어 서명한 값과 맞는지 본다. 마지막 줄이 "관문 2 통과" 또는 "관문 2 실패"이고 종료 코드는 0 또는 1이다
-- 항목 id는 등록 API의 DB id(1부터)와 겹치지 않는 8000억대 + 실행 시각이라 몇 번이고 다시 실행해도 된다. 노드를 재시작하면 기록은 사라진다
-- 총무 키로 서명하는 "앱 역할"이라 서버 코드 밖(`backend/scripts/`)에 있고 로컬 체인(31337)에서만 돈다. 로컬 계정 배치와 앱 서명은 `backend/scripts/local_chain.py`가 정본이다
+- 등록 API와 같은 순서(앱 서명 → 서명자가 체인의 총무인지 대조 → `record_pending`)로 수입(PENDING)과 예산 없는 지출(BLOCKED)을 **실제로 기록**하고, 체인에서 다시 읽어 서명한 값과 맞는지 본다
+- 이어서 승인 API와 같은 순서(체인에 등록된 값으로 `entry_commit` 계산 → 감사 서명 → 서명자가 체인의 감사·회장인지 대조 → `confirm_entry`)로 **수입을 확정**하고, 다시 읽어 `CONFIRMED`·승인자 = 감사인지 본다. 지출은 예산이 없어 BLOCKED라 확정하지 않는다 — 공용 노드에 예산을 발행하지 않기 위해서다(지출 확정·예산 소모는 `backend/tests/test_web3_confirm.py`가 스냅샷 안에서 확인한다)
+- 마지막 줄이 "관문 2·확정 통과" 또는 "관문 2 실패"이고 종료 코드는 0 또는 1이다
+- 항목 id는 8000억 + 실행 시각(밀리초) × 10(지금은 18조대)이라 등록 API의 DB id(1부터)와 겹치지 않고, 몇 번이고 다시 실행해도 된다. 노드를 재시작하면 기록은 사라진다
+- 총무·감사 키로 서명하는 "앱 역할"이라 서버 코드 밖(`backend/scripts/`)에 있고 로컬 체인(31337)에서만 돈다. 로컬 계정 배치와 앱 서명은 `backend/scripts/local_chain.py`가 정본이다
