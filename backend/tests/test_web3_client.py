@@ -7,7 +7,6 @@ import asyncio
 import gc
 import json
 import logging
-import shutil
 import subprocess
 import sys
 import threading
@@ -23,12 +22,12 @@ from eth_account import Account
 from app.chain import ChainSetupError, FakeChainClient, RecordRequest
 from app.chain import provider
 from app.chain import web3_client
-from app.chain.deployment import DEFAULT_PATH, DeploymentError, Eip712Domain, domain_separator, load_abi, load_deployment
+from app.chain.deployment import DEFAULT_PATH, DeploymentError, load_abi, load_deployment
 from app.chain.models import KIND_ORDER
 from app.chain.provider import close_chain_client, get_chain_client, reset_chain_client
 from app.chain.web3_client import BUDGET_TOKEN, CONTRACTS, LEDGER, ROLE_MANAGER, Web3ChainClient, _link_problem
 from app.main import app
-from chain_support import RELAYER_KEY, RPC_URL, TREASURER_KEY, UNREACHABLE
+from chain_support import RELAYER_KEY, RPC_URL, TREASURER_KEY, UNREACHABLE, deployment_variant
 
 BACKEND = Path(__file__).resolve().parents[1]
 VECTORS = json.loads((Path(__file__).parent / "fixtures" / "eip712_vectors.json").read_text(encoding="utf-8"))["vectors"]
@@ -61,21 +60,6 @@ def offline_client(key: str = RELAYER_KEY, w3=None) -> Web3ChainClient:
         for name in CONTRACTS
     }
     return Web3ChainClient(w3, Account.from_key(key), DEPLOYMENT, contracts, DEFAULT_PATH)
-
-
-def deployment_variant(tmp_path: Path, change=None, change_abi=None) -> Path:
-    """배포 기록을 바꾼 사본. 도메인 해시를 다시 계산해 load_deployment 의 일관성 검사는 통과시킨다."""
-    raw = json.loads(DEFAULT_PATH.read_text(encoding="utf-8"))
-    if change:
-        change(raw)
-    for domain in raw["eip712"].values():
-        domain["domainSeparator"] = domain_separator(Eip712Domain.model_validate(domain))
-    path = tmp_path / "localhost.json"
-    path.write_text(json.dumps(raw), encoding="utf-8")
-    shutil.copytree(DEFAULT_PATH.parent / "abi", tmp_path / "abi")
-    if change_abi:
-        change_abi(tmp_path / "abi")
-    return path
 
 
 def edit_abi(name: str, edit):

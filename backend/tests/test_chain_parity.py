@@ -9,16 +9,14 @@ import time
 
 import pytest
 from eth_account import Account
-from eth_account.messages import encode_typed_data
 from eth_utils import keccak
 
 from app.chain import ChainRevert, FakeChainClient, RecordRequest, RevertReason, fake_signature
 from app.chain.deployment import DEFAULT_PATH, load_deployment
-from app.chain.eip712 import typed_data_for
 from app.chain.models import MAX_AMOUNT, UINT64_MAX, BlockReason
 from app.chain.web3_client import LEDGER, Web3ChainClient
 from app.schemas.entry import EntryKind, EntryStatus
-from chain_support import RELAYER_KEY, RPC_URL, TREASURER_KEY, chain_now, in_snapshot
+from chain_support import RELAYER_KEY, RPC_URL, TREASURER_KEY, chain_now, in_snapshot, sign_as_app
 
 DOMAIN = load_deployment(DEFAULT_PATH).eip712[LEDGER]
 TREASURER = Account.from_key(TREASURER_KEY).address
@@ -95,8 +93,7 @@ def run_fake(requests: list) -> list:
 
 def run_web3(requests: list) -> list:
     def sign(request):
-        typed = typed_data_for(request, DOMAIN)
-        return "0x" + bytes(Account.sign_message(encode_typed_data(full_message=typed), TREASURER_KEY).signature).hex()
+        return sign_as_app(request, DOMAIN, TREASURER_KEY)
 
     async def run():
         client = await Web3ChainClient.connect(RPC_URL, RELAYER_KEY, DEFAULT_PATH)

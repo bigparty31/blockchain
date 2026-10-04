@@ -215,3 +215,13 @@ async def submit(id: int, req: ..., chain: ChainClient = Depends(get_chain_clien
 - 연결할 때 컨트랙트끼리 가리키는 주소(원장↔BudgetToken↔RoleManager)와 세 컨트랙트의 `DOMAIN_SEPARATOR`·코드 존재를 확인한다. 일부만 다시 배포된 조합은 시작을 거부한다
 - 릴레이어 키 하나로 트랜잭션을 보내므로 전송은 **릴레이어 주소마다 lock 하나**로 직렬화한다. 클라이언트를 교체해도 같은 lock을 쓰고, 교체된 클라이언트는 보내던 트랜잭션이 끝난 뒤 닫힌다. 다른 프로세스와는 나누지 못하니 **uvicorn 워커는 1개**로 띄운다 (`--workers` 를 주지 않는 기본값)
 - 테스트는 `reset_chain_client()`로 만들어 둔 클라이언트를 버리고, 실제 연결은 `close_chain_client()`로 닫는다
+
+**관문 2 스모크** — 로컬 노드에 배포한 뒤 실제 체인 경로를 끝까지 확인한다.
+
+```bash
+cd backend && .venv/bin/python -m scripts.relayer_smoke
+```
+
+- 등록 API와 같은 순서(앱 서명 → 서명자가 체인의 총무인지 대조 → `record_pending`)로 수입(PENDING)과 예산 없는 지출(BLOCKED)을 **실제로 기록**하고, 체인에서 다시 읽어 서명한 값과 맞는지 본다. 마지막 줄이 "관문 2 통과" 또는 "관문 2 실패"이고 종료 코드는 0 또는 1이다
+- 항목 id는 등록 API의 DB id(1부터)와 겹치지 않는 8000억대 + 실행 시각이라 몇 번이고 다시 실행해도 된다. 노드를 재시작하면 기록은 사라진다
+- 총무 키로 서명하는 "앱 역할"이라 서버 코드 밖(`backend/scripts/`)에 있고 로컬 체인(31337)에서만 돈다. 로컬 계정 배치와 앱 서명은 `backend/scripts/local_chain.py`가 정본이다

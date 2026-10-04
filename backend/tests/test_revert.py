@@ -10,7 +10,6 @@ from typing import Optional
 import pytest
 from eth_abi import encode
 from eth_account import Account
-from eth_account.messages import encode_typed_data
 from eth_utils import keccak
 from web3.exceptions import ContractCustomError, ContractLogicError, ProviderConnectionError, Web3RPCError
 
@@ -20,7 +19,7 @@ from app.chain.eip712 import typed_data_for
 from app.chain.revert import RevertDecoder
 from app.chain.web3_client import LEDGER, Web3ChainClient
 from app.schemas.entry import EntryKind
-from chain_support import RELAYER, RELAYER_KEY, RPC_URL, chain_now
+from chain_support import RELAYER, RELAYER_KEY, RPC_URL, chain_now, sign_as_app
 
 DEPLOYMENT = load_deployment(DEFAULT_PATH)
 LEDGER_ABI = load_abi(DEPLOYMENT.contracts[LEDGER], DEFAULT_PATH)
@@ -255,8 +254,7 @@ def record_struct(req: RecordRequest, kind: Optional[int] = None) -> dict:
 
 
 def sign(req: RecordRequest, key: str) -> bytes:
-    typed = typed_data_for(req, DEPLOYMENT.eip712[LEDGER])
-    return bytes(Account.sign_message(encode_typed_data(full_message=typed), key).signature)
+    return bytes.fromhex(sign_as_app(req, DEPLOYMENT.eip712[LEDGER], key)[2:])
 
 
 @pytest.mark.chain

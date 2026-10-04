@@ -7,19 +7,17 @@ import asyncio
 
 import pytest
 from eth_account import Account
-from eth_account.messages import encode_typed_data
 from eth_utils import keccak
 from web3.contract.async_contract import AsyncContractFunction
 from web3.exceptions import ContractCustomError, Web3RPCError
 
 from app.chain import ChainRevert, ChainSetupError, ChainUnavailable, RecordRequest, RevertReason
 from app.chain.deployment import DEFAULT_PATH, load_abi, load_deployment
-from app.chain.eip712 import typed_data_for
 from app.chain.models import BlockReason
 from app.chain.revert import RevertDecoder
 from app.chain.web3_client import LEDGER, Web3ChainClient, _send_failure
 from app.schemas.entry import EntryKind, EntryStatus
-from chain_support import RELAYER_KEY, RPC_URL, TREASURER_KEY, chain_now, in_snapshot
+from chain_support import RELAYER_KEY, RPC_URL, TREASURER_KEY, chain_now, in_snapshot, sign_as_app
 
 DEPLOYMENT = load_deployment(DEFAULT_PATH)
 DECODER = RevertDecoder(load_abi(DEPLOYMENT.contracts[LEDGER], DEFAULT_PATH))
@@ -49,8 +47,7 @@ def request(entry_id: int, deadline: int, **override) -> RecordRequest:
 
 def sign(req: RecordRequest, key: str = TREASURER_KEY) -> str:
     """앱이 하는 서명. 총무 키로 EIP-712 서명한다."""
-    typed = typed_data_for(req, DEPLOYMENT.eip712[LEDGER])
-    return "0x" + bytes(Account.sign_message(encode_typed_data(full_message=typed), key).signature).hex()
+    return sign_as_app(req, DEPLOYMENT.eip712[LEDGER], key)
 
 
 def on_chain(body):
