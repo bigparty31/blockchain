@@ -21,15 +21,20 @@ class EntryVerifier {
   /// [onChain] 이 null 이면 체인 대조를 못 한 것이므로 「통과」로 만들지 않는다.
   /// [receiptBytes] 가 null 이면 영수증 재계산을 건너뛴다 (아직 안 내려받은 상태).
   ///
-  /// [walletByUserId] 는 `User.wallet_address` 매핑이다. 체인의 `registrant`·
-  /// `approver` 는 지갑 주소인데 DB 의 `created_by`·`approved_by` 는 user id 라
-  /// 값 자체가 달라서, 이 매핑 없이는 대조할 수 없다. 인증 파트(손종인)가
-  /// API 로 내려주기 전까지는 null 이며 그동안 해당 검사는 「모름」으로 남는다.
+  /// [userIdByAddress] 는 `GET /users/wallets` 의 **주소(소문자) → user id** 매핑이다.
+  /// 체인의 `registrant`·`approver` 는 지갑 주소인데 DB 의 `created_by`·`approved_by`
+  /// 는 user id 라 값 자체가 달라서, 이 매핑 없이는 대조할 수 없다. 아직 못 받았으면
+  /// null 이며 그동안 해당 검사는 「모름」으로 남는다.
+  ///
+  /// **방향이 주소 → id 인 것이 중요하다.** 반대 방향(user id → 주소 하나)이면
+  /// 키를 교체한 사람의 **옛 주소가 응답에 아예 없어서**, 그 주소로 등록한 과거
+  /// 항목이 전부 「등록자 불일치 = 변조 감지」로 뒤집힌다. 한 사람이 주소를 여러 개
+  /// 갖는 것이 정상이므로(`RoleManager.rotateKey`) 매핑도 그 모양이어야 한다.
   static VerificationReport verify(
     EntryModel entry, {
     OnChainEntry? onChain,
     List<int>? receiptBytes,
-    Map<int, String>? walletByUserId,
+    Map<String, int>? userIdByAddress,
   }) {
     final recomputed = Hashing.metaHash(
       // API 가 준 정본 값을 그대로 쓴다. 앱이 다시 다듬으면 값이 갈린다 (§1.1).
@@ -78,7 +83,7 @@ class EntryVerifier {
     // ── 2단계: 해시가 덮지 않는 필드 대조 ─────────────────────
     final fieldChecks = chain == null
         ? <FieldCheck>[]
-        : _compareFields(entry, chain, walletByUserId);
+        : _compareFields(entry, chain, userIdByAddress);
 
     // ── 3단계: 영수증 바이트 재계산 ───────────────────────────
     final receipt = _checkReceipt(entry, receiptBytes);
@@ -129,58 +134,60 @@ class EntryVerifier {
 
   /// HASHING.md §2 의 비교 표. NULL ↔ 0 변환을 반드시 거친다 —
   /// 빼먹으면 `None != 0` 이라 정상 항목이 거의 전부 위조로 판정된다 (§2.1).
+  ///
+  /// **응답에 없는 필드는 「모름」으로 남긴다.** `OnChainEntry` 가 없는 값을 null 로
+  /// 두는 것과 짝이다 — 여기서 `?? 0` 이나 `?? EXPENSE` 로 메우면 모델에서 막은
+  /// 거짓 양성이 그대로 되살아난다.
   static List<FieldCheck> _compareFields(
     EntryModel e,
     OnChainEntry c,
-    Map<int, String>? walletByUserId,
+    Map<String, int>? userIdByAddress,
   ) {
     final checks = <FieldCheck>[
-      FieldCheck.compare(
+      _compareOrUnknown(
         label: '금액',
-        chain: '${c.amount}',
+        chain: c.amount?.toString(),
         local: '${e.amount}',
+        missingField: 'amount',
       ),
-      FieldCheck.compare(
+      _compareOrUnknown(
         label: '수입·지출 구분',
-        chain: c.kind.code,
+        chain: c.kind?.code,
         local: e.kind.code,
+        missingField: 'kind',
         note: '해시에 들어가지 않는 값이다',
       ),
       // 체인 상태를 못 읽었으면 「모름」으로 남긴다. 예전처럼 PENDING 으로
       // 채워 놓고 대조하면 확정된 항목이 전부 어긋난다.
-      if (c.status == null)
-        FieldCheck(
-          label: '상태',
-          chain: '(읽지 못함)',
-          local: e.status.code,
-          state: CheckState.unavailable,
-          note: '온체인 응답에 status 가 없다',
-        )
-      else
-        FieldCheck.compare(
-          label: '상태',
-          chain: c.status!.code,
-          local: e.status.code,
-        ),
-      FieldCheck.compare(
+      _compareOrUnknown(
+        label: '상태',
+        chain: c.status?.code,
+        local: e.status.code,
+        missingField: 'status',
+      ),
+      _compareOrUnknown(
         label: '사용일',
-        chain: '${c.occurredAt}',
+        chain: c.occurredAt?.toString(),
         local: '${e.occurredAt}',
+        missingField: 'occurred_at',
       ),
       // 학기 — 체인에는 있지만 meta_hash 에는 없다. 빼면 **학기가 바뀐 항목도
       // 「검증됨」으로 뜬다** (IAccountingLedger `Entry.term`).
       _compareTerm(chainTerm: c.term, localTermCode: e.termCode),
-      FieldCheck.compare(
+      _compareOrUnknown(
         label: '예산 항목',
-        chain: '${c.budgetId}',
-        // NULL → 0 (§2.1). 모든 수입 항목이 여기 걸린다.
+        // 실려 온 `0` 은 비교한다 — DB 의 NULL → 0 에 대응한다 (§2.1).
+        // 모든 수입 항목이 여기 걸리므로 「없음」과 합치면 안 된다.
+        chain: c.budgetId?.toString(),
         local: '${e.budgetId ?? 0}',
+        missingField: 'budget_id',
         note: '해시에 들어가지 않는 값이다',
       ),
-      FieldCheck.compare(
+      _compareOrUnknown(
         label: '정정 대상',
-        chain: '${c.correctsId}',
+        chain: c.correctsId?.toString(),
         local: '${e.correctsEntryId ?? 0}',
+        missingField: 'corrects_id',
         note: '해시에 들어가지 않는 값이다',
       ),
     ];
@@ -191,8 +198,9 @@ class EntryVerifier {
     checks.add(_comparePerson(
       label: '등록자',
       chainAddress: c.registrant,
+      missingField: 'registrant',
       userId: e.createdBy,
-      walletByUserId: walletByUserId,
+      userIdByAddress: userIdByAddress,
     ));
 
     if (e.status == EntryStatus.REJECTED) {
@@ -200,7 +208,7 @@ class EntryVerifier {
       // 그대로 비교하면 반려된 항목이 전부 위조로 판정된다 (§2, §8).
       checks.add(FieldCheck(
         label: '승인자',
-        chain: c.approver,
+        chain: c.approver ?? '(읽지 못함)',
         local: '—',
         state: CheckState.notApplicable,
         note: 'rejected_by 컬럼이 생기기 전까지 반려 항목은 비교하지 않는다',
@@ -208,13 +216,43 @@ class EntryVerifier {
     } else {
       checks.add(_comparePerson(
         label: '승인자',
-        chainAddress: c.hasApprover ? c.approver : null,
+        chainAddress: c.approver,
+        missingField: 'approver',
         userId: e.approvedBy,
-        walletByUserId: walletByUserId,
+        userIdByAddress: userIdByAddress,
       ));
     }
 
     return checks;
+  }
+
+  /// 한 필드를 대조한다. [chain] 이 null 이면 **응답에 그 필드가 없었다**는 뜻이므로
+  /// 불일치가 아니라 「모름」이다.
+  ///
+  /// 이 구분을 뭉개면 `/verify` 응답에서 필드 하나가 빠질 때마다 그 필드를 가진
+  /// 모든 항목이 학생 화면에서 빨간 「변조 감지」가 된다.
+  static FieldCheck _compareOrUnknown({
+    required String label,
+    required String? chain,
+    required String local,
+    required String missingField,
+    String? note,
+  }) {
+    if (chain == null) {
+      return FieldCheck(
+        label: label,
+        chain: '(읽지 못함)',
+        local: local,
+        state: CheckState.unavailable,
+        note: '온체인 응답에 $missingField 필드가 없다',
+      );
+    }
+    return FieldCheck.compare(
+      label: label,
+      chain: chain,
+      local: local,
+      note: note,
+    );
   }
 
   /// 학기 대조 — **양쪽 모두 학기 코드(`YYYYS`)여야 한다.**
@@ -256,16 +294,34 @@ class EntryVerifier {
 
   /// 지갑 주소와 user id 를 매핑을 거쳐 대조한다.
   ///
-  /// 양쪽이 모두 비어 있으면(미처리) 일치로 본다 — `address(0)` ↔ `NULL` (§2.1).
-  /// 한쪽만 비어 있으면 매핑이 없어도 불일치를 알 수 있다.
+  /// **체인 주소를 user id 로 옮겨서 비교한다** — 반대 방향(user id 로 「현재 주소」
+  /// 하나를 꺼내 비교)이면 키를 교체한 사람의 옛 주소가 매핑에 없어서, 그 주소로
+  /// 등록한 과거 항목이 전부 「불일치 = 변조 감지」가 된다. 주소는 바뀌어도
+  /// **누구였는지는 바뀌지 않는다**는 쪽으로 대조해야 한다.
+  ///
+  /// 세 가지를 구분한다 — 응답에 필드가 없으면 「모름」, 실려 온 `address(0)` 은
+  /// 「미처리」로 DB 의 `NULL` 과 맞아야 통과(§2.1), 주소가 있으면 매핑을 본다.
   static FieldCheck _comparePerson({
     required String label,
     required String? chainAddress,
+    required String missingField,
     required int? userId,
-    required Map<int, String>? walletByUserId,
+    required Map<String, int>? userIdByAddress,
   }) {
-    final chainEmpty = chainAddress == null;
     final localEmpty = userId == null;
+
+    // 응답에 아예 없는 것은 「체인에 등록자가 없다」가 아니다.
+    if (chainAddress == null) {
+      return FieldCheck(
+        label: label,
+        chain: '(읽지 못함)',
+        local: localEmpty ? '(미처리)' : 'user #$userId',
+        state: CheckState.unavailable,
+        note: '온체인 응답에 $missingField 필드가 없다',
+      );
+    }
+
+    final chainEmpty = OnChainEntry.isZeroAddress(chainAddress);
 
     if (chainEmpty && localEmpty) {
       return FieldCheck(
@@ -279,32 +335,43 @@ class EntryVerifier {
     if (chainEmpty != localEmpty) {
       return FieldCheck(
         label: label,
-        chain: chainAddress ?? '(미처리)',
+        chain: chainEmpty ? '(미처리)' : chainAddress,
         local: localEmpty ? '(미처리)' : 'user #$userId',
         state: CheckState.failed,
         note: '한쪽만 값이 있다',
       );
     }
 
-    final wallet = walletByUserId?[userId];
-    if (wallet == null) {
+    if (userIdByAddress == null) {
       return FieldCheck(
         label: label,
-        chain: chainAddress!,
+        chain: chainAddress,
         local: 'user #$userId',
         state: CheckState.unavailable,
         note: '주소 ↔ user id 매핑 API 대기',
       );
     }
 
+    // 주소는 대소문자 표기(EIP-55 체크섬)가 갈릴 수 있어 소문자로 맞춰서 찾는다.
+    final owner = userIdByAddress[chainAddress.toLowerCase()];
+    if (owner == null) {
+      // 매핑에 없는 주소다. 「다른 사람이다」가 아니라 **누구인지 모른다**는 뜻이다 —
+      // 키 교체 후 옛 주소가 아직 매핑에 안 실린 경우가 여기 걸린다.
+      // 여기서 불일치로 판정하면 과거 항목이 학생 화면에서 빨갛게 뜬다.
+      return FieldCheck(
+        label: label,
+        chain: chainAddress,
+        local: 'user #$userId',
+        state: CheckState.unavailable,
+        note: '이 주소가 지갑 매핑에 없다 (키 교체 전 주소일 수 있다)',
+      );
+    }
+
     return FieldCheck(
       label: label,
-      chain: chainAddress!,
-      local: wallet,
-      // 주소는 대소문자 표기(EIP-55 체크섬)가 갈릴 수 있어 맞춰서 본다.
-      state: wallet.toLowerCase() == chainAddress.toLowerCase()
-          ? CheckState.passed
-          : CheckState.failed,
+      chain: '$chainAddress (user #$owner)',
+      local: 'user #$userId',
+      state: owner == userId ? CheckState.passed : CheckState.failed,
     );
   }
 

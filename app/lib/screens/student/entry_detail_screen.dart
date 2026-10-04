@@ -85,7 +85,7 @@ class _EntryDetailScreenState extends State<EntryDetailScreen> {
         _entry,
         onChain: onChain,
         receiptBytes: receiptBytes,
-        walletByUserId: wallets,
+        userIdByAddress: wallets,
       );
     });
 
@@ -100,7 +100,7 @@ class _EntryDetailScreenState extends State<EntryDetailScreen> {
           correction,
           onChain: chainEntry,
           receiptBytes: bytes,
-          walletByUserId: wallets,
+          userIdByAddress: wallets,
         );
       });
     }

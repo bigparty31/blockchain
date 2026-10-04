@@ -168,19 +168,52 @@ class StudentApiService {
     return _usingDemoData ? _demoOnChain(entryId) : null;
   }
 
-  /// GET /users/wallets — user id ↔ 지갑 주소 매핑 (검증 2단계)
+  /// GET /users/wallets — **지갑 주소 → user id** 매핑 (검증 2단계)
   ///
   /// 체인의 `registrant`·`approver` 는 지갑 주소이고 DB 의 `created_by`·
   /// `approved_by` 는 user id 라 값 자체가 다르다. 이 매핑이 없으면
   /// **누가 등록하고 누가 승인했는지를 대조할 수 없다** (HASHING.md §2).
-  /// 인증 파트(손종인)에 요청해 둔 상태다.
-  Future<Map<int, String>?> fetchWalletMap() async {
+  Future<Map<String, int>?> fetchWalletMap() async {
     final json = await _getJson('${ApiConfig.baseUrl}/users/wallets');
     if (json is Map<String, dynamic>) {
-      return json.map((k, v) => MapEntry(int.parse(k), v as String));
+      final parsed = parseWalletMap(json);
+      if (parsed != null) return parsed;
     }
     // 서버 원장에는 데모 지갑을 끼워 넣지 않는다 ([fetchOnChainEntry] 참고).
-    return _usingDemoData ? _demoWallets : null;
+    return _usingDemoData ? _demoUserIdByAddress : null;
+  }
+
+  /// `GET /users/wallets` 응답을 **주소(소문자) → user id** 로 모은다.
+  ///
+  /// **두 형식을 모두 받는다.** 인증 파트가 응답을 주소 → id 방향으로 바꾸는 중인데
+  /// (PR #20), 앱과 서버의 머지 순서를 맞추지 않아도 되게 양쪽을 다 읽는다.
+  /// 한쪽만 먼저 올라가면 파싱이 던져서 **검증이 아예 안 돌고 배지가 「검증 중」에
+  /// 멈춘다** — `_verifyAll` 은 await 되지 않아 그 예외가 조용히 사라진다.
+  /// #20 이 머지되고 실연동이 끝나면 옛 형식 가지는 지우면 된다.
+  ///
+  /// 못 읽은 항목은 **버리지 않고 건너뛴다** — 한 사람 때문에 매핑 전체를 잃으면
+  /// 나머지 항목의 등록자 대조까지 「모름」이 된다.
+  static Map<String, int>? parseWalletMap(Map<String, dynamic> json) {
+    final map = <String, int>{};
+
+    json.forEach((key, value) {
+      if (key.toLowerCase().startsWith('0x')) {
+        // 새 형식 — `{"0x3c44…": 2}`. 한 사람이 주소를 여러 개 가질 수 있다.
+        final id = value is int ? value : int.tryParse('$value');
+        if (id != null) map[key.toLowerCase()] = id;
+      } else {
+        // 옛 형식 — `{"2": "0x3C44…"}`. 사용자당 주소 하나뿐이라 키를 교체하면
+        // 옛 주소가 응답에서 사라진다. 방향만 뒤집어 같은 모양으로 담는다.
+        final id = int.tryParse(key);
+        if (id != null && value is String && value.startsWith('0x')) {
+          map[value.toLowerCase()] = id;
+        }
+      }
+    });
+
+    // 하나도 못 읽었으면 「매핑 없음」이다. 빈 매핑을 돌려주면 「주소가 매핑에
+    // 없다」가 되어 사유 문구가 엉뚱해진다.
+    return map.isEmpty ? null : map;
   }
 
   /// 영수증 원본 바이트를 내려받는다 (검증 3단계, HASHING.md §4).
@@ -358,6 +391,14 @@ class StudentApiService {
     3: '0x90F79bf6EB2c4f870365E785982E1f101E93b906', // 감사
     4: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8', // 회장
     5: '0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc', // 감사 2
+  };
+
+  /// [fetchWalletMap] 이 돌려주는 모양 — API 와 같은 **주소 → user id** 방향이다.
+  ///
+  /// `_demoWallets` 에서 만들어 쓴다. 주소를 두 군데 적어 두면 한쪽만 바뀌는 순간
+  /// 데모 전체가 「등록자 불일치 = 변조 감지」로 뒤집힌다 ([_demoOnChain] 참고).
+  static final Map<String, int> _demoUserIdByAddress = {
+    for (final e in _demoWallets.entries) e.value.toLowerCase(): e.key,
   };
 
   /// 항목별 데모 영수증 바이트. 실제 이미지 대신 구분 가능한 더미를 쓴다.

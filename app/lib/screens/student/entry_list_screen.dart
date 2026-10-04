@@ -98,7 +98,7 @@ class _EntryListScreenState extends State<EntryListScreen> {
             entry,
             onChain: onChain,
             receiptBytes: receiptBytes,
-            walletByUserId: wallets,
+            userIdByAddress: wallets,
           );
         });
       }
