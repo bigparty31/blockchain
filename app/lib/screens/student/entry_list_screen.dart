@@ -54,24 +54,29 @@ class _EntryListScreenState extends State<EntryListScreen> {
     if (_scroll.hasClients) _scroll.jumpTo(0);
   }
 
+  /// **무슨 일이 있어도 `_loading` 은 끈다.** 예전에는 조회가 중간에 던지면
+  /// 스피너가 영영 안 꺼져서 화면이 멈춘 것처럼 보였다.
   Future<void> _load() async {
     if (mounted) setState(() => _loading = true);
-    final entries = await _api.fetchEntries();
-    if (!mounted) return;
+    try {
+      final entries = await _api.fetchEntries();
+      if (!mounted) return;
 
-    setState(() {
-      _chains = EntryMerge.fold(entries);
-      _reports.clear();
-      _loading = false;
-    });
+      setState(() {
+        _chains = EntryMerge.fold(entries);
+        _reports.clear();
+      });
 
-    // 목록을 열어본 시점에 미확인 뱃지(S12)를 지운다.
-    if (entries.isNotEmpty) {
-      final maxId = entries.map((e) => e.id).reduce((a, b) => a > b ? a : b);
-      await _api.markEntriesSeen(maxId);
+      // 목록을 열어본 시점에 미확인 뱃지(S12)를 지운다.
+      if (entries.isNotEmpty) {
+        final maxId = entries.map((e) => e.id).reduce((a, b) => a > b ? a : b);
+        await _api.markEntriesSeen(maxId);
+      }
+
+      _verifyAll();
+    } finally {
+      if (mounted) setState(() => _loading = false);
     }
-
-    _verifyAll();
   }
 
   /// 체인별로 검증을 돌린다. 끝나는 대로 배지를 갱신한다.
@@ -141,6 +146,11 @@ class _EntryListScreenState extends State<EntryListScreen> {
             const Padding(
               padding: EdgeInsets.fromLTRB(20, 12, 20, 0),
               child: DemoDataBanner(),
+            ),
+          if (!_loading && _api.skippedEntryCount > 0)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
+              child: SkippedEntriesBanner(count: _api.skippedEntryCount),
             ),
           _buildFilterBar(),
           Expanded(

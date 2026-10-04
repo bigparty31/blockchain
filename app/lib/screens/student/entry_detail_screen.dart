@@ -52,11 +52,10 @@ class _EntryDetailScreenState extends State<EntryDetailScreen> {
 
   EntryModel get _entry => widget.chain.original;
 
-  /// 이의를 제기할 수 있는 상태인지 (스토리보드 5 「화면 전체 규칙」).
-  ///
-  /// 확정된 항목이어야 하고, SBT 를 들고 있어야 한다. 아직 확인 중이면 막지 않는다.
-  bool get _canObject =>
-      widget.chain.isConfirmed && (_membership == null || _membership!.held);
+  bool get _canObject => canObject(
+        isConfirmed: widget.chain.isConfirmed,
+        membership: _membership,
+      );
 
   @override
   void initState() {
@@ -1306,3 +1305,22 @@ class _ObjectionTile extends StatelessWidget {
     );
   }
 }
+
+/// 이의를 제기할 수 있는 상태인지 (스토리보드 5 「화면 전체 규칙」).
+///
+/// 확정된 항목이어야 하고, SBT 를 들고 있어야 한다. 다만 **보유 여부를 모를 때는
+/// 막지 않는다** — 아직 확인 중(`null`)이거나 조회에 실패한(`failed`) 경우다.
+///
+/// 조회 실패는 「SBT 없음」이 아니라 「모름」이다 ([MembershipResult]). 실패를
+/// 미보유로 취급하면 서버 장애 때 납부한 학생이 이의를 제기하지 못하고
+/// 「납부 확인이 필요합니다」 안내를 받는다. 막아서 잃는 것(정당한 이의)이
+/// 열어서 잃는 것(미납자의 이의 한 건)보다 크다.
+///
+/// 화면 바깥의 함수인 이유는 이 판정이 눈에 안 보이는 회귀라 테스트로
+/// 직접 못박아 두기 위해서다.
+bool canObject({
+  required bool isConfirmed,
+  required MembershipResult? membership,
+}) =>
+    isConfirmed &&
+    (membership == null || membership.failed || membership.held);

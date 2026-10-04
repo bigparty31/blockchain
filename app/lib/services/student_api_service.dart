@@ -68,6 +68,16 @@ class StudentApiService {
   bool get usingDemoData => _usingDemoData;
   bool _usingDemoData = true;
 
+  /// 마지막 [fetchEntries] 에서 파싱에 실패해 목록에서 빠진 항목 수.
+  ///
+  /// **0 이 아니면 화면에 반드시 알린다.** 조용히 빼면 학생은 「내역이 원래
+  /// 이게 다」로 오해한다. 반대로 한 건 깨졌다고 목록 전체를 비우면 멀쩡한
+  /// 나머지까지 못 본다.
+  ///
+  /// 초안(`status IS NULL`)은 정상 제외라 여기 세지 않는다.
+  int get skippedEntryCount => _skippedEntryCount;
+  int _skippedEntryCount = 0;
+
   /// 서버에 `POST /objections` 가 없을 때 제기한 이의를 담아 두는 곳.
   ///
   /// 엔드포인트가 생기면 이 목록은 통째로 지운다. **항목(`entries`)에는 이런
@@ -96,13 +106,39 @@ class StudentApiService {
     final json = await _getJson(ApiConfig.entries);
     if (json is List) {
       _usingDemoData = false;
-      return json
-          .where((e) => e is! Map || e['status'] != null)
-          .map((e) => EntryModel.fromJson(e))
-          .toList();
+      return parseEntries(json);
     }
     _usingDemoData = true;
+    _skippedEntryCount = 0;
     return _demoEntries();
+  }
+
+  /// `GET /entries` 응답을 모델로 바꾼다. [skippedEntryCount] 를 갱신한다.
+  ///
+  /// **한 항목이 깨져도 나머지는 보여준다.** [EntryStatus.fromCode] 는
+  /// `docs/enums.md` 에 없는 값을 만나면 던지는데(도메인 규칙 1 — 조용히
+  /// 넘어가는 대신 드러낸다), 목록 전체를 한 번에 변환하면 그 한 건 때문에
+  /// 화면이 통째로 멈춘다. 그래서 항목 단위로 받아 건너뛴다.
+  ///
+  /// **모르는 값을 `PENDING` 으로 메우지는 않는다.** 메우면 학생 화면이
+  /// 모르는 상태를 「승인대기」라고 잘못 말하게 된다.
+  ///
+  /// `fromJson` 이 아니라 여기서 걸러야 하는 이유는 [EntryModel.fromJson] 이
+  /// 실패를 던져서 알리는 계약이기 때문이다. 판단은 호출자 몫이다.
+  List<EntryModel> parseEntries(List<dynamic> json) {
+    final entries = <EntryModel>[];
+    var skipped = 0;
+    for (final e in json) {
+      // 초안(status IS NULL)은 학생 앱에서 정상 제외 — 실패로 세지 않는다.
+      if (e is Map && e['status'] == null) continue;
+      try {
+        entries.add(EntryModel.fromJson(e));
+      } catch (_) {
+        skipped++;
+      }
+    }
+    _skippedEntryCount = skipped;
+    return entries;
   }
 
   /// GET /budgets — 예산 항목별 잔량·집행률·개정 이력 (S6)
