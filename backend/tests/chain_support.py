@@ -3,6 +3,7 @@
 노드 주소·계정 배치·서명 방식은 scripts/local_chain.py 가 정본이다 (스모크 스크립트와 같이 쓴다). 바뀌면 거기만 고친다.
 노드를 쓰는 테스트는 conftest 의 node 픽스처를 받는다 — 노드가 없으면 건너뛴다.
 """
+import asyncio
 import json
 import shutil
 import urllib.request
@@ -16,6 +17,7 @@ from app.chain.deployment import DEFAULT_PATH, Eip712Domain, domain_separator, l
 from app.chain.eip712 import typed_data
 from app.chain.models import ZERO_BYTES32, ChainEntry, ConfirmApproval
 from app.chain.revert import RevertDecoder
+from app.chain.web3_client import Web3ChainClient
 from scripts.local_chain import (
     AUDITOR_INDEX,
     LOCAL_RPC_URL,
@@ -35,6 +37,7 @@ UNREACHABLE = "http://127.0.0.1:1"
 # 스냅샷 안 테스트가 쓰는 항목·예산 id 구간. 공용 노드에는 등록 API·예산 화면이 DB id(1부터)로 남긴 기록과
 # 스모크 기록(8000억 + 실행 시각(밀리초) × 10, 지금은 18조대)이 있다. 둘과 겹치면 ENTRY_ALREADY_EXISTS·BudgetAlreadyExists 로 거짓 실패한다
 TEST_ID_BASE = 900_000_000_000
+KST_MIDNIGHT = 1790694000  # 2026-09-30 00:00 KST. 테스트 항목의 사용일
 
 RELAYER_KEY = hardhat_key(RELAYER_INDEX)
 TREASURER_KEY = hardhat_key(TREASURER_INDEX)
@@ -49,6 +52,8 @@ __all__ = [
     "RPC_URL",
     "UNREACHABLE",
     "TEST_ID_BASE",
+    "KST_MIDNIGHT",
+    "on_chain",
     "RELAYER_KEY",
     "TREASURER_KEY",
     "RELAYER",
@@ -85,6 +90,20 @@ def node_available() -> bool:
     except OSError:
         return False
     return True
+
+
+def on_chain(body):
+    """연결 → 스냅샷 안에서 body(client, now) → 되돌림 → 닫기. now 는 체인 시각(다음 블록)."""
+
+    async def run():
+        client = await Web3ChainClient.connect(RPC_URL, RELAYER_KEY, DEFAULT_PATH)
+        try:
+            now = await chain_now(client._w3)
+            return await in_snapshot(client._w3, lambda: body(client, now))
+        finally:
+            await client.close()
+
+    return asyncio.run(run())
 
 
 async def in_snapshot(w3, body):

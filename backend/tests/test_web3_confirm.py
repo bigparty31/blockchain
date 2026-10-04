@@ -4,36 +4,34 @@
 예산을 발행해 확인한다 — 공용 노드에는 예산이 남지 않는다 (chain_support.issue_budget).
 승인자의 entryCommit 은 앱처럼 체인에 등록된 값(get_entry)으로 계산해 서명한다 (CHAIN_CLIENT §5).
 항목·예산 id 는 공용 노드의 실제 기록과 겹치지 않는 TEST_ID_BASE 구간이다.
-결과 이벤트를 못 찾았을 때의 대체 경로(등록·확정 공용)도 여기서 본다.
+결과 이벤트를 못 찾았을 때의 대체 경로(등록·확정 공용)와, 보낸 트랜잭션의 결과를 hash 로 다시 읽는 tx_result 도 여기서 본다.
 """
-import asyncio
-
 import pytest
+from eth_account import Account
 from eth_utils import keccak
 
-from app.chain import ChainRevert, ChainUnavailable, ConfirmApproval, RecordRequest, RevertReason, TxResult
+from app.chain import ChainRevert, ChainUnavailable, ConfirmApproval, RecordRequest, RevertReason, TxResult, eip712
 from app.chain.deployment import DEFAULT_PATH, load_deployment
-from app.chain.web3_client import LEDGER, Web3ChainClient
+from app.chain.models import BlockReason
+from app.chain.web3_client import LEDGER
 from app.schemas.entry import EntryKind, EntryStatus
 from chain_support import (
     AUDITOR,
     AUDITOR_KEY,
+    KST_MIDNIGHT,
     PRESIDENT,
     PRESIDENT_KEY,
     RELAYER_KEY,
-    RPC_URL,
     TEST_ID_BASE,
     TREASURER_KEY,
     approval_for_id,
     budget_remaining,
-    chain_now,
-    in_snapshot,
     issue_budget,
+    on_chain,
     sign_as_app,
 )
 
 DOMAIN = load_deployment(DEFAULT_PATH).eip712[LEDGER]
-KST_MIDNIGHT = 1790694000
 REASON = "0x" + keccak(text="경고 승인 사유").hex()
 E = TEST_ID_BASE + 2000  # 항목 id
 BUDGET = TEST_ID_BASE + 900  # 예산 id
@@ -42,20 +40,6 @@ BUDGET = TEST_ID_BASE + 900  # 예산 id
 @pytest.fixture(autouse=True)
 def isolated(clean_chain_env):
     yield
-
-
-def on_chain(body):
-    """연결 → 스냅샷 안에서 body(client, now) → 되돌림 → 닫기."""
-
-    async def run():
-        client = await Web3ChainClient.connect(RPC_URL, RELAYER_KEY, DEFAULT_PATH)
-        try:
-            now = await chain_now(client._w3)
-            return await in_snapshot(client._w3, lambda: body(client, now))
-        finally:
-            await client.close()
-
-    return asyncio.run(run())
 
 
 async def record(client, now: int, entry_id: int, **override) -> TxResult:
@@ -329,3 +313,74 @@ def test_a_failing_budget_issue_names_its_revert(node):
             await issue_budget(client._w3, BUDGET + 5, 1_000)
 
     on_chain(body)
+
+
+# ---------------------------------------------------------------- tx_result (보낸 트랜잭션의 결과를 hash 로 다시 읽기)
+
+
+@pytest.mark.chain
+def test_tx_result_reads_back_what_each_transaction_did(node):
+    # 응답을 잃은 뒤 DB 에 남긴 hash 로 결과를 되찾는다. BLOCKED 사유도 이벤트에서 읽는다
+    async def body(client, now):
+        income = await record(client, now, E + 30)
+        blocked = await record(client, now, E + 31, kind=EntryKind.EXPENSE, amount=35_000)
+        confirmed = await confirm(client, await approval_for(client, now, E + 30))
+        read = [await client.tx_result(r.tx_hash, i) for r, i in ((income, E + 30), (blocked, E + 31), (confirmed, E + 30))]
+        return [income, blocked, confirmed], read
+
+    sent, read = on_chain(body)
+    assert read == sent
+    # 등록 트랜잭션은 그 뒤 확정돼도 등록 결과(PENDING)다 — 체인의 지금 상태가 아니라 그 트랜잭션을 읽는다
+    assert read[0].status is EntryStatus.PENDING
+    assert read[1].block_reason is BlockReason.BUDGET_NOT_FOUND
+
+
+@pytest.mark.chain
+def test_tx_result_of_an_unknown_or_foreign_transaction(node):
+    async def body(client, now):
+        income = await record(client, now, E + 32)
+        await record(client, now, E + 33)
+        unknown = await client.tx_result("0x" + "ab" * 32, E + 32)
+        with pytest.raises(ChainUnavailable, match="결과 이벤트를 찾지 못했다"):
+            # 다른 id 의 트랜잭션. 그 id 가 체인에 PENDING 으로 있어도 체인 상태로 대신 판정하지 않는다
+            await client.tx_result(income.tx_hash, E + 33)
+        with pytest.raises(ValueError, match="hex 64자"):
+            await client.tx_result("0x1234", E + 32)
+        return unknown
+
+    assert on_chain(body) is None  # 아직 블록에 없다 — 들어가지 않았다고 단정하지 않는다
+
+
+@pytest.mark.chain
+def test_tx_result_of_a_transaction_that_failed_in_the_block(node):
+    # Hardhat 은 revert 하는 트랜잭션도 블록에 넣는다(receipt status 0). 체인에 남은 것이 없으니 ChainRevert 다
+    async def body(client, now):
+        request = RecordRequest(
+            id=E + 34,
+            hash="0x" + keccak(text="failed-in-block").hex(),
+            amount=500_000,
+            kind=EntryKind.INCOME,
+            term=20262,
+            occurred_at=KST_MIDNIGHT,
+            budget_id=0,
+            corrects_id=0,
+            deadline=1,  # 만료 — 시뮬레이션 없이 보내 블록에서 실패시킨다
+        )
+        message = eip712.record_request_typed_data(request, DOMAIN)["message"]
+        signature = bytes.fromhex(sign_as_app(request, DOMAIN, TREASURER_KEY)[2:])
+        relayer = Account.from_key(RELAYER_KEY)
+        tx = await client._ledger.functions.recordPending(message, signature).build_transaction(
+            {"from": relayer.address, "nonce": await nonce(client), "gas": 500_000}
+        )
+        signed = relayer.sign_transaction(tx)
+        with pytest.raises(Exception):
+            await client._w3.eth.send_raw_transaction(signed.raw_transaction)
+        tx_hash = "0x" + bytes(signed.hash).hex()
+        receipt = await client._w3.eth.get_transaction_receipt(tx_hash)
+        with pytest.raises(ChainRevert) as error:
+            await client.tx_result(tx_hash, E + 34)
+        return receipt["status"], error.value
+
+    status, error = on_chain(body)
+    assert status == 0 and error.reason is RevertReason.UNKNOWN
+

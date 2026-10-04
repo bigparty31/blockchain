@@ -17,11 +17,18 @@ from app.chain.models import BlockReason
 from app.chain.revert import RevertDecoder
 from app.chain.web3_client import LEDGER, Web3ChainClient, _send_failure
 from app.schemas.entry import EntryKind, EntryStatus
-from chain_support import RELAYER_KEY, RPC_URL, TEST_ID_BASE, TREASURER, TREASURER_KEY, chain_now, in_snapshot, sign_as_app
+from chain_support import (
+    KST_MIDNIGHT,
+    RELAYER_KEY,
+    TEST_ID_BASE,
+    TREASURER,
+    TREASURER_KEY,
+    on_chain,
+    sign_as_app,
+)
 
 DEPLOYMENT = load_deployment(DEFAULT_PATH)
 DECODER = RevertDecoder(load_abi(DEPLOYMENT.contracts[LEDGER], DEFAULT_PATH))
-KST_MIDNIGHT = 1790694000
 R = TEST_ID_BASE + 100_000  # 항목 id. 공용 노드의 실제 기록과 겹치지 않는 구간 (chain_support)
 
 
@@ -48,20 +55,6 @@ def request(entry_id: int, deadline: int, **override) -> RecordRequest:
 def sign(req: RecordRequest, key: str = TREASURER_KEY) -> str:
     """앱이 하는 서명. 총무 키로 EIP-712 서명한다."""
     return sign_as_app(req, DEPLOYMENT.eip712[LEDGER], key)
-
-
-def on_chain(body):
-    """연결 → 스냅샷 안에서 body(client, now) → 되돌림 → 닫기."""
-
-    async def run():
-        client = await Web3ChainClient.connect(RPC_URL, RELAYER_KEY, DEFAULT_PATH)
-        try:
-            now = await chain_now(client._w3)
-            return await in_snapshot(client._w3, lambda: body(client, now))
-        finally:
-            await client.close()
-
-    return asyncio.run(run())
 
 
 async def nonce(client) -> int:
@@ -275,6 +268,12 @@ def test_send_revert_is_a_chain_revert():
         ("Sender doesn't have enough funds to send tx", "잔액이 부족"),
         ("insufficient funds for gas * price + value", "잔액이 부족"),
         ("Nonce too low. Expected nonce to be 3 but got 2.", "워커를 1개로"),
+        # 확정적인 거절인데 "들어갔는지 모름" 으로 두면 선점(②)이 풀리지 않아 그 항목을 다시 제출할 수 없다
+        ("replacement transaction underpriced", "수수료"),
+        ("max fee per gas less than block base fee: address 0x..., maxFeePerGas: 1, baseFee: 7", "수수료"),
+        ("transaction underpriced: tip needed 1, tip permitted 0", "수수료"),
+        ("intrinsic gas too low: have 21000, want 53000", "가스 한도"),
+        ("exceeds block gas limit", "가스 한도"),
     ],
 )
 def test_rejections_are_setup_errors(message, expected):

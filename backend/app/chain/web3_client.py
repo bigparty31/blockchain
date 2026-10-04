@@ -24,7 +24,7 @@ import aiohttp
 from eth_account import Account
 from eth_account.signers.local import LocalAccount
 from web3 import AsyncHTTPProvider, AsyncWeb3
-from web3.exceptions import ProviderConnectionError, TimeExhausted, Web3Exception, Web3RPCError
+from web3.exceptions import ProviderConnectionError, TimeExhausted, TransactionNotFound, Web3Exception, Web3RPCError
 from web3.logs import DISCARD
 
 from app.chain import eip712
@@ -45,6 +45,7 @@ from app.chain.models import (
     RejectDecision,
     RevertReason,
     TxResult,
+    check_tx_hash,
 )
 from app.schemas.entry import EntryStatus
 from app.chain.revert import RevertDecoder, rpc_error_of
@@ -142,10 +143,16 @@ def _link_problem(d: Deployment, links: dict) -> Optional[str]:
     return None
 
 
-# 노드가 전송 자체를 거절한 경우. revert 가 아니고 트랜잭션은 들어가지 않았다. 메시지는 노드마다 달라 소문자 부분 일치로 본다
+# 노드가 전송 자체를 거절한 경우. revert 가 아니고 트랜잭션은 들어가지 않았다. 메시지는 노드마다 달라 소문자 부분 일치로 본다.
+# 여기 없는 거절은 "들어갔는지 모름"(ChainUnavailable)으로 남는다 — 선점(②)이 풀리지 않으니, 확정적인 거절은 여기에 더한다
 _REJECTIONS = (
     (("insufficient funds", "enough funds"), "릴레이어 잔액이 부족해 가스를 낼 수 없다. 릴레이어 계정에 잔액을 채운다"),
     (("nonce too low",), "다른 프로세스가 같은 릴레이어 키로 보내고 있다. uvicorn 워커를 1개로 띄운다"),
+    (
+        ("underpriced", "fee too low", "less than block base fee", "fee cap less than block base fee"),
+        "수수료가 노드의 기준보다 낮아 거절됐다. 잠시 뒤 다시 보낸다",
+    ),
+    (("intrinsic gas too low", "exceeds block gas limit"), "가스 한도가 맞지 않아 거절됐다. 서버 로그를 확인한다"),
 )
 # 같은 트랜잭션이 이미 노드의 대기열에 있다. 보낸 것과 같으니 receipt 를 기다리면 된다.
 # "known transaction" 은 "rlp: unknown transaction type" 같은 확정 거절에도 들어 있어 앞에 글자가 없을 때만 본다
@@ -453,6 +460,31 @@ class Web3ChainClient:
     ) -> TxResult:
         raise NotImplementedError("반려 릴레이는 이번 범위가 아니다")
 
+    async def tx_result(self, tx_hash: str, entry_id: int) -> Optional[TxResult]:
+        self._ensure_open()
+        tx_hash = check_tx_hash(tx_hash)
+        try:
+            receipt = await self._w3.eth.get_transaction_receipt(tx_hash)
+        except TransactionNotFound:
+            return None  # 아직 블록에 없다. 들어가지 않았다고 단정하지 않는다
+        except (*UNREACHABLE, Web3Exception) as e:
+            raise ChainUnavailable(f"receipt 를 읽지 못했다 ({type(e).__name__}, tx={tx_hash})") from e
+        if receipt["status"] != 1:
+            # 사유를 재현하려면 원래 호출이 있어야 한다. 서비스에는 "실패로 끝났다(체인에 남은 것 없음)" 면 충분하다
+            raise ChainRevert(RevertReason.UNKNOWN, f"트랜잭션이 실패로 끝났다 (tx={tx_hash})")
+        events = self._ledger.events
+        outcomes = (
+            (events.EntryBlocked, EntryStatus.BLOCKED),
+            (events.EntryPending, EntryStatus.PENDING),
+            (events.EntryConfirmed, EntryStatus.CONFIRMED),
+            (events.EntryRejected, EntryStatus.REJECTED),
+        )
+        # 체인 상태로 대신 판정하지 않는다 — 이 트랜잭션이 아닌 나중 트랜잭션의 결과(예: 등록 뒤 확정)를 읽게 된다
+        result = self._find_event(tx_hash, receipt, entry_id, outcomes)
+        if result is None:
+            raise ChainUnavailable(f"결과 이벤트를 찾지 못했다 (tx={tx_hash})")
+        return result
+
     # ------------------------------------------------------------ 전송
 
     async def _relay_signed(
@@ -554,16 +586,23 @@ class Web3ChainClient:
                 return revert
         return ChainRevert(RevertReason.UNKNOWN, f"트랜잭션이 실패했지만 사유를 재현하지 못했다 (tx={tx_hash})")
 
-    async def _event_result(self, tx_hash: str, receipt: dict, entry_id: int, outcomes: tuple) -> TxResult:
-        """receipt 의 이 원장·이 id 이벤트로 결과를 정한다. outcomes 는 (이벤트, status) 를 볼 순서대로.
-
-        등록은 EntryBlocked → BLOCKED(사유 포함), EntryPending → PENDING. 확정은 EntryConfirmed → CONFIRMED.
-        """
+    def _find_event(self, tx_hash: str, receipt: dict, entry_id: int, outcomes: tuple) -> Optional[TxResult]:
+        """receipt 에서 이 원장·이 id 의 결과 이벤트를 찾는다. outcomes 는 (이벤트, status) 를 볼 순서대로. 없으면 None."""
         for event, status in outcomes:
             for log in event().process_receipt(receipt, errors=DISCARD):
                 if log["address"] == self._ledger.address and log["args"]["id"] == entry_id:
                     reason = BLOCK_REASON_ORDER[log["args"]["reason"]] if status is EntryStatus.BLOCKED else None
                     return TxResult(tx_hash=tx_hash, status=status, block_reason=reason)
+        return None
+
+    async def _event_result(self, tx_hash: str, receipt: dict, entry_id: int, outcomes: tuple) -> TxResult:
+        """방금 보낸 트랜잭션의 결과. 이벤트가 없으면 체인 상태로 판정한다 — 방금 보낸 것이라 그 상태가 이 트랜잭션의 결과다.
+
+        등록은 EntryBlocked → BLOCKED(사유 포함), EntryPending → PENDING. 확정은 EntryConfirmed → CONFIRMED.
+        """
+        result = self._find_event(tx_hash, receipt, entry_id, outcomes)
+        if result is not None:
+            return result
         # 성공한 트랜잭션인데 이벤트가 없다. 체인 상태로 확인하되, 사유가 이벤트에만 있는 BLOCKED 는 단정하지 않는다
         try:
             entry = await self.get_entry(entry_id)

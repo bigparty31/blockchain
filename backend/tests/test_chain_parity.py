@@ -138,6 +138,8 @@ async def play(client, sign, now: int, steps: list) -> list:
         except ChainRevert as e:
             outcomes.append((e.reason, None))
             continue
+        # 응답을 잃었을 때 쓰는 tx_result 도 같은 결과를 되찾는다 (Fake·실제 모두)
+        assert await client.tx_result(result.tx_hash, payload.id) == result
         entry = await client.get_entry(payload.id)
         outcomes.append(((result.status, result.block_reason), entry.model_dump()))
     return outcomes

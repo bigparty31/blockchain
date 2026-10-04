@@ -67,6 +67,13 @@ def check_signature(signature: str) -> str:
     return signature.lower()
 
 
+def check_tx_hash(tx_hash: str) -> str:
+    """트랜잭션 hash 형식(0x + 32바이트)만 보고 소문자로 맞춰 돌려준다. DB 의 tx_pending·tx_confirm 값이다."""
+    if not _BYTES32.fullmatch(tx_hash.lower()):
+        raise ValueError("트랜잭션 hash 는 0x + hex 64자여야 한다")
+    return tx_hash.lower()
+
+
 class _Frozen(BaseModel):
     model_config = ConfigDict(frozen=True)
 

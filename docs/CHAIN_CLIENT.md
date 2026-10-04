@@ -6,7 +6,7 @@
 
 | 지금 | 다음 |
 | --- | --- |
-| `AccountingLedger` 등록·확정·반려, `getEntry` 조회. 실제 릴레이어(`Web3ChainClient`)는 등록(`record_pending`)·확정(`confirm_entry`)·조회(`get_entry`)까지, 배포 기록 읽기, 중복 전송 방지(`before_broadcast`), deadline 결정(§7) | 실제 릴레이어의 반려, 한 id에 확정·반려 서명을 동시에 발급하지 않는 서버 규칙, 재시도. 예산(`BudgetToken`)·롤(`RoleManager`) 릴레이 — 둘 다 서명 + 릴레이어 방식이 됐다. 이의·SBT는 컨트랙트가 아직 없다 |
+| `AccountingLedger` 등록·확정·반려, `getEntry` 조회. 실제 릴레이어(`Web3ChainClient`)는 등록(`record_pending`)·확정(`confirm_entry`)·조회(`get_entry`·`tx_result`)까지, 배포 기록 읽기, 중복 전송 방지(`before_broadcast`), deadline 결정(§7). `tx_pending` 3상태 전이(`app/services/chain_tx.py`, §3) | 실제 릴레이어의 반려, 한 id에 확정·반려 서명을 동시에 발급하지 않는 서버 규칙, 재시도, 오래 남은 처리 중(②) 정리. 예산(`BudgetToken`)·롤(`RoleManager`) 릴레이 — 둘 다 서명 + 릴레이어 방식이 됐다. 이의·SBT는 컨트랙트가 아직 없다 |
 
 서명은 ChainClient가 만들지 않는다. 임원 기기가 서명한 값을 받아 릴레이만 한다 (PRD §9.2).
 
@@ -42,6 +42,7 @@
 | `confirm_entry(approval, signature, before_broadcast=None)` | `confirmEntry` | `CONFIRMED` |
 | `reject_entry(decision, signature, before_broadcast=None)` | `rejectEntry` | `REJECTED` |
 | `get_entry(entry_id)` | `getEntry` | 없으면 `None` |
+| `tx_result(tx_hash, entry_id)` | 부르지 않음 (receipt) | 그 트랜잭션이 남긴 결과. 아직 블록에 없으면 `None` (§3) |
 | `signer_of(payload, signature)` | 부르지 않음 | 서명자 주소 (§4). 동기 메서드 |
 
 `getEntry`는 없는 id에도 0으로 채운 구조체(`registrant == 0`)를 돌려주고, status 0은 `PENDING`이다. 그대로 옮기면 없는 항목이 `PENDING`으로 보이므로 실제 구현은 `exists(id)`를 먼저 확인해 없으면 `None`을 돌려준다. (`statusOf`는 없는 id면 `EntryNotFound`로 revert한다.) 반환 튜플 순서는 저장 배치를 따르므로 **위치가 아니라 필드 이름으로 읽는다** (HASHING §2).
@@ -62,9 +63,43 @@
 | 결과(`PENDING`·`BLOCKED`) | `status`를 채운다 |
 | `ChainRevert` | 체인에 남은 것이 없다. **선점한 `tx_pending`을 비운다** (다시 초안) |
 | `ChainSetupError` | 노드가 전송을 거절했다(릴레이어 잔액 부족, nonce). 들어가지 않았으니 **선점한 `tx_pending`을 비운다.** 응답은 503 |
-| `ChainUnavailable` | `tx_pending`을 둔 채 `get_entry`로 확인한다 (§4) |
+| `ChainUnavailable` | `tx_pending`을 둔 채 그 hash로 결과를 확인한다(`tx_result`, §4) |
 
 콜백은 릴레이어 lock을 쥔 채 불린다. **콜백 안에서 같은 클라이언트로 다시 보내거나 닫지 않는다** — 영원히 기다리게 되므로 실제 구현과 Fake 모두 바로 `RuntimeError`를 낸다. 콜백은 DB 선점만 한다.
+
+**서비스 도우미 — `app/services/chain_tx.py`** — 위 규칙을 구현해 둔 것이다. 등록·승인 API는 콜백을 직접 쓰지 않고 이것을 부른다.
+
+| 상태 | `status` | `tx_pending` | 뜻 |
+| --- | --- | --- | --- |
+| ① 초안 | NULL | NULL | 제출할 수 있다 |
+| ② 처리 중 | NULL | 있음 | 보냈는데 결과를 모른다. **다시 보내지 않는다** |
+| ③ 체인 기록 | `PENDING`·`BLOCKED` | 있음 | 끝났다 |
+
+확정은 같은 규칙을 `tx_confirm`으로 한다 — `PENDING`이고 `tx_confirm` NULL → `tx_confirm` 있음 → `CONFIRMED`. `approved_by`·`warning_ack_reason`은 선점할 때 함께 적고, 실패해 비울 때 함께 비운다. `tx_confirm`은 반려와 같이 쓰는 칸이라 **`approved_by`가 빈 선점은 반려의 것으로 보고 읽지도 비우지도 않는다**(409). 경고 사유 원문은 그 SHA256(HASHING §3)이 서명된 `warning_reason_hash`와 같아야 저장한다 — 다르면 학생 검증에서 위조로 보인다(400). 경고 승인이 아니면 사유는 `None`이다.
+
+```python
+from app.services.chain_tx import EntryConflict, relay_confirm, relay_record
+
+# 권한 검사 → RecordRequest 구성 → signer_of 대조(다르면 400) → 라우터 자신의 변경은 commit 한 다음에
+result = await relay_record(db, chain, request, signature)                    # ① → ③. DB 는 여기서 갱신된다
+result = await relay_confirm(db, chain, approval, signature, user.id, reason)  # PENDING → CONFIRMED. reason 은 정본 원문 또는 None
+```
+
+- **이미 ②인 항목에 요청이 다시 오면 보내지 않고** 저장한 hash로 결과부터 확인한다(`tx_result`). 결과가 있으면 ③으로 맞추고, 그 선점이 이 요청과 같은 내용(확정이면 같은 승인자·사유)일 때만 성공으로 돌려준다 — 다르면 409(앞선 요청이 끝낸 것이고 이 서명은 보내지 않았다). 블록에서 실패로 끝났으면 ①로 돌려 이 요청의 서명으로 보내고, 아직 모르면 409다
+- **DB는 단계(읽기·선점·반영·해제)마다 짧은 세션을 따로 열어 스레드에서 돌린다.** 라우터가 넘긴 세션은 엔진을 얻는 데만 쓰고 commit·rollback하지 않는다 — 라우터는 부르기 전에 자기 변경을 commit하고, 부른 뒤 항목 값이 필요하면 다시 읽는다. 선점은 릴레이어 lock을 쥔 채 일어나므로 동기 DB 대기가 이벤트 루프를 막지 않게 했고, 체인을 기다리는 동안 열린 DB 트랜잭션도 없다. 테스트에서 메모리 sqlite를 쓰면 `poolclass=StaticPool`로 만든다 — 기본 풀은 스레드마다 다른 연결(다른 DB)이라 시작할 때 막는다
+- hash는 소문자로 저장하고, 반영·해제는 DB에 저장된 값을 조건으로 쓴다. 반영이 0행인데 DB가 체인 결과와 다르면 성공으로 돌려주지 않는다(`RuntimeError` → 500, 서버 로그)
+- 콜백 전에 `ENTRY_ALREADY_EXISTS`(등록)·`INVALID_STATUS`(확정)로 걸리면 동시에 온 다른 요청이 먼저 보낸 것일 수 있다. DB를 다시 읽어 그렇다면 409로 바꾼다
+- 선점을 비우는 UPDATE는 칸에 **내 hash가 있을 때만** 쓴다. 남의 선점은 건드리지 않는다
+- ②가 오래 남는 경우(노드가 트랜잭션을 잃음, 선점 직후 보내기 전에 요청이 취소됨 — 서버 종료 등)의 정리는 이번 범위가 아니다. receipt가 없다고 들어가지 않았다고 단정할 수 없다 (§7)
+
+| 예외 | 응답 | 상태 |
+| --- | --- | --- |
+| `EntryConflict` (`EntryInFlight` ②·`EntryAlreadyRecorded` ③) | 409 | 그대로 |
+| `LookupError` | 404 | — |
+| `ValueError` (단계에 맞지 않는 상태, 사유 원문 ≠ 서명된 해시, 기록할 수 없는 승인자 — 등록자 본인·없는 사용자, 서명·값 형식) | 400 | 그대로 |
+| `ChainRevert` | 400 (`e.reason`) | ① 또는 `PENDING` |
+| `ChainSetupError` | 503 (전역 처리기) | 이번 요청이 보낸 것은 없다 — 선점했으면 비웠다. 보낸 뒤에는 이 예외가 아니라 `ChainUnavailable`이다 |
+| `ChainUnavailable` | 503 | ② 유지. 다시 요청하면 결과를 확인한다 |
 
 ## 4. 결과와 실패
 
@@ -77,7 +112,7 @@
 
 **`BLOCKED`는 예외가 아니다.** 트랜잭션은 성공했고 예산 조건 위반이 기록된 것이다. 에러 처리 분기에 넣지 말 것.
 
-**`ChainUnavailable`이면 바로 재시도하지 않는다.** 먼저 `get_entry(id)`로 들어갔는지 확인한다. 확정·반려 때는 항목이 원래 있으므로 `None`인지가 아니라 `status`로 판단한다.
+**`ChainUnavailable`이면 바로 재시도하지 않는다.** 먼저 들어갔는지 확인한다. 콜백이 불렸다면 DB에 남긴 hash로 `tx_result`를 읽는 것이 정확하다 — 그 트랜잭션의 결과와 BLOCKED 사유까지 나온다(서비스 도우미가 이렇게 한다). hash가 없을 때는 `get_entry(id)`로 본다. 확정·반려 때는 항목이 원래 있으므로 `None`인지가 아니라 `status`로 판단하고, BLOCKED 사유는 알 수 없다.
 
 | 메서드 | 이미 들어간 것으로 보는 조건 | 확인 없이 다시 보내면 |
 | --- | --- | --- |
@@ -125,6 +160,7 @@ revert는 시뮬레이션(`eth_call`)뿐 아니라 **전송 응답**으로도 �
 | 전송 응답이 revert (Hardhat은 revert하는 트랜잭션도 블록에 넣는다) | `ChainRevert` | 상태 그대로, 릴레이어 nonce만 쓰임 |
 | 릴레이어 잔액 부족 | `ChainSetupError` → 503 | 들어가지 않음 |
 | nonce가 낮음 (다른 프로세스가 같은 키로 보냄 — 워커 2개 이상) | `ChainSetupError` → 503 | 들어가지 않음 |
+| 수수료가 노드 기준보다 낮음(underpriced·base fee 미만), 가스 한도가 맞지 않음 | `ChainSetupError` → 503 | 들어가지 않음. 확정적인 거절은 이렇게 목록에 더한다 — 모르는 거절은 "들어갔는지 모름"으로 남아 선점(②)이 풀리지 않는다 |
 | 같은 트랜잭션이 이미 노드에 있음 ("already known") | receipt를 기다려 정상 처리 | — |
 | 연결 실패, receipt 30초 초과, 그 밖 | `ChainUnavailable` | 모름 → `get_entry` |
 | 들어갔는데 receipt에서 결과 이벤트를 찾지 못함 (ABI 불일치 등) | 체인 상태(`get_entry`)로 판정한다. `BLOCKED`(사유가 이벤트에만 있음)이거나 확인하지 못하면 — 그 사이 교체로 클라이언트가 닫힌 경우 포함 — `ChainUnavailable`. 들어간 뒤에는 `ChainSetupError`를 내지 않는다 | 들어감 → `get_entry` |
@@ -168,7 +204,8 @@ chain.unavailable_next("confirm_entry", landed=True)                # 체인엔 
 ```
 
 - `fail_next`·`unavailable_next`는 한 번만 적용된다. `fail_next`는 상태를 바꾸지 않는다
-- `unavailable_next(landed=True)`는 체인에서 평소대로 처리한 뒤(성공이든 revert든) `ChainUnavailable`을 던진다
+- `unavailable_next(landed=True)`는 체인에 기록한 뒤 `ChainUnavailable`을 던진다. revert할 입력이면 지정과 상관없이 `ChainRevert`가 먼저 난다(아래)
+- `tx_result`는 블록에 들어간 트랜잭션(`landed=True` 포함)의 결과를 돌려주고, 검사에서 걸렸거나 `landed=False`로 닿지 않은 hash는 `None`이다. 가짜의 revert는 모두 보내기 전이라 "블록에서 실패"(`ChainRevert`)는 만들지 않는다
 - 메서드 이름은 파이썬 이름(`record_pending`, `confirm_entry`, `reject_entry`)이다. 다른 값이면 `ValueError`
 - `block_next`는 예산 id가 0이 아닌 **양수** 지출에만 적용된다. 수입과 음수 정정(환불)은 예산 판정을 건너뛴다
 - 서명자는 서명의 앞 20바이트다. **같은 주소로 만든 서명으로 등록·확정하면 `SELF_APPROVAL`**이 난다. 테스트에서는 `fake_signature`로 서명을 만든다
@@ -188,6 +225,7 @@ chain.unavailable_next("confirm_entry", landed=True)                # 체인엔 
 - ~~③에서 서버가 서명자를 먼저 복구해 확인할지~~ → 확인한다. 서비스가 `ChainClient.signer_of`로 복구한 주소를 기대 지갑과 비교하고, 다르면 체인에 보내지 않는다 (§4). 서비스가 `app/chain/eip712.py`를 직접 부르지 않는 이유는 FakeChainClient로도 같은 흐름을 테스트하기 위해서다
 - 예산·롤 릴레이 — `BudgetToken`(발행·증액·회수)과 `RoleManager`(롤 변경·회장 복구)도 서명 + 릴레이어 방식이다. 같은 모양으로 메서드를 더한다. 두 컨트랙트에는 원장과 이름이 같은 에러(`TermRequired`·`ReservedId` 등)가 있어 **어느 컨트랙트에서 났는지까지** 보고 분류한다
 - ~~반려 사유·경고 사유 필수 검사~~ → `REASON_REQUIRED`·`REASON_NOT_ALLOWED`로 반영됨
+- ~~`tx_pending` 3상태~~ → `app/services/chain_tx.py` (§3). 남은 것: ②가 오래 남은 항목의 정리(관리자 해제·정리 작업)와 재시도는 다음 범위 — 노드가 트랜잭션을 잃었거나(receipt 없음), 원장을 다시 배포해 옛 receipt의 로그가 새 원장 것이 아닐 때(결과 이벤트 없음) ②가 풀리지 않는다. 다시 배포하면 DB도 초기화한다. 반려를 구현할 때 같은 모듈에 반려 단계(`tx_confirm`·`rejected_by`·`reject_reason`)를 더하고, 반려의 ② 정리도 그 흐름이 한다. API.md에 409(처리 중·이미 기록됨) 응답을 넣는 것은 등록·승인 API 담당이 정한다
 
 ## 8. 클라이언트 받기 — provider
 

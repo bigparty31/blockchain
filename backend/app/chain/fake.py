@@ -37,13 +37,14 @@ from app.chain.models import (
     RevertReason,
     TxResult,
     check_signature,
+    check_tx_hash,
 )
 from app.schemas.entry import EntryKind, EntryStatus
 
 WRITE_METHODS = ("record_pending", "confirm_entry", "reject_entry")
 
-# 검사를 통과한 쓰기의 (결과, 상태 변경). 상태는 before_broadcast 가 끝난 뒤에 바꾼다
-Prepared = Tuple[TxResult, Callable[[], None]]
+# 검사를 통과한 쓰기의 (항목 id, 결과, 상태 변경). 상태는 before_broadcast 가 끝난 뒤에 바꾼다
+Prepared = Tuple[int, TxResult, Callable[[], None]]
 
 
 def fake_signature(address: str) -> str:
@@ -67,6 +68,9 @@ class FakeChainClient:
         # 정정 가능 항목(원본·재분류 양수 정정)의 순금액. 원장의 netAmountOf 와 같은 규칙으로 갱신한다
         self._net: dict[int, int] = {}
         self._tx_count = 0
+        # tx hash 에 섞는 인스턴스별 값. 서버를 다시 켜 새 가짜가 생겨도 DB 에 남은 옛 hash 와 겹치지 않는다 (tx_result)
+        self._tx_salt = secrets.token_hex(8)
+        self._landed: dict[str, tuple[int, TxResult]] = {}  # 블록에 들어간 트랜잭션 hash → (id, 결과). tx_result 가 읽는다
         self._fail: dict[str, RevertReason] = {}
         self._unavailable: dict[str, tuple[bool, bool]] = {}  # method → (sent, landed)
         self._send_lock: Optional[asyncio.Lock] = None
@@ -129,6 +133,19 @@ class FakeChainClient:
     async def get_entry(self, entry_id: int) -> Optional[ChainEntry]:
         return self._entries.get(entry_id)
 
+    async def tx_result(self, tx_hash: str, entry_id: int) -> Optional[TxResult]:
+        """들어간 트랜잭션의 결과. 검사에서 걸렸거나(보내지 않음) unavailable_next(landed=False) 로 닿지 않은 hash 는 None.
+
+        가짜의 revert 는 모두 보내기 전(검사)에 나서, 블록에 들어가 실패로 끝난 트랜잭션(ChainRevert)은 만들지 않는다.
+        """
+        landed = self._landed.get(check_tx_hash(tx_hash))
+        if landed is None:
+            return None
+        landed_id, result = landed
+        if landed_id != entry_id:
+            raise ChainUnavailable(f"결과 이벤트를 찾지 못했다 — 이 트랜잭션은 id={landed_id} 의 것이다 (tx={tx_hash})")
+        return result
+
     # ------------------------------------------------------------ 컨트랙트 흉내
 
     def _record(self, r: RecordRequest, signature: str, tx_hash: str) -> Prepared:
@@ -186,7 +203,7 @@ class FakeChainClient:
             if uses_block_next:  # 보내지 않았으면(콜백 실패) 다음 지출에 그대로 남는다
                 self._block = None
 
-        return TxResult(tx_hash=tx_hash, status=status, block_reason=block_reason), commit
+        return r.id, TxResult(tx_hash=tx_hash, status=status, block_reason=block_reason), commit
 
     def _check_correction(self, r: RecordRequest) -> None:
         target = self._entries.get(r.corrects_id)
@@ -225,7 +242,7 @@ class FakeChainClient:
             self._entries[entry.id] = entry.model_copy(update={"status": EntryStatus.CONFIRMED, "approver": approver})
             self._update_net(entry)
 
-        return TxResult(tx_hash=tx_hash, status=EntryStatus.CONFIRMED), commit
+        return entry.id, TxResult(tx_hash=tx_hash, status=EntryStatus.CONFIRMED), commit
 
     def _reject(self, d: RejectDecision, signature: str, tx_hash: str) -> Prepared:
         self._precheck("reject_entry", d.deadline)
@@ -238,7 +255,7 @@ class FakeChainClient:
         def commit() -> None:
             self._entries[entry.id] = entry.model_copy(update={"status": EntryStatus.REJECTED, "approver": approver})
 
-        return TxResult(tx_hash=tx_hash, status=EntryStatus.REJECTED), commit
+        return entry.id, TxResult(tx_hash=tx_hash, status=EntryStatus.REJECTED), commit
 
     # ------------------------------------------------------------ 내부
 
@@ -271,17 +288,22 @@ class FakeChainClient:
             del self._unavailable[method]
             raise ChainUnavailable("unavailable_next 로 지정 (보내기 전)")
         tx_hash = self._next_tx()
-        result, commit = prepare(tx_hash)
+        entry_id, result, commit = prepare(tx_hash)
         if before_broadcast is not None:
             await before_broadcast(tx_hash)
         if scenario is not None:
             del self._unavailable[method]
             landed = scenario[1]
             if landed:
-                commit()
+                self._land(tx_hash, entry_id, result, commit)
             raise ChainUnavailable(f"unavailable_next 로 지정 (보낸 뒤, landed={landed})")
-        commit()
+        self._land(tx_hash, entry_id, result, commit)
         return result
+
+    def _land(self, tx_hash: str, entry_id: int, result: TxResult, commit: Callable[[], None]) -> None:
+        """블록에 들어갔다 — 상태를 바꾸고 결과를 hash 로 남긴다 (tx_result)."""
+        commit()
+        self._landed[tx_hash] = (entry_id, result)
 
     def _lock(self) -> asyncio.Lock:
         # asyncio.Lock 은 처음 경합한 이벤트 루프에 묶인다. 테스트마다 루프가 바뀌니(asyncio.run) 루프별로 만든다
@@ -337,4 +359,4 @@ class FakeChainClient:
 
     def _next_tx(self) -> str:
         self._tx_count += 1
-        return "0x" + hashlib.sha256(f"fake-tx-{self._tx_count}".encode()).hexdigest()
+        return "0x" + hashlib.sha256(f"fake-tx-{self._tx_salt}-{self._tx_count}".encode()).hexdigest()
