@@ -246,7 +246,7 @@ Entry { hash, amount, budgetId, correctsId, registrant, occurredAt, term, approv
 
 > **`REJECTED` 항목은 `approver`를 비교하지 않는다.** 컨트랙트의 `approver`는 확정자와 **반려자를 겸한다**(`confirmEntry` / `rejectEntry` 서명자). 그런데 DB에는 `approved_by`와 `reject_reason`만 있고 **반려자 컬럼이 없다.** 그대로 비교하면 체인에는 감사 주소가, DB에는 `NULL`이 있어 **반려된 항목이 전부 위조로 판정된다.** `rejected_by` 컬럼이 생기기 전까지 `REJECTED` 상태에서는 이 필드를 건너뛴다 (§8).
 
-> **`registrant` / `approver`는 지갑 주소이고 DB의 `created_by` / `approved_by`는 user id다.** 값 자체가 달라서 그냥 비교하면 안 되고, `User.wallet_address`로 옮긴 뒤 대조해야 한다. **이 두 필드가 "누가 등록하고 누가 승인했는가"의 유일한 온체인 증거**이므로 빠뜨리면 안 된다. 주소 매핑은 인증 파트(손종인)가 API로 내려준다.
+> **`registrant` / `approver`는 지갑 주소이고 DB의 `created_by` / `approved_by`는 user id다.** 값 자체가 달라서 그냥 비교하면 안 되고, 체인 주소를 `GET /users/wallets`(소문자 주소 → user id)로 user id로 바꾼 뒤 대조해야 한다. 반대 방향(user id → 현재 주소)으로 대조하면 키를 교체한 사람이 옛 주소로 남긴 과거 항목이 모두 불일치로 나온다. **이 두 필드가 "누가 등록하고 누가 승인했는가"의 유일한 온체인 증거**이므로 빠뜨리면 안 된다. 주소 매핑은 인증 파트(손종인)가 API로 내려준다.
 
 ### 2.1 NULL과 0 — 비교 전에 맞춰야 한다
 

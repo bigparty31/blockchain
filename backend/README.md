@@ -52,7 +52,7 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 | `GET` | `/balance` | 장부 잔액 요약 | `{ "balance": 4965000, "income": 5000000, "expense": 35000 }` |
 | `GET` | `/budgets` | 카테고리별 예산 현황 | 행사비, 사업비, 운영비 편성액 및 잔량 |
 | `GET` | `/chain/domains` | 앱이 서명할 EIP-712 도메인 (컨트랙트별) | `{ "chainId": 31337, "domains": { ... } }` |
-| `GET` | `/users/wallets` | user id ↔ 지갑 주소 매핑 (현·전 임원, 검증용) | `{ "2": "0x3C44…93BC", ... }` |
+| `GET` | `/users/wallets` | 지갑 주소 → user id 매핑 (현·전 임원, 검증용) | `{ "0x3c44…93bc": 2, ... }` |
 
 ### 2.1 인증
 - `POST /auth/login` 으로 받은 `access_token` 을 `Authorization: Bearer <token>` 헤더로 보냅니다. Swagger UI 에서는 우측 상단 **Authorize** 에 토큰을 넣으면 됩니다.

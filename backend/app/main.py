@@ -31,7 +31,7 @@ app = FastAPI(
 - **산출물 대상**:
   - `POST /auth/login`: 학번·비밀번호 로그인, 세션 JWT·role 발급
   - `GET /auth/me`: 로그인한 사용자 정보
-  - `GET /users/wallets`: user id ↔ 지갑 주소 매핑, 현·전 임원 (체인의 등록자·승인자 대조용)
+  - `GET /users/wallets`: 지갑 주소 → user id 매핑, 현·전 임원 (체인의 등록자·승인자 대조용)
   - `GET /chain/domains`: 앱이 서명할 때 쓸 EIP-712 도메인 (컨트랙트별, 배포 기록에서 읽음)
   - `GET /entries`: 수입·지출 내역 목록 (더미 3건: 확정 지출, 승인 대기 지출, 확정 수입)
   - `GET /balance`: 장부 잔액, 총 수입, 총 지출 요약
