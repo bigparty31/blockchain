@@ -7,6 +7,7 @@ import 'approval_list_screen.dart';
 import 'correction_screen.dart';
 import 'inquiry_response_screen.dart';
 import 'hardware_test_screen.dart';
+import '../president/budget_plan_screen.dart';
 
 /// [이승호 담당: app/lib/screens/council/]
 /// 총무·감사·회장 역할별 맞춤 메인 대시보드 화면
@@ -230,6 +231,18 @@ class CouncilHomeScreen extends StatelessWidget {
         gradient: const LinearGradient(colors: [Color(0xFF10B981), Color(0xFF06B6D4)]),
         target: const InquiryResponseScreen(),
       ),
+      // 회장에게만 보인다. 감사 계정에는 회색도 아니고 아예 없다 (스토리보드 15).
+      // 회장 하단 내비게이션이 정해지면(중간발표 이후) 그쪽으로 옮긴다.
+      if (role == UserRole.PRESIDENT)
+        _MenuData(
+          title: '예산 편성',
+          subtitle: '학기 예산 편성·확정',
+          icon: Icons.account_balance_rounded,
+          badge: '회장 전용',
+          isLocked: false,
+          gradient: const LinearGradient(colors: [Color(0xFF6C63FF), Color(0xFF06B6D4)]),
+          target: BudgetPlanScreen(role: role),
+        ),
     ];
 
     return GridView.builder(
