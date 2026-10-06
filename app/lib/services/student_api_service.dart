@@ -330,12 +330,7 @@ class StudentApiService {
           .get(Uri.parse('${ApiConfig.baseUrl}/memberships/me'))
           .timeout(_timeout);
       if (res.statusCode == 200) {
-        final body = jsonDecode(utf8.decode(res.bodyBytes));
-        // 서버가 분명히 「발급받은 적 없음」이라고 대답한 경우.
-        if (body == null) return const MembershipResult.ok(null);
-        if (body is Map<String, dynamic>) {
-          return MembershipResult.ok(MembershipModel.fromJson(body));
-        }
+        return parseMembership(jsonDecode(utf8.decode(res.bodyBytes)));
       }
 
       // 서버가 **대답은 했는데** 읽을 수 없는 경우다 (404 · 5xx · 모양이 다른 200).
@@ -350,6 +345,48 @@ class StudentApiService {
     return _usingDemoData
         ? MembershipResult.ok(_demoMembership())
         : const MembershipResult.failed();
+  }
+
+  /// `GET /memberships/me` 의 **`200` 응답 본문**을 판정한다.
+  ///
+  /// **미보유를 「보유」로 읽지 않는 것이 이 함수의 일이다.** 미납 학생에게
+  /// 「납부 확인됨」 배지와 QR 이 뜨고 이의 제기 버튼이 열리면, 게이팅이 있다는
+  /// 사실 자체가 무의미해진다.
+  ///
+  /// 미보유의 모양이 아직 합의 전이라(`backend_requests.md` §1-4) **세 가지를 모두
+  /// 미보유로 받는다** — 벗은 `null`, 래퍼 `{"membership": null}`, 빈 객체 `{}`.
+  /// 래퍼는 나중에 옆에 필드를 붙이기 좋아서 백엔드가 흔히 고르는 방식이라
+  /// 가능성이 낮지 않고, 그대로 두면 `{` 로 시작한다는 이유로 보유 쪽 분기에
+  /// 떨어진다. 지갑 매핑을 두 형식 다 읽게 해 둔 것과 같은 이유로, 어느 쪽으로
+  /// 정해져도 깨지지 않게 한다.
+  ///
+  /// 마지막 방어선은 [MembershipModel.isValid] 다 — 모르는 모양이 와도 `id` 가
+  /// 실려 있지 않으면 보유로 판정되지 않는다.
+  static MembershipResult parseMembership(dynamic body) {
+    final unwrapped = _unwrapMembership(body);
+
+    // 서버가 분명히 「발급받은 적 없음」이라고 대답한 경우.
+    if (unwrapped == null) return const MembershipResult.ok(null);
+
+    if (unwrapped is Map<String, dynamic>) {
+      final m = MembershipModel.fromJson(unwrapped);
+      // 모양은 객체인데 멤버십이 아니다(`{}` 등) — 미보유로 다룬다.
+      return MembershipResult.ok(m.isValid ? m : null);
+    }
+
+    // 숫자·문자열 같은 뜻 모를 본문. 읽은 것이 아니므로 「모름」이다.
+    return const MembershipResult.failed();
+  }
+
+  /// 래퍼 한 겹을 벗긴다. 감싸여 있지 않으면 그대로 돌려준다.
+  ///
+  /// 멤버십 필드에는 `membership`·`data` 라는 이름이 없어서 충돌하지 않는다.
+  static dynamic _unwrapMembership(dynamic body) {
+    if (body is! Map<String, dynamic>) return body;
+    for (final key in const ['membership', 'data']) {
+      if (body.containsKey(key)) return body[key];
+    }
+    return body;
   }
 
   // ── 미확인 항목 뱃지 카운트 (S12) ──────────────────────────

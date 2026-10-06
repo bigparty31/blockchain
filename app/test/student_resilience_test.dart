@@ -88,6 +88,82 @@ void main() {
     });
   });
 
+  group('미보유를 「보유」로 읽지 않는다 (/memberships/me 응답 모양)', () {
+    // 뚫리면 **미납 학생에게 「납부 확인됨」 배지와 QR 이 뜨고 이의 버튼이 열린다.**
+    // 미보유 응답 모양이 아직 합의 전이라(backend_requests.md §1-4) 어느 모양이
+    // 와도 보유로 넘어가지 않아야 한다.
+
+    Map<String, dynamic> real() => {
+          'id': 1,
+          'user_id': 3,
+          'term_id': 1,
+          'token_id': 128,
+          'commit_hash': '0x7d3a9f1c',
+          'minted_at': 1788620400,
+          'qr_payload': 'SCA:2026-2:U000003',
+        };
+
+    test('벗은 null 은 미보유다', () {
+      final r = StudentApiService.parseMembership(null);
+      expect(r.failed, isFalse, reason: '서버가 대답했으므로 조회 실패가 아니다');
+      expect(r.held, isFalse);
+      expect(r.membership, isNull);
+    });
+
+    test('래퍼 {"membership": null} 도 미보유다', () {
+      final r = StudentApiService.parseMembership({'membership': null});
+      expect(r.held, isFalse,
+          reason: '{ 로 시작한다는 이유로 보유가 되면 미납자에게 QR 이 뜬다');
+      expect(r.membership, isNull);
+    });
+
+    test('{"data": null} 도 미보유다', () {
+      expect(StudentApiService.parseMembership({'data': null}).held, isFalse);
+    });
+
+    test('빈 객체 {} 는 미보유다 — 기본값으로 멤버십을 지어내지 않는다', () {
+      final r = StudentApiService.parseMembership(<String, dynamic>{});
+      expect(r.held, isFalse,
+          reason: 'burned_at 이 없다고 「회수 안 됨」으로 읽으면 안 된다');
+    });
+
+    test('id 가 0 이면 미보유다 — 0 은 「없음」으로 예약된 값이다', () {
+      final r = StudentApiService.parseMembership(real()..['id'] = 0);
+      expect(r.held, isFalse);
+    });
+
+    test('멀쩡한 응답은 보유로 읽는다', () {
+      final r = StudentApiService.parseMembership(real());
+      expect(r.held, isTrue);
+      expect(r.membership!.tokenId, 128);
+      expect(r.membership!.hasQr, isTrue);
+    });
+
+    test('래퍼에 담긴 멀쩡한 멤버십도 읽는다', () {
+      final r = StudentApiService.parseMembership({'membership': real()});
+      expect(r.held, isTrue, reason: '래퍼로 정해지면 그쪽도 읽혀야 한다');
+      expect(r.membership!.tokenId, 128);
+    });
+
+    test('회수(burn)된 멤버십은 보유가 아니다', () {
+      final r =
+          StudentApiService.parseMembership(real()..['burned_at'] = 1789052400);
+      expect(r.held, isFalse);
+    });
+
+    test('qr_payload 가 비면 보유이지만 QR 은 그리지 않는다', () {
+      final r = StudentApiService.parseMembership(real()..['qr_payload'] = '');
+      expect(r.held, isTrue, reason: '납부는 확인됐다');
+      expect(r.membership!.hasQr, isFalse,
+          reason: '찍히지 않는 QR 을 「납부 확인됨」과 함께 띄우면 안 된다');
+    });
+
+    test('뜻 모를 본문은 미보유가 아니라 「모름」이다', () {
+      expect(StudentApiService.parseMembership('ok').failed, isTrue);
+      expect(StudentApiService.parseMembership(7).failed, isTrue);
+    });
+  });
+
   group('모르는 status 하나가 목록 전체를 막지 않는다', () {
     late StudentApiService api;
 

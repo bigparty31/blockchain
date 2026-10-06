@@ -59,7 +59,13 @@ class _MySbtScreenState extends State<MySbtScreen> {
                     if (!result.held)
                       _buildNoMembership()
                     else ...[
-                      _buildQrCard(result.membership!),
+                      // 보유가 확인됐어도 `qr_payload` 가 비어 있으면 QR 을 그리지
+                      // 않는다 — 찍히지 않는 코드를 「납부 확인됨」 배지와 함께
+                      // 띄우면 학생이 그걸 입장 증명으로 믿고 들고 간다.
+                      if (result.membership!.hasQr)
+                        _buildQrCard(result.membership!)
+                      else
+                        _buildQrUnavailable(),
                       const SizedBox(height: 16),
                       _buildDetailCard(result.membership!),
                     ],
@@ -67,6 +73,43 @@ class _MySbtScreenState extends State<MySbtScreen> {
                     _buildNotice(),
                   ],
                 ),
+    );
+  }
+
+  /// 멤버십은 있는데 QR 페이로드가 비어 있을 때.
+  ///
+  /// 「납부 확인됨」은 맞지만 입장 코드는 아직 없는 상태다. 빈 QR 을 그리는 대신
+  /// 그렇다고 말한다 — 찍히지 않는 코드를 들고 행사장에 가는 쪽이 더 나쁘다.
+  Widget _buildQrUnavailable() {
+    return Container(
+      padding: const EdgeInsets.all(28),
+      decoration: AppTheme.cardDecoration,
+      child: Column(
+        children: [
+          Icon(Icons.qr_code_2_rounded,
+              size: 44, color: AppTheme.textSub.withOpacity(0.4)),
+          const SizedBox(height: 12),
+          const Text(
+            '입장 QR이 아직 발급되지 않았습니다',
+            style: TextStyle(
+              fontSize: 15,
+              fontWeight: FontWeight.bold,
+              color: AppTheme.textMain,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            '학생회비 납부는 확인되었습니다. 입장 코드가 발급되면 이 자리에 QR이 '
+            '표시됩니다.',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 12,
+              color: AppTheme.textSub.withOpacity(0.95),
+              height: 1.5,
+            ),
+          ),
+        ],
+      ),
     );
   }
 
