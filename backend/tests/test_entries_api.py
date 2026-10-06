@@ -19,14 +19,24 @@ AUDITOR_WALLET = "0x90F79bf6EB2c4f870365E785982E1f101E93b906"    # 시드 감사
 PRESIDENT_WALLET = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"  # 시드 회장 지갑
 
 
+from app.database import SessionLocal
+from app.models import Entry as DBEntry
+
+
 @pytest.fixture(autouse=True)
 def restore_entries():
     """테스트가 DUMMY_ENTRIES 에 남긴 초안·상태 변경 및 FakeChainClient 상태를 테스트마다 되돌린다."""
     saved = [e.model_copy() for e in DUMMY_ENTRIES]
     set_chain_client(FakeChainClient())
+    with SessionLocal() as db:
+        db.query(DBEntry).filter(DBEntry.id > 3).delete()
+        db.commit()
     yield
     DUMMY_ENTRIES[:] = saved
     set_chain_client(FakeChainClient())
+    with SessionLocal() as db:
+        db.query(DBEntry).filter(DBEntry.id > 3).delete()
+        db.commit()
 
 
 def test_get_entries():
@@ -441,3 +451,83 @@ def test_reject_entry_success(auth_header):
     data = res.json()
     assert data["id"] == entry_id
     assert data["status"] == "REJECTED"
+
+
+def test_confirm_ocr_mismatch_requires_warning_reason(auth_header):
+    """OCR 불일치(AMOUNT_MISMATCH) 항목 승인 시 warning_reason 누락 시 400 Bad Request 차단 검증"""
+    now = int(time.time())
+    draft_body = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 50000,
+        "counterparty": "OCR경고테스트점",
+        "purpose": "OCR 금액 불일치 항목",
+        "budget_id": 2,
+        "occurred_at": 1788793200,
+        "receipt_hash": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+        "ocr_amount": 48000,
+        "ocr_approval_no": "11223344",
+        "ocr_paid_at": 1788829999,
+        "ocr_status": "MISMATCH",
+    }
+    res_draft = client.post("/entries", json=draft_body, headers=auth_header(Role.TREASURER))
+    assert res_draft.status_code == 201
+    entry_id = res_draft.json()["id"]
+
+    submit_body = {
+        "deadline": now + 600,
+        "signature": fake_signature(TREASURER_WALLET),
+    }
+    res_submit = client.post(f"/entries/{entry_id}/submit", json=submit_body, headers=auth_header(Role.TREASURER))
+    assert res_submit.status_code == 200
+
+    # 사유 없이 승인 시도 -> 400 차단 검증
+    confirm_body_no_reason = {
+        "deadline": now + 600,
+        "signature": fake_signature(AUDITOR_WALLET),
+        "warning_reason": None,
+    }
+    res_fail = client.post(f"/entries/{entry_id}/confirm", json=confirm_body_no_reason, headers=auth_header(Role.AUDITOR))
+    assert res_fail.status_code == 400
+    assert "경고 무시 사유(warning_reason)가 필수입니다" in res_fail.json()["detail"]
+
+    # 사유 포함 승인 시도 -> 200 성공 검증
+    confirm_body_with_reason = {
+        "deadline": now + 600,
+        "signature": fake_signature(AUDITOR_WALLET),
+        "warning_reason": "봉투값 2000원 수기 합산 확인 완료",
+    }
+    res_ok = client.post(f"/entries/{entry_id}/confirm", json=confirm_body_with_reason, headers=auth_header(Role.AUDITOR))
+    assert res_ok.status_code == 200
+    assert res_ok.json()["status"] == "CONFIRMED"
+
+
+def test_confirm_without_warning_rejects_warning_reason(auth_header):
+    """경고가 없는 정상 항목에 warning_reason 제출 시 400 Bad Request 차단 검증"""
+    now = int(time.time())
+    draft_body = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 20000,
+        "counterparty": "정상거래점",
+        "purpose": "정상 거래 승인",
+        "budget_id": 2,
+        "occurred_at": 1788793200,
+    }
+    res_draft = client.post("/entries", json=draft_body, headers=auth_header(Role.TREASURER))
+    entry_id = res_draft.json()["id"]
+
+    client.post(
+        f"/entries/{entry_id}/submit",
+        json={"deadline": now + 600, "signature": fake_signature(TREASURER_WALLET)},
+        headers=auth_header(Role.TREASURER),
+    )
+
+    confirm_body = {
+        "deadline": now + 600,
+        "signature": fake_signature(AUDITOR_WALLET),
+        "warning_reason": "경고 없는 건에 불필요한 사유 제출",
+    }
+    res = client.post(f"/entries/{entry_id}/confirm", json=confirm_body, headers=auth_header(Role.AUDITOR))
+    assert res.status_code == 400
+    assert "경고 항목이 아닌 경우" in res.json()["detail"]

@@ -18,7 +18,7 @@ from app.chain import (
 )
 from app.chain.models import BlockReason as ChainBlockReason
 from app.database import get_db
-from app.models import Budget as DBBudget, Entry as DBEntry, Term as DBTerm
+from app.models import Budget as DBBudget, Entry as DBEntry, Term as DBTerm, User as DBUser
 from app.schemas.auth import Role
 from app.schemas.entry import (
     BlockReason,
@@ -402,13 +402,20 @@ async def submit_entry(
         )
 
     # 4. 온체인 학기 코드(term_code, YYYYS) 조회
-    term_code = 20261
+    db_term = None
     try:
         db_term = db.query(DBTerm).filter(DBTerm.id == target.term_id).first()
-        if db_term and db_term.term_code:
-            term_code = db_term.term_code
-    except SQLAlchemyError:
-        pass
+    except SQLAlchemyError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"학기 정보 조회 중 데이터베이스 오류가 발생했습니다: {e}",
+        )
+    if not db_term or not db_term.term_code:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"해당 항목(term_id={target.term_id})의 유효한 학기 코드(term_code)를 찾을 수 없습니다.",
+        )
+    term_code = db_term.term_code
 
     # 5. RecordRequest 구성
     target_kind = EntryKind(target.kind)
@@ -447,6 +454,14 @@ async def submit_entry(
         )
 
     expected_wallet = user.wallet_address
+    if not expected_wallet:
+        try:
+            db_u = db.query(DBUser).filter(DBUser.id == user.id).first()
+            if db_u and db_u.wallet_address:
+                expected_wallet = db_u.wallet_address
+        except SQLAlchemyError:
+            pass
+
     if not expected_wallet or recovered_signer.lower() != expected_wallet.lower():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -542,14 +557,21 @@ async def confirm_entry(
             detail="PENDING 상태의 항목만 확정할 수 있습니다.",
         )
 
-    # 학기 코드 및 등록자 정보
-    term_code = 20261
+    # 학기 코드 조회
+    db_term = None
     try:
         db_term = db.query(DBTerm).filter(DBTerm.id == target.term_id).first()
-        if db_term and db_term.term_code:
-            term_code = db_term.term_code
-    except SQLAlchemyError:
-        pass
+    except SQLAlchemyError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"학기 정보 조회 중 데이터베이스 오류가 발생했습니다: {e}",
+        )
+    if not db_term or not db_term.term_code:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"해당 항목(term_id={target.term_id})의 유효한 학기 코드(term_code)를 찾을 수 없습니다.",
+        )
+    term_code = db_term.term_code
 
     target_kind = EntryKind(target.kind)
     target_amount = target.amount
@@ -563,7 +585,20 @@ async def confirm_entry(
     )
 
     creator = get_user_by_id(target.created_by)
-    registrant_addr = (creator and creator.wallet_address) or "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+    registrant_addr = creator.wallet_address if creator else None
+    if not registrant_addr:
+        try:
+            db_creator = db.query(DBUser).filter(DBUser.id == target.created_by).first()
+            if db_creator and db_creator.wallet_address:
+                registrant_addr = db_creator.wallet_address
+        except SQLAlchemyError:
+            pass
+
+    if not registrant_addr:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"등록자(user_id={target.created_by})의 유효한 지갑 주소를 찾을 수 없습니다.",
+        )
 
     commit_hash = entry_commit(
         hash=target_hash,
@@ -576,7 +611,23 @@ async def confirm_entry(
         registrant=registrant_addr,
     )
 
-    had_warning = bool(target.category_warning)
+    # 경고 승인 판정 (카테고리 불일치 경고 또는 OCR 불일치/미인식 건)
+    ocr_status_val = target.ocr_status.value if hasattr(target.ocr_status, "value") else target.ocr_status
+    has_ocr_warning = bool(ocr_status_val and ocr_status_val != OCRStatus.MATCH.value)
+    had_warning = bool(target.category_warning or has_ocr_warning)
+
+    # 경고 항목인데 사유가 비어 있으면 선제 400 차단 (체인 ReasonRequired 방지)
+    if had_warning and not (req.warning_reason and req.warning_reason.strip()):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="경고 항목 승인 시에는 경고 무시 사유(warning_reason)가 필수입니다.",
+        )
+    if not had_warning and req.warning_reason and req.warning_reason.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="경고 항목이 아닌 경우 경고 무시 사유(warning_reason)를 제출할 수 없습니다.",
+        )
+
     warning_reason_hash = (
         text_hash(canonical_text(req.warning_reason))
         if had_warning and req.warning_reason
@@ -686,13 +737,21 @@ async def reject_entry(
 
     reason_hash = text_hash(canon_reason)
 
-    term_code = 20261
+    # 학기 코드 조회
+    db_term = None
     try:
         db_term = db.query(DBTerm).filter(DBTerm.id == target.term_id).first()
-        if db_term and db_term.term_code:
-            term_code = db_term.term_code
-    except SQLAlchemyError:
-        pass
+    except SQLAlchemyError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"학기 정보 조회 중 데이터베이스 오류가 발생했습니다: {e}",
+        )
+    if not db_term or not db_term.term_code:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"해당 항목(term_id={target.term_id})의 유효한 학기 코드(term_code)를 찾을 수 없습니다.",
+        )
+    term_code = db_term.term_code
 
     target_kind = EntryKind(target.kind)
     target_amount = target.amount
@@ -706,7 +765,20 @@ async def reject_entry(
     )
 
     creator = get_user_by_id(target.created_by)
-    registrant_addr = (creator and creator.wallet_address) or "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+    registrant_addr = creator.wallet_address if creator else None
+    if not registrant_addr:
+        try:
+            db_creator = db.query(DBUser).filter(DBUser.id == target.created_by).first()
+            if db_creator and db_creator.wallet_address:
+                registrant_addr = db_creator.wallet_address
+        except SQLAlchemyError:
+            pass
+
+    if not registrant_addr:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"등록자(user_id={target.created_by})의 유효한 지갑 주소를 찾을 수 없습니다.",
+        )
 
     commit_hash = entry_commit(
         hash=target_hash,
