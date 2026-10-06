@@ -166,15 +166,34 @@ class OnChainEntry {
     return null;
   }
 
+  /// `status` 도 같은 규칙이다 — **모르는 코드에 던지지 않고 null 로 둔다.**
+  ///
+  /// [EntryStatus.fromCode] 는 `docs/enums.md` 에 없는 값을 만나면 던지는데
+  /// (도메인 규칙 1 — 조용히 넘어가는 대신 드러낸다), 그 계약은 **목록 파싱**을
+  /// 위한 것이다. 거기서는 [StudentApiService.parseEntries] 가 항목 단위로 받아
+  /// 한 건만 건너뛰고 건너뛴 수를 화면에 알린다.
+  ///
+  /// 검증 경로에는 그렇게 받아 줄 자리가 없다. 여기서 던지면 `_verify`·`_verifyAll`
+  /// 이 중간에 멈춰서 **그 뒤 항목의 배지가 전부 「검증 중」에 남는다** — 화면은
+  /// 멀쩡해 보이는데 검증만 조용히 안 돌아가는, 눈에 안 보이는 고장이다.
+  ///
+  /// 모르는 상태는 「모름」이다. 대조하지 못한 것은 불일치가 아니므로
+  /// 「부분 검증」으로 남고, 지어낸 상태와 대조해 거짓 양성을 내지도 않는다.
+  static EntryStatus? _statusOrNull(dynamic value) {
+    if (value is! String) return null;
+    for (final s in EntryStatus.values) {
+      if (s.code == value) return s;
+    }
+    return null;
+  }
+
   factory OnChainEntry.fromJson(Map<String, dynamic> json) {
     return OnChainEntry(
       hash: _hashOrNull(json['hash']),
       // 아래는 전부 **없으면 null 이다.** 지어낸 값과 대조하면 멀쩡한 항목이 어긋난다.
       amount: _intOrNull(json['amount']),
       kind: _kindOrNull(json['kind']),
-      status: json['status'] == null
-          ? null
-          : EntryStatus.fromCode(json['status'] as String),
+      status: _statusOrNull(json['status']),
       occurredAt: _intOrNull(json['occurred_at']),
       term: _intOrNull(json['term']),
       budgetId: _intOrNull(json['budget_id']),

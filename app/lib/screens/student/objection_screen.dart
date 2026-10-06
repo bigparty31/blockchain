@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../../core/app_theme.dart';
 import '../../core/enums.dart';
 import '../../core/format.dart';
+import '../../core/hashing.dart';
 import '../../models/entry_model.dart';
 import '../../services/student_api_service.dart';
 
@@ -40,8 +41,24 @@ class _ObjectionScreenState extends State<ObjectionScreen> {
     super.dispose();
   }
 
-  /// 제출할 수 있는 상태인지 — 본문이 비어 있지도, 공백만도 아닐 때 (스토리보드 5 ③).
-  bool get _canSubmit => _controller.text.trim().isNotEmpty;
+  /// 이의 본문의 최소 길이 (`student_screens.md` §2.4).
+  ///
+  /// 「이상함」 한 줄로는 학생회가 무엇을 답해야 할지 알 수 없다.
+  static const int minLength = 10;
+
+  /// 정본화한 본문의 길이 — **버튼 상태와 안내에만 쓴다.**
+  ///
+  /// `backend_requests.md` §1-3 대로 **화면의 최소 길이 검사만 `canonicalText` 로
+  /// 재고, 전송값은 건드리지 않는다.** 앞뒤 공백·개행을 세서 10자를 넘기는 것을
+  /// 막으려면 정본화한 값으로 재야 하는데, 다듬은 값을 보내면 학생이 친 원문과
+  /// 저장·해시되는 값이 갈린다 ([_submit] 참고).
+  ///
+  /// 길이는 `runes` 로 센다 — Dart 의 `String.length` 는 UTF-16 단위라 이모지
+  /// 하나를 2 로 세서, 백엔드(Python `len()`, 코드포인트 단위)와 경계값이 갈린다.
+  int get _contentLength => Hashing.canonicalText(_controller.text).runes.length;
+
+  /// 제출할 수 있는 상태인지 (스토리보드 5 ③).
+  bool get _canSubmit => _contentLength >= minLength;
 
   /// 뒤로 가면 입력한 내용이 사라지므로 한 번 묻는다 (스토리보드 5 ② 「되돌림」).
   Future<bool> _confirmDiscard() async {
@@ -190,6 +207,26 @@ class _ObjectionScreenState extends State<ObjectionScreen> {
                 ),
               ),
             ),
+            // 쓰기 시작했는데 버튼이 아직 회색이면 왜 그런지 말해 준다.
+            // 비어 있을 때는 회색인 이유가 뻔하므로 띄우지 않는다.
+            if (_contentLength > 0 && _contentLength < minLength) ...[
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  const Icon(Icons.edit_note_rounded,
+                      size: 14, color: AppTheme.textSub),
+                  const SizedBox(width: 6),
+                  Text(
+                    '$minLength자 이상 적어 주세요 (${minLength - _contentLength}자 더)',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      color: AppTheme.textSub,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ],
             const SizedBox(height: 16),
             _buildNotice(),
             const SizedBox(height: 20),
@@ -211,7 +248,7 @@ class _ObjectionScreenState extends State<ObjectionScreen> {
                       ),
                     )
                   : GradientButton(
-                      // 비어 있으면 회색이고 눌리지 않는다. 버튼 상태가 곧 검사라서
+                      // 10자 미만이면 회색이고 눌리지 않는다. 버튼 상태가 곧 검사라서
                       // 「눌렀더니 거절」이 생기지 않는다 (스토리보드 5 ③).
                       onPressed: _canSubmit ? _submit : null,
                       enabled: _canSubmit,

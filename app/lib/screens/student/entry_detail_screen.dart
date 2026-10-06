@@ -52,7 +52,15 @@ class _EntryDetailScreenState extends State<EntryDetailScreen> {
 
   EntryModel get _entry => widget.chain.original;
 
+  /// 멤버십을 다시 조회하는 중인지 — 재시도 버튼의 스피너용.
+  bool _membershipLoading = false;
+
   bool get _canObject => canObject(
+        isConfirmed: widget.chain.isConfirmed,
+        membership: _membership,
+      );
+
+  ObjectionBlock get _block => objectionBlock(
         isConfirmed: widget.chain.isConfirmed,
         membership: _membership,
       );
@@ -70,39 +78,71 @@ class _EntryDetailScreenState extends State<EntryDetailScreen> {
     if (mounted) setState(() => _membership = r);
   }
 
+  /// 조회가 안 돼 막힌 경우의 재시도 (스토리보드 6 ②).
+  ///
+  /// **막는 데서 끝내지 않는다.** 납부 확인이 안 되면 이의를 막기로 했으므로
+  /// (`canObject`), 일시적인 장애로 막힌 학생에게는 다시 시도할 길이 있어야 한다.
+  /// 없으면 서버가 돌아와도 학생은 화면을 나갔다 들어오는 수밖에 없다.
+  Future<void> _retryMembership() async {
+    if (_membershipLoading) return;
+    setState(() => _membershipLoading = true);
+    try {
+      await _loadMembership();
+    } finally {
+      if (mounted) setState(() => _membershipLoading = false);
+    }
+  }
+
   /// HASHING.md §2 의 세 단계를 **원본과 정정 항목 모두에** 돌린다.
+  ///
+  /// **한 건이 던져도 나머지는 계속 돌린다.** `initState` 에서 await 되지 않아
+  /// 예외가 올라가면 조용히 사라지고, 원본이 깨지면 정정 항목의 배지까지 전부
+  /// 「검증 중」에 남는다 (`entry_list_screen.dart` 의 `_verifyAll` 과 같은 이유).
   Future<void> _verify() async {
-    final wallets = await _api.fetchWalletMap();
+    Map<String, int>? wallets;
+    try {
+      wallets = await _api.fetchWalletMap();
+    } catch (_) {
+      wallets = null;
+    }
 
-    final onChain = await _api.fetchOnChainEntry(_entry.id);
-    final receiptBytes = await _api.fetchReceiptBytes(_entry);
-    if (!mounted) return;
-
-    setState(() {
-      _receiptBytes =
-          receiptBytes == null ? null : Uint8List.fromList(receiptBytes);
-      _report = EntryVerifier.verify(
-        _entry,
-        onChain: onChain,
-        receiptBytes: receiptBytes,
-        userIdByAddress: wallets,
-      );
-    });
-
-    // 원본이 끝난 뒤 정정을 하나씩. 끝나는 대로 이력 줄의 배지를 갱신한다.
-    for (final correction in widget.chain.corrections) {
-      final chainEntry = await _api.fetchOnChainEntry(correction.id);
-      final bytes = await _api.fetchReceiptBytes(correction);
+    try {
+      final onChain = await _api.fetchOnChainEntry(_entry.id);
+      final receiptBytes = await _api.fetchReceiptBytes(_entry);
       if (!mounted) return;
 
       setState(() {
-        _correctionReports[correction.id] = EntryVerifier.verify(
-          correction,
-          onChain: chainEntry,
-          receiptBytes: bytes,
+        _receiptBytes =
+            receiptBytes == null ? null : Uint8List.fromList(receiptBytes);
+        _report = EntryVerifier.verify(
+          _entry,
+          onChain: onChain,
+          receiptBytes: receiptBytes,
           userIdByAddress: wallets,
         );
       });
+    } catch (_) {
+      // 원본 검증이 깨져도 아래 정정 검증은 돌려야 한다.
+    }
+
+    // 원본이 끝난 뒤 정정을 하나씩. 끝나는 대로 이력 줄의 배지를 갱신한다.
+    for (final correction in widget.chain.corrections) {
+      try {
+        final chainEntry = await _api.fetchOnChainEntry(correction.id);
+        final bytes = await _api.fetchReceiptBytes(correction);
+        if (!mounted) return;
+
+        setState(() {
+          _correctionReports[correction.id] = EntryVerifier.verify(
+            correction,
+            onChain: chainEntry,
+            receiptBytes: bytes,
+            userIdByAddress: wallets,
+          );
+        });
+      } catch (_) {
+        // 이 정정 한 건만 「검증 중」에 남는다.
+      }
     }
   }
 
@@ -111,11 +151,22 @@ class _EntryDetailScreenState extends State<EntryDetailScreen> {
     if (mounted) setState(() => _objections = list);
   }
 
-  /// SBT 가 없어 이의를 제기할 수 없을 때 (스토리보드 4 ⑤ 「실패」).
-  void _warnNoMembership() {
+  /// 이의를 제기할 수 없을 때 (스토리보드 4 ⑤ 「실패」).
+  ///
+  /// **모름과 미보유의 문구가 다르다.** 조회가 안 된 것을 「납부 확인이
+  /// 필요합니다」라고 말하면 납부한 학생에게 거짓을 말하는 셈이 된다.
+  void _warnBlocked() {
+    final message = switch (_block) {
+      ObjectionBlock.noMembership => '학생회비 납부 확인이 필요합니다',
+      ObjectionBlock.membershipUnknown => '납부 여부를 확인할 수 없습니다. 다시 시도해 주세요',
+      ObjectionBlock.notConfirmed => '확정된 항목에만 이의를 제기할 수 있습니다',
+      ObjectionBlock.none => '',
+    };
+    if (message.isEmpty) return;
+
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('학생회비 납부 확인이 필요합니다'),
+      SnackBar(
+        content: Text(message),
         behavior: SnackBarBehavior.floating,
       ),
     );
@@ -781,25 +832,28 @@ class _EntryDetailScreenState extends State<EntryDetailScreen> {
         SizedBox(
           width: double.infinity,
           child: GradientButton(
-            // 확정 전에는 아예 눌리지 않고(null), SBT 가 없을 때는 눌리되
+            // 확정 전에는 아예 눌리지 않고(null), 납부 확인이 안 된 경우는 눌리되
             // 왜 안 되는지 토스트로 알려준다 — 회색 버튼만 두면 학생은 이유를
             // 알 길이 없다 (스토리보드 4 ⑤).
             onPressed: !widget.chain.isConfirmed
                 ? null
-                : (_canObject ? _openObjection : _warnNoMembership),
+                : (_canObject ? _openObjection : _warnBlocked),
             enabled: _canObject,
             label: '이의 제기',
             icon: Icons.help_outline_rounded,
           ),
         ),
-        if (!widget.chain.isConfirmed) ...[
+        // 막혔으면 사유를 적는다. **모름과 미보유의 문구가 다르다** — 조회가
+        // 안 됐을 뿐인데 「납부 확인이 필요합니다」라고 하면 납부한 학생에게
+        // 거짓을 말하는 것이 된다 ([canObject]).
+        if (_block != ObjectionBlock.none) ...[
           const SizedBox(height: 6),
-          Text(
-            '확정된 항목에만 이의를 제기할 수 있습니다.',
-            style: TextStyle(
-              fontSize: 11,
-              color: AppTheme.textSub.withOpacity(0.9),
-            ),
+          _ObjectionGate(
+            block: _block,
+            onRetry: _block == ObjectionBlock.membershipUnknown
+                ? _retryMembership
+                : null,
+            retrying: _membershipLoading,
           ),
         ],
         const SizedBox(height: 8),
@@ -1308,13 +1362,23 @@ class _ObjectionTile extends StatelessWidget {
 
 /// 이의를 제기할 수 있는 상태인지 (스토리보드 5 「화면 전체 규칙」).
 ///
-/// 확정된 항목이어야 하고, SBT 를 들고 있어야 한다. 다만 **보유 여부를 모를 때는
-/// 막지 않는다** — 아직 확인 중(`null`)이거나 조회에 실패한(`failed`) 경우다.
+/// **확정된 항목이고, SBT 보유가 확인된 경우에만 열린다.** 보유 여부를 모르는
+/// 동안에는 막는다 — 아직 확인 중(`null`)이든 조회에 실패한(`failed`) 것이든,
+/// 둘 다 「납부가 확인되지 않은 상태」다.
 ///
-/// 조회 실패는 「SBT 없음」이 아니라 「모름」이다 ([MembershipResult]). 실패를
-/// 미보유로 취급하면 서버 장애 때 납부한 학생이 이의를 제기하지 못하고
-/// 「납부 확인이 필요합니다」 안내를 받는다. 막아서 잃는 것(정당한 이의)이
-/// 열어서 잃는 것(미납자의 이의 한 건)보다 크다.
+/// 이것은 **의도적으로 fail-closed** 다. 이의는 가볍지 않다 — 학생회에 답변
+/// 의무가 생기고, 답변하지 않은 사실이 감사 화면의 미답변 카운트로 남는다.
+/// 확인되지 않은 사람이 그걸 만들어낼 수 있으면 카운트 자체를 믿을 수 없게 된다.
+///
+/// **대가를 알고 고른 것이다.** 조회가 안 되는 동안에는 납부한 학생도 막힌다.
+/// 그래서 막는 데서 끝내지 않고 「확인할 수 없습니다 + 다시 시도」를 같이 띄운다
+/// ([_ObjectionGate]) — 회색 버튼만 두면 학생은 영문을 모른 채 길이 막힌다.
+/// 그리고 **미보유와 모름의 문구를 다르게 쓴다**: 모름일 때 「납부 확인이
+/// 필요합니다」라고 하면 납부한 학생에게 거짓을 말하는 것이 된다.
+///
+/// **화면 제어는 보장이 아니다** (도메인 규칙 2). 백엔드에 아직 인증·권한이 없고
+/// `POST /objections` 라우터 자체가 없어서, 이 판정은 앱을 쓰는 사람에게만 걸린다.
+/// 실제 강제는 그 엔드포인트가 SBT 미보유를 `403` 으로 거절해야 생긴다.
 ///
 /// 화면 바깥의 함수인 이유는 이 판정이 눈에 안 보이는 회귀라 테스트로
 /// 직접 못박아 두기 위해서다.
@@ -1322,5 +1386,97 @@ bool canObject({
   required bool isConfirmed,
   required MembershipResult? membership,
 }) =>
-    isConfirmed &&
-    (membership == null || membership.failed || membership.held);
+    isConfirmed && (membership?.held ?? false);
+
+/// 이의 버튼이 막힌 사유 안내. 조회 실패일 때만 재시도를 같이 준다.
+class _ObjectionGate extends StatelessWidget {
+  final ObjectionBlock block;
+
+  /// 조회가 안 돼 막힌 경우에만 non-null.
+  final Future<void> Function()? onRetry;
+  final bool retrying;
+
+  const _ObjectionGate({
+    required this.block,
+    required this.onRetry,
+    required this.retrying,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final text = switch (block) {
+      ObjectionBlock.notConfirmed => '확정된 항목에만 이의를 제기할 수 있습니다.',
+      // 납부하지 않았다고 단정하지 않는다 — 확인이 안 됐다고만 말한다.
+      ObjectionBlock.membershipUnknown =>
+        '납부 여부를 확인할 수 없어 이의 제기가 잠겨 있습니다.',
+      ObjectionBlock.noMembership =>
+        '학생회비 납부가 확인되면 이의를 제기할 수 있습니다.',
+      ObjectionBlock.none => '',
+    };
+
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: Text(
+            text,
+            style: TextStyle(
+              fontSize: 11,
+              color: AppTheme.textSub.withOpacity(0.9),
+              height: 1.4,
+            ),
+          ),
+        ),
+        if (onRetry != null) ...[
+          const SizedBox(width: 8),
+          retrying
+              ? const SizedBox(
+                  width: 14,
+                  height: 14,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : GestureDetector(
+                  onTap: () => onRetry!(),
+                  child: const Text(
+                    '다시 시도',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold,
+                      color: AppTheme.primary,
+                    ),
+                  ),
+                ),
+        ],
+      ],
+    );
+  }
+}
+
+/// 이의 버튼이 막힌 이유 — 문구가 서로 달라야 한다.
+enum ObjectionBlock {
+  /// 확정되지 않은 항목.
+  notConfirmed,
+
+  /// 보유 여부를 아직 모른다 (확인 중이거나 조회 실패). **미보유가 아니다.**
+  membershipUnknown,
+
+  /// 서버가 분명히 「발급받은 적 없음」이라고 답했다.
+  noMembership,
+
+  /// 막히지 않았다.
+  none,
+}
+
+/// 왜 막혔는지 판정한다. 확정 여부를 먼저 본다 — 확정되지 않은 항목은
+/// SBT 가 있든 없든 이의 대상이 아니다.
+ObjectionBlock objectionBlock({
+  required bool isConfirmed,
+  required MembershipResult? membership,
+}) {
+  if (!isConfirmed) return ObjectionBlock.notConfirmed;
+  if (membership == null || membership.failed) {
+    return ObjectionBlock.membershipUnknown;
+  }
+  if (!membership.held) return ObjectionBlock.noMembership;
+  return ObjectionBlock.none;
+}

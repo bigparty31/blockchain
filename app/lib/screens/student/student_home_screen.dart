@@ -37,22 +37,30 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
     _load();
   }
 
+  /// **무슨 일이 있어도 `_loading` 은 끈다** (`entry_list_screen.dart` 의 `_load`
+  /// 와 같은 이유). 조회가 중간에 던지면 스피너가 영영 안 꺼져서 화면이 멈춘 것처럼
+  /// 보인다. 여기서는 추측이 아니라 실제 경로가 있다 — `fetchBudgets` 와
+  /// `fetchLatestSnapshot` 은 응답을 한 번에 변환해서, 예산 한 건이나 스냅샷 모양이
+  /// 어긋나면 그대로 던진다.
   Future<void> _load() async {
     if (mounted) setState(() => _loading = true);
 
-    final entries = await _api.fetchEntries();
-    final budgets = await _api.fetchBudgets();
-    final snapshot = await _api.fetchLatestSnapshot();
-    final lastSeen = await _api.lastSeenEntryId();
+    try {
+      final entries = await _api.fetchEntries();
+      final budgets = await _api.fetchBudgets();
+      final snapshot = await _api.fetchLatestSnapshot();
+      final lastSeen = await _api.lastSeenEntryId();
 
-    if (!mounted) return;
-    setState(() {
-      _entries = entries;
-      _budgets = budgets;
-      _snapshot = snapshot;
-      _unseen = EntryMerge.unseenCount(entries, lastSeen);
-      _loading = false;
-    });
+      if (!mounted) return;
+      setState(() {
+        _entries = entries;
+        _budgets = budgets;
+        _snapshot = snapshot;
+        _unseen = EntryMerge.unseenCount(entries, lastSeen);
+      });
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
   }
 
   /// 장부 잔액은 항목에서 직접 계산한다 (PRD §7.4).
@@ -304,10 +312,12 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
         const SizedBox(width: 12),
         Expanded(
           child: _ActionTile(
+            // **장부와 무관하게 항상 열린다.** 내 SBT 는 납부 기록에서 나오고
+            // 장부 항목에서 나오지 않는다. `hasLedger` 로 막아 두면 지출이 아직
+            // 없는 학기 초에 납부한 학생이 행사 입장 QR 을 못 띄운다.
             icon: Icons.qr_code_2_rounded,
             label: '내 SBT · QR',
             sublabel: '행사 입장용',
-            enabled: hasLedger,
             onTap: () => Navigator.push(
               context,
               MaterialPageRoute(builder: (_) => const MySbtScreen()),

@@ -84,23 +84,40 @@ class _EntryListScreenState extends State<EntryListScreen> {
   /// **원본뿐 아니라 정정 항목도 검증한다.** 정정도 저마다 온체인 entry 이고,
   /// 카드에 크게 뜨는 최종 금액이 정정 금액에서 나온다. 원본만 보면 정정 내용이
   /// 나중에 조작돼도 배지가 초록으로 남는다.
+  ///
+  /// **한 건이 던져도 나머지는 계속 돌린다.** 이 함수는 `_load` 에서 await 되지
+  /// 않으므로 예외가 올라가면 조용히 사라지고, 그 뒤 항목의 배지가 전부
+  /// 「검증 중」에 남는다 — 화면은 멀쩡해 보이는데 검증만 멈춘 상태다.
+  /// 지갑 매핑처럼 전체에 걸리는 조회도 같은 이유로 감싼다. 매핑을 못 받으면
+  /// 등록자 대조만 「모름」이 되고, 해시·영수증 대조는 그대로 돌아간다.
   Future<void> _verifyAll() async {
-    final wallets = await _api.fetchWalletMap();
+    Map<String, int>? wallets;
+    try {
+      wallets = await _api.fetchWalletMap();
+    } catch (_) {
+      wallets = null;
+    }
 
     for (final chain in _chains) {
       for (final entry in chain.allEntries) {
-        final onChain = await _api.fetchOnChainEntry(entry.id);
-        final receiptBytes = await _api.fetchReceiptBytes(entry);
-        if (!mounted) return;
+        try {
+          final onChain = await _api.fetchOnChainEntry(entry.id);
+          final receiptBytes = await _api.fetchReceiptBytes(entry);
+          if (!mounted) return;
 
-        setState(() {
-          _reports[entry.id] = EntryVerifier.verify(
-            entry,
-            onChain: onChain,
-            receiptBytes: receiptBytes,
-            userIdByAddress: wallets,
-          );
-        });
+          setState(() {
+            _reports[entry.id] = EntryVerifier.verify(
+              entry,
+              onChain: onChain,
+              receiptBytes: receiptBytes,
+              userIdByAddress: wallets,
+            );
+          });
+        } catch (_) {
+          // 이 한 건은 「검증 중」에 남지만 나머지는 끝까지 돈다.
+          // 결과를 지어내서 채우지는 않는다 — 확인 못 한 것을 확인했다고
+          // 말하는 쪽이 멈춰 있는 배지보다 나쁘다.
+        }
       }
     }
   }

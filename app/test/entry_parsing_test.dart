@@ -54,6 +54,25 @@ void main() {
           reason: '지어낸 PENDING 과 대조하면 확정 항목이 어긋난다');
     });
 
+    test('모르는 status 는 던지지 않고 「모름」으로 둔다', () {
+      // `EntryStatus.fromCode` 를 그대로 부르면 여기서 던진다. 검증 경로에는
+      // 그 예외를 받아 줄 자리가 없어서, 던지면 `_verify`·`_verifyAll` 이 중간에
+      // 멈추고 그 뒤 항목의 배지가 전부 「검증 중」에 남는다.
+      late OnChainEntry c;
+      expect(
+        () => c = OnChainEntry.fromJson({'amount': 35000, 'status': 'SETTLED'}),
+        returnsNormally,
+        reason: '검증 루프가 모르는 상태 하나에 멈추면 안 된다',
+      );
+      expect(c.status, isNull, reason: '모르는 상태는 불일치가 아니라 모름이다');
+      expect(c.amount, 35000, reason: '나머지 필드는 그대로 읽혀야 한다');
+    });
+
+    test('아는 status 는 그대로 읽는다', () {
+      final c = OnChainEntry.fromJson({'amount': 35000, 'status': 'CONFIRMED'});
+      expect(c.status, EntryStatus.CONFIRMED);
+    });
+
     test('term 은 학기 코드 그대로 읽는다', () {
       final c = OnChainEntry.fromJson({'amount': 35000, 'term': 20262});
       expect(c.term, 20262);

@@ -314,23 +314,39 @@ class StudentApiService {
   /// 안 된 것은 보유 여부 자체를 모르는 상태다. 못 받았는데 「미보유」라고 하면
   /// SBT 를 가진 학생에게 없다고 말하는 셈이 된다.
   ///
-  /// 못 받았으면 null 을 돌려준다 — 다른 조회들과 같은 규칙으로, 데모 데이터는
-  /// 데모 모드일 때만 끼워 넣는다 ([fetchOnChainEntry] 참고).
+  /// 못 읽었으면 「모름」을 돌려준다. **데모 값은 서버에 닿지도 못했을 때만** 끼워
+  /// 넣는다 ([fetchOnChainEntry] 참고) — 서버가 404 로 대답한 것은 데모로 메울
+  /// 자리가 아니다.
+  ///
+  /// **미보유는 `200` + 본문 `null` 이다** (backend_requests.md §1-4).
+  /// `404` 는 미보유로 읽지 않는다 — 이 경로가 서버에 아직 없어서, FastAPI 가
+  /// 「경로 없음」으로 내는 404 와 「발급받은 적 없음」을 뜻하는 404 가 앱에서
+  /// 구분되지 않는다. 404 를 미보유로 다루면 **엔드포인트가 생기기 전까지 모든
+  /// 학생에게 「학생회비 납부 확인이 필요합니다」가 뜨고 이의 제기 버튼이 잠긴다.**
+  /// 못 읽은 것은 「모름」으로 두는 쪽이 안전하다 ([canObject] 의 같은 판단).
   Future<MembershipResult> fetchMyMembership() async {
     try {
       final res = await http
           .get(Uri.parse('${ApiConfig.baseUrl}/memberships/me'))
           .timeout(_timeout);
       if (res.statusCode == 200) {
-        return MembershipResult.ok(
-          MembershipModel.fromJson(jsonDecode(utf8.decode(res.bodyBytes))),
-        );
+        final body = jsonDecode(utf8.decode(res.bodyBytes));
+        // 서버가 분명히 「발급받은 적 없음」이라고 대답한 경우.
+        if (body == null) return const MembershipResult.ok(null);
+        if (body is Map<String, dynamic>) {
+          return MembershipResult.ok(MembershipModel.fromJson(body));
+        }
       }
-      // 404 는 「발급받은 적 없음」이다. 서버가 분명히 대답한 것이므로
-      // 조회 실패가 아니라 미보유로 다룬다.
-      if (res.statusCode == 404) return const MembershipResult.ok(null);
+
+      // 서버가 **대답은 했는데** 읽을 수 없는 경우다 (404 · 5xx · 모양이 다른 200).
+      // **여기서 데모 값을 끼워 넣지 않는다.** `_usingDemoData` 는 초기값이 true 이고
+      // `fetchEntries` 가 성공할 때만 false 가 되므로, 장부 조회 없이 이 화면으로
+      // 바로 들어오면(`AppRoutes.studentSbt`) 실서버의 404 에 **가짜 데모 SBT 와 QR 이
+      // 진짜처럼 뜬다.** 행사 입장에 쓰는 QR 이라 더 그렇다.
+      return const MembershipResult.failed();
     } catch (_) {}
 
+    // 여기는 서버에 **닿지도 못한** 경우다 — 그게 데모 모드의 뜻이다.
     return _usingDemoData
         ? MembershipResult.ok(_demoMembership())
         : const MembershipResult.failed();
