@@ -60,6 +60,20 @@ class StudentApiService {
   static const _lastSeenKey = 'student_last_seen_entry_id';
   static const _timeout = Duration(seconds: 3);
 
+  /// HTTP 클라이언트. **테스트에서 갈아끼운다.**
+  ///
+  /// 패키지 함수 `http.get` 을 직접 부르면 테스트가 **실제 네트워크를 탄다.**
+  /// 그러면 결과가 「그 머신에 서버가 떠 있는지」에 따라 달라진다 —
+  /// `demo_verification_test` 가 그래서 깨졌다. 서버가 켜져 있으면
+  /// `/entries` 가 200 을 주면서 [usingDemoData] 가 꺼지고, 온체인 조회는 404 라
+  /// 배지가 전부 `partial` 로 바뀐다. 백엔드를 돌리는 사람 누구에게나 깨지고,
+  /// 켜지거나 죽는 중일 때는 연결이 대기해 테스트 한도(30초)를 넘긴다.
+  ///
+  /// 주입으로 바꾸면 테스트가 응답을 직접 정할 수 있어서, 네트워크 없이
+  /// **404 분류나 빈 장부 같은 경로까지** 못박을 수 있다
+  /// (`package:http/testing.dart` 의 `MockClient`).
+  static http.Client client = http.Client();
+
   /// 마지막 원장 조회가 서버에서 온 것인지, 예시 데이터로 폴백한 것인지.
   ///
   /// **화면에 반드시 표시해야 한다.** 이 앱의 존재 이유가 「학생이 직접 검증한다」인데
@@ -226,7 +240,7 @@ class StudentApiService {
 
     final url = path.startsWith('http') ? path : '${ApiConfig.baseUrl}$path';
     try {
-      final res = await http.get(Uri.parse(url)).timeout(_timeout);
+      final res = await client.get(Uri.parse(url)).timeout(_timeout);
       if (res.statusCode == 200) return res.bodyBytes;
     } catch (_) {}
 
@@ -275,7 +289,7 @@ class StudentApiService {
     required String content,
   }) async {
     try {
-      final res = await http
+      final res = await client
           .post(
             Uri.parse('${ApiConfig.baseUrl}/objections'),
             headers: {'Content-Type': 'application/json'},
@@ -326,7 +340,7 @@ class StudentApiService {
   /// 못 읽은 것은 「모름」으로 두는 쪽이 안전하다 ([canObject] 의 같은 판단).
   Future<MembershipResult> fetchMyMembership() async {
     try {
-      final res = await http
+      final res = await client
           .get(Uri.parse('${ApiConfig.baseUrl}/memberships/me'))
           .timeout(_timeout);
       if (res.statusCode == 200) {
@@ -412,7 +426,7 @@ class StudentApiService {
 
   Future<dynamic> _getJson(String url) async {
     try {
-      final res = await http.get(Uri.parse(url)).timeout(_timeout);
+      final res = await client.get(Uri.parse(url)).timeout(_timeout);
       if (res.statusCode == 200) {
         return jsonDecode(utf8.decode(res.bodyBytes));
       }
@@ -519,7 +533,20 @@ class StudentApiService {
     );
   }
 
-  List<EntryModel> _demoEntries() {
+  /// 데모 항목 7건. **한 번만 만들어 재사용한다.**
+  ///
+  /// [_demoOnChain] 이 항목 하나를 찾을 때마다 이것을 다시 부르는데, 각 항목은
+  /// `Hashing.metaHash`(SHA-256 + NFC 정규화)를 계산한다. 그래서 항목 7개를
+  /// 검증하면 metaHash 를 **49번** 계산했다. 값이 고정이라(모든 `occurredAt` 이
+  /// 상수 KST 자정) 캐시해도 결과가 같다.
+  ///
+  /// 리스트를 공유해도 안전하다 — [EntryModel] 은 전 필드가 final 이고,
+  /// `EntryMerge.fold` 는 `where().toList()` 로 복사한 뒤 정렬한다.
+  static List<EntryModel>? _demoEntriesCache;
+
+  List<EntryModel> _demoEntries() => _demoEntriesCache ??= _buildDemoEntries();
+
+  List<EntryModel> _buildDemoEntries() {
     return [
       // #1 확정 수입 — 영수증 없음 (receipt_hash NULL → preimage 가 구분자로 끝난다)
       _sound(

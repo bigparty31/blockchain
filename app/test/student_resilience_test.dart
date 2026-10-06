@@ -1,4 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:student_council_app/core/enums.dart';
 import 'package:student_council_app/models/membership_model.dart';
 import 'package:student_council_app/screens/student/entry_detail_screen.dart';
@@ -85,6 +87,54 @@ void main() {
         ObjectionBlock.notConfirmed,
         reason: '확정 여부를 먼저 본다 — SBT 문구를 띄울 상황이 아니다',
       );
+    });
+  });
+
+  group('/memberships/me 의 404 는 미보유가 아니라 조회 실패다', () {
+    // 리뷰 피드백 1번. 이 경로가 백엔드에 아직 없어서 FastAPI 의 「경로 없음」
+    // 404 가 내려오는데, 그것을 미보유로 읽으면 **모든 학생에게 「납부 확인이
+    // 필요합니다」가 뜬다.** 두 404 는 앱에서 구분할 수 없으므로 미보유는
+    // `200` + 본문으로만 판정한다 (backend_requests.md §1-4).
+
+    final api = StudentApiService();
+
+    tearDown(() => StudentApiService.client = http.Client());
+
+    void respond(int status, String body) {
+      StudentApiService.client =
+          MockClient((_) async => http.Response(body, status));
+    }
+
+    test('404 는 조회 실패(= 모름)다 — 미보유로 단정하지 않는다', () async {
+      respond(404, '{"detail":"Not Found"}');
+      // 실서버에서 실제로 내려오는 본문이다. 경로가 없을 때 FastAPI 의 기본 404.
+      final r = await api.fetchMyMembership();
+
+      expect(r.failed, isTrue, reason: '미보유로 읽으면 전원에게 미납 안내가 뜬다');
+      expect(r.held, isFalse, reason: '모름을 보유로 치지도 않는다');
+    });
+
+    test('5xx 도 조회 실패다', () async {
+      respond(500, 'boom');
+      expect((await api.fetchMyMembership()).failed, isTrue);
+    });
+
+    test('200 + null 은 미보유다 — 404 와 다르게 다룬다', () async {
+      respond(200, 'null');
+      final r = await api.fetchMyMembership();
+
+      expect(r.failed, isFalse, reason: '서버가 분명히 대답했다');
+      expect(r.held, isFalse);
+      expect(r.membership, isNull);
+    });
+
+    test('404 에 데모 멤버십을 끼워 넣지 않는다', () async {
+      // 서버가 대답한 것을 데모로 메우면, 실서버의 404 에 **가짜 SBT 와 QR 이
+      // 진짜처럼 뜬다.** 데모 폴백은 서버에 닿지도 못했을 때만이다.
+      respond(404, '{"detail":"Not Found"}');
+      final r = await api.fetchMyMembership();
+
+      expect(r.membership, isNull, reason: '행사 입장 QR 이라 더 위험하다');
     });
   });
 

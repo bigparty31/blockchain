@@ -1,4 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:student_council_app/core/entry_verifier.dart';
 import 'package:student_council_app/models/entry_model.dart';
 import 'package:student_council_app/services/student_api_service.dart';
@@ -12,12 +14,27 @@ import 'package:student_council_app/services/student_api_service.dart';
 /// 종류라(각각은 멀쩡하다) 여기서 끝에서 끝까지 본다.
 ///
 /// 중간발표 시연이 이 데이터로 돌아가므로 결과가 바뀌면 바로 드러나야 한다.
+///
+/// **서버에 닿지 않는 클라이언트를 끼운다.** 예전에는 실제 네트워크를 타서
+/// 「그 머신에 백엔드가 떠 있는지」에 따라 결과가 달라졌다 — 서버가 켜져 있으면
+/// `/entries` 가 200 을 주면서 데모 모드가 꺼지고 온체인 조회는 404 라 배지가
+/// 전부 `partial` 로 바뀌었고, 켜지거나 죽는 중일 때는 연결이 대기해 30초 한도를
+/// 넘겼다. 백엔드를 돌리는 사람 누구에게나 깨지던 것이다.
 void main() {
+  setUp(() {
+    // 어떤 요청에도 응답하지 않는 서버 = 데모 폴백 경로. 이 테스트가 고정하려는
+    // 것이 바로 그 경로다.
+    StudentApiService.client =
+        MockClient((_) async => http.Response('', 503));
+  });
+
+  tearDown(() => StudentApiService.client = http.Client());
+
   test('데모 7건 — 정상 4건은 초록, 일부러 조작한 3건만 빨강', () async {
     final api = StudentApiService();
 
-    // 서버가 없으면 데모로 떨어진다. `_usingDemoData` 가 켜져야 아래 폴백들이
-    // 같은 데모 세계를 보므로 이 호출이 먼저여야 한다.
+    // `_usingDemoData` 가 켜져야 아래 폴백들이 같은 데모 세계를 보므로
+    // 이 호출이 먼저여야 한다.
     final entries = await api.fetchEntries();
     expect(entries, isNotEmpty);
 
