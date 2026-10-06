@@ -277,7 +277,6 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
             label: '학기 총수입',
             amount: _totalIncome,
             color: AppTheme.income,
-            icon: Icons.south_west_rounded,
           ),
         ),
         const SizedBox(width: 12),
@@ -286,7 +285,6 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
             label: '학기 총지출',
             amount: _totalExpense,
             color: AppTheme.expense,
-            icon: Icons.north_east_rounded,
           ),
         ),
       ],
@@ -448,17 +446,19 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
 }
 
 /// 총수입·총지출 작은 카드
+///
+/// 아이콘은 일부러 두지 않는다. ↗/↙ 는 가계부 앱에서 "전 기간 대비 증감"으로
+/// 읽히는데 여기 값은 학기 누계일 뿐 증감이 아니라서 오독을 부른다.
+/// 수입·지출 구분은 색(`AppTheme.income`/`expense`)과 라벨로만 한다.
 class _MiniStatCard extends StatelessWidget {
   final String label;
   final int amount;
   final Color color;
-  final IconData icon;
 
   const _MiniStatCard({
     required this.label,
     required this.amount,
     required this.color,
-    required this.icon,
   });
 
   @override
@@ -469,24 +469,9 @@ class _MiniStatCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              Container(
-                padding: const EdgeInsets.all(6),
-                decoration: BoxDecoration(
-                  color: color.withOpacity(0.12),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Icon(icon, size: 14, color: color),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  label,
-                  style: const TextStyle(fontSize: 12, color: AppTheme.textSub),
-                ),
-              ),
-            ],
+          Text(
+            label,
+            style: const TextStyle(fontSize: 12, color: AppTheme.textSub),
           ),
           const SizedBox(height: 10),
           FittedBox(
