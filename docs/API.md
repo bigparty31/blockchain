@@ -19,7 +19,7 @@
 **Request**
 ```json
 {
-  "student_no": "20240001",
+  "student_no": "20240002",
   "password": "userPassword123!"
 }
 ```
@@ -31,22 +31,55 @@
   "token_type": "bearer",
   "role": "TREASURER",
   "name": "김총무",
-  "wallet_address": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+  "wallet_address": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
 }
+```
+- `wallet_address`: 임원만 값이 있고 학생은 `null`
+- 토큰 유효시간: 12시간
+
+**로그인 실패 (`401 Unauthorized`)** — 학번이 없는지 비밀번호가 틀렸는지 구분하지 않습니다.
+```json
+{ "detail": "학번 또는 비밀번호가 올바르지 않습니다." }
 ```
 
 ### 2. 내 정보 조회 (`GET /auth/me`)
 - **설명**: 현재 로그인한 사용자의 기본 프로필과 권한을 확인합니다.
+- **권한**: 로그인한 사용자 누구나 (`Authorization` 헤더 필요)
 
 **Response (`200 OK`)**
 ```json
 {
-  "id": 1,
-  "student_no": "20240001",
+  "id": 2,
+  "student_no": "20240002",
   "name": "김총무",
   "role": "TREASURER"
 }
 ```
+
+### 3. 인증 헤더와 권한 오류 (공통)
+- 로그인이 필요한 API는 `Authorization: Bearer <access_token>` 헤더를 붙여 호출합니다.
+- 조회 API(`GET /entries`, `GET /balance`, `GET /budgets`)는 현재 토큰 없이 호출할 수 있습니다.
+
+| 상황 | 응답 | `detail` |
+| :--- | :--- | :--- |
+| 헤더 없음 | `401` | `로그인이 필요합니다.` |
+| 토큰 만료 | `401` | `세션이 만료되었습니다. 다시 로그인해 주세요.` |
+| 위조·손상된 토큰, 없는 사용자 | `401` | `유효하지 않은 토큰입니다.` |
+| 허용되지 않은 역할 | `403` | `이 작업을 할 권한이 없습니다.` |
+
+`401` 응답에는 `WWW-Authenticate: Bearer` 헤더가 붙습니다. 앱은 `401`이면 로그인 화면으로, `403`이면 권한 없음 안내로 처리합니다.
+
+### 4. 테스트 계정 (DB 도입 전 시드)
+비밀번호는 모두 `userPassword123!` 입니다. id는 더미 데이터(`created_by=2`, `approved_by=3`)에 맞췄습니다.
+임원 지갑은 로컬 배포의 임원 계정(`contracts/deployments/localhost.json`의 `accounts`, Hardhat 계정 1·2·3·5)과 같습니다. 체인의 등록자·승인자 주소를 사용자와 대조하는 기준이라, 재배포로 계정이 바뀌면 함께 바꿔야 합니다 (`backend/tests/test_seed_wallets.py`가 확인). 감사는 컨트랙트 규칙상 최소 2명입니다.
+
+| id | 학번 | 이름 | role | wallet_address |
+| :--- | :--- | :--- | :--- | :--- |
+| 1 | 20240001 | 김학생 | `STUDENT` | `null` |
+| 2 | 20240002 | 김총무 | `TREASURER` | `0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC` |
+| 3 | 20240003 | 이감사 | `AUDITOR` | `0x90F79bf6EB2c4f870365E785982E1f101E93b906` |
+| 4 | 20240004 | 박회장 | `PRESIDENT` | `0x70997970C51812dc3A010C7d01b50e0d17dc79C8` |
+| 5 | 20240005 | 최감사 | `AUDITOR` | `0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc` |
 
 ---
 
@@ -64,10 +97,11 @@
     "term_id": 1,
     "category": "행사비",
     "planned_amount": 2500000,
-    "remaining_amount": 2500000,
-    "execution_rate": 0.0,
-    "version": 1,
-    "expires_at": 1767196799
+    "remaining_amount": 2470000,
+    "execution_rate": 0.012,
+    "version": 2,
+    "expires_at": 1797260399,
+    "revision_reason": "참가인원 증가"
   },
   {
     "id": 2,
@@ -77,7 +111,7 @@
     "remaining_amount": 1465000,
     "execution_rate": 0.023,
     "version": 1,
-    "expires_at": 1767196799
+    "expires_at": 1797260399
   },
   {
     "id": 3,
@@ -87,7 +121,7 @@
     "remaining_amount": 1000000,
     "execution_rate": 0.0,
     "version": 1,
-    "expires_at": 1767196799
+    "expires_at": 1797260399
   }
 ]
 ```
@@ -101,7 +135,7 @@
   "term_id": 1,
   "category": "행사비",
   "planned_amount": 2500000,
-  "expires_at": 1767196799
+  "expires_at": 1797260399
 }
 ```
 
@@ -176,6 +210,8 @@
 
 #### 2.1 [1단계] 초안 등록 및 검증 (`POST /entries`)
 - **설명**: 총무가 영수증 해시와 거래 내역을 입력하여 초안을 생성합니다. 블록체인 기록 전이므로 온체인 상태가 아니며, 고유 `id`만 발급됩니다.
+- **권한**: 총무(`TREASURER`)만. 컨트랙트도 등록자를 총무로 제한합니다(`NotRegistrant`). 학생·감사·회장은 `403`, 토큰이 없으면 `401` (인증 §3).
+- **등록자**: `created_by`에는 토큰의 사용자 id가 기록됩니다.
 
 **Request**
 ```json
@@ -206,6 +242,8 @@
 
 #### 2.2 [2단계] 모바일 앱 서명 및 체인 등록 (`POST /entries/{id}/submit`)
 - **설명**: 1단계에서 발급받은 `id`에 대해 총무의 모바일 기기 서명값(`RecordRequest` EIP-712 signature)을 백엔드로 전달하여 블록체인에 등록합니다. 등록 완료 시 `tx_pending` 해시가 부여되며 이 시점부터 온체인 **`PENDING`** 상태가 부여됩니다.
+- **권한**: 초안을 등록한 총무 본인만. 다른 역할은 `403` "이 작업을 할 권한이 없습니다.", 다른 총무는 `403` "본인이 등록한 초안만 제출할 수 있습니다.", 토큰이 없으면 `401`.
+  - 다른 사람이 서명하면 체인의 등록자(서명자)와 DB의 `created_by`가 달라져 학생 앱 검증에서 불일치로 표시되기 때문입니다.
 - **예산 검증 및 차단 (`BLOCKED`)**: 
   - 잔여 예산 초과, 집행 마감 경과 등의 사유 발생 시 단순 `400 Bad Request`로 요청을 버리지 않고, **감사 및 추적을 위해 장부에 `status: BLOCKED`로 기록**하며 사유(`block_reason`)를 반환합니다.
 
@@ -256,6 +294,10 @@
 ### 3. 감사 기기 서명 승인 (`POST /entries/{id}/approve`)
 - **설명**: 감사가 기기 생체인증 서명(`ConfirmApproval`)을 제출하여 지출을 `CONFIRMED`로 최종 확정하고 연계 예산을 차감합니다.
 - **제약 (Maker-Checker)**: 작성자(`created_by`)와 승인자(`approved_by`)가 동일할 경우 `403 Forbidden`으로 즉시 거부됩니다.
+  - `detail`: `본인이 등록한 항목은 승인·반려할 수 없습니다.` — 역할 오류(`이 작업을 할 권한이 없습니다.`)와 구분됩니다.
+  - **반려에도 똑같이 적용**됩니다. 컨트랙트가 확정·반려 서명자 모두 등록자와 같으면 revert(`SelfApproval`)하기 때문입니다.
+  - 서버 검사는 서명이 담긴 요청이 온 뒤에 돌기 때문에, 서명 전에 막으려면 **화면에서 먼저** 거릅니다. 승인 목록에서 `GET /auth/me`의 `id`와 항목의 `created_by`가 같으면 승인·반려 버튼을 비활성화합니다.
+  - 서버 구현: `app/auth/approval.py`의 `ensure_not_self_approval(entry.created_by, user)`를 승인·반려 API에서 항목을 불러온 뒤 호출합니다.
 
 **Request**
 ```json
@@ -311,4 +353,73 @@
   "onchain_meta_hash": "0x24ae73988d927fb39f45eb6024e9ff8ffa19e8501603565bd82710ea8df4b937",
   "is_tampered": false
 }
+```
+
+### 3. 사용자 지갑 매핑 (`GET /users/wallets`)
+- **설명**: 체인의 `registrant`·`approver`(지갑 주소)를 DB의 `created_by`·`approved_by`(user id)와 대조할 때 쓰는 매핑입니다. 학생 앱 단건 검증 2단계가 읽습니다 (HASHING.md §2, `docs/backend_requests.md` 1-2).
+- **권한**: 토큰 없이 호출할 수 있습니다 (다른 조회 API와 같음). 임원 주소는 체인에 이미 공개된 값입니다.
+- **범위**: 지갑이 등록된 사용자(현·전 임원)가 모두 들어 있습니다. 역할이 아니라 지갑 유무로 고르므로, 임기가 끝난 사람이 등록·승인한 과거 항목도 검증할 수 있습니다. 지갑이 없는 학생은 체인에 서명자로 나오지 않아 빠집니다.
+- **형식**: 키는 user id 문자열, 값은 EIP-55 체크섬 주소입니다. **비교할 때는 양쪽을 소문자로 맞춥니다.** 주소는 로컬 배포의 임원 계정(`contracts/deployments/localhost.json`)과 같습니다.
+
+**Response (`200 OK`)**
+```json
+{
+  "2": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+  "3": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+  "4": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+  "5": "0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc"
+}
+```
+
+---
+
+## 체인
+
+### 1. EIP-712 서명 도메인 (`GET /chain/domains`)
+- **설명**: 앱이 서명할 때 쓸 EIP-712 도메인을 배포 기록(`contracts/deployments/localhost.json`)에서 읽어 내려줍니다. 재배포하면 주소와 도메인이 바뀌므로 **앱은 값을 하드코딩하지 말고 이 API를 씁니다.**
+- **권한**: 토큰 없이 호출할 수 있습니다.
+- **도메인 고르기**: 서명을 받는 컨트랙트마다 도메인이 따로 있습니다 (`docs/CONTRACTS.md` 「EIP-712」).
+
+| 서명 | 도메인 |
+| :--- | :--- |
+| 등록 `RecordRequest`, 승인 `ConfirmApproval`, 반려 `RejectDecision` | `AccountingLedger` |
+| 예산 발행 `IssueRequest`, 증액 `IncreaseRequest`, 회수 `ReclaimRequest` | `BudgetToken` |
+| 롤 변경 `RoleChange`, 회장 복구 `PresidentRecovery`·`RecoveryCancel` | `RoleManager` |
+
+- **검산**: `domainSeparator`는 컨트랙트의 `DOMAIN_SEPARATOR()`입니다. 앱이 나머지 네 필드로 계산한 도메인 해시와 비교하면, 체인 id나 주소를 잘못 쓴 것을 서명 전에 잡을 수 있습니다.
+- 키 이름은 EIP-712 도메인 필드 그대로(`chainId`, `verifyingContract`)라 서명 라이브러리에 바로 넘길 수 있습니다. `domainSeparator`는 도메인 필드가 아니니 넘기기 전에 뺍니다.
+
+**Response (`200 OK`)**
+```json
+{
+  "chainId": 31337,
+  "domains": {
+    "RoleManager": {
+      "name": "RoleManager",
+      "version": "1",
+      "chainId": 31337,
+      "verifyingContract": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+      "domainSeparator": "0xebbd14b2ace84e519e5d9866354eabd2160af1a8a8675bb913e187e94c7a2a0c"
+    },
+    "BudgetToken": {
+      "name": "BudgetToken",
+      "version": "1",
+      "chainId": 31337,
+      "verifyingContract": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
+      "domainSeparator": "0x1f2905a02b6b82de113d21bf22f98674232314b3d02d77ab6f4bdf7e0c252699"
+    },
+    "AccountingLedger": {
+      "name": "AccountingLedger",
+      "version": "1",
+      "chainId": 31337,
+      "verifyingContract": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
+      "domainSeparator": "0x7887f5ba6910ea3e84a905c6e45288e1cd7b0f62a455182c7bc12b4208109294"
+    }
+  }
+}
+```
+
+**배포 기록이 없거나 앞뒤가 맞지 않을 때 (`503 Service Unavailable`)** — 서명 도메인(`AccountingLedger`·`BudgetToken`·`RoleManager`) 중 하나라도 없거나, 도메인의 `chainId`·`verifyingContract`가 같은 파일의 체인·주소와 다르거나, `domainSeparator`가 네 필드로 계산한 값과 다르면 반쯤 갱신되거나 잘못된 기록으로 보고 내려주지 않습니다. 틀린 `domainSeparator`를 내려주면 앱의 검산이 모든 서명을 막기 때문입니다.
+```json
+{ "detail": "배포 기록이 없습니다 (localhost.json). 컨트랙트를 배포했는지 확인하세요" }
 ```

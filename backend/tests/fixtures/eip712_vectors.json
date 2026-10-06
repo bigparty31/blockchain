@@ -1,0 +1,109 @@
+{
+  "generatedBy": "contracts/scripts/eip712Vectors.ts (ethers 6.17.0)",
+  "domain": {
+    "name": "AccountingLedger",
+    "version": "1",
+    "chainId": 31337,
+    "verifyingContract": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
+    "domainSeparator": "0x7887f5ba6910ea3e84a905c6e45288e1cd7b0f62a455182c7bc12b4208109294"
+  },
+  "vectors": [
+    {
+      "name": "record_income",
+      "primaryType": "RecordRequest",
+      "message": {
+        "id": 1,
+        "hash": "0xf515bb6ee3a0e85455c6c98565c134c0278865e7ddc4f157c4fd1b118ed15282",
+        "amount": 500000,
+        "kind": 0,
+        "term": 20262,
+        "occurredAt": 1790694000,
+        "budgetId": 0,
+        "correctsId": 0,
+        "deadline": 1790700000
+      },
+      "digest": "0x74788e51b78d1360f2a5affccc548d8bceed5254ded5f4beec693c66c3dd35c2",
+      "signature": "0x0df786962ffa1dc4ad9ee15bcff27e2403000eb2dfc9908a9136f16f3d1489ad380466c267f576c2e996bb99202f0c6c740f00c1f20d27fce8e234079f35ac0f1c",
+      "signer": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+    },
+    {
+      "name": "record_expense",
+      "primaryType": "RecordRequest",
+      "message": {
+        "id": 2,
+        "hash": "0x396aae648a6fad646ec310ea07e1533107d8f323ffc3a0c345907fecc5674ee5",
+        "amount": 35000,
+        "kind": 1,
+        "term": 20262,
+        "occurredAt": 1790694000,
+        "budgetId": 1,
+        "correctsId": 0,
+        "deadline": 1790700000
+      },
+      "digest": "0x4ef8118a6a9c61e0895334ae8f067f0ed1e94cebdefa165f5689480a622754ab",
+      "signature": "0x7fe5cae27dfbeed3276bef786a34727cb814d1425561ef809f9d9fb79c6603cd51982a7d496933e25c23709ea10e48ed49b44bc60b2f4ade06937d40e0e8fb591c",
+      "signer": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+    },
+    {
+      "name": "record_negative_correction",
+      "primaryType": "RecordRequest",
+      "message": {
+        "id": 3,
+        "hash": "0x194139c082a800691e8a6cde500ef51671ab08d3bc33b45637f2529240e116f9",
+        "amount": -20000,
+        "kind": 1,
+        "term": 20262,
+        "occurredAt": 1790694000,
+        "budgetId": 1,
+        "correctsId": 2,
+        "deadline": 1790700000
+      },
+      "digest": "0x9f08e4fb82c77ef0ffdde6fd0921258826fd8d274d80f4878e0848484a1fbbfb",
+      "signature": "0x70e801220a03449cd4643cba758aab2d96228df4d377d406100987437ace92733828ebe24de87841db50a6228329c0a251a4b882b93df7c9e029584ee31b1c7e1c",
+      "signer": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+    },
+    {
+      "name": "confirm_expense",
+      "primaryType": "ConfirmApproval",
+      "message": {
+        "id": 2,
+        "hash": "0x396aae648a6fad646ec310ea07e1533107d8f323ffc3a0c345907fecc5674ee5",
+        "entryCommit": "0x678b1aa0844ace9b1ebcbfc9a0e8b4c04ae220d9b91c6156ace056b7e6a1e5e8",
+        "hadWarning": false,
+        "warningReasonHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "deadline": 1790700000
+      },
+      "digest": "0x4ba370fbc0b1977f6e55ff73cf2872e926aa0bba2ec5789453920ab6d7f16313",
+      "signature": "0x33454802fd8ac95e7ebbd72e9e7c00d20f08acf1f1873a0b26e3658b0ba5c56d435673b5dc1075824d5ef5836a624ae6daff2f43b420fd71b1d88ceb49ac68771b",
+      "signer": "0x90F79bf6EB2c4f870365E785982E1f101E93b906"
+    },
+    {
+      "name": "confirm_with_warning",
+      "primaryType": "ConfirmApproval",
+      "message": {
+        "id": 2,
+        "hash": "0x396aae648a6fad646ec310ea07e1533107d8f323ffc3a0c345907fecc5674ee5",
+        "entryCommit": "0x678b1aa0844ace9b1ebcbfc9a0e8b4c04ae220d9b91c6156ace056b7e6a1e5e8",
+        "hadWarning": true,
+        "warningReasonHash": "0x59d4fd2cc559f4952ba0735c7b2379cb3ad97edf82f828bfbd85b7e3e4b7bd36",
+        "deadline": 1790700000
+      },
+      "digest": "0x4709dbd29e4486e52ec442d842ab2f7cce99975de6a18c34214291145614ccd4",
+      "signature": "0x7f504d25bbf9a781cc11635cc56a9be04018b78857b28f876325c65a61074cec6f3828c4abac6bab40b5a7d222492c3f18d261e2866c221e21f44e0404e97aae1c",
+      "signer": "0x90F79bf6EB2c4f870365E785982E1f101E93b906"
+    },
+    {
+      "name": "reject_expense",
+      "primaryType": "RejectDecision",
+      "message": {
+        "id": 2,
+        "entryCommit": "0x678b1aa0844ace9b1ebcbfc9a0e8b4c04ae220d9b91c6156ace056b7e6a1e5e8",
+        "reasonHash": "0x5f10637f0b08a8934c99101551734eafe3858f6de5311b7c3824f10bccf145cb",
+        "deadline": 1790700000
+      },
+      "digest": "0x381256ae064fac40608a11e09cec77ef448669199878751494af1d2b17622e3d",
+      "signature": "0x664b9d3a104da74b654de4f37d2b99f7fa987973dfc54c6e55e72800b7df3797533e470f5cd6e924830d3e9be0236f217f2daa232c9bb87aad07f45a8933c1781c",
+      "signer": "0x90F79bf6EB2c4f870365E785982E1f101E93b906"
+    }
+  ]
+}

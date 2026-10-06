@@ -19,7 +19,7 @@ config = context.config
 
 # Interpret the config file for Python logging.
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # 환경 변수나 database.py의 DATABASE_URL을 alembic 설정에 동적 주입
 raw_url = config.get_main_option("sqlalchemy.url")

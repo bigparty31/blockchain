@@ -44,10 +44,22 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 | Method | Endpoint | 설명 | 반환 데이터 |
 | :--- | :--- | :--- | :--- |
 | `GET` | `/` | 헬스체크 및 서비스 상태 | `{ "status": "ok", ... }` |
+| `POST` | `/auth/login` | 학번·비밀번호 로그인 | `{ "access_token": "...", "role": "TREASURER", ... }` |
+| `GET` | `/auth/me` | 내 정보 (토큰 필요) | `{ "id": 2, "role": "TREASURER", ... }` |
 | `GET` | `/entries` | 수입·지출 내역 목록 | 더미 3건 (확정 지출, 대기 지출, 확정 수입) |
-| `POST` | `/entries` | 지출/수입 신규 등록 | `{ "id": 4, "status": "PENDING", ... }` |
+| `POST` | `/entries` | 지출/수입 초안 등록 (**총무 토큰 필요**) | `{ "id": 4, "message": "..." }` |
+| `POST` | `/entries/{id}/submit` | 초안 서명 제출 (**등록한 총무 본인 토큰 필요**) | `{ "id": 4, "status": "PENDING", ... }` |
 | `GET` | `/balance` | 장부 잔액 요약 | `{ "balance": 4965000, "income": 5000000, "expense": 35000 }` |
 | `GET` | `/budgets` | 카테고리별 예산 현황 | 행사비, 사업비, 운영비 편성액 및 잔량 |
+| `GET` | `/chain/domains` | 앱이 서명할 EIP-712 도메인 (컨트랙트별) | `{ "chainId": 31337, "domains": { ... } }` |
+| `GET` | `/users/wallets` | user id ↔ 지갑 주소 매핑 (현·전 임원, 검증용) | `{ "2": "0x3C44…93BC", ... }` |
+
+### 2.1 인증
+- `POST /auth/login` 으로 받은 `access_token` 을 `Authorization: Bearer <token>` 헤더로 보냅니다. Swagger UI 에서는 우측 상단 **Authorize** 에 토큰을 넣으면 됩니다.
+- 테스트 계정: `20240001`(학생) · `20240002`(총무) · `20240003`(감사) · `20240004`(회장) · `20240005`(감사 2), 비밀번호는 모두 `userPassword123!` (자세한 내용은 `docs/API.md` 「인증」)
+- 설정은 환경변수로 줍니다. 저장소 루트의 `.env.example` 을 `.env` 로 복사해 채우면 서버가 시작할 때 읽습니다 (`app/env.py`). 이미 설정된 실제 환경변수가 우선합니다.
+- 배포 기록 위치는 환경변수 `DEPLOYMENTS_FILE` 로 바꿀 수 있습니다. 없으면 저장소의 `contracts/deployments/localhost.json` 을 읽습니다 (`GET /chain/domains`, 릴레이어가 사용).
+- 토큰 서명 키는 환경변수 `JWT_SECRET` 으로 설정합니다. 없으면 개발용 기본 키를 쓰고 시작 로그에 경고가 뜹니다 — **배포 환경에서는 반드시 설정하세요.**
 
 ---
 
