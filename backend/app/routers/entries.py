@@ -1,7 +1,10 @@
+import logging
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
+
+logger = logging.getLogger(__name__)
 
 from app.auth import User, require_roles
 from app.auth.approval import ensure_not_self_approval
@@ -18,7 +21,7 @@ from app.chain import (
 )
 from app.chain.models import BlockReason as ChainBlockReason
 from app.database import get_db
-from app.models import Budget as DBBudget, Entry as DBEntry, Term as DBTerm
+from app.models import Budget as DBBudget, Entry as DBEntry, Term as DBTerm, User as DBUser
 from app.schemas.auth import Role
 from app.schemas.entry import (
     BlockReason,
@@ -42,6 +45,13 @@ from app.utils.hashing import (
     text_hash,
     validate_text_for_hash,
 )
+
+# PRD §8/§9 기준 경고 판정 대상 OCR 상태 (MATCH, NO_NUMBER, None 은 정상)
+WARNING_OCR_STATUSES = {
+    OCRStatus.MISMATCH.value,
+    OCRStatus.DUPLICATE.value,
+    OCRStatus.UNREADABLE.value,
+}
 
 router = APIRouter(prefix="/entries", tags=["Entries"])
 
@@ -235,7 +245,7 @@ async def create_entry(
             detail="occurred_at은 사용일의 KST 자정(00:00:00 KST) Unix timestamp 초 단위여야 합니다.",
         )
 
-    # 4. 영수증 중복 검사 (DB + DUMMY_ENTRIES)
+    # 4. 영수증 중복 검사 (DB)
     if entry.ocr_approval_no and entry.ocr_paid_at:
         try:
             existing_db = (
@@ -247,24 +257,18 @@ async def create_entry(
                 )
                 .first()
             )
-            if existing_db:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=f"이미 등록된 영수증입니다 (내역 ID: {existing_db.id}, 승인번호: {entry.ocr_approval_no}).",
-                )
-        except SQLAlchemyError:
-            pass
+        except SQLAlchemyError as e:
+            logger.exception("영수증 중복 조회 중 데이터베이스 오류: %s", e)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="데이터베이스 처리 중 오류가 발생했습니다.",
+            )
 
-        for existing in DUMMY_ENTRIES:
-            if (
-                existing.ocr_approval_no == entry.ocr_approval_no
-                and existing.ocr_paid_at == entry.ocr_paid_at
-                and existing.amount == entry.amount
-            ):
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=f"이미 등록된 영수증입니다 (내역 ID: {existing.id}, 승인번호: {entry.ocr_approval_no}).",
-                )
+        if existing_db:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"이미 등록된 영수증입니다 (내역 ID: {existing_db.id}, 승인번호: {entry.ocr_approval_no}).",
+            )
 
     # 5. meta_hash 계산
     computed_meta_hash = calculate_meta_hash(
@@ -275,9 +279,7 @@ async def create_entry(
         receipt_hash=entry.receipt_hash,
     )
 
-    # 6. ID 채번 및 저장
-    new_id = max([e.id for e in DUMMY_ENTRIES], default=0) + 1
-
+    # 6. DB 초안 생성 (쓰기 경로는 실제 DB 전용)
     try:
         db_entry = DBEntry(
             term_id=entry.term_id,
@@ -310,43 +312,16 @@ async def create_entry(
         db.add(db_entry)
         db.commit()
         db.refresh(db_entry)
-        new_id = db_entry.id
-    except SQLAlchemyError:
+    except SQLAlchemyError as e:
         db.rollback()
-
-    dummy_item = EntryResponse(
-        id=new_id,
-        term_id=entry.term_id,
-        kind=entry.kind,
-        amount=entry.amount,
-        counterparty=canonical_counterparty,
-        purpose=canonical_purpose,
-        budget_id=entry.budget_id,
-        occurred_at=entry.occurred_at,
-        receipt_path=entry.receipt_path,
-        receipt_hash=entry.receipt_hash,
-        meta_hash=computed_meta_hash,
-        hash_version=1,
-        ocr_amount=entry.ocr_amount,
-        ocr_approval_no=entry.ocr_approval_no,
-        ocr_paid_at=entry.ocr_paid_at,
-        ocr_status=entry.ocr_status,
-        category_warning=False,
-        warning_ack_reason=None,
-        status=None,
-        created_by=user.id,
-        approved_by=None,
-        rejected_by=None,
-        reject_reason=None,
-        tx_pending=None,
-        tx_confirm=None,
-        corrects_entry_id=entry.corrects_entry_id,
-        correction_reason=entry.correction_reason,
-    )
-    DUMMY_ENTRIES.append(dummy_item)
+        logger.exception("초안 등록 중 데이터베이스 오류: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 처리 중 오류가 발생했습니다.",
+        )
 
     return EntryCreateResponse(
-        id=new_id,
+        id=db_entry.id,
         message="지출/수입 초안이 등록되었으며, 기기 서명 제출 대기 상태입니다.",
     )
 
@@ -368,21 +343,22 @@ async def submit_entry(
     체인 릴레이 전에 ChainClient.signer_of 로 서명자 지갑 주소를 기대 지갑(총무 지갑)과 대조합니다.
     불일치하거나 서명 형식이 틀리면 400 Bad Request를 반환합니다.
     """
-    # 1. 초안 조회 (DB 또는 DUMMY_ENTRIES)
-    db_target = None
+    # 1. 초안 조회 (DB 전용)
     try:
-        db_target = db.query(DBEntry).filter(DBEntry.id == id).first()
-    except SQLAlchemyError:
-        pass
-    dummy_target = next((e for e in DUMMY_ENTRIES if e.id == id), None)
+        target = db.query(DBEntry).filter(DBEntry.id == id).first()
+    except SQLAlchemyError as e:
+        logger.exception("초안 조회 중 데이터베이스 오류: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 처리 중 오류가 발생했습니다.",
+        )
 
-    if not db_target and not dummy_target:
+    if not target:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"ID {id}에 해당하는 초안 내역을 찾을 수 없습니다.",
         )
 
-    target = dummy_target or db_target
     created_by = target.created_by
     current_status = target.status
     current_tx = target.tx_pending
@@ -402,13 +378,21 @@ async def submit_entry(
         )
 
     # 4. 온체인 학기 코드(term_code, YYYYS) 조회
-    term_code = 20261
+    db_term = None
     try:
         db_term = db.query(DBTerm).filter(DBTerm.id == target.term_id).first()
-        if db_term and db_term.term_code:
-            term_code = db_term.term_code
-    except SQLAlchemyError:
-        pass
+    except SQLAlchemyError as e:
+        logger.exception("학기 정보 조회 중 데이터베이스 오류: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 처리 중 오류가 발생했습니다.",
+        )
+    if not db_term or not db_term.term_code:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"해당 항목(term_id={target.term_id})의 유효한 학기 코드(term_code)를 찾을 수 없습니다.",
+        )
+    term_code = db_term.term_code
 
     # 5. RecordRequest 구성
     target_kind = EntryKind(target.kind)
@@ -447,6 +431,14 @@ async def submit_entry(
         )
 
     expected_wallet = user.wallet_address
+    if not expected_wallet:
+        try:
+            db_u = db.query(DBUser).filter(DBUser.id == user.id).first()
+            if db_u and db_u.wallet_address:
+                expected_wallet = db_u.wallet_address
+        except SQLAlchemyError:
+            pass
+
     if not expected_wallet or recovered_signer.lower() != expected_wallet.lower():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -469,24 +461,24 @@ async def submit_entry(
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
-    # 8. 상태 갱신
+    # 8. 상태 갱신 (DB 전용)
     new_status = tx_result.status
     tx_hash = tx_result.tx_hash
     b_reason = tx_result.block_reason
 
-    if db_target:
-        try:
-            db_target.status = new_status.value
-            db_target.tx_pending = tx_hash
-            if b_reason:
-                db_target.block_reason = b_reason.value
-            db.commit()
-        except SQLAlchemyError:
-            db.rollback()
-
-    if dummy_target:
-        dummy_target.status = new_status
-        dummy_target.tx_pending = tx_hash
+    try:
+        target.status = new_status.value
+        target.tx_pending = tx_hash
+        if b_reason:
+            target.block_reason = b_reason.value
+        db.commit()
+    except SQLAlchemyError as e:
+        db.rollback()
+        logger.exception("초안 제출 상태 저장 중 데이터베이스 오류: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 처리 중 오류가 발생했습니다.",
+        )
 
     msg = (
         "온체인에 성공적으로 기록되어 감사 승인 대기(PENDING) 상태가 되었습니다."
@@ -519,20 +511,22 @@ async def confirm_entry(
     자기 승인(등록자 본인의 승인)은 403으로 차단됩니다.
     체인 릴레이 전에 signer_of 로 승인자의 지갑 주소를 대조합니다.
     """
-    db_target = None
+    # 1. 항목 조회 (DB 전용)
     try:
-        db_target = db.query(DBEntry).filter(DBEntry.id == id).first()
-    except SQLAlchemyError:
-        pass
-    dummy_target = next((e for e in DUMMY_ENTRIES if e.id == id), None)
+        target = db.query(DBEntry).filter(DBEntry.id == id).first()
+    except SQLAlchemyError as e:
+        logger.exception("내역 조회 중 데이터베이스 오류: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 처리 중 오류가 발생했습니다.",
+        )
 
-    if not db_target and not dummy_target:
+    if not target:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"ID {id}에 해당하는 내역을 찾을 수 없습니다.",
         )
 
-    target = dummy_target or db_target
     ensure_not_self_approval(target.created_by, user)
 
     current_status = target.status
@@ -542,14 +536,22 @@ async def confirm_entry(
             detail="PENDING 상태의 항목만 확정할 수 있습니다.",
         )
 
-    # 학기 코드 및 등록자 정보
-    term_code = 20261
+    # 학기 코드 조회
+    db_term = None
     try:
         db_term = db.query(DBTerm).filter(DBTerm.id == target.term_id).first()
-        if db_term and db_term.term_code:
-            term_code = db_term.term_code
-    except SQLAlchemyError:
-        pass
+    except SQLAlchemyError as e:
+        logger.exception("학기 정보 조회 중 데이터베이스 오류: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 처리 중 오류가 발생했습니다.",
+        )
+    if not db_term or not db_term.term_code:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"해당 항목(term_id={target.term_id})의 유효한 학기 코드(term_code)를 찾을 수 없습니다.",
+        )
+    term_code = db_term.term_code
 
     target_kind = EntryKind(target.kind)
     target_amount = target.amount
@@ -563,7 +565,20 @@ async def confirm_entry(
     )
 
     creator = get_user_by_id(target.created_by)
-    registrant_addr = (creator and creator.wallet_address) or "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+    registrant_addr = creator.wallet_address if creator else None
+    if not registrant_addr:
+        try:
+            db_creator = db.query(DBUser).filter(DBUser.id == target.created_by).first()
+            if db_creator and db_creator.wallet_address:
+                registrant_addr = db_creator.wallet_address
+        except SQLAlchemyError:
+            pass
+
+    if not registrant_addr:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"등록자(user_id={target.created_by})의 유효한 지갑 주소를 찾을 수 없습니다.",
+        )
 
     commit_hash = entry_commit(
         hash=target_hash,
@@ -576,7 +591,24 @@ async def confirm_entry(
         registrant=registrant_addr,
     )
 
-    had_warning = bool(target.category_warning)
+    # 경고 승인 판정 (카테고리 불일치 경고 또는 OCR 불일치/미인식 건)
+    # PRD §8/§9 기준: MISMATCH, DUPLICATE, UNREADABLE 만 경고 대상이며, MATCH, NO_NUMBER, None 은 정상
+    ocr_status_val = target.ocr_status.value if hasattr(target.ocr_status, "value") else target.ocr_status
+    has_ocr_warning = bool(ocr_status_val in WARNING_OCR_STATUSES)
+    had_warning = bool(target.category_warning or has_ocr_warning)
+
+    # 경고 항목인데 사유가 비어 있으면 선제 400 차단 (체인 ReasonRequired 방지)
+    if had_warning and not (req.warning_reason and req.warning_reason.strip()):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="경고 항목 승인 시에는 경고 무시 사유(warning_reason)가 필수입니다.",
+        )
+    if not had_warning and req.warning_reason and req.warning_reason.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="경고 항목이 아닌 경우 경고 무시 사유(warning_reason)를 제출할 수 없습니다.",
+        )
+
     warning_reason_hash = (
         text_hash(canonical_text(req.warning_reason))
         if had_warning and req.warning_reason
@@ -617,21 +649,21 @@ async def confirm_entry(
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
-    if db_target:
-        try:
-            db_target.status = EntryStatus.CONFIRMED.value
-            db_target.approved_by = user.id
-            db_target.tx_confirm = tx_res.tx_hash
-            if had_warning and req.warning_reason:
-                db_target.warning_ack_reason = canonical_text(req.warning_reason)
-            db.commit()
-        except SQLAlchemyError:
-            db.rollback()
-
-    if dummy_target:
-        dummy_target.status = EntryStatus.CONFIRMED
-        dummy_target.approved_by = user.id
-        dummy_target.tx_confirm = tx_res.tx_hash
+    # 상태 갱신 (DB 전용)
+    try:
+        target.status = EntryStatus.CONFIRMED.value
+        target.approved_by = user.id
+        target.tx_confirm = tx_res.tx_hash
+        if had_warning and req.warning_reason:
+            target.warning_ack_reason = canonical_text(req.warning_reason)
+        db.commit()
+    except SQLAlchemyError as e:
+        db.rollback()
+        logger.exception("내역 확정 상태 저장 중 데이터베이스 오류: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 처리 중 오류가 발생했습니다.",
+        )
 
     return EntryConfirmResponse(
         id=id,
@@ -657,20 +689,22 @@ async def reject_entry(
     자기 승인/반려는 403으로 차단됩니다.
     체인 릴레이 전에 signer_of 로 서명자 지갑 주소를 대조합니다.
     """
-    db_target = None
+    # 1. 항목 조회 (DB 전용)
     try:
-        db_target = db.query(DBEntry).filter(DBEntry.id == id).first()
-    except SQLAlchemyError:
-        pass
-    dummy_target = next((e for e in DUMMY_ENTRIES if e.id == id), None)
+        target = db.query(DBEntry).filter(DBEntry.id == id).first()
+    except SQLAlchemyError as e:
+        logger.exception("내역 조회 중 데이터베이스 오류: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 처리 중 오류가 발생했습니다.",
+        )
 
-    if not db_target and not dummy_target:
+    if not target:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"ID {id}에 해당하는 내역을 찾을 수 없습니다.",
         )
 
-    target = dummy_target or db_target
     ensure_not_self_approval(target.created_by, user)
 
     current_status = target.status
@@ -686,13 +720,22 @@ async def reject_entry(
 
     reason_hash = text_hash(canon_reason)
 
-    term_code = 20261
+    # 학기 코드 조회
+    db_term = None
     try:
         db_term = db.query(DBTerm).filter(DBTerm.id == target.term_id).first()
-        if db_term and db_term.term_code:
-            term_code = db_term.term_code
-    except SQLAlchemyError:
-        pass
+    except SQLAlchemyError as e:
+        logger.exception("학기 정보 조회 중 데이터베이스 오류: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 처리 중 오류가 발생했습니다.",
+        )
+    if not db_term or not db_term.term_code:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"해당 항목(term_id={target.term_id})의 유효한 학기 코드(term_code)를 찾을 수 없습니다.",
+        )
+    term_code = db_term.term_code
 
     target_kind = EntryKind(target.kind)
     target_amount = target.amount
@@ -706,7 +749,20 @@ async def reject_entry(
     )
 
     creator = get_user_by_id(target.created_by)
-    registrant_addr = (creator and creator.wallet_address) or "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+    registrant_addr = creator.wallet_address if creator else None
+    if not registrant_addr:
+        try:
+            db_creator = db.query(DBUser).filter(DBUser.id == target.created_by).first()
+            if db_creator and db_creator.wallet_address:
+                registrant_addr = db_creator.wallet_address
+        except SQLAlchemyError:
+            pass
+
+    if not registrant_addr:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"등록자(user_id={target.created_by})의 유효한 지갑 주소를 찾을 수 없습니다.",
+        )
 
     commit_hash = entry_commit(
         hash=target_hash,
@@ -751,19 +807,19 @@ async def reject_entry(
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
-    if db_target:
-        try:
-            db_target.status = EntryStatus.REJECTED.value
-            db_target.rejected_by = user.id
-            db_target.reject_reason = canon_reason
-            db.commit()
-        except SQLAlchemyError:
-            db.rollback()
-
-    if dummy_target:
-        dummy_target.status = EntryStatus.REJECTED
-        dummy_target.rejected_by = user.id
-        dummy_target.reject_reason = canon_reason
+    # 상태 갱신 (DB 전용)
+    try:
+        target.status = EntryStatus.REJECTED.value
+        target.rejected_by = user.id
+        target.reject_reason = canon_reason
+        db.commit()
+    except SQLAlchemyError as e:
+        db.rollback()
+        logger.exception("내역 반려 상태 저장 중 데이터베이스 오류: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 처리 중 오류가 발생했습니다.",
+        )
 
     return EntryRejectResponse(
         id=id,

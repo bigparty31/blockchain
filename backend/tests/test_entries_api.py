@@ -1,15 +1,24 @@
 import time
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 from app.auth import users
 from app.auth.security import create_access_token
 from app.chain import FakeChainClient, fake_signature, get_chain_client, set_chain_client
 from app.chain.models import BlockReason
+from app.database import Base, get_db
 from app.main import app
-from app.routers.entries import DUMMY_ENTRIES
+from app.models import (
+    Budget as DBBudget,
+    Entry as DBEntry,
+    Term as DBTerm,
+    User as DBUser,
+)
 from app.schemas.auth import Role
 
 client = TestClient(app)
@@ -18,15 +27,173 @@ TREASURER_WALLET = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"  # 시드 총무
 AUDITOR_WALLET = "0x90F79bf6EB2c4f870365E785982E1f101E93b906"    # 시드 감사 지갑
 PRESIDENT_WALLET = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"  # 시드 회장 지갑
 
+_test_session_factory = None
+
 
 @pytest.fixture(autouse=True)
-def restore_entries():
-    """테스트가 DUMMY_ENTRIES 에 남긴 초안·상태 변경 및 FakeChainClient 상태를 테스트마다 되돌린다."""
-    saved = [e.model_copy() for e in DUMMY_ENTRIES]
+def setup_test_db(tmp_path):
+    """각 테스트마다 독립된 임시 SQLite DB를 생성하고 기본 시드 데이터를 주입한다.
+    실제 student_council.db를 건드리지 않으며, get_db를 override한다.
+    """
+    global _test_session_factory
+    db_file = tmp_path / "test.db"
+    engine = create_engine(
+        f"sqlite:///{db_file}",
+        connect_args={"check_same_thread": False},
+    )
+    Base.metadata.create_all(bind=engine)
+    TestingSession = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    _test_session_factory = TestingSession
+
+    # 기본 시드 데이터 삽입
+    with TestingSession() as db:
+        # 1. Users
+        for u in users.SEED_USERS:
+            db_u = DBUser(
+                id=u.id,
+                student_no=u.student_no,
+                password_hash=u.password_hash,
+                name=u.name,
+                role=u.role.value if hasattr(u.role, "value") else u.role,
+                wallet_index=u.wallet_index,
+                wallet_address=u.wallet_address.lower() if u.wallet_address else None,
+            )
+            db.add(db_u)
+
+        # 2. Term (term_code=20261)
+        term = DBTerm(
+            id=1,
+            term_code=20261,
+            name="2026-1학기",
+            started_at=datetime.fromtimestamp(1772323200, tz=timezone.utc),
+            ended_at=datetime.fromtimestamp(1788163200, tz=timezone.utc),
+        )
+        db.add(term)
+
+        # 3. Budgets
+        b1 = DBBudget(
+            id=1,
+            term_id=1,
+            category="운영비",
+            expires_at=datetime.fromtimestamp(1798704000, tz=timezone.utc),
+        )
+        b2 = DBBudget(
+            id=2,
+            term_id=1,
+            category="행사비",
+            expires_at=datetime.fromtimestamp(1798704000, tz=timezone.utc),
+        )
+        db.add(b1)
+        db.add(b2)
+
+        # 4. 초기 Entries 3건
+        e1 = DBEntry(
+            id=1,
+            term_id=1,
+            kind="EXPENSE",
+            amount=35000,
+            counterparty="한결문구",
+            purpose="신입생 환영회 명찰 및 필기구 구매",
+            budget_id=2,
+            occurred_at=1788793200,
+            receipt_path="/receipts/sample_01.jpg",
+            receipt_hash="0xabc1234567890abcdef1234567890abcdef1234567890abcdef1234567890abc",
+            meta_hash="0x24ae73988d927fb39f45eb6024e9ff8ffa19e8501603565bd82710ea8df4b937",
+            hash_version=1,
+            ocr_amount=35000,
+            ocr_approval_no="12345678",
+            ocr_paid_at=1788825820,
+            ocr_status="MATCH",
+            category_warning=False,
+            warning_ack_reason=None,
+            status="CONFIRMED",
+            created_by=2,
+            approved_by=3,
+            rejected_by=None,
+            reject_reason=None,
+            tx_pending="0x1111111111111111111111111111111111111111111111111111111111111111",
+            tx_confirm="0x2222222222222222222222222222222222222222222222222222222222222222",
+            corrects_entry_id=None,
+            correction_reason=None,
+        )
+        e2 = DBEntry(
+            id=2,
+            term_id=1,
+            kind="EXPENSE",
+            amount=120000,
+            counterparty="청년피자",
+            purpose="개강총회 다과 주문",
+            budget_id=1,
+            occurred_at=1788706800,
+            receipt_path="/receipts/sample_02.jpg",
+            receipt_hash="0xdef4567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+            meta_hash="0x622fc1b357c04032e65bc1855c73aaff6d519464d69bf22b10761f3b26a1b793",
+            hash_version=1,
+            ocr_amount=120000,
+            ocr_approval_no="87654321",
+            ocr_paid_at=1788775450,
+            ocr_status="MATCH",
+            category_warning=False,
+            warning_ack_reason=None,
+            status="PENDING",
+            created_by=2,
+            approved_by=None,
+            rejected_by=None,
+            reject_reason=None,
+            tx_pending="0x3333333333333333333333333333333333333333333333333333333333333333",
+            tx_confirm=None,
+            corrects_entry_id=None,
+            correction_reason=None,
+        )
+        e3 = DBEntry(
+            id=3,
+            term_id=1,
+            kind="INCOME",
+            amount=5000000,
+            counterparty="컴퓨터공학과 학생회비 일괄 납부",
+            purpose="2026-2학기 학과 학생회비 수납",
+            budget_id=None,
+            occurred_at=1788620400,
+            receipt_path=None,
+            receipt_hash=None,
+            meta_hash="0x74c9740556d857575586251e71fa24091ffaece5c01c4f889d7c1224ce7af3a9",
+            hash_version=1,
+            ocr_amount=None,
+            ocr_approval_no=None,
+            ocr_paid_at=None,
+            ocr_status=None,
+            category_warning=False,
+            warning_ack_reason=None,
+            status="CONFIRMED",
+            created_by=2,
+            approved_by=3,
+            rejected_by=None,
+            reject_reason=None,
+            tx_pending="0x4444444444444444444444444444444444444444444444444444444444444444",
+            tx_confirm="0x5555555555555555555555555555555555555555555555555555555555555555",
+            corrects_entry_id=None,
+            correction_reason=None,
+        )
+        db.add(e1)
+        db.add(e2)
+        db.add(e3)
+        db.commit()
+
+    def override_get_db():
+        session = TestingSession()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    app.dependency_overrides[get_db] = override_get_db
     set_chain_client(FakeChainClient())
+
     yield
-    DUMMY_ENTRIES[:] = saved
+
+    app.dependency_overrides.clear()
     set_chain_client(FakeChainClient())
+    _test_session_factory = None
 
 
 def test_get_entries():
@@ -247,6 +414,21 @@ def second_treasurer(monkeypatch):
         wallet_address=second_wallet,
     )
     monkeypatch.setattr(users, "SEED_USERS", [*users.SEED_USERS, user])
+
+    if _test_session_factory:
+        with _test_session_factory() as db:
+            db.add(
+                DBUser(
+                    id=user.id,
+                    student_no=user.student_no,
+                    password_hash="unused",
+                    name=user.name,
+                    role="TREASURER",
+                    wallet_address=second_wallet.lower(),
+                )
+            )
+            db.commit()
+
     return SimpleNamespace(
         id=user.id,
         wallet_address=second_wallet,
@@ -255,15 +437,18 @@ def second_treasurer(monkeypatch):
 
 
 def get_draft(entry_id):
-    return next(e for e in DUMMY_ENTRIES if e.id == entry_id)
+    with _test_session_factory() as db:
+        return db.query(DBEntry).filter(DBEntry.id == entry_id).first()
 
 
 @pytest.mark.parametrize("role", [Role.STUDENT, Role.AUDITOR, Role.PRESIDENT])
 def test_only_treasurer_can_create_entry(role, auth_header):
-    count_before = len(DUMMY_ENTRIES)
+    with _test_session_factory() as db:
+        count_before = db.query(DBEntry).count()
     res = client.post("/entries", json=DRAFT_BODY, headers=auth_header(role))
     assert res.status_code == 403
-    assert len(DUMMY_ENTRIES) == count_before
+    with _test_session_factory() as db:
+        assert db.query(DBEntry).count() == count_before
 
 
 @pytest.mark.parametrize("role", [Role.STUDENT, Role.AUDITOR, Role.PRESIDENT])
@@ -441,3 +626,134 @@ def test_reject_entry_success(auth_header):
     data = res.json()
     assert data["id"] == entry_id
     assert data["status"] == "REJECTED"
+
+
+def test_confirm_ocr_mismatch_requires_warning_reason(auth_header):
+    """OCR 불일치(AMOUNT_MISMATCH) 항목 승인 시 warning_reason 누락 시 400 Bad Request 차단 검증"""
+    now = int(time.time())
+    draft_body = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 50000,
+        "counterparty": "OCR경고테스트점",
+        "purpose": "OCR 금액 불일치 항목",
+        "budget_id": 2,
+        "occurred_at": 1788793200,
+        "receipt_hash": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+        "ocr_amount": 48000,
+        "ocr_approval_no": "11223344",
+        "ocr_paid_at": 1788829999,
+        "ocr_status": "MISMATCH",
+    }
+    res_draft = client.post("/entries", json=draft_body, headers=auth_header(Role.TREASURER))
+    assert res_draft.status_code == 201
+    entry_id = res_draft.json()["id"]
+
+    submit_body = {
+        "deadline": now + 600,
+        "signature": fake_signature(TREASURER_WALLET),
+    }
+    res_submit = client.post(f"/entries/{entry_id}/submit", json=submit_body, headers=auth_header(Role.TREASURER))
+    assert res_submit.status_code == 200
+
+    # 사유 없이 승인 시도 -> 400 차단 검증
+    confirm_body_no_reason = {
+        "deadline": now + 600,
+        "signature": fake_signature(AUDITOR_WALLET),
+        "warning_reason": None,
+    }
+    res_fail = client.post(f"/entries/{entry_id}/confirm", json=confirm_body_no_reason, headers=auth_header(Role.AUDITOR))
+    assert res_fail.status_code == 400
+    assert "경고 무시 사유(warning_reason)가 필수입니다" in res_fail.json()["detail"]
+
+    # 사유 포함 승인 시도 -> 200 성공 검증
+    confirm_body_with_reason = {
+        "deadline": now + 600,
+        "signature": fake_signature(AUDITOR_WALLET),
+        "warning_reason": "봉투값 2000원 수기 합산 확인 완료",
+    }
+    res_ok = client.post(f"/entries/{entry_id}/confirm", json=confirm_body_with_reason, headers=auth_header(Role.AUDITOR))
+    assert res_ok.status_code == 200
+    assert res_ok.json()["status"] == "CONFIRMED"
+
+
+def test_confirm_without_warning_rejects_warning_reason(auth_header):
+    """경고가 없는 정상 항목에 warning_reason 제출 시 400 Bad Request 차단 검증"""
+    now = int(time.time())
+    draft_body = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 20000,
+        "counterparty": "정상거래점",
+        "purpose": "정상 거래 승인",
+        "budget_id": 2,
+        "occurred_at": 1788793200,
+    }
+    res_draft = client.post("/entries", json=draft_body, headers=auth_header(Role.TREASURER))
+    entry_id = res_draft.json()["id"]
+
+    client.post(
+        f"/entries/{entry_id}/submit",
+        json={"deadline": now + 600, "signature": fake_signature(TREASURER_WALLET)},
+        headers=auth_header(Role.TREASURER),
+    )
+
+    confirm_body = {
+        "deadline": now + 600,
+        "signature": fake_signature(AUDITOR_WALLET),
+        "warning_reason": "경고 없는 건에 불필요한 사유 제출",
+    }
+    res = client.post(f"/entries/{entry_id}/confirm", json=confirm_body, headers=auth_header(Role.AUDITOR))
+    assert res.status_code == 400
+    assert "경고 항목이 아닌 경우" in res.json()["detail"]
+
+
+def test_confirm_ocr_no_number_is_normal(auth_header):
+    """PRD 기준 OCRStatus NO_NUMBER(계좌이체 등)는 정상 항목이므로 warning_reason 없이 승인 가능하고 사유 제출 시 400 차단 검증"""
+    now = int(time.time())
+    draft_body = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 30000,
+        "counterparty": "계좌이체거래처",
+        "purpose": "승인번호 없는 계좌이체 영수증",
+        "budget_id": 2,
+        "occurred_at": 1788793200,
+        "ocr_status": "NO_NUMBER",
+    }
+    res_draft = client.post("/entries", json=draft_body, headers=auth_header(Role.TREASURER))
+    assert res_draft.status_code == 201
+    entry_id = res_draft.json()["id"]
+
+    res_submit = client.post(
+        f"/entries/{entry_id}/submit",
+        json={"deadline": now + 600, "signature": fake_signature(TREASURER_WALLET)},
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_submit.status_code == 200
+
+    # 1. NO_NUMBER 항목에 불필요한 사유 제출 시 -> 400 차단 검증
+    confirm_fail = client.post(
+        f"/entries/{entry_id}/confirm",
+        json={
+            "deadline": now + 600,
+            "signature": fake_signature(AUDITOR_WALLET),
+            "warning_reason": "정상 건에 사유 제출",
+        },
+        headers=auth_header(Role.AUDITOR),
+    )
+    assert confirm_fail.status_code == 400
+    assert "경고 항목이 아닌 경우" in confirm_fail.json()["detail"]
+
+    # 2. 사유 없이 승인 시 -> 200 정상 승인 검증
+    confirm_ok = client.post(
+        f"/entries/{entry_id}/confirm",
+        json={
+            "deadline": now + 600,
+            "signature": fake_signature(AUDITOR_WALLET),
+            "warning_reason": None,
+        },
+        headers=auth_header(Role.AUDITOR),
+    )
+    assert confirm_ok.status_code == 200
+    assert confirm_ok.json()["status"] == "CONFIRMED"
