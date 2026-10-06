@@ -58,7 +58,7 @@ class EntryResponse(BaseModel):
     category_warning: bool = Field(False, description="예산 카테고리 불일치 경고 여부")
     warning_ack_reason: Optional[str] = Field(None, description="경고 무시 승인 사유")
     status: Optional[EntryStatus] = Field(None, description="장부 상태 (초안은 null, 온체인은 PENDING | CONFIRMED | REJECTED | BLOCKED)")
-    created_by: int = Field(..., description="등록자 User ID (총무/회장)")
+    created_by: int = Field(..., description="등록자 User ID (총무)")
     approved_by: Optional[int] = Field(None, description="승인자 User ID (감사)")
     rejected_by: Optional[int] = Field(None, description="반려자 User ID (감사/회장)")
     reject_reason: Optional[str] = Field(None, description="반려 사유")
@@ -102,4 +102,29 @@ class EntrySubmitResponse(BaseModel):
     tx_pending: Optional[str] = Field(None, description="체인 트랜잭션 해시 (BLOCKED 포함 온체인 기록 시 부여)")
     block_reason: Optional[BlockReason] = Field(None, description="차단 사유 (BLOCKED 시 필수)")
     message: str = Field(..., description="처리 결과 메시지")
+
+
+class EntryConfirmRequest(BaseModel):
+    signature: str = Field(..., description="EIP-712 기기 서명값 (0x...)")
+    deadline: int = Field(..., description="서명 유효 시한 (Unix 초)")
+    warning_reason: Optional[str] = Field(None, description="경고 무시 사유 원문 (경고 항목인 경우 필수)")
+
+
+class EntryConfirmResponse(BaseModel):
+    id: int = Field(..., description="Entry ID")
+    status: EntryStatus = Field(EntryStatus.CONFIRMED, description="장부 상태 (CONFIRMED)")
+    tx_confirm: Optional[str] = Field(None, description="확정 트랜잭션 해시")
+    message: str = Field("온체인에 성공적으로 확정(CONFIRMED) 기록되었습니다.")
+
+
+class EntryRejectRequest(BaseModel):
+    signature: str = Field(..., description="EIP-712 기기 서명값 (0x...)")
+    deadline: int = Field(..., description="서명 유효 시한 (Unix 초)")
+    reject_reason: str = Field(..., min_length=1, description="반려 사유 원문")
+
+
+class EntryRejectResponse(BaseModel):
+    id: int = Field(..., description="Entry ID")
+    status: EntryStatus = Field(EntryStatus.REJECTED, description="장부 상태 (REJECTED)")
+    message: str = Field("온체인에 성공적으로 반려(REJECTED) 기록되었습니다.")
 

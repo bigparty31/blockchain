@@ -38,9 +38,19 @@ class ApiService {
 
     // 서버 미구동 시 fallback 더미 (backend/app/routers/budgets.py 기준)
     return [
-      BudgetModel(id: 1, termId: 1, category: '행사비', plannedAmount: 2500000, remainingAmount: 2500000, executionRate: 0.0, version: 1, expiresAt: 1767196799),
-      BudgetModel(id: 2, termId: 1, category: '사업비', plannedAmount: 1500000, remainingAmount: 1465000, executionRate: 0.023, version: 1, expiresAt: 1767196799),
-      BudgetModel(id: 3, termId: 1, category: '운영비', plannedAmount: 1000000, remainingAmount: 1000000, executionRate: 0.0, version: 1, expiresAt: 1767196799),
+      BudgetModel(
+        id: 1,
+        termId: 1,
+        category: '행사비',
+        plannedAmount: 2500000,
+        remainingAmount: 2470000,
+        executionRate: 0.012,
+        version: 2,
+        expiresAt: 1797260399,
+        revisionReason: '참가인원 증가',
+      ),
+      BudgetModel(id: 2, termId: 1, category: '사업비', plannedAmount: 1500000, remainingAmount: 1465000, executionRate: 0.023, version: 1, expiresAt: 1797260399),
+      BudgetModel(id: 3, termId: 1, category: '운영비', plannedAmount: 1000000, remainingAmount: 1000000, executionRate: 0.0, version: 1, expiresAt: 1797260399),
     ];
   }
 
