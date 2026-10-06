@@ -36,6 +36,15 @@ UNREACHABLE = "http://127.0.0.1:1"
 
 # 스냅샷 안 테스트가 쓰는 항목·예산 id 구간. 공용 노드에는 등록 API·예산 화면이 DB id(1부터)로 남긴 기록과
 # 스모크 기록(8000억 + 실행 시각(밀리초) × 10, 지금은 18조대)이 있다. 둘과 겹치면 ENTRY_ALREADY_EXISTS·BudgetAlreadyExists 로 거짓 실패한다
+def unchecked(payload, **changes):
+    """모델 검증을 건너뛰고 값을 바꾼 요청 (pydantic 의 model_copy(update=...) 는 검증하지 않는다).
+
+    모델은 컨트랙트가 거부할 값(hash 0, 금액 0 등)을 만들 때 막는다 (app/chain/models.py). 그 아래 층
+    — EIP-712 인코딩, FakeChainClient, 컨트랙트 — 도 같은 값을 스스로 거부하는지 볼 때만 쓴다.
+    """
+    return payload.model_copy(update=changes)
+
+
 TEST_ID_BASE = 900_000_000_000
 KST_MIDNIGHT = 1790694000  # 2026-09-30 00:00 KST. 테스트 항목의 사용일
 

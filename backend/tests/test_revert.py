@@ -17,21 +17,23 @@ from app.chain import RecordRequest, RevertReason
 from app.chain.deployment import DEFAULT_PATH, load_abi, load_deployment
 from app.chain.eip712 import typed_data_for
 from app.chain.revert import RevertDecoder
-from app.chain.web3_client import LEDGER, Web3ChainClient
+from app.chain.web3_client import BUDGET_TOKEN, LEDGER, Web3ChainClient
 from app.schemas.entry import EntryKind
 from chain_support import RELAYER, RELAYER_KEY, RPC_URL, chain_now, sign_as_app
 
 DEPLOYMENT = load_deployment(DEFAULT_PATH)
 LEDGER_ABI = load_abi(DEPLOYMENT.contracts[LEDGER], DEFAULT_PATH)
+BUDGET_ABI = load_abi(DEPLOYMENT.contracts[BUDGET_TOKEN], DEFAULT_PATH)
 ERRORS = {item["name"]: item for item in LEDGER_ABI if item["type"] == "error"}
-DECODER = RevertDecoder(LEDGER_ABI)
+BUDGET_ERRORS = {item["name"]: item for item in BUDGET_ABI if item["type"] == "error"}
+DECODER = RevertDecoder(LEDGER_ABI, BUDGET_ABI)
 
 # ABI 타입별 예시 인자. enum 인자(uint8)는 1 이라 Status 는 CONFIRMED, Kind 는 EXPENSE 로 보인다
 SAMPLE = {"uint256": 7, "int256": -5, "uint8": 1, "bytes32": b"\x11" * 32, "address": RELAYER, "string": "x"}
 
 
-def revert_data(name: str, *args) -> bytes:
-    inputs = ERRORS[name]["inputs"]
+def revert_data(name: str, *args, errors: dict = ERRORS) -> bytes:
+    inputs = errors[name]["inputs"]
     types = [i["type"] for i in inputs]
     values = list(args) or [SAMPLE[t] for t in types]
     return keccak(text=f"{name}({','.join(types)})")[:4] + encode(types, values)
@@ -46,7 +48,7 @@ def isolated(clean_chain_env):
 # ---------------------------------------------------------------- 원장 에러
 
 
-@pytest.mark.parametrize("reason", [r for r in RevertReason if r is not RevertReason.UNKNOWN], ids=lambda r: r.value)
+@pytest.mark.parametrize("reason", [r for r in RevertReason if r.value in ERRORS], ids=lambda r: r.value)
 def test_every_reason_decodes_from_the_ledger_abi(reason):
     revert = DECODER.decode(revert_data(reason.value))
     assert revert.reason is reason
@@ -56,6 +58,19 @@ def test_every_reason_decodes_from_the_ledger_abi(reason):
 
 def test_no_reason_is_missing_from_the_deployed_abi():
     assert DECODER.missing_reasons() == []
+
+
+def test_every_reason_is_in_the_ledger_or_budget_token_abi():
+    # 원장 ABI 에 없는 것은 원장이 부르는 BudgetToken.spend·refund 의 에러뿐이다
+    only_budget = {r.value for r in RevertReason if r is not RevertReason.UNKNOWN} - set(ERRORS)
+    assert only_budget == {"BudgetNotFound", "RefundExceedsSpent"}
+    assert only_budget <= set(BUDGET_ERRORS)
+
+
+def test_ledger_abi_alone_reports_budget_token_reasons_missing():
+    # 시작 점검이 BudgetToken ABI 를 빼먹으면 드러난다
+    missing = {r.value for r in RevertDecoder(LEDGER_ABI).missing_reasons()}
+    assert missing == {"BudgetNotFound", "RefundExceedsSpent"}
 
 
 def test_hex_string_and_bytes_are_the_same():
@@ -101,6 +116,30 @@ def test_only_the_ledger_enums_get_names():
     assert RevertDecoder(LEDGER_ABI + [foreign]).decode(data).detail == "OtherStatus(status=3) — RevertReason 에 없는 원장 에러"
 
 
+@pytest.mark.parametrize(
+    "name, args, reason",
+    [
+        ("BudgetNotFound", (), RevertReason.BUDGET_NOT_FOUND),
+        ("RefundExceedsSpent", (3, 100, 500), RevertReason.REFUND_EXCEEDS_SPENT),
+        ("ZeroAmount", (), RevertReason.ZERO_AMOUNT),
+    ],
+)
+def test_budget_token_only_errors_are_known(name, args, reason):
+    # 확정 안에서 원장이 부르는 spend·refund 의 에러. 원장 ABI 에는 없어 예전에는 UNKNOWN 이었다 (PR #20 2차 리뷰)
+    revert = DECODER.decode(revert_data(name, *args, errors=BUDGET_ERRORS))
+    assert revert.reason is reason
+    for item in BUDGET_ERRORS[name]["inputs"]:
+        assert f"{item['name']}=" in revert.detail
+
+
+@pytest.mark.parametrize("name", ["TermRequired", "ReasonRequired", "NotPresident"])
+def test_budget_token_errors_outside_spend_and_refund_stay_unknown(name):
+    # 원장 에러와 이름이 같아도 예산 발행·증액에서만 나는 에러를 원장 사유로 붙이지 않는다
+    revert = DECODER.decode(revert_data(name, errors=BUDGET_ERRORS))
+    assert revert.reason is RevertReason.UNKNOWN
+    assert revert.detail.startswith(f"{name}(") and revert.detail.endswith("— RevertReason 에 없는 BudgetToken 에러")
+
+
 def test_budget_token_errors_declared_in_the_ledger_abi_are_known():
     # BudgetToken 이 confirmEntry 안에서 내지만 원장 ABI 에도 같은 시그니처로 있다 (IAccountingLedger)
     assert DECODER.decode(revert_data("InsufficientBudget", 1, 100, 500)).reason is RevertReason.INSUFFICIENT_BUDGET
@@ -121,10 +160,10 @@ def test_ledger_error_outside_revert_reason_is_unknown_with_its_name():
     assert unknown(revert_data("ZeroAddress")) == "ZeroAddress() — RevertReason 에 없는 원장 에러"
 
 
-def test_selector_outside_the_ledger_abi_is_unknown():
-    # BudgetToken 고유 에러 (원장 ABI 에 없다)
-    refund = keccak(text="RefundExceedsSpent(uint256,uint256,uint256)")[:4]
-    assert unknown(refund + encode(["uint256"] * 3, [1, 2, 3])) == f"알 수 없는 에러 selector 0x{refund.hex()}"
+def test_selector_outside_both_abis_is_unknown():
+    # 원장·BudgetToken 어느 ABI 에도 없는 에러 (RoleManager 고유 에러 등)
+    selector = keccak(text="NotInAnyAbi(uint256)")[:4]
+    assert unknown(selector + encode(["uint256"], [1])) == f"알 수 없는 에러 selector 0x{selector.hex()}"
 
 
 def test_panic_and_error_string_are_unknown_with_their_content():

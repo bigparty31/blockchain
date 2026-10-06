@@ -133,17 +133,17 @@ result = await relay_confirm(db, chain, approval, signature, user.id, reason)  #
 | 승인·반려자가 본 값 ≠ 등록 값 | `ChainRevert(ENTRY_COMMIT_MISMATCH)` | `PENDING` 유지. 앱에 최신 항목 값을 다시 내려준다 (§5) |
 | 체인이 거부했지만 원인을 해석할 수 없음 | `ChainRevert(UNKNOWN)` | 상태 그대로. **500 + 서버 로그** (`detail`에 원본) |
 
-`INSUFFICIENT_BUDGET`·`BUDGET_EXPIRED`는 `BudgetToken`이 `confirmEntry` 안에서 내는 에러지만, 원장 ABI에도 같은 시그니처로 선언돼 있어 **원장 ABI 하나로 해석된다.** `RESERVED_ID`(id 0)는 중복(`ENTRY_ALREADY_EXISTS`)과 다른 에러다 — 재시도 판정에 쓰지 않는다.
+`INSUFFICIENT_BUDGET`·`BUDGET_EXPIRED`·`BUDGET_NOT_FOUND`·`REFUND_EXCEEDS_SPENT`(와 인자 없는 `ZeroAmount()`)는 원장이 `confirmEntry` 안에서 부르는 `BudgetToken.spend`·`refund`가 내는 에러다. 앞의 둘은 원장 ABI에도 같은 시그니처로 있고, 나머지는 BudgetToken ABI에만 있어 **두 ABI를 함께 써서 해석한다.** 원장의 사전 검사가 먼저 막아 뒤의 셋은 보통 나지 않는다 — 나면 원장과 예산 상태가 어긋난 것이다. `RESERVED_ID`(id 0)는 중복(`ENTRY_ALREADY_EXISTS`)과 다른 에러다 — 재시도 판정에 쓰지 않는다.
 
 **서명 불일치는 `INVALID_SIGNATURE`로 오지 않는다.** EIP-712 서명은 형식만 맞으면 다른 데이터에 대한 서명이어도 실패하지 않고 엉뚱한 주소를 복구해 낸다. 컨트랙트에는 권한 없는 사람이 서명한 것으로 보여서 `NOT_REGISTRANT`·`NOT_APPROVER`가 난다. `INVALID_SIGNATURE`는 서명 바이트 자체가 깨졌을 때만 난다. 그래서 revert만으로는 "앱이 다른 값에 서명함"과 "정말 권한이 없는 사람"을 구분할 수 없다. **그래서 서버가 릴레이 전에 `signer_of`로 서명자를 복구해 기대 지갑(등록은 `created_by`의 지갑, 확정·반려는 요청한 감사·회장의 지갑)과 소문자로 맞춰 비교한다.** 이 검사를 통과한 뒤에 오는 `NOT_REGISTRANT`·`NOT_APPROVER`는 서명자의 롤 문제다 (등록 뒤 롤이 바뀐 경우 등).
 
-`RevertReason`의 값은 Solidity 에러 이름 그대로다 (`"InvalidSignature"` 등). 전체 목록은 `backend/app/chain/models.py`. 해석은 `backend/app/chain/revert.py`가 원장 ABI로 한다.
+`RevertReason`의 값은 Solidity 에러 이름 그대로다 (`"InvalidSignature"` 등). 전체 목록은 `backend/app/chain/models.py`. 해석은 `backend/app/chain/revert.py`가 원장 ABI와 BudgetToken ABI로 한다. BudgetToken 에러는 `spend`·`refund`가 내는 것만 이름으로 분류한다 — `TermRequired()`처럼 원장 에러와 이름이 같아도 예산 발행·증액에서만 나는 것은 원장 호출에서 날 수 없다.
 
-**예외는 `UNKNOWN` 하나다.** revert는 확실하지만(온체인 상태 그대로) 원인을 해석할 수 없을 때 쓴다 — 원장 ABI에 없는 에러(BudgetToken 고유 에러 등), `RevertReason`에 없는 원장 에러(생성자 전용), 빈 revert 데이터, `Panic`, `Error(string)`. 원본은 `detail`에 남는다. 연결 실패와는 다르다 — 그쪽은 `ChainUnavailable`이고 트랜잭션이 들어갔는지 모른다. `detail`은 `id=5, current=BLOCKED, expected=PENDING`처럼 인자를 ABI 이름으로 적은 로그·디버깅용 문자열이고 화면 문구로 쓰지 않는다.
+**예외는 `UNKNOWN` 하나다.** revert는 확실하지만(온체인 상태 그대로) 원인을 해석할 수 없을 때 쓴다 — 두 ABI 어디에도 없는 에러, `RevertReason`에 없는 에러(생성자 전용, 예산 발행 전용 BudgetToken 에러 등), 빈 revert 데이터, `Panic`, `Error(string)`. 원본은 `detail`에 남는다. 연결 실패와는 다르다 — 그쪽은 `ChainUnavailable`이고 트랜잭션이 들어갔는지 모른다. `detail`은 `id=5, current=BLOCKED, expected=PENDING`처럼 인자를 ABI 이름으로 적은 로그·디버깅용 문자열이고 화면 문구로 쓰지 않는다.
 
 revert는 시뮬레이션(`eth_call`)뿐 아니라 **전송 응답**으로도 온다 — Hardhat은 revert하는 트랜잭션도 블록에 넣고 `eth_sendRawTransaction`에 에러를 돌려준다. 둘 다 결과가 확정된 `ChainRevert`다. 반면 노드가 전송 자체를 거절한 경우(릴레이어 잔액 부족, nonce)는 revert가 아니고 트랜잭션도 들어가지 않았다. 이 구분은 전송 경로가 한다.
 
-연결할 때 `RevertReason`이 전부 원장 ABI에 있는지 확인한다. 컨트랙트 에러 이름이 바뀌면 revert가 모두 `UNKNOWN`이 되므로, 그 전에 `ChainSetupError`로 막는다.
+연결할 때 `RevertReason`이 전부 원장·BudgetToken ABI에 있는지 확인한다. 컨트랙트 에러 이름이 바뀌면 revert가 모두 `UNKNOWN`이 되므로, 그 전에 `ChainSetupError`로 막는다.
 
 **체인 호출 전에 막는 것**
 
@@ -229,7 +229,7 @@ chain.unavailable_next("confirm_entry", landed=True)                # 체인엔 
 
 ## 8. 클라이언트 받기 — provider
 
-API에서는 구현을 직접 만들지 않고 의존성으로 받는다. Fake와 실제 구현이 환경변수로 갈린다.
+API에서는 구현을 직접 만들지 않고 의존성으로 받는다. Fake와 실제 구현이 환경변수로 갈린다. **둘 중 하나를 명시해야 서버가 뜬다** (PR #20 2차 리뷰).
 
 ```python
 from fastapi import Depends
@@ -241,10 +241,13 @@ async def submit(id: int, req: ..., chain: ChainClient = Depends(get_chain_clien
     ...
 ```
 
-| 환경변수 | 비었을 때 | 있을 때 |
+| 환경변수 | 값 | 쓰는 것 |
 | --- | --- | --- |
-| `CHAIN_RPC_URL` | `FakeChainClient` + **경고 로그** (가짜 서명이 통과하므로 개발·테스트 전용) | `Web3ChainClient` (예: `http://127.0.0.1:8545`) |
-| `RELAYER_PRIVATE_KEY` | — | 릴레이어 전용 키 (로컬은 Hardhat 계정 4). **임원 키를 넣으면 시작을 거부한다** (PRD §9.2) |
+| `CHAIN_RPC_URL` | 노드 주소 (예: `http://127.0.0.1:8545`) | `Web3ChainClient` |
+| `RELAYER_PRIVATE_KEY` | 릴레이어 전용 키 (로컬은 Hardhat 계정 4) | `CHAIN_RPC_URL`과 함께. **임원 키를 넣으면 시작을 거부한다** (PRD §9.2) |
+| `CHAIN_FAKE` | `1` | `FakeChainClient` + 경고 로그. 노드 없이 개발할 때만 |
+
+- **둘 다 없거나 둘 다 있으면 서버가 시작하지 않는다** (`check_chain_config`, 시작 때와 클라이언트를 만들 때). 가짜는 서명 앞 20바이트를 서명자로 믿어 남을 사칭한 서명도 `signer_of` 대조를 통과하고, 체인에 아무것도 남기지 않은 채 성공을 돌려준다. 운영에서 `CHAIN_RPC_URL` 하나가 빠졌다고 조용히 가짜로 넘어가면 안 되므로 명시했을 때만 쓴다. `CHAIN_FAKE`는 `1`·`0`·빈 값만 받는다 (`true` 같은 값은 시작 거부)
 
 - 실제 클라이언트는 **첫 요청 때** 연결하고 재사용한다. 노드가 꺼져 있어도 체인을 쓰지 않는 API는 돈다
 - 연결할 때 점검한다 — 체인 id, 원장 코드 존재, `DOMAIN_SEPARATOR`, 원장의 RoleManager·BudgetToken, 릴레이어에 롤 없음, 릴레이어 잔액

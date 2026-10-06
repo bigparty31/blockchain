@@ -18,7 +18,7 @@ LOCAL_RPC_URL = "http://127.0.0.1:8545"
 HARDHAT_MNEMONIC = "test test test test test test test test test test test junk"
 
 # contracts/scripts/deploy.ts 의 계정 배치
-PRESIDENT_INDEX, TREASURER_INDEX, AUDITOR_INDEX, RELAYER_INDEX = 1, 2, 3, 4
+PRESIDENT_INDEX, TREASURER_INDEX, AUDITOR_INDEX, RELAYER_INDEX, AUDITOR2_INDEX = 1, 2, 3, 4, 5
 
 Account.enable_unaudited_hdwallet_features()
 

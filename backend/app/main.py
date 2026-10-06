@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.chain import ChainSetupError
-from app.chain.provider import close_chain_client
+from app.chain.provider import check_chain_config, close_chain_client
 from app.routers.auth import router as auth_router
 from app.routers.entries import router as entries_router
 from app.routers.balance import router as balance_router
@@ -16,6 +16,8 @@ from app.routers.chain import router as chain_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 체인 설정이 없으면 서버를 띄우지 않는다. 가짜 체인은 CHAIN_FAKE=1 로 명시했을 때만 쓴다 (app/chain/provider.py)
+    check_chain_config()
     yield
     await close_chain_client()  # 릴레이어의 RPC 연결을 닫는다
 

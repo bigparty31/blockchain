@@ -133,7 +133,8 @@ async def play(client, sign, now: int, steps: list) -> list:
                 payload = approval_for_id(entry, step.entry_id, **{"deadline": now + 600, **dict(step.override)})
                 result = await client.confirm_entry(payload, sign(payload))
             else:
-                payload = RecordRequest(**{"deadline": now + 600, **step})
+                # 모델이 막는 값(zero_amount 등)도 Fake 와 컨트랙트가 같게 거부하는지 보려고 검증 없이 만든다
+                payload = RecordRequest.model_construct(**{"deadline": now + 600, **step})
                 result = await client.record_pending(payload, sign(payload))
         except ChainRevert as e:
             outcomes.append((e.reason, None))

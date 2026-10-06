@@ -275,7 +275,7 @@ Entry { hash, amount, budgetId, correctsId, registrant, occurredAt, term, approv
 | `REJECTED` | 가능 | 반려는 `PENDING`에서만 가능하므로 `Entry`가 남아 있다 |
 | `BLOCKED` | 가능 | 예산 검사에 걸려도 `Entry`는 저장된다 (`IAccountingLedger`: "revert 하지 않고 BLOCKED 로 저장") |
 
-이벤트만 보면 `EntryRejected`에 `hash`가 없어 검증이 안 되는 것처럼 보인다(`EntryBlocked`에는 PR #13부터 `hash`·`term`·등록자가 있다). **`getEntry(id)`를 쓰면 네 상태 모두 검증된다.**
+이벤트만 보면 `EntryRejected`에 `hash`가 없어 검증이 안 되는 것처럼 보인다(`EntryBlocked`에는 PR #13부터 `hash`·`term`·`correctsId`·등록자가 있다). **`getEntry(id)`를 쓰면 네 상태 모두 검증된다.**
 
 **승인 전 수정은 새 id로 다시 등록된다.** 같은 내용의 항목이 여러 건 남을 수 있으므로, 각 항목은 **자기 id의 체인 값과만** 비교한다. 이전 id의 기록이 체인에 남아 있는 것은 정상이다 (PRD T4 "이전 기록 잔존").
 

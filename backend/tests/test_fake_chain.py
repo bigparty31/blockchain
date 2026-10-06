@@ -22,6 +22,7 @@ from app.chain import (
     fake_signature,
 )
 from app.schemas.entry import EntryKind, EntryStatus
+from chain_support import unchecked
 
 NOW = 1_790_000_000
 DAY = NOW // 86400 * 86400 + 54000  # KST 자정 (docs/HASHING.md §1.3)
@@ -176,20 +177,20 @@ def test_duplicate_id(chain):
 
 def test_zero_hash_is_rejected(chain):
     """학생 앱은 0 해시를 "아직 기록 안 됨"으로 읽어서, 체인이 0 해시를 받지 않는다."""
-    expect_revert(chain.record_pending(record(1, hash=ZERO32), fake_signature(TREASURER)), RevertReason.HASH_REQUIRED)
+    expect_revert(chain.record_pending(unchecked(record(1), hash=ZERO32), fake_signature(TREASURER)), RevertReason.HASH_REQUIRED)
     assert run(chain.get_entry(1)) is None
 
 
 def test_zero_amount(chain):
-    expect_revert(chain.record_pending(record(1, amount=0), fake_signature(TREASURER)), RevertReason.ZERO_AMOUNT)
+    expect_revert(chain.record_pending(unchecked(record(1), amount=0), fake_signature(TREASURER)), RevertReason.ZERO_AMOUNT)
     assert run(chain.get_entry(1)) is None  # revert 뒤에는 아무것도 남지 않는다
 
 
 def test_amount_limit(chain):
     assert run(chain.record_pending(record(1, amount=MAX_AMOUNT), fake_signature(TREASURER))).status == EntryStatus.PENDING
-    expect_revert(chain.record_pending(record(2, amount=MAX_AMOUNT + 1), fake_signature(TREASURER)), RevertReason.AMOUNT_OUT_OF_RANGE)
+    expect_revert(chain.record_pending(unchecked(record(2), amount=MAX_AMOUNT + 1), fake_signature(TREASURER)), RevertReason.AMOUNT_OUT_OF_RANGE)
     expect_revert(
-        chain.record_pending(record(3, amount=-(MAX_AMOUNT + 1), corrects_id=1), fake_signature(TREASURER)),
+        chain.record_pending(unchecked(record(3, amount=-5, corrects_id=1), amount=-(MAX_AMOUNT + 1)), fake_signature(TREASURER)),
         RevertReason.AMOUNT_OUT_OF_RANGE,
     )
 
@@ -197,19 +198,19 @@ def test_amount_limit(chain):
 @pytest.mark.parametrize("field", ["id", "budget_id", "corrects_id"])
 def test_fields_must_fit_storage(chain, field):
     """원장은 id·budgetId·correctsId 를 uint64 로 저장한다."""
-    expect_revert(chain.record_pending(record(1, **{field: 2**64}), fake_signature(TREASURER)), RevertReason.FIELD_OUT_OF_RANGE)
+    expect_revert(chain.record_pending(unchecked(record(1), **{field: 2**64}), fake_signature(TREASURER)), RevertReason.FIELD_OUT_OF_RANGE)
 
 
 def test_negative_amount_needs_correction_target(chain):
     expect_revert(
-        chain.record_pending(record(1, amount=-500), fake_signature(TREASURER)),
+        chain.record_pending(unchecked(record(1), amount=-500), fake_signature(TREASURER)),
         RevertReason.NEGATIVE_AMOUNT_WITHOUT_CORRECTION,
     )
 
 
 def test_income_must_not_have_budget(chain):
     expect_revert(
-        chain.record_pending(record(1, kind=EntryKind.INCOME, budget_id=2), fake_signature(TREASURER)),
+        chain.record_pending(unchecked(record(1, kind=EntryKind.INCOME, budget_id=0), budget_id=2), fake_signature(TREASURER)),
         RevertReason.BUDGET_ID_NOT_ALLOWED_FOR_INCOME,
     )
 
@@ -527,7 +528,7 @@ def test_unavailable_landed_applies_then_raises(chain):
 def test_revert_input_is_caught_before_sending_and_keeps_unavailable_next(chain):
     """실제 구현은 revert 할 입력을 시뮬레이션에서 ChainRevert 로 끝낸다. 보내지 않았으니 지정은 다음 호출에 남는다."""
     chain.unavailable_next("record_pending", landed=True)
-    expect_revert(chain.record_pending(record(1, amount=0), fake_signature(TREASURER)), RevertReason.ZERO_AMOUNT)
+    expect_revert(chain.record_pending(unchecked(record(1), amount=0), fake_signature(TREASURER)), RevertReason.ZERO_AMOUNT)
     assert run(chain.get_entry(1)) is None
     with pytest.raises(ChainUnavailable):
         run(chain.record_pending(record(1), fake_signature(TREASURER)))
@@ -582,7 +583,7 @@ def test_revert_does_not_call_before_broadcast(chain):
     async def claim(tx_hash):
         called.append(tx_hash)
 
-    expect_revert(chain.record_pending(record(1, amount=0), fake_signature(TREASURER), claim), RevertReason.ZERO_AMOUNT)
+    expect_revert(chain.record_pending(unchecked(record(1), amount=0), fake_signature(TREASURER), claim), RevertReason.ZERO_AMOUNT)
     assert called == []
 
 

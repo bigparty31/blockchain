@@ -59,7 +59,9 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 - 테스트 계정: `20240001`(학생) · `20240002`(총무) · `20240003`(감사) · `20240004`(회장) · `20240005`(감사 2), 비밀번호는 모두 `userPassword123!` (자세한 내용은 `docs/API.md` 「인증」)
 - 설정은 환경변수로 줍니다. 저장소 루트의 `.env.example` 을 `.env` 로 복사해 채우면 서버가 시작할 때 읽습니다 (`app/env.py`). 이미 설정된 실제 환경변수가 우선합니다.
 - 배포 기록 위치는 환경변수 `DEPLOYMENTS_FILE` 로 바꿀 수 있습니다. 없으면 저장소의 `contracts/deployments/localhost.json` 을 읽습니다 (`GET /chain/domains`, 릴레이어가 사용).
-- 토큰 서명 키는 환경변수 `JWT_SECRET` 으로 설정합니다. 없으면 개발용 기본 키를 쓰고 시작 로그에 경고가 뜹니다 — **배포 환경에서는 반드시 설정하세요.**
+- 토큰 서명 키는 환경변수 `JWT_SECRET` 으로 설정합니다. **없으면 서버가 시작하지 않습니다.** 로컬 개발에서는 `JWT_DEV_SECRET=1` 로 저장소에 공개된 개발용 키를 쓸 수 있습니다 (시작 로그에 경고). 배포 환경에서는 `JWT_DEV_SECRET` 을 넣지 마세요.
+- 체인도 둘 중 하나를 명시해야 서버가 시작합니다. 노드 없이 개발할 때는 `CHAIN_FAKE=1`(가짜 체인 — 서명을 검사하지 않고 아무것도 기록하지 않음), 로컬 노드를 쓸 때는 `CHAIN_RPC_URL`·`RELAYER_PRIVATE_KEY` 입니다 (`docs/CHAIN_CLIENT.md` §8).
+- 노드 없이 로컬에서 띄우는 가장 간단한 `.env`: `JWT_DEV_SECRET=1`, `CHAIN_FAKE=1`
 
 ---
 

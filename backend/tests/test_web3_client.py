@@ -184,7 +184,7 @@ def test_get_entry_shape_is_checked_before_connecting(tmp_path, edit, problem):
 def test_abi_without_a_known_error_is_refused_before_connecting(tmp_path):
     # 컨트랙트 에러 이름이 바뀌면 revert 가 전부 UNKNOWN 이 된다. 노드에 붙기 전에 막는다
     drop = edit_abi(LEDGER, lambda abi: [item for item in abi if item.get("name") != "SignatureExpired"])
-    with pytest.raises(ChainSetupError, match="원장 ABI 에 백엔드가 아는 에러가 없다: SignatureExpired"):
+    with pytest.raises(ChainSetupError, match="원장·BudgetToken ABI 에 백엔드가 아는 에러가 없다: SignatureExpired"):
         connect(RELAYER_KEY, deployment_variant(tmp_path, change_abi=drop), rpc_url=UNREACHABLE)
 
 
@@ -320,14 +320,63 @@ def test_clients_of_one_relayer_share_the_send_lock_and_close_waits_for_it():
 # ---------------------------------------------------------------- provider
 
 
-def test_without_rpc_url_the_fake_is_used_with_a_warning(caplog, monkeypatch):
+def test_fake_is_used_only_with_chain_fake_and_warns(caplog, monkeypatch):
     # alembic/env.py 의 fileConfig 가 같은 프로세스의 기존 로거를 끈다 (test_migrations 가 먼저 돌면). 다시 켜 둔다
     monkeypatch.setattr(logging.getLogger("app.chain.provider"), "disabled", False)
+    monkeypatch.setenv("CHAIN_FAKE", "1")
     with caplog.at_level(logging.WARNING, logger="app.chain.provider"):
         first = asyncio.run(get_chain_client())
     assert isinstance(first, FakeChainClient)
-    assert "CHAIN_RPC_URL 미설정" in caplog.text
+    assert "CHAIN_FAKE=1" in caplog.text
     assert asyncio.run(get_chain_client()) is first
+
+
+def test_without_chain_config_nothing_is_chosen():
+    # 운영에서 CHAIN_RPC_URL 이 빠졌다고 가짜로 넘어가면 사칭한 서명이 통과하고 체인에는 아무것도 남지 않는다 (PR #20 2차 리뷰)
+    with pytest.raises(ChainSetupError, match="체인 설정이 없습니다"):
+        asyncio.run(get_chain_client())
+
+
+def test_fake_and_rpc_url_together_are_refused(monkeypatch):
+    monkeypatch.setenv("CHAIN_FAKE", "1")
+    monkeypatch.setenv("CHAIN_RPC_URL", UNREACHABLE)
+    with pytest.raises(ChainSetupError, match="함께 설정"):
+        asyncio.run(get_chain_client())
+
+
+@pytest.mark.parametrize("flag", ["true", "yes", "on"])
+def test_only_1_turns_on_the_fake(monkeypatch, flag):
+    # 켠 줄 알았는데 꺼져 있거나 그 반대인 일이 없게, 1·0·빈 값 말고는 받지 않는다
+    monkeypatch.setenv("CHAIN_FAKE", flag)
+    with pytest.raises(ChainSetupError, match="CHAIN_FAKE"):
+        asyncio.run(get_chain_client())
+
+
+def test_chain_fake_0_is_off(monkeypatch):
+    monkeypatch.setenv("CHAIN_FAKE", "0")
+    with pytest.raises(ChainSetupError, match="체인 설정이 없습니다"):
+        asyncio.run(get_chain_client())
+
+
+def test_server_refuses_to_start_without_chain_config():
+    # 첫 요청이 아니라 시작할 때 드러낸다. TestClient 를 with 로 쓰면 lifespan 이 돈다
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    with pytest.raises(ChainSetupError, match="체인 설정이 없습니다"):
+        with TestClient(app):
+            pass
+
+
+def test_server_starts_with_chain_fake(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    monkeypatch.setenv("CHAIN_FAKE", "1")
+    with TestClient(app) as client:
+        assert client.get("/").status_code == 200
 
 
 def test_provider_does_not_import_web3_for_the_fake():
@@ -344,6 +393,15 @@ def test_failed_connect_is_not_kept(monkeypatch):
     with pytest.raises(ChainSetupError, match="노드에 연결할 수 없다"):
         asyncio.run(get_chain_client())
     monkeypatch.delenv("CHAIN_RPC_URL")
+    monkeypatch.setenv("CHAIN_FAKE", "1")
+    assert isinstance(asyncio.run(get_chain_client()), FakeChainClient)
+
+
+def test_failure_finished_before_arrival_is_not_shared(monkeypatch):
+    # 도착하기 전에 끝난 실패는 "기다리던 시도" 가 아니다. 예전에는 실패 시각과 도착 시각을 비교해서, Windows 처럼
+    # 시계 단위가 거친 곳에서는 직후에 온 요청이 같은 시각을 받아 설정을 고쳤는데도 옛 실패를 돌려받았다 (PR #20 2차 리뷰)
+    monkeypatch.setattr(provider, "_failure", (provider._finished, ChainSetupError, "옛 실패"))
+    monkeypatch.setenv("CHAIN_FAKE", "1")
     assert isinstance(asyncio.run(get_chain_client()), FakeChainClient)
 
 
@@ -392,6 +450,7 @@ def test_stale_client_is_closed_and_replaced(monkeypatch):
 
     stale = Stale()
     monkeypatch.setattr(provider, "_client", stale)
+    monkeypatch.setenv("CHAIN_FAKE", "1")
     replacement = asyncio.run(get_chain_client())
     assert stale.closed and isinstance(replacement, FakeChainClient)
 

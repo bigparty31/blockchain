@@ -226,7 +226,8 @@ class Web3ChainClient:
         self._ledger = contracts[LEDGER]
         self._role_manager = contracts.get(ROLE_MANAGER)
         self._budget_token = contracts.get(BUDGET_TOKEN)
-        self._reverts = RevertDecoder(self._ledger.abi)
+        # 확정 안에서 원장이 부르는 BudgetToken 의 에러도 원장 호출의 revert 로 올라온다 (app/chain/revert.py)
+        self._reverts = RevertDecoder(self._ledger.abi, self._budget_token.abi if self._budget_token is not None else None)
         self._entry_fields = _entry_fields(self._ledger.abi)
         self._stamps = self._file_stamps()
         self._code_checked_at = time.monotonic()
@@ -350,7 +351,7 @@ class Web3ChainClient:
         missing = self._reverts.missing_reasons()
         if missing:
             raise ChainSetupError(
-                f"원장 ABI 에 백엔드가 아는 에러가 없다: {', '.join(r.value for r in missing)}. "
+                f"원장·BudgetToken ABI 에 백엔드가 아는 에러가 없다: {', '.join(r.value for r in missing)}. "
                 "컨트랙트의 에러 이름·시그니처가 바뀌었으면 backend/app/chain/models.py 의 RevertReason 도 맞춘다"
             )
 
