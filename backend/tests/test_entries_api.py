@@ -9,7 +9,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.auth import users
 from app.auth.security import create_access_token
-from app.chain import FakeChainClient, fake_signature, get_chain_client, set_chain_client
+from app.chain import FakeChainClient, fake_signature, get_chain_client
 from app.chain.models import BlockReason
 from app.database import Base, get_db
 from app.main import app
@@ -28,6 +28,7 @@ AUDITOR_WALLET = "0x90F79bf6EB2c4f870365E785982E1f101E93b906"    # 시드 감사
 PRESIDENT_WALLET = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"  # 시드 회장 지갑
 
 _test_session_factory = None
+_test_chain = FakeChainClient()
 
 
 @pytest.fixture(autouse=True)
@@ -35,7 +36,8 @@ def setup_test_db(tmp_path):
     """각 테스트마다 독립된 임시 SQLite DB를 생성하고 기본 시드 데이터를 주입한다.
     실제 student_council.db를 건드리지 않으며, get_db를 override한다.
     """
-    global _test_session_factory
+    global _test_session_factory, _test_chain
+    _test_chain = FakeChainClient()
     db_file = tmp_path / "test.db"
     engine = create_engine(
         f"sqlite:///{db_file}",
@@ -187,12 +189,11 @@ def setup_test_db(tmp_path):
             session.close()
 
     app.dependency_overrides[get_db] = override_get_db
-    set_chain_client(FakeChainClient())
+    app.dependency_overrides[get_chain_client] = lambda: _test_chain
 
     yield
 
     app.dependency_overrides.clear()
-    set_chain_client(FakeChainClient())
     _test_session_factory = None
 
 
@@ -317,7 +318,7 @@ def test_submit_invalid_signature_format_fails(auth_header):
 
 def test_submit_blocked_budget_exceeded(auth_header):
     """예산 초과 시 2단계 submit에서 BLOCKED 상태, block_reason 및 체인 tx_pending 반환 검증"""
-    chain: FakeChainClient = get_chain_client()
+    chain: FakeChainClient = _test_chain
     chain.block_next(BlockReason.BUDGET_EXCEEDED)
 
     req_body = {

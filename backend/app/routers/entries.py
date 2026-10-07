@@ -17,9 +17,14 @@ from app.chain import (
     RecordRequest,
     RejectDecision,
     entry_commit,
-    get_chain_client,
 )
+from app.chain.provider import get_chain_client
 from app.chain.models import BlockReason as ChainBlockReason
+from app.services.chain_tx import (
+    EntryConflict,
+    relay_confirm,
+    relay_record,
+)
 from app.database import get_db
 from app.models import Budget as DBBudget, Entry as DBEntry, Term as DBTerm, User as DBUser
 from app.schemas.auth import Role
@@ -193,11 +198,13 @@ async def get_entries(db: Session = Depends(get_db)):
     """
     try:
         db_entries = db.query(DBEntry).filter(DBEntry.status.isnot(None)).all()
-        if db_entries:
-            return [_to_schema(e) for e in db_entries]
-    except SQLAlchemyError:
-        pass
-    return [e for e in DUMMY_ENTRIES if e.status is not None]
+        return [_to_schema(e) for e in db_entries]
+    except SQLAlchemyError as e:
+        logger.exception("수입·지출 내역 목록 조회 중 데이터베이스 오류: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 처리 중 오류가 발생했습니다.",
+        )
 
 
 @router.post(
@@ -445,9 +452,12 @@ async def submit_entry(
             detail="서명자가 등록자와 일치하지 않습니다.",
         )
 
-    # 7. 체인 릴레이 호출
+    # 7. 체인 릴레이 호출 및 상태 갱신 (chain_tx 서비스 연동)
     try:
-        tx_result = await chain.record_pending(record_req, req.signature)
+        db.commit()
+        tx_result = await relay_record(db, chain, record_req, req.signature)
+    except EntryConflict as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except ChainRevert as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -460,25 +470,14 @@ async def submit_entry(
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except LookupError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
 
-    # 8. 상태 갱신 (DB 전용)
+    db.refresh(target)
+
     new_status = tx_result.status
     tx_hash = tx_result.tx_hash
     b_reason = tx_result.block_reason
-
-    try:
-        target.status = new_status.value
-        target.tx_pending = tx_hash
-        if b_reason:
-            target.block_reason = b_reason.value
-        db.commit()
-    except SQLAlchemyError as e:
-        db.rollback()
-        logger.exception("초안 제출 상태 저장 중 데이터베이스 오류: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="데이터베이스 처리 중 오류가 발생했습니다.",
-        )
 
     msg = (
         "온체인에 성공적으로 기록되어 감사 승인 대기(PENDING) 상태가 되었습니다."
@@ -564,15 +563,25 @@ async def confirm_entry(
         or 0
     )
 
-    creator = get_user_by_id(target.created_by)
-    registrant_addr = creator.wallet_address if creator else None
+    registrant_addr = None
+    try:
+        chain_entry = await chain.get_entry(id)
+        if chain_entry and chain_entry.registrant:
+            registrant_addr = chain_entry.registrant
+    except Exception:
+        pass
+
     if not registrant_addr:
-        try:
-            db_creator = db.query(DBUser).filter(DBUser.id == target.created_by).first()
-            if db_creator and db_creator.wallet_address:
-                registrant_addr = db_creator.wallet_address
-        except SQLAlchemyError:
-            pass
+        creator = get_user_by_id(target.created_by)
+        if creator and creator.wallet_address:
+            registrant_addr = creator.wallet_address
+        else:
+            try:
+                db_creator = db.query(DBUser).filter(DBUser.id == target.created_by).first()
+                if db_creator and db_creator.wallet_address:
+                    registrant_addr = db_creator.wallet_address
+            except SQLAlchemyError:
+                pass
 
     if not registrant_addr:
         raise HTTPException(
@@ -609,9 +618,10 @@ async def confirm_entry(
             detail="경고 항목이 아닌 경우 경고 무시 사유(warning_reason)를 제출할 수 없습니다.",
         )
 
+    clean_reason = canonical_text(req.warning_reason) if had_warning and req.warning_reason else None
     warning_reason_hash = (
-        text_hash(canonical_text(req.warning_reason))
-        if had_warning and req.warning_reason
+        text_hash(clean_reason)
+        if had_warning and clean_reason
         else "0x" + "0" * 64
     )
 
@@ -636,9 +646,19 @@ async def confirm_entry(
     if not user.wallet_address or recovered.lower() != user.wallet_address.lower():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="서명자가 승인권자와 일치하지 않습니다.")
 
-    # 체인 릴레이
+    # 체인 릴레이 호출 및 상태 갱신 (chain_tx 서비스 연동)
     try:
-        tx_res = await chain.confirm_entry(approval, req.signature)
+        db.commit()
+        tx_res = await relay_confirm(
+            db=db,
+            chain=chain,
+            approval=approval,
+            signature=req.signature,
+            approver_id=user.id,
+            warning_reason=clean_reason,
+        )
+    except EntryConflict as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except ChainRevert as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -648,22 +668,10 @@ async def confirm_entry(
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="블록체인 네트워크와 통신할 수 없습니다.")
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except LookupError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
 
-    # 상태 갱신 (DB 전용)
-    try:
-        target.status = EntryStatus.CONFIRMED.value
-        target.approved_by = user.id
-        target.tx_confirm = tx_res.tx_hash
-        if had_warning and req.warning_reason:
-            target.warning_ack_reason = canonical_text(req.warning_reason)
-        db.commit()
-    except SQLAlchemyError as e:
-        db.rollback()
-        logger.exception("내역 확정 상태 저장 중 데이터베이스 오류: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="데이터베이스 처리 중 오류가 발생했습니다.",
-        )
+    db.refresh(target)
 
     return EntryConfirmResponse(
         id=id,
@@ -748,15 +756,25 @@ async def reject_entry(
         or 0
     )
 
-    creator = get_user_by_id(target.created_by)
-    registrant_addr = creator.wallet_address if creator else None
+    registrant_addr = None
+    try:
+        chain_entry = await chain.get_entry(id)
+        if chain_entry and chain_entry.registrant:
+            registrant_addr = chain_entry.registrant
+    except Exception:
+        pass
+
     if not registrant_addr:
-        try:
-            db_creator = db.query(DBUser).filter(DBUser.id == target.created_by).first()
-            if db_creator and db_creator.wallet_address:
-                registrant_addr = db_creator.wallet_address
-        except SQLAlchemyError:
-            pass
+        creator = get_user_by_id(target.created_by)
+        if creator and creator.wallet_address:
+            registrant_addr = creator.wallet_address
+        else:
+            try:
+                db_creator = db.query(DBUser).filter(DBUser.id == target.created_by).first()
+                if db_creator and db_creator.wallet_address:
+                    registrant_addr = db_creator.wallet_address
+            except SQLAlchemyError:
+                pass
 
     if not registrant_addr:
         raise HTTPException(
