@@ -8,7 +8,7 @@ import re
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.schemas.entry import EntryKind, EntryStatus
 
@@ -27,6 +27,7 @@ _KST_MIDNIGHT_REMAINDER = 54000  # KST 00:00 = UTC 15:00 → Unix 초 % 86400
 # 원장의 저장 필드 폭과 금액 상한 (IAccountingLedger "저장 필드 폭", MAX_AMOUNT). 넘으면 체인이 revert 한다
 MAX_AMOUNT = 10**15
 UINT64_MAX = 2**64 - 1
+UINT256_MAX = 2**256 - 1  # deadline 처럼 uint256 인 필드. 넘으면 서명 인코딩부터 안 된다
 # 학기 코드 YYYYS 의 학기 자리: 1·2 정규, 3 여름, 4 겨울 (docs/CONTRACTS.md "공통 규칙")
 _TERM_SEMESTERS = (1, 2, 3, 4)
 
@@ -67,31 +68,54 @@ def check_signature(signature: str) -> str:
     return signature.lower()
 
 
+def check_tx_hash(tx_hash: str) -> str:
+    """트랜잭션 hash 형식(0x + 32바이트)만 보고 소문자로 맞춰 돌려준다. DB 의 tx_pending·tx_confirm 값이다."""
+    if not _BYTES32.fullmatch(tx_hash.lower()):
+        raise ValueError("트랜잭션 hash 는 0x + hex 64자여야 한다")
+    return tx_hash.lower()
+
+
 class _Frozen(BaseModel):
     model_config = ConfigDict(frozen=True)
 
 
 # ---------------------------------------------------------------- 서명 대상 구조체
 # 필드 이름·순서가 IAccountingLedger 의 EIP-712 struct 와 같다. 앱이 서명한 값을 그대로 담는다.
+#
+# 컨트랙트가 상태와 무관하게 거부하는 값(hash 0, 금액 0·상한 초과, 저장 폭을 넘는 숫자, 정정 없는 음수, 예산 붙은 수입)은
+# 모델을 만들 때 막는다. 체인까지 가면 시뮬레이션에서 걸리긴 하지만, 등록 API 가 400 으로 일찍 돌려줄 수 있다
+# (PR #20 2차 리뷰). 같은 검사가 컨트랙트·FakeChainClient 에도 있다 — 테스트는 model_copy(update=...) 로 이 검사를
+# 건너뛰고 체인 쪽 거부를 확인한다 (tests/chain_support.py unchecked).
 
 
 class RecordRequest(_Frozen):
     """총무 기기가 서명한 등록 요청."""
 
-    id: int = Field(..., ge=1, description="DB 에서 채번한 entryId. 1부터 (0 은 없음)")
-    hash: str = Field(..., description="meta_hash (docs/HASHING.md §1)")
-    amount: int = Field(..., description="원 단위. 정정 항목만 음수")
+    id: int = Field(..., ge=1, le=UINT64_MAX, description="DB 에서 채번한 entryId. 1부터 (0 은 없음)")
+    hash: str = Field(..., description="meta_hash (docs/HASHING.md §1). 0 이면 HashRequired")
+    amount: int = Field(..., description="원 단위. 0 이 아니고 |amount| ≤ MAX_AMOUNT. 정정 항목만 음수")
     kind: EntryKind
     term: int = Field(..., description="학기 코드 YYYYS. 지출은 예산의 term, 정정은 원본의 term 과 같아야 한다")
-    occurred_at: int = Field(..., ge=0, description="사용일 KST 00:00:00 Unix 초 (docs/HASHING.md §1.3)")
-    budget_id: int = Field(0, ge=0, description="INCOME 은 0")
-    corrects_id: int = Field(0, ge=0, description="정정 대상 entryId. 정정이 아니면 0")
-    deadline: int = Field(..., ge=0, description="서명 유효 시한 (Unix 초)")
+    occurred_at: int = Field(..., ge=0, le=UINT64_MAX, description="사용일 KST 00:00:00 Unix 초 (docs/HASHING.md §1.3)")
+    budget_id: int = Field(0, ge=0, le=UINT64_MAX, description="INCOME 은 0")
+    corrects_id: int = Field(0, ge=0, le=UINT64_MAX, description="정정 대상 entryId. 정정이 아니면 0")
+    deadline: int = Field(..., ge=0, le=UINT256_MAX, description="서명 유효 시한 (Unix 초)")
 
     @field_validator("hash")
     @classmethod
     def _hash(cls, v: str) -> str:
-        return _bytes32(v)
+        if _bytes32(v) == ZERO_BYTES32:
+            raise ValueError("hash 가 0 이다 (컨트랙트 HashRequired)")
+        return v
+
+    @field_validator("amount")
+    @classmethod
+    def _amount(cls, v: int) -> int:
+        if v == 0:
+            raise ValueError("amount 가 0 이다 (컨트랙트 ZeroAmount)")
+        if abs(v) > MAX_AMOUNT:
+            raise ValueError(f"|amount| 는 {MAX_AMOUNT} 이하여야 한다 (컨트랙트 AmountOutOfRange)")
+        return v
 
     @field_validator("term")
     @classmethod
@@ -105,16 +129,24 @@ class RecordRequest(_Frozen):
             raise ValueError("사용일의 KST 자정이어야 한다 (docs/HASHING.md §1.3)")
         return v
 
+    @model_validator(mode="after")
+    def _combination(self) -> "RecordRequest":
+        if self.amount < 0 and self.corrects_id == 0:
+            raise ValueError("음수 금액은 정정 항목(corrects_id)만 쓸 수 있다 (컨트랙트 NegativeAmountWithoutCorrection)")
+        if self.kind == EntryKind.INCOME and self.budget_id != 0:
+            raise ValueError("수입에는 예산을 붙이지 않는다 (컨트랙트 BudgetIdNotAllowedForIncome)")
+        return self
+
 
 class ConfirmApproval(_Frozen):
     """감사·회장 기기가 서명한 확정 요청."""
 
-    id: int = Field(..., ge=1)
+    id: int = Field(..., ge=1, le=UINT64_MAX)
     hash: str = Field(..., description="등록 때와 같은 meta_hash. 다르면 HashMismatch")
     entry_commit: str = Field(..., description="승인자가 본 항목 값의 커밋 (app.chain.commit). 다르면 EntryCommitMismatch")
     had_warning: bool = False
     warning_reason_hash: str = Field(ZERO_BYTES32, description="경고가 없으면 bytes32(0). 경고면 사유 해시 필수")
-    deadline: int = Field(..., ge=0)
+    deadline: int = Field(..., ge=0, le=UINT256_MAX)
 
     @field_validator("hash", "entry_commit", "warning_reason_hash")
     @classmethod
@@ -125,10 +157,10 @@ class ConfirmApproval(_Frozen):
 class RejectDecision(_Frozen):
     """감사·회장 기기가 서명한 반려 요청."""
 
-    id: int = Field(..., ge=1)
+    id: int = Field(..., ge=1, le=UINT64_MAX)
     entry_commit: str = Field(..., description="반려자가 본 항목 값의 커밋. ConfirmApproval 과 같은 식")
     reason_hash: str = Field(..., description="반려 사유 text_hash (docs/HASHING.md §3). 0 이면 ReasonRequired")
-    deadline: int = Field(..., ge=0)
+    deadline: int = Field(..., ge=0, le=UINT256_MAX)
 
     @field_validator("entry_commit", "reason_hash")
     @classmethod
@@ -169,8 +201,9 @@ class ChainEntry(_Frozen):
 class RevertReason(str, Enum):
     """값은 Solidity 에러 이름 그대로다. 실제 구현에서 revert 데이터를 이 값으로 옮긴다.
 
-    범위는 AccountingLedger ABI 의 에러다 (ChainClient 가 원장만 부른다). confirmEntry 안에서 BudgetToken 이 내는
-    InsufficientBudget·BudgetExpired 도 원장 ABI 에 같은 시그니처로 선언돼 있어 원장 ABI 하나로 해석된다.
+    범위는 원장을 부를 때 날 수 있는 에러다 (ChainClient 가 원장만 부른다). 원장 ABI 의 에러에 더해, 확정 안에서
+    원장이 부르는 BudgetToken.spend·refund 가 내는 에러도 넣는다 — InsufficientBudget·BudgetExpired 는 원장 ABI 에도
+    같은 시그니처로 있고, BudgetNotFound·RefundExceedsSpent·ZeroAmount() 는 BudgetToken ABI 에만 있다 (app/chain/revert.py).
     BudgetToken·RoleManager 를 직접 부르게 되면 TermRequired·ReservedId 처럼 이름이 같은 에러가 있으니
     이름만이 아니라 어느 컨트랙트에서 났는지까지 보고 분류한다. 순서는 IAccountingLedger 의 검사 순서다.
     """
@@ -210,6 +243,12 @@ class RevertReason(str, Enum):
     # BudgetToken 이 confirmEntry 안에서 내는 것. 항목은 PENDING 그대로라 반려 흐름으로 넘긴다
     INSUFFICIENT_BUDGET = "InsufficientBudget"
     BUDGET_EXPIRED = "BudgetExpired"
+    # BudgetToken ABI 에만 있는 것. 원장의 사전 검사가 먼저 막아 보통은 나지 않는다 — 나면 원장과 예산 상태가 어긋났다
+    BUDGET_NOT_FOUND = "BudgetNotFound"  # spend·refund 할 예산이 없음
+    REFUND_EXCEEDS_SPENT = "RefundExceedsSpent"  # 음수 정정 확정의 환급이 쓴 금액을 넘음
+    # Solidity 에러 이름이 아닌 유일한 값. revert 는 확실하지만(온체인 상태 그대로) 원인을 해석할 수 없다 —
+    # 원장 ABI 에 없는 에러, 빈 revert 데이터, Panic, Error(string). 원본은 detail 에 있다 (app/chain/revert.py)
+    UNKNOWN = "Unknown"
 
 
 class ChainError(Exception):
@@ -227,3 +266,10 @@ class ChainRevert(ChainError):
 
 class ChainUnavailable(ChainError):
     """RPC 연결 실패·타임아웃. revert 와 달리 트랜잭션이 들어갔는지 알 수 없다."""
+
+
+class ChainSetupError(ChainError):
+    """릴레이할 수 없는 설정 상태 — 노드 연결, 배포 기록, 릴레이어 키 문제. 트랜잭션은 보내지 않았다.
+
+    API 는 503 으로 바꾼다 (app/main.py). 배포 기록 파일 문제(DeploymentError)도 이 하위 클래스다.
+    """

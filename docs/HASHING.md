@@ -246,7 +246,7 @@ Entry { hash, amount, budgetId, correctsId, registrant, occurredAt, term, approv
 
 > **`REJECTED` 항목은 `approver`를 비교하지 않는다.** 컨트랙트의 `approver`는 확정자와 **반려자를 겸한다**(`confirmEntry` / `rejectEntry` 서명자). 그런데 DB에는 `approved_by`와 `reject_reason`만 있고 **반려자 컬럼이 없다.** 그대로 비교하면 체인에는 감사 주소가, DB에는 `NULL`이 있어 **반려된 항목이 전부 위조로 판정된다.** `rejected_by` 컬럼이 생기기 전까지 `REJECTED` 상태에서는 이 필드를 건너뛴다 (§8).
 
-> **`registrant` / `approver`는 지갑 주소이고 DB의 `created_by` / `approved_by`는 user id다.** 값 자체가 달라서 그냥 비교하면 안 되고, `User.wallet_address`로 옮긴 뒤 대조해야 한다. **이 두 필드가 "누가 등록하고 누가 승인했는가"의 유일한 온체인 증거**이므로 빠뜨리면 안 된다. 주소 매핑은 인증 파트(손종인)가 API로 내려준다.
+> **`registrant` / `approver`는 지갑 주소이고 DB의 `created_by` / `approved_by`는 user id다.** 값 자체가 달라서 그냥 비교하면 안 되고, 체인 주소를 `GET /users/wallets`(소문자 주소 → user id)로 user id로 바꾼 뒤 대조해야 한다. 반대 방향(user id → 현재 주소)으로 대조하면 키를 교체한 사람이 옛 주소로 남긴 과거 항목이 모두 불일치로 나온다. **이 두 필드가 "누가 등록하고 누가 승인했는가"의 유일한 온체인 증거**이므로 빠뜨리면 안 된다. 주소 매핑은 인증 파트(손종인)가 API로 내려준다.
 
 ### 2.1 NULL과 0 — 비교 전에 맞춰야 한다
 
@@ -275,7 +275,7 @@ Entry { hash, amount, budgetId, correctsId, registrant, occurredAt, term, approv
 | `REJECTED` | 가능 | 반려는 `PENDING`에서만 가능하므로 `Entry`가 남아 있다 |
 | `BLOCKED` | 가능 | 예산 검사에 걸려도 `Entry`는 저장된다 (`IAccountingLedger`: "revert 하지 않고 BLOCKED 로 저장") |
 
-이벤트만 보면 `EntryRejected`에 `hash`가 없어 검증이 안 되는 것처럼 보인다(`EntryBlocked`에는 PR #13부터 `hash`·`term`·등록자가 있다). **`getEntry(id)`를 쓰면 네 상태 모두 검증된다.**
+이벤트만 보면 `EntryRejected`에 `hash`가 없어 검증이 안 되는 것처럼 보인다(`EntryBlocked`에는 PR #13부터 `hash`·`term`·`correctsId`·등록자가 있다). **`getEntry(id)`를 쓰면 네 상태 모두 검증된다.**
 
 **승인 전 수정은 새 id로 다시 등록된다.** 같은 내용의 항목이 여러 건 남을 수 있으므로, 각 항목은 **자기 id의 체인 값과만** 비교한다. 이전 id의 기록이 체인에 남아 있는 것은 정상이다 (PRD T4 "이전 기록 잔존").
 
