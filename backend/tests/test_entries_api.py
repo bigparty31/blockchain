@@ -9,7 +9,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.auth import users
 from app.auth.security import create_access_token
-from app.chain import FakeChainClient, fake_signature, get_chain_client
+from app.chain import ChainUnavailable, FakeChainClient, fake_signature, get_chain_client
 from app.chain.models import BlockReason
 from app.database import Base, get_db
 from app.main import app
@@ -758,3 +758,183 @@ def test_confirm_ocr_no_number_is_normal(auth_header):
     )
     assert confirm_ok.status_code == 200
     assert confirm_ok.json()["status"] == "CONFIRMED"
+
+
+def test_submit_entry_retry_recovers_state_2(auth_header, monkeypatch):
+    """상태 ②(전송 후 응답 유실 + 노드 일시 불능)에서 재제출 시 200 PENDING으로 정상 복구 검증"""
+    global _test_chain
+    now = int(time.time())
+    draft_body = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 40000,
+        "counterparty": "상태2복구문구",
+        "purpose": "상태 2 재시도 복구 검증",
+        "budget_id": 2,
+        "occurred_at": 1788793200,
+    }
+    res_draft = client.post("/entries", json=draft_body, headers=auth_header(Role.TREASURER))
+    assert res_draft.status_code == 201
+    entry_id = res_draft.json()["id"]
+
+    submit_body = {
+        "deadline": now + 600,
+        "signature": fake_signature(TREASURER_WALLET),
+    }
+
+    # 1. 전송 후 응답 유실 + 결과 확인 시 노드 일시 불능 (상태 ② 유도)
+    _test_chain.unavailable_next("record_pending", landed=True)
+    orig_tx_result = _test_chain.tx_result
+    failed_once = False
+
+    async def fail_once_tx_result(tx_hash, eid):
+        nonlocal failed_once
+        if not failed_once:
+            failed_once = True
+            raise ChainUnavailable("결과 확인 시 노드 일시 불능")
+        return await orig_tx_result(tx_hash, eid)
+
+    monkeypatch.setattr(_test_chain, "tx_result", fail_once_tx_result)
+
+    res_fail = client.post(
+        f"/entries/{entry_id}/submit",
+        json=submit_body,
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_fail.status_code == 503
+    assert res_fail.json()["detail"] == "블록체인 네트워크와 통신할 수 없습니다."
+
+    # DB 상태 확인: 상태 ② (status는 None, tx_pending은 채워짐)
+    with _test_session_factory() as db:
+        row = db.query(DBEntry).filter(DBEntry.id == entry_id).first()
+        assert row.status is None
+        assert row.tx_pending is not None
+        saved_tx = row.tx_pending
+
+    # 2. 노드 복구 후 재제출 -> 200 OK 및 PENDING 상태로 복구 확인
+    res_retry = client.post(
+        f"/entries/{entry_id}/submit",
+        json=submit_body,
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_retry.status_code == 200
+    retry_data = res_retry.json()
+    assert retry_data["status"] == "PENDING"
+    assert retry_data["tx_pending"] == saved_tx
+
+    # DB 확인: status가 PENDING으로 정상 갱신됨
+    with _test_session_factory() as db:
+        row = db.query(DBEntry).filter(DBEntry.id == entry_id).first()
+        assert row.status == "PENDING"
+        assert row.tx_pending == saved_tx
+
+
+def test_reject_blocked_when_confirm_in_flight(auth_header):
+    """확정 처리가 상태 ②로 선점된 도중 반려 시 409 Conflict 차단 검증"""
+    now = int(time.time())
+    draft_body = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 25000,
+        "counterparty": "확정선점문구",
+        "purpose": "확정 선점 중 반려 차단 검증",
+        "budget_id": 2,
+        "occurred_at": 1788793200,
+    }
+    res_draft = client.post("/entries", json=draft_body, headers=auth_header(Role.TREASURER))
+    entry_id = res_draft.json()["id"]
+
+    res_submit = client.post(
+        f"/entries/{entry_id}/submit",
+        json={"deadline": now + 600, "signature": fake_signature(TREASURER_WALLET)},
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_submit.status_code == 200
+
+    # 확정이 진행 중(상태 ② 선점)인 상태를 DB에 모사
+    with _test_session_factory() as db:
+        row = db.query(DBEntry).filter(DBEntry.id == entry_id).first()
+        row.tx_confirm = "0x" + "7" * 64
+        row.approved_by = 3
+        db.commit()
+
+    # 회장이 반려를 시도할 경우 409로 차단
+    reject_body = {
+        "deadline": now + 600,
+        "signature": fake_signature(PRESIDENT_WALLET),
+        "reject_reason": "확정 선점 중 반려 시도",
+    }
+    res_reject = client.post(
+        f"/entries/{entry_id}/reject",
+        json=reject_body,
+        headers=auth_header(Role.PRESIDENT),
+    )
+    assert res_reject.status_code == 409
+    assert "확정 처리 중인 내역은 반려할 수 없습니다." in res_reject.json()["detail"]
+
+    # DB 상태가 REJECTED로 오염되지 않고 유지되었는지 확인
+    with _test_session_factory() as db:
+        row = db.query(DBEntry).filter(DBEntry.id == entry_id).first()
+        assert row.status == "PENDING"
+        assert row.rejected_by is None
+
+
+def test_confirm_or_reject_when_chain_entry_missing_returns_404(auth_header):
+    """DB에는 PENDING이나 체인에 미등록된 항목에 대해 확정/반려 시 404 차단 검증"""
+    now = int(time.time())
+    # entry 2는 시드 DB에 PENDING이지만 _test_chain._entries에는 없음
+    confirm_body = {
+        "deadline": now + 600,
+        "signature": fake_signature(AUDITOR_WALLET),
+        "warning_reason": None,
+    }
+    res_confirm = client.post("/entries/2/confirm", json=confirm_body, headers=auth_header(Role.AUDITOR))
+    assert res_confirm.status_code == 404
+    assert "체인에서 항목" in res_confirm.json()["detail"]
+
+    reject_body = {
+        "deadline": now + 600,
+        "signature": fake_signature(AUDITOR_WALLET),
+        "reject_reason": "체인 미등록 건 반려 시도",
+    }
+    res_reject = client.post("/entries/2/reject", json=reject_body, headers=auth_header(Role.AUDITOR))
+    assert res_reject.status_code == 404
+    assert "체인에서 항목" in res_reject.json()["detail"]
+
+
+def test_confirm_when_chain_unavailable_on_get_entry_returns_503(auth_header, monkeypatch):
+    """체인 항목 등록자 조회 중 ChainUnavailable 발생 시 503 에스컬레이션 검증"""
+    now = int(time.time())
+    draft_body = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 15000,
+        "counterparty": "장애테스트점",
+        "purpose": "노드 장애 에스컬레이션 검증",
+        "budget_id": 2,
+        "occurred_at": 1788793200,
+    }
+    res_draft = client.post("/entries", json=draft_body, headers=auth_header(Role.TREASURER))
+    entry_id = res_draft.json()["id"]
+
+    res_submit = client.post(
+        f"/entries/{entry_id}/submit",
+        json={"deadline": now + 600, "signature": fake_signature(TREASURER_WALLET)},
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_submit.status_code == 200
+
+    async def mock_get_entry(entry_id):
+        raise ChainUnavailable("체인 RPC 노드 연결 단절")
+
+    monkeypatch.setattr(_test_chain, "get_entry", mock_get_entry)
+
+    confirm_body = {
+        "deadline": now + 600,
+        "signature": fake_signature(AUDITOR_WALLET),
+        "warning_reason": None,
+    }
+    res = client.post(f"/entries/{entry_id}/confirm", json=confirm_body, headers=auth_header(Role.AUDITOR))
+    assert res.status_code == 503
+    assert "블록체인 네트워크와 통신할 수 없습니다." in res.json()["detail"]
+
