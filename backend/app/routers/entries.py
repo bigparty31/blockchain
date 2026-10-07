@@ -8,18 +8,23 @@ logger = logging.getLogger(__name__)
 
 from app.auth import User, require_roles
 from app.auth.approval import ensure_not_self_approval
-from app.auth.users import get_user_by_id
 from app.chain import (
     ChainClient,
     ChainRevert,
+    ChainSetupError,
     ChainUnavailable,
     ConfirmApproval,
     RecordRequest,
     RejectDecision,
     entry_commit,
-    get_chain_client,
 )
+from app.chain.provider import get_chain_client
 from app.chain.models import BlockReason as ChainBlockReason
+from app.services.chain_tx import (
+    EntryConflict,
+    relay_confirm,
+    relay_record,
+)
 from app.database import get_db
 from app.models import Budget as DBBudget, Entry as DBEntry, Term as DBTerm, User as DBUser
 from app.schemas.auth import Role
@@ -60,96 +65,32 @@ treasurer_only = require_roles(Role.TREASURER)
 # 승인·반려는 감사와 회장만 가능
 approver_only = require_roles(Role.AUDITOR, Role.PRESIDENT)
 
-# PRD §8 및 docs/HASHING.md 규격에 맞춘 초기 목업 더미 데이터 3건 (KST 자정 타임스탬프 준수)
-DUMMY_ENTRIES: List[EntryResponse] = [
-    EntryResponse(
-        id=1,
-        term_id=1,
-        kind=EntryKind.EXPENSE,
-        amount=35000,
-        counterparty="한결문구",
-        purpose="신입생 환영회 명찰 및 필기구 구매",
-        budget_id=2,
-        occurred_at=1788793200,  # 2026-09-08 00:00:00 KST
-        receipt_path="/receipts/sample_01.jpg",
-        receipt_hash="0xabc1234567890abcdef1234567890abcdef1234567890abcdef1234567890abc",
-        meta_hash="0x24ae73988d927fb39f45eb6024e9ff8ffa19e8501603565bd82710ea8df4b937",
-        hash_version=1,
-        ocr_amount=35000,
-        ocr_approval_no="12345678",
-        ocr_paid_at=1788825820,
-        ocr_status=OCRStatus.MATCH,
-        category_warning=False,
-        warning_ack_reason=None,
-        status=EntryStatus.CONFIRMED,
-        created_by=2,
-        approved_by=3,
-        rejected_by=None,
-        reject_reason=None,
-        tx_pending="0x1111111111111111111111111111111111111111111111111111111111111111",
-        tx_confirm="0x2222222222222222222222222222222222222222222222222222222222222222",
-        corrects_entry_id=None,
-        correction_reason=None,
-    ),
-    EntryResponse(
-        id=2,
-        term_id=1,
-        kind=EntryKind.EXPENSE,
-        amount=120000,
-        counterparty="청년피자",
-        purpose="개강총회 다과 주문",
-        budget_id=1,
-        occurred_at=1788706800,  # 2026-09-07 00:00:00 KST
-        receipt_path="/receipts/sample_02.jpg",
-        receipt_hash="0xdef4567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
-        meta_hash="0x622fc1b357c04032e65bc1855c73aaff6d519464d69bf22b10761f3b26a1b793",
-        hash_version=1,
-        ocr_amount=120000,
-        ocr_approval_no="87654321",
-        ocr_paid_at=1788775450,
-        ocr_status=OCRStatus.MATCH,
-        category_warning=False,
-        warning_ack_reason=None,
-        status=EntryStatus.PENDING,
-        created_by=2,
-        approved_by=None,
-        rejected_by=None,
-        reject_reason=None,
-        tx_pending="0x3333333333333333333333333333333333333333333333333333333333333333",
-        tx_confirm=None,
-        corrects_entry_id=None,
-        correction_reason=None,
-    ),
-    EntryResponse(
-        id=3,
-        term_id=1,
-        kind=EntryKind.INCOME,
-        amount=5000000,
-        counterparty="컴퓨터공학과 학생회비 일괄 납부",
-        purpose="2026-2학기 학과 학생회비 수납",
-        budget_id=None,
-        occurred_at=1788620400,  # 2026-09-06 00:00:00 KST
-        receipt_path=None,
-        receipt_hash=None,
-        meta_hash="0x74c9740556d857575586251e71fa24091ffaece5c01c4f889d7c1224ce7af3a9",
-        hash_version=1,
-        ocr_amount=None,
-        ocr_approval_no=None,
-        ocr_paid_at=None,
-        ocr_status=None,
-        category_warning=False,
-        warning_ack_reason=None,
-        status=EntryStatus.CONFIRMED,
-        created_by=2,
-        approved_by=3,
-        rejected_by=None,
-        reject_reason=None,
-        tx_pending="0x4444444444444444444444444444444444444444444444444444444444444444",
-        tx_confirm="0x5555555555555555555555555555555555555555555555555555555555555555",
-        corrects_entry_id=None,
-        correction_reason=None,
-    ),
-]
+async def _get_chain_registrant(entry_id: int, chain: ChainClient) -> str:
+    """온체인에서 항목의 등록자 지갑 주소를 조회합니다.
+    체인 통신/설정 오류는 503, 체인에 없는 건은 404를 반환합니다.
+    """
+    try:
+        chain_entry = await chain.get_entry(entry_id)
+    except (ChainUnavailable, ChainSetupError) as e:
+        logger.exception("체인 항목(%d) 등록자 조회 중 오류: %s", entry_id, e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="블록체인 네트워크와 통신할 수 없습니다.",
+        )
+
+    if not chain_entry:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"체인에서 항목(id={entry_id})을 찾을 수 없습니다.",
+        )
+
+    if not chain_entry.registrant:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"항목(id={entry_id})의 체인 등록자 지갑 주소를 찾을 수 없습니다.",
+        )
+
+    return chain_entry.registrant
 
 
 def _to_schema(entry: DBEntry) -> EntryResponse:
@@ -193,11 +134,13 @@ async def get_entries(db: Session = Depends(get_db)):
     """
     try:
         db_entries = db.query(DBEntry).filter(DBEntry.status.isnot(None)).all()
-        if db_entries:
-            return [_to_schema(e) for e in db_entries]
-    except SQLAlchemyError:
-        pass
-    return [e for e in DUMMY_ENTRIES if e.status is not None]
+        return [_to_schema(e) for e in db_entries]
+    except SQLAlchemyError as e:
+        logger.exception("수입·지출 내역 목록 조회 중 데이터베이스 오류: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 처리 중 오류가 발생했습니다.",
+        )
 
 
 @router.post(
@@ -370,8 +313,8 @@ async def submit_entry(
             detail="본인이 등록한 초안만 제출할 수 있습니다.",
         )
 
-    # 3. 이미 제출된 건인지 확인
-    if current_status is not None or current_tx is not None:
+    # 3. 이미 제출된 건인지 확인 (상태 ②인 경우 relay_record에서 복구하도록 status만 검사)
+    if current_status is not None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="이미 온체인에 제출된 내역입니다.",
@@ -445,9 +388,20 @@ async def submit_entry(
             detail="서명자가 등록자와 일치하지 않습니다.",
         )
 
-    # 7. 체인 릴레이 호출
+    # 7. 체인 릴레이 호출 및 상태 갱신 (chain_tx 서비스 연동)
     try:
-        tx_result = await chain.record_pending(record_req, req.signature)
+        db.commit()
+    except SQLAlchemyError as e:
+        logger.exception("체인 릴레이 전 데이터베이스 커밋 오류: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 처리 중 오류가 발생했습니다.",
+        )
+
+    try:
+        tx_result = await relay_record(db, chain, record_req, req.signature)
+    except EntryConflict as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except ChainRevert as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -460,25 +414,12 @@ async def submit_entry(
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except LookupError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
 
-    # 8. 상태 갱신 (DB 전용)
     new_status = tx_result.status
     tx_hash = tx_result.tx_hash
     b_reason = tx_result.block_reason
-
-    try:
-        target.status = new_status.value
-        target.tx_pending = tx_hash
-        if b_reason:
-            target.block_reason = b_reason.value
-        db.commit()
-    except SQLAlchemyError as e:
-        db.rollback()
-        logger.exception("초안 제출 상태 저장 중 데이터베이스 오류: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="데이터베이스 처리 중 오류가 발생했습니다.",
-        )
 
     msg = (
         "온체인에 성공적으로 기록되어 감사 승인 대기(PENDING) 상태가 되었습니다."
@@ -564,21 +505,7 @@ async def confirm_entry(
         or 0
     )
 
-    creator = get_user_by_id(target.created_by)
-    registrant_addr = creator.wallet_address if creator else None
-    if not registrant_addr:
-        try:
-            db_creator = db.query(DBUser).filter(DBUser.id == target.created_by).first()
-            if db_creator and db_creator.wallet_address:
-                registrant_addr = db_creator.wallet_address
-        except SQLAlchemyError:
-            pass
-
-    if not registrant_addr:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"등록자(user_id={target.created_by})의 유효한 지갑 주소를 찾을 수 없습니다.",
-        )
+    registrant_addr = await _get_chain_registrant(id, chain)
 
     commit_hash = entry_commit(
         hash=target_hash,
@@ -609,9 +536,10 @@ async def confirm_entry(
             detail="경고 항목이 아닌 경우 경고 무시 사유(warning_reason)를 제출할 수 없습니다.",
         )
 
+    clean_reason = canonical_text(req.warning_reason) if had_warning and req.warning_reason else None
     warning_reason_hash = (
-        text_hash(canonical_text(req.warning_reason))
-        if had_warning and req.warning_reason
+        text_hash(clean_reason)
+        if had_warning and clean_reason
         else "0x" + "0" * 64
     )
 
@@ -636,9 +564,27 @@ async def confirm_entry(
     if not user.wallet_address or recovered.lower() != user.wallet_address.lower():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="서명자가 승인권자와 일치하지 않습니다.")
 
-    # 체인 릴레이
+    # 체인 릴레이 호출 및 상태 갱신 (chain_tx 서비스 연동)
     try:
-        tx_res = await chain.confirm_entry(approval, req.signature)
+        db.commit()
+    except SQLAlchemyError as e:
+        logger.exception("체인 릴레이 전 데이터베이스 커밋 오류: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 처리 중 오류가 발생했습니다.",
+        )
+
+    try:
+        tx_res = await relay_confirm(
+            db=db,
+            chain=chain,
+            approval=approval,
+            signature=req.signature,
+            approver_id=user.id,
+            warning_reason=clean_reason,
+        )
+    except EntryConflict as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except ChainRevert as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -648,22 +594,8 @@ async def confirm_entry(
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="블록체인 네트워크와 통신할 수 없습니다.")
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-
-    # 상태 갱신 (DB 전용)
-    try:
-        target.status = EntryStatus.CONFIRMED.value
-        target.approved_by = user.id
-        target.tx_confirm = tx_res.tx_hash
-        if had_warning and req.warning_reason:
-            target.warning_ack_reason = canonical_text(req.warning_reason)
-        db.commit()
-    except SQLAlchemyError as e:
-        db.rollback()
-        logger.exception("내역 확정 상태 저장 중 데이터베이스 오류: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="데이터베이스 처리 중 오류가 발생했습니다.",
-        )
+    except LookupError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
 
     return EntryConfirmResponse(
         id=id,
@@ -714,6 +646,13 @@ async def reject_entry(
             detail="PENDING 상태의 항목만 반려할 수 있습니다.",
         )
 
+    # 확정 선점(tx_confirm)이 있으면 409 선제 차단 (relay_reject 도입 전 임시 방어)
+    if target.tx_confirm:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="확정 처리 중인 내역은 반려할 수 없습니다.",
+        )
+
     canon_reason = canonical_text(req.reject_reason)
     if not canon_reason:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="반려 사유는 필수입니다.")
@@ -748,21 +687,7 @@ async def reject_entry(
         or 0
     )
 
-    creator = get_user_by_id(target.created_by)
-    registrant_addr = creator.wallet_address if creator else None
-    if not registrant_addr:
-        try:
-            db_creator = db.query(DBUser).filter(DBUser.id == target.created_by).first()
-            if db_creator and db_creator.wallet_address:
-                registrant_addr = db_creator.wallet_address
-        except SQLAlchemyError:
-            pass
-
-    if not registrant_addr:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"등록자(user_id={target.created_by})의 유효한 지갑 주소를 찾을 수 없습니다.",
-        )
+    registrant_addr = await _get_chain_registrant(id, chain)
 
     commit_hash = entry_commit(
         hash=target_hash,
