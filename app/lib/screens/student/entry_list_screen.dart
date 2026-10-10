@@ -31,30 +31,52 @@ class _EntryListScreenState extends State<EntryListScreen> {
   final Map<int, VerificationReport> _reports = {};
   _Filter _filter = _Filter.all;
 
+  /// 필터를 바꿀 때 목록 맨 위로 되돌리기 위한 것 (스토리보드 3 ①).
+  final _scroll = ScrollController();
+
   @override
   void initState() {
     super.initState();
     _load();
   }
 
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  /// 필터를 바꾼다. **스크롤은 맨 위로 되돌린다** — 그대로 두면 짧아진 목록의
+  /// 중간에 떨어져서, 바뀐 결과의 첫 줄을 못 보고 「아무것도 없다」고 읽게 된다.
+  void _selectFilter(_Filter f) {
+    if (_filter == f) return;
+    setState(() => _filter = f);
+    if (_scroll.hasClients) _scroll.jumpTo(0);
+  }
+
+  /// **무슨 일이 있어도 `_loading` 은 끈다.** 예전에는 조회가 중간에 던지면
+  /// 스피너가 영영 안 꺼져서 화면이 멈춘 것처럼 보였다.
   Future<void> _load() async {
     if (mounted) setState(() => _loading = true);
-    final entries = await _api.fetchEntries();
-    if (!mounted) return;
+    try {
+      final entries = await _api.fetchEntries();
+      if (!mounted) return;
 
-    setState(() {
-      _chains = EntryMerge.fold(entries);
-      _reports.clear();
-      _loading = false;
-    });
+      setState(() {
+        _chains = EntryMerge.fold(entries);
+        _reports.clear();
+      });
 
-    // 목록을 열어본 시점에 미확인 뱃지(S12)를 지운다.
-    if (entries.isNotEmpty) {
-      final maxId = entries.map((e) => e.id).reduce((a, b) => a > b ? a : b);
-      await _api.markEntriesSeen(maxId);
+      // 목록을 열어본 시점에 미확인 뱃지(S12)를 지운다.
+      if (entries.isNotEmpty) {
+        final maxId = entries.map((e) => e.id).reduce((a, b) => a > b ? a : b);
+        await _api.markEntriesSeen(maxId);
+      }
+
+      _verifyAll();
+    } finally {
+      if (mounted) setState(() => _loading = false);
     }
-
-    _verifyAll();
   }
 
   /// 체인별로 검증을 돌린다. 끝나는 대로 배지를 갱신한다.
@@ -62,23 +84,40 @@ class _EntryListScreenState extends State<EntryListScreen> {
   /// **원본뿐 아니라 정정 항목도 검증한다.** 정정도 저마다 온체인 entry 이고,
   /// 카드에 크게 뜨는 최종 금액이 정정 금액에서 나온다. 원본만 보면 정정 내용이
   /// 나중에 조작돼도 배지가 초록으로 남는다.
+  ///
+  /// **한 건이 던져도 나머지는 계속 돌린다.** 이 함수는 `_load` 에서 await 되지
+  /// 않으므로 예외가 올라가면 조용히 사라지고, 그 뒤 항목의 배지가 전부
+  /// 「검증 중」에 남는다 — 화면은 멀쩡해 보이는데 검증만 멈춘 상태다.
+  /// 지갑 매핑처럼 전체에 걸리는 조회도 같은 이유로 감싼다. 매핑을 못 받으면
+  /// 등록자 대조만 「모름」이 되고, 해시·영수증 대조는 그대로 돌아간다.
   Future<void> _verifyAll() async {
-    final wallets = await _api.fetchWalletMap();
+    Map<String, int>? wallets;
+    try {
+      wallets = await _api.fetchWalletMap();
+    } catch (_) {
+      wallets = null;
+    }
 
     for (final chain in _chains) {
       for (final entry in chain.allEntries) {
-        final onChain = await _api.fetchOnChainEntry(entry.id);
-        final receiptBytes = await _api.fetchReceiptBytes(entry);
-        if (!mounted) return;
+        try {
+          final onChain = await _api.fetchOnChainEntry(entry.id);
+          final receiptBytes = await _api.fetchReceiptBytes(entry);
+          if (!mounted) return;
 
-        setState(() {
-          _reports[entry.id] = EntryVerifier.verify(
-            entry,
-            onChain: onChain,
-            receiptBytes: receiptBytes,
-            walletByUserId: wallets,
-          );
-        });
+          setState(() {
+            _reports[entry.id] = EntryVerifier.verify(
+              entry,
+              onChain: onChain,
+              receiptBytes: receiptBytes,
+              userIdByAddress: wallets,
+            );
+          });
+        } catch (_) {
+          // 이 한 건은 「검증 중」에 남지만 나머지는 끝까지 돈다.
+          // 결과를 지어내서 채우지는 않는다 — 확인 못 한 것을 확인했다고
+          // 말하는 쪽이 멈춰 있는 배지보다 나쁘다.
+        }
       }
     }
   }
@@ -125,6 +164,11 @@ class _EntryListScreenState extends State<EntryListScreen> {
               padding: EdgeInsets.fromLTRB(20, 12, 20, 0),
               child: DemoDataBanner(),
             ),
+          if (!_loading && _api.skippedEntryCount > 0)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
+              child: SkippedEntriesBanner(count: _api.skippedEntryCount),
+            ),
           _buildFilterBar(),
           Expanded(
             child: _loading
@@ -134,6 +178,7 @@ class _EntryListScreenState extends State<EntryListScreen> {
                     child: _visible.isEmpty
                         ? _buildEmpty()
                         : ListView.separated(
+                            controller: _scroll,
                             padding: const EdgeInsets.fromLTRB(20, 8, 20, 28),
                             itemCount: _visible.length,
                             separatorBuilder: (_, __) => const SizedBox(height: 12),
@@ -175,7 +220,7 @@ class _EntryListScreenState extends State<EntryListScreen> {
           return Padding(
             padding: const EdgeInsets.only(right: 8),
             child: GestureDetector(
-              onTap: () => setState(() => _filter = f),
+              onTap: () => _selectFilter(f),
               child: AnimatedContainer(
                 duration: const Duration(milliseconds: 180),
                 padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),

@@ -5,6 +5,7 @@ import 'package:student_council_app/core/entry_merge.dart';
 import 'package:student_council_app/core/entry_verifier.dart';
 import 'package:student_council_app/core/enums.dart';
 import 'package:student_council_app/core/hashing.dart';
+import 'package:student_council_app/core/term_info.dart';
 import 'package:student_council_app/models/entry_model.dart';
 import 'package:student_council_app/models/onchain_entry_model.dart';
 
@@ -102,10 +103,17 @@ void main() {
 
     const registrant = '0x71C7656EC7ab88b098defB751B7401B5f6d8976F';
     const approver = '0x2546BcD3c84621e976D8185a91A922aE77ECEc30';
-    const wallets = {2: registrant, 3: approver};
+    // `GET /users/wallets` 와 같은 모양 — **주소(소문자) → user id** 다.
+    // 반대 방향이면 키를 교체한 사람의 옛 주소가 응답에서 사라져, 그 주소로
+    // 등록한 과거 항목이 전부 「등록자 불일치 = 변조 감지」로 뒤집힌다.
+    final wallets = {
+      registrant.toLowerCase(): 2,
+      approver.toLowerCase(): 3,
+    };
 
-    EntryModel soundEntry() => _entry(
+    EntryModel soundEntry({int? termCode = TermInfo.currentTermCode}) => _entry(
           id: 2,
+          termCode: termCode,
           amount: 35000,
           counterparty: '한결문구',
           purpose: '신입생 환영회 명찰 및 필기구 구매',
@@ -121,6 +129,7 @@ void main() {
           kind: e.kind,
           status: e.status,
           occurredAt: e.occurredAt,
+          term: e.termCode,
           budgetId: budgetId ?? e.budgetId ?? 0,
           correctsId: e.correctsEntryId ?? 0,
           registrant: '0x71C7656EC7ab88b098defB751B7401B5f6d8976F',
@@ -133,7 +142,7 @@ void main() {
         e,
         onChain: chainOf(e),
         receiptBytes: receiptBytes,
-        walletByUserId: wallets,
+        userIdByAddress: wallets,
       );
       expect(r.status, VerificationStatus.verified);
       expect(r.hashState, CheckState.passed);
@@ -157,34 +166,59 @@ void main() {
       );
     });
 
-    test('등록자 주소가 다르면 tampered', () {
+    test('체인 주소의 주인이 다른 사람이면 tampered', () {
       final e = soundEntry();
       final r = EntryVerifier.verify(
         e,
         onChain: chainOf(e),
         receiptBytes: receiptBytes,
-        // user #2 의 실제 지갑이 체인에 찍힌 주소와 다르다.
-        walletByUserId: const {
-          2: '0x000000000000000000000000000000000000dEaD',
-          3: approver,
+        // 체인에 찍힌 등록자 주소가 감사(user #3)의 것인데 DB 는 총무(#2)가
+        // 등록했다고 말한다. 등록자 ≠ 승인자 보장이 걸린 자리다.
+        userIdByAddress: {
+          registrant.toLowerCase(): 3,
+          approver.toLowerCase(): 3,
         },
       );
       expect(r.status, VerificationStatus.tampered);
       expect(r.mismatches.map((m) => m.label), contains('등록자'));
     });
 
-    test('주소 대소문자 표기가 달라도 같은 주소로 본다', () {
+    test('체인 주소가 체크섬 표기여도 소문자 매핑에서 찾는다', () {
+      // 체인은 EIP-55 체크섬 주소(대소문자 섞임)를 돌려주고 API 는 소문자 키를
+      // 내려준다 (`CHAIN_CLIENT.md`). 맞춰 보지 않으면 전부 「모름」이 된다.
       final e = soundEntry();
       final r = EntryVerifier.verify(
         e,
         onChain: chainOf(e),
         receiptBytes: receiptBytes,
-        walletByUserId: {
-          2: registrant.toLowerCase(),
-          3: approver.toUpperCase(),
-        },
+        userIdByAddress: wallets,
       );
       expect(r.status, VerificationStatus.verified);
+      expect(
+        r.fieldChecks.firstWhere((f) => f.label == '등록자').state,
+        CheckState.passed,
+      );
+    });
+
+    test('키 교체 전 주소는 「모름」이지 불일치가 아니다', () {
+      // 매핑에 없는 주소를 불일치로 판정하면, 키를 교체한 임원이 과거에
+      // 등록·승인한 항목이 전부 학생 화면에서 빨간 「변조 감지」로 뜬다.
+      // 옛 주소가 매핑에 실리는 것은 rotateKey 릴레이가 붙은 뒤다.
+      final e = soundEntry();
+      final r = EntryVerifier.verify(
+        e,
+        onChain: chainOf(e),
+        receiptBytes: receiptBytes,
+        // 등록자의 주소만 매핑에서 빠져 있다.
+        userIdByAddress: {approver.toLowerCase(): 3},
+      );
+
+      expect(r.status, VerificationStatus.partial);
+      expect(r.mismatches, isEmpty, reason: '모르는 것은 불일치가 아니다');
+      final check = r.fieldChecks.firstWhere((f) => f.label == '등록자');
+      expect(check.state, CheckState.unavailable);
+      expect(r.pendingReasons.any((s) => s.contains('등록자')), isTrue,
+          reason: '왜 초록이 아닌지 화면에 말해줄 수 있어야 한다');
     });
 
     test('금액이 바뀌면 해시가 어긋나 tampered', () {
@@ -218,12 +252,65 @@ void main() {
         e,
         onChain: chainOf(e, budgetId: 7), // 체인에는 7, API 는 2
         receiptBytes: receiptBytes,
-        walletByUserId: wallets,
+        userIdByAddress: wallets,
       );
 
       expect(r.hashState, CheckState.passed, reason: '해시는 멀쩡해야 한다');
       expect(r.status, VerificationStatus.tampered);
       expect(r.mismatches.map((m) => m.label), contains('예산 항목'));
+    });
+
+    group('학기 (Entry.term) — 해시가 덮지 않아 따로 대조한다', () {
+      test('학기가 어긋나면 해시가 통과해도 변조 감지다', () {
+        final e = soundEntry();
+        final other = OnChainEntry(
+          hash: e.metaHash,
+          amount: e.amount,
+          kind: e.kind,
+          status: e.status,
+          occurredAt: e.occurredAt,
+          term: 20261, // 체인은 지난 학기라고 말한다
+          budgetId: e.budgetId ?? 0,
+          correctsId: 0,
+          registrant: registrant,
+          approver: approver,
+        );
+
+        final r = EntryVerifier.verify(e,
+            onChain: other, receiptBytes: receiptBytes, userIdByAddress: wallets);
+
+        expect(r.hashState, CheckState.passed,
+            reason: 'term 은 meta_hash 에 들어가지 않아 해시로는 안 잡힌다');
+        expect(r.status, VerificationStatus.tampered);
+        expect(r.mismatches.map((f) => f.label), contains('학기'));
+      });
+
+      test('학기를 대조하지 못하면 초록을 주지 않는다', () {
+        // `EntryResponse` 에 아직 term_code 가 없는 지금 상태.
+        final e = soundEntry(termCode: null);
+        final r = EntryVerifier.verify(e,
+            onChain: chainOf(e),
+            receiptBytes: receiptBytes,
+            userIdByAddress: wallets);
+
+        expect(r.status, VerificationStatus.partial,
+            reason: '확인 못 한 것을 「완전 검증」으로 보여주면 안 된다');
+      });
+
+      test('DB 의 term_id 가 아니라 term_code 와 대조한다', () {
+        // term_id 는 1, 학기 코드는 20262 다. 체인 값(20262)과 맞아야 한다 —
+        // term_id 를 보고 비교하면 1 != 20262 로 멀쩡한 항목이 전부 어긋난다.
+        final e = soundEntry();
+        expect(e.termId, 1);
+        expect(e.termCode, 20262);
+
+        final r = EntryVerifier.verify(e,
+            onChain: chainOf(e),
+            receiptBytes: receiptBytes,
+            userIdByAddress: wallets);
+
+        expect(r.status, VerificationStatus.verified);
+      });
     });
 
     test('수입·지출을 뒤바꿔도 해시는 통과하지만 필드 대조가 잡는다', () {
@@ -234,6 +321,7 @@ void main() {
         kind: EntryKind.INCOME, // 체인은 수입이라고 말한다
         status: e.status,
         occurredAt: e.occurredAt,
+        term: e.termCode,
         budgetId: e.budgetId ?? 0,
         correctsId: 0,
         registrant: '0x71C7656EC7ab88b098defB751B7401B5f6d8976F',
@@ -241,7 +329,7 @@ void main() {
       );
 
       final r = EntryVerifier.verify(e,
-          onChain: swapped, receiptBytes: receiptBytes, walletByUserId: wallets);
+          onChain: swapped, receiptBytes: receiptBytes, userIdByAddress: wallets);
       expect(r.hashState, CheckState.passed);
       expect(r.status, VerificationStatus.tampered);
       expect(r.mismatches.map((m) => m.label), contains('수입·지출 구분'));
@@ -253,7 +341,7 @@ void main() {
         e,
         onChain: chainOf(e),
         receiptBytes: utf8.encode('different-bytes'),
-        walletByUserId: wallets,
+        userIdByAddress: wallets,
       );
 
       expect(r.hashState, CheckState.passed, reason: '해시는 멀쩡해야 한다');
@@ -264,7 +352,7 @@ void main() {
     test('체인 값이 없으면 초록을 주지 않는다 — partial', () {
       final e = soundEntry();
       final r = EntryVerifier.verify(e,
-          onChain: null, receiptBytes: receiptBytes, walletByUserId: wallets);
+          onChain: null, receiptBytes: receiptBytes, userIdByAddress: wallets);
       expect(r.status, VerificationStatus.partial);
       expect(r.chainDataAvailable, isFalse);
       expect(r.pendingReasons, isNotEmpty);
@@ -273,7 +361,7 @@ void main() {
     test('영수증을 못 받아도 초록을 주지 않는다 — partial', () {
       final e = soundEntry();
       final r = EntryVerifier.verify(e,
-          onChain: chainOf(e), receiptBytes: null, walletByUserId: wallets);
+          onChain: chainOf(e), receiptBytes: null, userIdByAddress: wallets);
       expect(r.receipt.state, CheckState.unavailable);
       expect(r.status, VerificationStatus.partial);
     });
@@ -292,7 +380,7 @@ void main() {
         income,
         onChain: chainOf(income),
         receiptBytes: null,
-        walletByUserId: wallets,
+        userIdByAddress: wallets,
       );
       expect(r.receipt.state, CheckState.notApplicable);
       expect(r.status, VerificationStatus.verified);
@@ -312,7 +400,7 @@ void main() {
       expect(income.budgetId, isNull);
 
       final r = EntryVerifier.verify(income,
-          onChain: chainOf(income), walletByUserId: wallets);
+          onChain: chainOf(income), userIdByAddress: wallets);
       expect(
         r.fieldChecks.firstWhere((f) => f.label == '예산 항목').state,
         CheckState.passed,
@@ -328,6 +416,7 @@ void main() {
             kind: e.kind,
             status: e.status,
             occurredAt: e.occurredAt,
+            term: e.termCode,
             budgetId: e.budgetId ?? 0,
             correctsId: 0,
             registrant: registrant,
@@ -340,7 +429,7 @@ void main() {
           e,
           onChain: chainWithoutHash(e),
           receiptBytes: receiptBytes,
-          walletByUserId: wallets,
+          userIdByAddress: wallets,
         );
 
         expect(r.status, isNot(VerificationStatus.tampered));
@@ -357,7 +446,7 @@ void main() {
           e,
           onChain: chainWithoutHash(e),
           receiptBytes: receiptBytes,
-          walletByUserId: wallets,
+          userIdByAddress: wallets,
         );
 
         expect(r.hashState, CheckState.unavailable);
@@ -398,7 +487,7 @@ void main() {
           e,
           onChain: onChain,
           receiptBytes: receiptBytes,
-          walletByUserId: wallets,
+          userIdByAddress: wallets,
         );
 
         expect(r.status, VerificationStatus.unavailable,
@@ -427,10 +516,174 @@ void main() {
           e,
           onChain: empty,
           receiptBytes: receiptBytes,
-          walletByUserId: wallets,
+          userIdByAddress: wallets,
         );
         expect(r.status, isNot(VerificationStatus.tampered));
         expect(r.chainDataAvailable, isFalse);
+        expect(r.mismatches, isEmpty);
+      });
+    });
+
+    group('응답에 필드가 없을 때 — 지어낸 값과 대조하지 않는다', () {
+      // `/verify` 응답 모양은 아직 확정 전이다 (김경윤 구현 10/9). 어떤 필드가
+      // 빠질지 모르는데 없는 값을 그럴듯한 기본값으로 메우면, 빠진 필드를 가진
+      // **모든 항목이 학생 화면에서 빨간 「변조 감지」로 뜬다.** 모름이어야 한다.
+
+      /// `getEntry(id)` 를 그대로 담은 정상 응답.
+      Map<String, dynamic> chainJson(EntryModel e) => {
+            'hash': e.metaHash,
+            'amount': e.amount,
+            'kind': e.kind.code,
+            'status': e.status.code,
+            'occurred_at': e.occurredAt,
+            'term': e.termCode,
+            'budget_id': e.budgetId ?? 0,
+            'corrects_id': e.correctsEntryId ?? 0,
+            'registrant': registrant,
+            'approver': approver,
+          };
+
+      final income = _entry(
+        id: 1,
+        kind: EntryKind.INCOME,
+        amount: 5000000,
+        counterparty: '컴퓨터공학과 학생회비 일괄 납부',
+        purpose: '2026-2학기 학과 학생회비 수납',
+        occurredAt: Hashing.kstMidnightOf(2026, 9, 6),
+        approvedBy: 3,
+      );
+
+      test('정상 응답은 그대로 초록이다 — 기준점', () {
+        final r = EntryVerifier.verify(
+          income,
+          onChain: OnChainEntry.fromJson(chainJson(income)),
+          userIdByAddress: wallets,
+        );
+        expect(r.status, VerificationStatus.verified);
+      });
+
+      test('kind 가 빠지면 수입 항목이 「변조 감지」로 뒤집히지 않는다', () {
+        // 신고된 경로 그대로 — `kind ?? 'EXPENSE'` 면 수입 항목이 지어낸 지출과
+        // 대조돼 INCOME ≠ EXPENSE 로 어긋난다.
+        final json = chainJson(income)..remove('kind');
+        final onChain = OnChainEntry.fromJson(json);
+        expect(onChain.kind, isNull, reason: '없는 것은 EXPENSE 가 아니다');
+
+        final r = EntryVerifier.verify(
+          income,
+          onChain: onChain,
+          userIdByAddress: wallets,
+        );
+
+        expect(r.status, VerificationStatus.partial);
+        expect(r.mismatches, isEmpty);
+        expect(
+          r.fieldChecks.firstWhere((f) => f.label == '수입·지출 구분').state,
+          CheckState.unavailable,
+        );
+      });
+
+      test('모르는 kind 코드도 지출로 떨어뜨리지 않는다', () {
+        final onChain = OnChainEntry.fromJson(
+          chainJson(income)..['kind'] = 'TRANSFER',
+        );
+        expect(onChain.kind, isNull,
+            reason: '모르는 코드를 EXPENSE 로 읽으면 「확인했다」가 거짓이 된다');
+      });
+
+      test('budget_id 가 빠지면 「모름」, 실려 온 0 은 그대로 대조한다', () {
+        // 0 과 null 을 합치면 §2.1(NULL ↔ 0)이 깨져 수입 항목이 전부 어긋난다.
+        final missing = OnChainEntry.fromJson(
+          chainJson(income)..remove('budget_id'),
+        );
+        expect(missing.budgetId, isNull);
+        expect(
+          EntryVerifier.verify(income,
+                  onChain: missing, userIdByAddress: wallets)
+              .fieldChecks
+              .firstWhere((f) => f.label == '예산 항목')
+              .state,
+          CheckState.unavailable,
+        );
+
+        final zero = OnChainEntry.fromJson(chainJson(income));
+        expect(zero.budgetId, 0);
+        expect(
+          EntryVerifier.verify(income, onChain: zero, userIdByAddress: wallets)
+              .fieldChecks
+              .firstWhere((f) => f.label == '예산 항목')
+              .state,
+          CheckState.passed,
+          reason: '체인의 0 은 DB 의 budget_id = NULL 과 같다',
+        );
+      });
+
+      test('registrant 가 빠지면 「한쪽만 값이 있다」가 아니라 「모름」이다', () {
+        // `?? address(0)` 으로 메우면 「체인에는 등록자가 없는데 DB 에는 있다」가
+        // 되어 불일치로 판정된다.
+        final onChain = OnChainEntry.fromJson(
+          chainJson(income)..remove('registrant'),
+        );
+        expect(onChain.registrant, isNull);
+
+        final r = EntryVerifier.verify(
+          income,
+          onChain: onChain,
+          userIdByAddress: wallets,
+        );
+
+        expect(r.mismatches, isEmpty);
+        expect(
+          r.fieldChecks.firstWhere((f) => f.label == '등록자').state,
+          CheckState.unavailable,
+        );
+      });
+
+      test('amount 가 빠져도 0 과 대조하지 않는다', () {
+        final onChain = OnChainEntry.fromJson(
+          chainJson(income)..remove('amount'),
+        );
+        expect(onChain.amount, isNull);
+
+        final r = EntryVerifier.verify(
+          income,
+          onChain: onChain,
+          userIdByAddress: wallets,
+        );
+
+        expect(r.mismatches, isEmpty);
+        expect(
+          r.fieldChecks.firstWhere((f) => f.label == '금액').state,
+          CheckState.unavailable,
+        );
+      });
+
+      test('승인자가 address(0) 이면 미처리와 맞아떨어진다', () {
+        // 「응답에 없음」과 「실려 온 address(0)」은 다르다. 후자는 DB 의
+        // approved_by = NULL 과 대조해 통과해야 한다 (§2.1).
+        final pending = _entry(
+          id: 9,
+          amount: 12000,
+          counterparty: '한결문구',
+          purpose: '대기 중인 지출',
+          occurredAt: d0908,
+          budgetId: 2,
+          status: EntryStatus.PENDING,
+        );
+        final onChain = OnChainEntry.fromJson(
+          chainJson(pending)..['approver'] = OnChainEntry.zeroAddress,
+        );
+
+        final r = EntryVerifier.verify(
+          pending,
+          onChain: onChain,
+          userIdByAddress: wallets,
+        );
+
+        expect(
+          r.fieldChecks.firstWhere((f) => f.label == '승인자').state,
+          CheckState.passed,
+        );
         expect(r.mismatches, isEmpty);
       });
     });
@@ -452,6 +705,7 @@ void main() {
         kind: rejected.kind,
         status: rejected.status,
         occurredAt: rejected.occurredAt,
+        term: rejected.termCode,
         budgetId: 2,
         correctsId: 0,
         registrant: '0x71C7656EC7ab88b098defB751B7401B5f6d8976F',
@@ -460,7 +714,7 @@ void main() {
       );
 
       final r = EntryVerifier.verify(rejected,
-          onChain: chain, walletByUserId: wallets);
+          onChain: chain, userIdByAddress: wallets);
       expect(
         r.fieldChecks.firstWhere((f) => f.label == '승인자').state,
         CheckState.notApplicable,
@@ -556,6 +810,7 @@ EntryModel _entry({
   EntryKind kind = EntryKind.EXPENSE,
   int? budgetId,
   String? receiptHash,
+  int? termCode = TermInfo.currentTermCode,
   EntryStatus status = EntryStatus.CONFIRMED,
   int? correctsEntryId,
   CorrectionReason? correctionReason,
@@ -565,6 +820,7 @@ EntryModel _entry({
   return EntryModel(
     id: id,
     termId: 1,
+    termCode: termCode,
     kind: kind,
     amount: amount,
     counterparty: counterparty,

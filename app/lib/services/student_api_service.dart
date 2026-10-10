@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 import '../core/api_config.dart';
 import '../core/enums.dart';
 import '../core/hashing.dart';
+import '../core/term_info.dart';
 import '../models/balance_model.dart';
 import '../models/budget_model.dart';
 import '../models/entry_model.dart';
@@ -11,6 +12,35 @@ import '../models/membership_model.dart';
 import '../models/objection_model.dart';
 import '../models/onchain_entry_model.dart';
 import '../models/snapshot_model.dart';
+
+/// 이의 제기가 서버에 닿지 못했을 때.
+///
+/// 실패를 조용히 삼키면 접수되지 않은 이의가 「접수되었습니다」로 뜬다.
+class ObjectionFailed implements Exception {
+  const ObjectionFailed();
+  @override
+  String toString() => 'ObjectionFailed';
+}
+
+/// SBT 조회 결과 — **미보유와 조회 실패를 구분한다** (스토리보드 6 ②·③).
+///
+/// 둘을 뭉개면 조회가 안 됐을 뿐인데 SBT 를 가진 학생에게 「없다」고 말하게 되고,
+/// 그 학생은 이의 제기 버튼까지 회색으로 막힌다.
+class MembershipResult {
+  /// 조회 자체가 안 된 경우. 이때 [membership] 은 「없음」이 아니라 「모름」이다.
+  final bool failed;
+
+  /// 조회된 멤버십. 발급받은 적이 없으면 null.
+  final MembershipModel? membership;
+
+  const MembershipResult.ok(this.membership) : failed = false;
+  const MembershipResult.failed()
+      : failed = true,
+        membership = null;
+
+  /// 유효한 SBT 를 들고 있는지. 조회 실패는 보유로 치지 않는다.
+  bool get held => !failed && membership != null && membership!.isValid;
+}
 
 /// 학생 화면 전용 API 서비스 (`screens/student/`)
 ///
@@ -30,6 +60,20 @@ class StudentApiService {
   static const _lastSeenKey = 'student_last_seen_entry_id';
   static const _timeout = Duration(seconds: 3);
 
+  /// HTTP 클라이언트. **테스트에서 갈아끼운다.**
+  ///
+  /// 패키지 함수 `http.get` 을 직접 부르면 테스트가 **실제 네트워크를 탄다.**
+  /// 그러면 결과가 「그 머신에 서버가 떠 있는지」에 따라 달라진다 —
+  /// `demo_verification_test` 가 그래서 깨졌다. 서버가 켜져 있으면
+  /// `/entries` 가 200 을 주면서 [usingDemoData] 가 꺼지고, 온체인 조회는 404 라
+  /// 배지가 전부 `partial` 로 바뀐다. 백엔드를 돌리는 사람 누구에게나 깨지고,
+  /// 켜지거나 죽는 중일 때는 연결이 대기해 테스트 한도(30초)를 넘긴다.
+  ///
+  /// 주입으로 바꾸면 테스트가 응답을 직접 정할 수 있어서, 네트워크 없이
+  /// **404 분류나 빈 장부 같은 경로까지** 못박을 수 있다
+  /// (`package:http/testing.dart` 의 `MockClient`).
+  static http.Client client = http.Client();
+
   /// 마지막 원장 조회가 서버에서 온 것인지, 예시 데이터로 폴백한 것인지.
   ///
   /// **화면에 반드시 표시해야 한다.** 이 앱의 존재 이유가 「학생이 직접 검증한다」인데
@@ -37,6 +81,16 @@ class StudentApiService {
   /// 시연 도중 서버가 꺼져도 화면이 멀쩡해 보여 아무도 알아채지 못한다.
   bool get usingDemoData => _usingDemoData;
   bool _usingDemoData = true;
+
+  /// 마지막 [fetchEntries] 에서 파싱에 실패해 목록에서 빠진 항목 수.
+  ///
+  /// **0 이 아니면 화면에 반드시 알린다.** 조용히 빼면 학생은 「내역이 원래
+  /// 이게 다」로 오해한다. 반대로 한 건 깨졌다고 목록 전체를 비우면 멀쩡한
+  /// 나머지까지 못 본다.
+  ///
+  /// 초안(`status IS NULL`)은 정상 제외라 여기 세지 않는다.
+  int get skippedEntryCount => _skippedEntryCount;
+  int _skippedEntryCount = 0;
 
   /// 서버에 `POST /objections` 가 없을 때 제기한 이의를 담아 두는 곳.
   ///
@@ -57,14 +111,48 @@ class StudentApiService {
   }
 
   /// GET /entries — 수입·지출 목록 (S2)
+  ///
+  /// **초안은 걸러낸다.** 총무가 저장만 하고 체인에 올리지 않은 건은 `status` 가
+  /// 없는 상태로 내려오는데(스토리보드 3 「화면 전체 규칙」), [EntryModel.fromJson]
+  /// 이 그것을 `PENDING` 으로 채워 넣어서 그냥 두면 **학생 목록에 「승인대기」로
+  /// 섞여 보인다.** 아직 아무 데도 올라가지 않아 검증할 대상조차 없는 건이다.
   Future<List<EntryModel>> fetchEntries() async {
     final json = await _getJson(ApiConfig.entries);
     if (json is List) {
       _usingDemoData = false;
-      return json.map((e) => EntryModel.fromJson(e)).toList();
+      return parseEntries(json);
     }
     _usingDemoData = true;
+    _skippedEntryCount = 0;
     return _demoEntries();
+  }
+
+  /// `GET /entries` 응답을 모델로 바꾼다. [skippedEntryCount] 를 갱신한다.
+  ///
+  /// **한 항목이 깨져도 나머지는 보여준다.** [EntryStatus.fromCode] 는
+  /// `docs/enums.md` 에 없는 값을 만나면 던지는데(도메인 규칙 1 — 조용히
+  /// 넘어가는 대신 드러낸다), 목록 전체를 한 번에 변환하면 그 한 건 때문에
+  /// 화면이 통째로 멈춘다. 그래서 항목 단위로 받아 건너뛴다.
+  ///
+  /// **모르는 값을 `PENDING` 으로 메우지는 않는다.** 메우면 학생 화면이
+  /// 모르는 상태를 「승인대기」라고 잘못 말하게 된다.
+  ///
+  /// `fromJson` 이 아니라 여기서 걸러야 하는 이유는 [EntryModel.fromJson] 이
+  /// 실패를 던져서 알리는 계약이기 때문이다. 판단은 호출자 몫이다.
+  List<EntryModel> parseEntries(List<dynamic> json) {
+    final entries = <EntryModel>[];
+    var skipped = 0;
+    for (final e in json) {
+      // 초안(status IS NULL)은 학생 앱에서 정상 제외 — 실패로 세지 않는다.
+      if (e is Map && e['status'] == null) continue;
+      try {
+        entries.add(EntryModel.fromJson(e));
+      } catch (_) {
+        skipped++;
+      }
+    }
+    _skippedEntryCount = skipped;
+    return entries;
   }
 
   /// GET /budgets — 예산 항목별 잔량·집행률·개정 이력 (S6)
@@ -94,19 +182,52 @@ class StudentApiService {
     return _usingDemoData ? _demoOnChain(entryId) : null;
   }
 
-  /// GET /users/wallets — user id ↔ 지갑 주소 매핑 (검증 2단계)
+  /// GET /users/wallets — **지갑 주소 → user id** 매핑 (검증 2단계)
   ///
   /// 체인의 `registrant`·`approver` 는 지갑 주소이고 DB 의 `created_by`·
   /// `approved_by` 는 user id 라 값 자체가 다르다. 이 매핑이 없으면
   /// **누가 등록하고 누가 승인했는지를 대조할 수 없다** (HASHING.md §2).
-  /// 인증 파트(손종인)에 요청해 둔 상태다.
-  Future<Map<int, String>?> fetchWalletMap() async {
+  Future<Map<String, int>?> fetchWalletMap() async {
     final json = await _getJson('${ApiConfig.baseUrl}/users/wallets');
     if (json is Map<String, dynamic>) {
-      return json.map((k, v) => MapEntry(int.parse(k), v as String));
+      final parsed = parseWalletMap(json);
+      if (parsed != null) return parsed;
     }
     // 서버 원장에는 데모 지갑을 끼워 넣지 않는다 ([fetchOnChainEntry] 참고).
-    return _usingDemoData ? _demoWallets : null;
+    return _usingDemoData ? _demoUserIdByAddress : null;
+  }
+
+  /// `GET /users/wallets` 응답을 **주소(소문자) → user id** 로 모은다.
+  ///
+  /// **두 형식을 모두 받는다.** 인증 파트가 응답을 주소 → id 방향으로 바꾸는 중인데
+  /// (PR #20), 앱과 서버의 머지 순서를 맞추지 않아도 되게 양쪽을 다 읽는다.
+  /// 한쪽만 먼저 올라가면 파싱이 던져서 **검증이 아예 안 돌고 배지가 「검증 중」에
+  /// 멈춘다** — `_verifyAll` 은 await 되지 않아 그 예외가 조용히 사라진다.
+  /// #20 이 머지되고 실연동이 끝나면 옛 형식 가지는 지우면 된다.
+  ///
+  /// 못 읽은 항목은 **버리지 않고 건너뛴다** — 한 사람 때문에 매핑 전체를 잃으면
+  /// 나머지 항목의 등록자 대조까지 「모름」이 된다.
+  static Map<String, int>? parseWalletMap(Map<String, dynamic> json) {
+    final map = <String, int>{};
+
+    json.forEach((key, value) {
+      if (key.toLowerCase().startsWith('0x')) {
+        // 새 형식 — `{"0x3c44…": 2}`. 한 사람이 주소를 여러 개 가질 수 있다.
+        final id = value is int ? value : int.tryParse('$value');
+        if (id != null) map[key.toLowerCase()] = id;
+      } else {
+        // 옛 형식 — `{"2": "0x3C44…"}`. 사용자당 주소 하나뿐이라 키를 교체하면
+        // 옛 주소가 응답에서 사라진다. 방향만 뒤집어 같은 모양으로 담는다.
+        final id = int.tryParse(key);
+        if (id != null && value is String && value.startsWith('0x')) {
+          map[value.toLowerCase()] = id;
+        }
+      }
+    });
+
+    // 하나도 못 읽었으면 「매핑 없음」이다. 빈 매핑을 돌려주면 「주소가 매핑에
+    // 없다」가 되어 사유 문구가 엉뚱해진다.
+    return map.isEmpty ? null : map;
   }
 
   /// 영수증 원본 바이트를 내려받는다 (검증 3단계, HASHING.md §4).
@@ -119,7 +240,7 @@ class StudentApiService {
 
     final url = path.startsWith('http') ? path : '${ApiConfig.baseUrl}$path';
     try {
-      final res = await http.get(Uri.parse(url)).timeout(_timeout);
+      final res = await client.get(Uri.parse(url)).timeout(_timeout);
       if (res.statusCode == 200) return res.bodyBytes;
     } catch (_) {}
 
@@ -158,12 +279,17 @@ class StudentApiService {
   ///
   /// 본문의 정본화·해시는 백엔드가 한다 (HASHING.md §1.1, §3).
   /// 학생 앱은 쓰기 권한이 없어 직접 서명하지 않는다 (PRD §9.2).
+  ///
+  /// 서버 원장을 보고 있는데 전송이 실패하면 [ObjectionFailed] 를 던진다.
+  /// 조용히 로컬 폴백으로 넘어가면 **접수되지도 않은 이의가 「접수되었습니다」로
+  /// 뜬다** — 학생은 답변을 기다리지만 학생회에는 아무것도 가 있지 않다
+  /// (스토리보드 5 ③ 「실패: 서버 무응답 → 토스트 · 입력 내용은 남겨둔다」).
   Future<ObjectionModel> raiseObjection({
     required int entryId,
     required String content,
   }) async {
     try {
-      final res = await http
+      final res = await client
           .post(
             Uri.parse('${ApiConfig.baseUrl}/objections'),
             headers: {'Content-Type': 'application/json'},
@@ -174,6 +300,8 @@ class StudentApiService {
         return ObjectionModel.fromJson(jsonDecode(utf8.decode(res.bodyBytes)));
       }
     } catch (_) {}
+
+    if (!_usingDemoData) throw const ObjectionFailed();
 
     // 서버가 없을 때. 만들어서 돌려주기만 하면 화면을 나가는 순간 사라지므로
     // 세션 동안 들고 있는다.
@@ -194,10 +322,85 @@ class StudentApiService {
   }
 
   /// GET /memberships/me — 본인 SBT 보유 여부와 QR 페이로드 (S5)
-  Future<MembershipModel?> fetchMyMembership() async {
-    final json = await _getJson('${ApiConfig.baseUrl}/memberships/me');
-    if (json is Map<String, dynamic>) return MembershipModel.fromJson(json);
-    return _demoMembership();
+  ///
+  /// **조회 실패와 미보유는 다르다** (스토리보드 6 ②·③). 미보유는 서버가
+  /// 대답한 결과라 「학생회비 납부 확인이 필요합니다」로 안내하면 되지만, 조회가
+  /// 안 된 것은 보유 여부 자체를 모르는 상태다. 못 받았는데 「미보유」라고 하면
+  /// SBT 를 가진 학생에게 없다고 말하는 셈이 된다.
+  ///
+  /// 못 읽었으면 「모름」을 돌려준다. **데모 값은 서버에 닿지도 못했을 때만** 끼워
+  /// 넣는다 ([fetchOnChainEntry] 참고) — 서버가 404 로 대답한 것은 데모로 메울
+  /// 자리가 아니다.
+  ///
+  /// **미보유는 `200` + 본문 `null` 이다** (backend_requests.md §1-4).
+  /// `404` 는 미보유로 읽지 않는다 — 이 경로가 서버에 아직 없어서, FastAPI 가
+  /// 「경로 없음」으로 내는 404 와 「발급받은 적 없음」을 뜻하는 404 가 앱에서
+  /// 구분되지 않는다. 404 를 미보유로 다루면 **엔드포인트가 생기기 전까지 모든
+  /// 학생에게 「학생회비 납부 확인이 필요합니다」가 뜨고 이의 제기 버튼이 잠긴다.**
+  /// 못 읽은 것은 「모름」으로 두는 쪽이 안전하다 ([canObject] 의 같은 판단).
+  Future<MembershipResult> fetchMyMembership() async {
+    try {
+      final res = await client
+          .get(Uri.parse('${ApiConfig.baseUrl}/memberships/me'))
+          .timeout(_timeout);
+      if (res.statusCode == 200) {
+        return parseMembership(jsonDecode(utf8.decode(res.bodyBytes)));
+      }
+
+      // 서버가 **대답은 했는데** 읽을 수 없는 경우다 (404 · 5xx · 모양이 다른 200).
+      // **여기서 데모 값을 끼워 넣지 않는다.** `_usingDemoData` 는 초기값이 true 이고
+      // `fetchEntries` 가 성공할 때만 false 가 되므로, 장부 조회 없이 이 화면으로
+      // 바로 들어오면(`AppRoutes.studentSbt`) 실서버의 404 에 **가짜 데모 SBT 와 QR 이
+      // 진짜처럼 뜬다.** 행사 입장에 쓰는 QR 이라 더 그렇다.
+      return const MembershipResult.failed();
+    } catch (_) {}
+
+    // 여기는 서버에 **닿지도 못한** 경우다 — 그게 데모 모드의 뜻이다.
+    return _usingDemoData
+        ? MembershipResult.ok(_demoMembership())
+        : const MembershipResult.failed();
+  }
+
+  /// `GET /memberships/me` 의 **`200` 응답 본문**을 판정한다.
+  ///
+  /// **미보유를 「보유」로 읽지 않는 것이 이 함수의 일이다.** 미납 학생에게
+  /// 「납부 확인됨」 배지와 QR 이 뜨고 이의 제기 버튼이 열리면, 게이팅이 있다는
+  /// 사실 자체가 무의미해진다.
+  ///
+  /// 미보유의 모양이 아직 합의 전이라(`backend_requests.md` §1-4) **세 가지를 모두
+  /// 미보유로 받는다** — 벗은 `null`, 래퍼 `{"membership": null}`, 빈 객체 `{}`.
+  /// 래퍼는 나중에 옆에 필드를 붙이기 좋아서 백엔드가 흔히 고르는 방식이라
+  /// 가능성이 낮지 않고, 그대로 두면 `{` 로 시작한다는 이유로 보유 쪽 분기에
+  /// 떨어진다. 지갑 매핑을 두 형식 다 읽게 해 둔 것과 같은 이유로, 어느 쪽으로
+  /// 정해져도 깨지지 않게 한다.
+  ///
+  /// 마지막 방어선은 [MembershipModel.isValid] 다 — 모르는 모양이 와도 `id` 가
+  /// 실려 있지 않으면 보유로 판정되지 않는다.
+  static MembershipResult parseMembership(dynamic body) {
+    final unwrapped = _unwrapMembership(body);
+
+    // 서버가 분명히 「발급받은 적 없음」이라고 대답한 경우.
+    if (unwrapped == null) return const MembershipResult.ok(null);
+
+    if (unwrapped is Map<String, dynamic>) {
+      final m = MembershipModel.fromJson(unwrapped);
+      // 모양은 객체인데 멤버십이 아니다(`{}` 등) — 미보유로 다룬다.
+      return MembershipResult.ok(m.isValid ? m : null);
+    }
+
+    // 숫자·문자열 같은 뜻 모를 본문. 읽은 것이 아니므로 「모름」이다.
+    return const MembershipResult.failed();
+  }
+
+  /// 래퍼 한 겹을 벗긴다. 감싸여 있지 않으면 그대로 돌려준다.
+  ///
+  /// 멤버십 필드에는 `membership`·`data` 라는 이름이 없어서 충돌하지 않는다.
+  static dynamic _unwrapMembership(dynamic body) {
+    if (body is! Map<String, dynamic>) return body;
+    for (final key in const ['membership', 'data']) {
+      if (body.containsKey(key)) return body[key];
+    }
+    return body;
   }
 
   // ── 미확인 항목 뱃지 카운트 (S12) ──────────────────────────
@@ -223,7 +426,7 @@ class StudentApiService {
 
   Future<dynamic> _getJson(String url) async {
     try {
-      final res = await http.get(Uri.parse(url)).timeout(_timeout);
+      final res = await client.get(Uri.parse(url)).timeout(_timeout);
       if (res.statusCode == 200) {
         return jsonDecode(utf8.decode(res.bodyBytes));
       }
@@ -244,11 +447,25 @@ class StudentApiService {
   static final int _d0911 = Hashing.kstMidnightOf(2026, 9, 11);
   static final int _d0912 = Hashing.kstMidnightOf(2026, 9, 12);
 
-  /// 데모용 지갑 매핑. user #2 총무, #3 감사, #4 회장.
+  /// 데모용 지갑 매핑 — `GET /users/wallets` 가 내려주는 것과 같은 값이다.
+  ///
+  /// 컨트랙트 병합으로 임원 주소가 정해졌다
+  /// (`contracts/deployments/localhost.json` 의 `accounts` 와 일치).
+  /// 역할이 아니라 **지갑이 등록된 사용자**가 들어 있어서, 임기가 끝난 사람이
+  /// 등록·승인한 과거 항목도 검증된다.
   static const Map<int, String> _demoWallets = {
-    2: '0x71C7656EC7ab88b098defB751B7401B5f6d8976F',
-    3: '0x2546BcD3c84621e976D8185a91A922aE77ECEc30',
-    4: '0xbDA5747bFD65F08deb54cb465eB87D40e51B197E',
+    2: '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC', // 총무
+    3: '0x90F79bf6EB2c4f870365E785982E1f101E93b906', // 감사
+    4: '0x70997970C51812dc3A010C7d01b50e0d17dc79C8', // 회장
+    5: '0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc', // 감사 2
+  };
+
+  /// [fetchWalletMap] 이 돌려주는 모양 — API 와 같은 **주소 → user id** 방향이다.
+  ///
+  /// `_demoWallets` 에서 만들어 쓴다. 주소를 두 군데 적어 두면 한쪽만 바뀌는 순간
+  /// 데모 전체가 「등록자 불일치 = 변조 감지」로 뒤집힌다 ([_demoOnChain] 참고).
+  static final Map<String, int> _demoUserIdByAddress = {
+    for (final e in _demoWallets.entries) e.value.toLowerCase(): e.key,
   };
 
   /// 항목별 데모 영수증 바이트. 실제 이미지 대신 구분 가능한 더미를 쓴다.
@@ -275,6 +492,7 @@ class StudentApiService {
     String? ocrApprovalNo,
     bool categoryWarning = false,
     String? warningAckReason,
+    int termCode = TermInfo.currentTermCode,
     EntryStatus status = EntryStatus.CONFIRMED,
     int? correctsEntryId,
     CorrectionReason? correctionReason,
@@ -284,6 +502,7 @@ class StudentApiService {
     return EntryModel(
       id: id,
       termId: 1,
+      termCode: termCode,
       kind: kind,
       amount: amount,
       counterparty: counterparty,
@@ -314,7 +533,20 @@ class StudentApiService {
     );
   }
 
-  List<EntryModel> _demoEntries() {
+  /// 데모 항목 7건. **한 번만 만들어 재사용한다.**
+  ///
+  /// [_demoOnChain] 이 항목 하나를 찾을 때마다 이것을 다시 부르는데, 각 항목은
+  /// `Hashing.metaHash`(SHA-256 + NFC 정규화)를 계산한다. 그래서 항목 7개를
+  /// 검증하면 metaHash 를 **49번** 계산했다. 값이 고정이라(모든 `occurredAt` 이
+  /// 상수 KST 자정) 캐시해도 결과가 같다.
+  ///
+  /// 리스트를 공유해도 안전하다 — [EntryModel] 은 전 필드가 final 이고,
+  /// `EntryMerge.fold` 는 `where().toList()` 로 복사한 뒤 정렬한다.
+  static List<EntryModel>? _demoEntriesCache;
+
+  List<EntryModel> _demoEntries() => _demoEntriesCache ??= _buildDemoEntries();
+
+  List<EntryModel> _buildDemoEntries() {
     return [
       // #1 확정 수입 — 영수증 없음 (receipt_hash NULL → preimage 가 구분자로 끝난다)
       _sound(
@@ -407,6 +639,7 @@ class StudentApiService {
       EntryModel(
         id: 6,
         termId: 1,
+        termCode: TermInfo.currentTermCode,
         kind: EntryKind.EXPENSE,
         amount: 45000,
         counterparty: '한빛인쇄',
@@ -469,10 +702,14 @@ class StudentApiService {
       // #7 은 체인에 행사비(1)로 올라가 있는데 API 는 운영비(3)라고 말한다.
       budgetId: entryId == 7 ? 1 : (e.budgetId ?? 0),
       correctsId: e.correctsEntryId ?? 0,
-      registrant: '0x71C7656EC7ab88b098defB751B7401B5f6d8976F',
+      term: e.termCode,
+      // **주소를 여기에 따로 적지 않는다.** 지갑 매핑과 두 군데에 적어 두면
+      // 한쪽만 바뀌는 순간 데모 전체가 「등록자 불일치 = 변조 감지」로 뒤집힌다.
+      // 실제로 컨트랙트 병합 때 주소가 바뀌면서 그럴 뻔했다.
+      registrant: _demoWallets[e.createdBy] ?? OnChainEntry.zeroAddress,
       approver: e.approvedBy == null
           ? OnChainEntry.zeroAddress
-          : '0x2546BcD3c84621e976D8185a91A922aE77ECEc30',
+          : (_demoWallets[e.approvedBy] ?? OnChainEntry.zeroAddress),
     );
   }
 
