@@ -62,7 +62,8 @@ REJECT_DECISION_FIELDS = (
 SignedPayload = Union[RecordRequest, ConfirmApproval, RejectDecision]
 
 
-def _typed_data(primary_type: str, fields: tuple, domain: Eip712Domain, message: dict) -> dict:
+def typed_data(primary_type: str, fields: tuple, domain: Eip712Domain, message: dict) -> dict:
+    """구조체 이름·(이름, 타입) 목록·도메인·값으로 typed data 를 만든다. 원장 구조체는 아래 함수들이 이걸로 만든다."""
     return {
         "types": {
             "EIP712Domain": [{"name": n, "type": t} for n, t in _DOMAIN_FIELDS],
@@ -81,7 +82,7 @@ def _typed_data(primary_type: str, fields: tuple, domain: Eip712Domain, message:
 
 def record_request_typed_data(request: RecordRequest, domain: Eip712Domain) -> dict:
     """총무가 서명하는 RecordRequest. domain 은 배포 기록의 eip712["AccountingLedger"]."""
-    return _typed_data(
+    return typed_data(
         "RecordRequest",
         RECORD_REQUEST_FIELDS,
         domain,
@@ -101,7 +102,7 @@ def record_request_typed_data(request: RecordRequest, domain: Eip712Domain) -> d
 
 def confirm_approval_typed_data(approval: ConfirmApproval, domain: Eip712Domain) -> dict:
     """감사·회장이 서명하는 ConfirmApproval. domain 은 배포 기록의 eip712["AccountingLedger"]."""
-    return _typed_data(
+    return typed_data(
         "ConfirmApproval",
         CONFIRM_APPROVAL_FIELDS,
         domain,
@@ -118,7 +119,7 @@ def confirm_approval_typed_data(approval: ConfirmApproval, domain: Eip712Domain)
 
 def reject_decision_typed_data(decision: RejectDecision, domain: Eip712Domain) -> dict:
     """감사·회장이 서명하는 RejectDecision. domain 은 배포 기록의 eip712["AccountingLedger"]."""
-    return _typed_data(
+    return typed_data(
         "RejectDecision",
         REJECT_DECISION_FIELDS,
         domain,

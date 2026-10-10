@@ -11,7 +11,7 @@ import pytest
 from eth_keys.constants import SECPK1_N
 
 from app.chain import ConfirmApproval, RecordRequest, RejectDecision, entry_commit
-from app.chain.deployment import DEFAULT_PATH, Eip712Domain, load_deployment
+from app.chain.deployment import DEFAULT_PATH, Eip712Domain, load_abi, load_deployment
 from app.chain.eip712 import (
     CONFIRM_APPROVAL_FIELDS,
     RECORD_REQUEST_FIELDS,
@@ -22,6 +22,7 @@ from app.chain.eip712 import (
     typed_data_for,
 )
 from app.chain.models import KIND_ORDER
+from chain_support import unchecked
 
 FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "eip712_vectors.json").read_text(encoding="utf-8"))
 DOMAIN = Eip712Domain.model_validate(FIXTURE["domain"])
@@ -148,6 +149,25 @@ def test_type_strings_match_contracts_doc():
 
 
 @pytest.mark.parametrize(
+    "struct, fields, function",
+    [
+        ("RecordRequest", RECORD_REQUEST_FIELDS, "recordPending"),
+        ("ConfirmApproval", CONFIRM_APPROVAL_FIELDS, "confirmEntry"),
+        ("RejectDecision", REJECT_DECISION_FIELDS, "rejectEntry"),
+    ],
+)
+def test_field_order_matches_the_ledger_abi(struct, fields, function):
+    # 서명 대상의 필드 이름·타입·순서가 배포된 원장 ABI 의 인자 tuple 과 같은지 노드 없이 본다 (PR #20 2차 리뷰).
+    # 순서가 어긋나면 typehash 가 달라 모든 서명이 다른 사람의 것으로 복구된다. 지금까지는 노드 테스트에서만 드러났다
+    deployment = load_deployment()
+    abi = load_abi(deployment.contracts["AccountingLedger"])
+    (item,) = [f for f in abi if f.get("type") == "function" and f["name"] == function]
+    arg = item["inputs"][0]
+    assert arg["internalType"] == f"struct IAccountingLedger.{struct}"
+    assert [(c["name"], c["type"]) for c in arg["components"]] == list(fields)
+
+
+@pytest.mark.parametrize(
     "name, field, value",
     [
         ("record_income", "deadline", 2**256),
@@ -157,8 +177,8 @@ def test_type_strings_match_contracts_doc():
     ],
 )
 def test_values_outside_the_eip712_types_raise_value_error(name, field, value):
-    # 모델은 uint256·int256 상한을 보지 않는다. 인코딩 단계의 eth_abi 예외가 아니라 ValueError 로 막혀야 한다
-    typed_data = typed_data_for(payload_of(VECTORS[name], **{field: value}), DOMAIN)
+    # 모델이 먼저 막지만(app/chain/models.py), 인코딩 층도 스스로 막는다. eth_abi 예외가 아니라 ValueError 여야 한다
+    typed_data = typed_data_for(unchecked(payload_of(VECTORS[name]), **{field: value}), DOMAIN)
     with pytest.raises(ValueError, match="범위"):
         digest(typed_data)
     with pytest.raises(ValueError, match="범위"):

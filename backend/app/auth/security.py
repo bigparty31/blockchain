@@ -8,16 +8,22 @@ import jwt
 
 logger = logging.getLogger(__name__)
 
-# 운영에서는 반드시 JWT_SECRET 을 설정한다. 기본값은 로컬 개발용이다.
-# `or` 로 받는다 — .env.example 을 그대로 복사하면 JWT_SECRET= 빈 값이 들어오기 때문
+# JWT_SECRET 이 없으면 서버가 뜨지 않는다. 저장소에 공개된 개발용 키는 JWT_DEV_SECRET=1 로 명시했을 때만 쓴다
+# (CHAIN_FAKE 와 같은 방식). 운영에서 설정 하나가 빠졌다고 누구나 위조할 수 있는 키로 넘어가면 안 된다.
+# 빈 값도 없는 것으로 본다 — .env.example 을 그대로 복사하면 JWT_SECRET= 빈 값이 들어오기 때문
 _DEV_SECRET = "dev-only-insecure-secret-change-me"
-JWT_SECRET = os.environ.get("JWT_SECRET") or _DEV_SECRET
-if JWT_SECRET == _DEV_SECRET:
-    # 배포 전에는 기본값을 없애고 키가 없으면 서버가 뜨지 않게 바꾼다. 그때까지는 로그로 드러낸다
+if os.environ.get("JWT_SECRET"):
+    JWT_SECRET = os.environ["JWT_SECRET"]
+elif os.environ.get("JWT_DEV_SECRET", "").strip() == "1":
+    JWT_SECRET = _DEV_SECRET
     logger.warning(
-        "JWT_SECRET 미설정: 저장소에 공개된 개발용 키로 토큰을 서명합니다. "
-        "이 키로 누구나 토큰을 위조할 수 있으니 배포 환경에서는 반드시 JWT_SECRET 을 설정하세요 "
-        "(환경변수 또는 저장소 루트의 .env)."
+        "JWT_DEV_SECRET=1: 저장소에 공개된 개발용 키로 토큰을 서명합니다. "
+        "이 키로 누구나 토큰을 위조할 수 있으니 개발용으로만 쓰세요."
+    )
+else:
+    raise RuntimeError(
+        "JWT_SECRET 미설정: 토큰 서명 키가 없어 서버를 시작하지 않습니다. JWT_SECRET 을 설정하거나, "
+        "로컬 개발이면 JWT_DEV_SECRET=1 로 개발용 키를 쓰세요 (환경변수 또는 저장소 루트의 .env)."
     )
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_TTL = timedelta(hours=12)

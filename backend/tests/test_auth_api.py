@@ -99,30 +99,50 @@ def test_me_with_non_canonical_sub_is_401(sub):
     assert res.status_code == 401
 
 
-def import_security(jwt_secret):
-    """JWT_SECRET 을 지정한 새 프로세스에서 security 를 불러온다 (모듈 상수라 이 프로세스에선 못 바꾼다)."""
+def import_security(**env):
+    """주어진 값으로 환경변수를 바꾼 새 프로세스에서 security 를 불러온다 (모듈 상수라 이 프로세스에선 못 바꾼다).
+
+    None 을 준 이름은 지운다. 결과의 returncode 가 0 이 아니면 import 가 거부된 것이다.
+    """
     code = "from app.auth.security import JWT_SECRET; print(len(JWT_SECRET))"
+    merged = {**os.environ, **{k: v for k, v in env.items() if v is not None}}
+    for name in (k for k, v in env.items() if v is None):
+        merged.pop(name, None)
     return subprocess.run(
         [sys.executable, "-c", code],
         cwd=Path(__file__).resolve().parents[1],
-        env={**os.environ, "JWT_SECRET": jwt_secret},
+        env=merged,
         capture_output=True,
         text=True,
-        check=True,
     )
 
 
-def test_empty_jwt_secret_env_falls_back_to_default_with_warning():
-    # .env.example 을 그대로 복사하면 JWT_SECRET= 빈 값이 들어온다. 빈 키로는 서명 자체가 안 된다
-    result = import_security("")
-    assert int(result.stdout) > 0
+@pytest.mark.parametrize("jwt_secret", [None, ""])
+def test_missing_jwt_secret_refuses_to_start(jwt_secret):
+    # 운영에서 설정이 빠졌다고 저장소에 공개된 키로 넘어가지 않는다 (PR #20 2차 리뷰).
+    # .env.example 을 그대로 복사하면 JWT_SECRET= 빈 값이 들어온다. 빈 값도 없는 것이다
+    result = import_security(JWT_SECRET=jwt_secret, JWT_DEV_SECRET=None)
+    assert result.returncode != 0
     assert "JWT_SECRET 미설정" in result.stderr
 
 
+def test_dev_secret_needs_explicit_flag_and_warns():
+    result = import_security(JWT_SECRET="", JWT_DEV_SECRET="1")
+    assert result.returncode == 0 and int(result.stdout) > 0
+    assert "JWT_DEV_SECRET=1" in result.stderr
+
+
+@pytest.mark.parametrize("flag", ["true", "yes", "0", ""])
+def test_only_1_turns_on_dev_secret(flag):
+    # "true" 같은 값을 켠 것으로 읽지 않는다. 켜는 값은 하나다
+    result = import_security(JWT_SECRET=None, JWT_DEV_SECRET=flag)
+    assert result.returncode != 0
+
+
 def test_set_jwt_secret_has_no_warning():
-    result = import_security("x" * 32)
-    assert int(result.stdout) == 32
-    assert "JWT_SECRET 미설정" not in result.stderr
+    result = import_security(JWT_SECRET="x" * 32, JWT_DEV_SECRET="1")
+    assert result.returncode == 0 and int(result.stdout) == 32
+    assert "JWT_DEV_SECRET" not in result.stderr
 
 
 def run_security(env):

@@ -6,8 +6,12 @@ import pytest
 from fastapi import HTTPException
 
 from app.auth import ensure_not_self_approval
-from app.routers.entries import DUMMY_ENTRIES
 from app.schemas.auth import Role
+
+
+class _DummyEntry:
+    pass
+
 
 
 def test_blocks_registrant_whose_role_changed_to_president(seed_user):
@@ -29,7 +33,7 @@ def test_other_user_can_approve(role, seed_user):
 
 @pytest.mark.parametrize(
     "wrong_created_by",
-    [DUMMY_ENTRIES[0], "2", 2.0, True],
+    [_DummyEntry(), "2", 2.0, True],
     ids=["entry-object", "str-id", "float-id", "bool"],
 )
 def test_wrong_created_by_type_fails_loudly(wrong_created_by, seed_user):

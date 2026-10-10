@@ -1,6 +1,6 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter
 
-from app.chain.deployment import DeploymentError, load_deployment
+from app.chain.deployment import load_deployment
 from app.schemas.chain import DomainsResponse
 
 router = APIRouter(prefix="/chain", tags=["Chain"])
@@ -15,10 +15,7 @@ def get_domains():
     - 재배포하면 주소와 도메인이 바뀌므로 앱은 값을 하드코딩하지 말고 이 API를 씁니다.
     - `domainSeparator` 는 컨트랙트의 `DOMAIN_SEPARATOR()` 입니다. 앱이 계산한 도메인 해시와 비교하면
       체인 id·주소를 잘못 쓴 것을 서명 전에 잡을 수 있습니다.
-    - 배포 기록이 없거나 앞뒤가 맞지 않으면 503 입니다.
+    - 배포 기록이 없거나 앞뒤가 맞지 않으면 503 입니다 (DeploymentError → app/main.py 의 ChainSetupError 처리기).
     """
-    try:
-        deployment = load_deployment()
-    except DeploymentError as e:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e))
+    deployment = load_deployment()
     return DomainsResponse(chain_id=deployment.chain_id, domains=deployment.eip712)

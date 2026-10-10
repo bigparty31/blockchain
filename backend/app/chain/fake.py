@@ -11,14 +11,16 @@
 롤을 모르는 가짜는 이 둘을 구분하지 못한다 — NOT_APPROVER 는 fail_next 로 지정한다.
 주소는 web3.py 처럼 EIP-55 체크섬 형식으로 돌려준다.
 """
+import asyncio
 import hashlib
 import secrets
 import time
-from typing import Callable, Optional, Union
+from typing import Callable, Optional, Tuple, Union
 
 from eth_utils import to_checksum_address
 
 from app.chain.abi import check_address
+from app.chain.client import BeforeBroadcast
 from app.chain.commit import entry_commit_of
 from app.chain.models import (
     MAX_AMOUNT,
@@ -35,10 +37,14 @@ from app.chain.models import (
     RevertReason,
     TxResult,
     check_signature,
+    check_tx_hash,
 )
 from app.schemas.entry import EntryKind, EntryStatus
 
 WRITE_METHODS = ("record_pending", "confirm_entry", "reject_entry")
+
+# 검사를 통과한 쓰기의 (항목 id, 결과, 상태 변경). 상태는 before_broadcast 가 끝난 뒤에 바꾼다
+Prepared = Tuple[int, TxResult, Callable[[], None]]
 
 
 def fake_signature(address: str) -> str:
@@ -62,8 +68,14 @@ class FakeChainClient:
         # 정정 가능 항목(원본·재분류 양수 정정)의 순금액. 원장의 netAmountOf 와 같은 규칙으로 갱신한다
         self._net: dict[int, int] = {}
         self._tx_count = 0
+        # tx hash 에 섞는 인스턴스별 값. 서버를 다시 켜 새 가짜가 생겨도 DB 에 남은 옛 hash 와 겹치지 않는다 (tx_result)
+        self._tx_salt = secrets.token_hex(8)
+        self._landed: dict[str, tuple[int, TxResult]] = {}  # 블록에 들어간 트랜잭션 hash → (id, 결과). tx_result 가 읽는다
         self._fail: dict[str, RevertReason] = {}
-        self._unavailable: dict[str, bool] = {}
+        self._unavailable: dict[str, tuple[bool, bool]] = {}  # method → (sent, landed)
+        self._send_lock: Optional[asyncio.Lock] = None
+        self._lock_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._lock_owner: Optional[asyncio.Task] = None
         self._block: Optional[BlockReason] = None
 
     # ------------------------------------------------------------ 시나리오 지정
@@ -73,14 +85,19 @@ class FakeChainClient:
         _check_method(method)
         self._fail[method] = reason
 
-    def unavailable_next(self, method: str, landed: bool = False) -> None:
-        """다음 한 번의 method 호출을 ChainUnavailable 로 끝낸다.
+    def unavailable_next(self, method: str, landed: bool = False, sent: bool = True) -> None:
+        """다음 한 번의 method 호출을 ChainUnavailable 로 끝낸다. 실제 구현에서 연결이 끊기는 두 시점을 흉내 낸다.
 
-        landed=False 면 트랜잭션이 체인에 닿지 않아 상태가 그대로다.
-        landed=True 면 체인은 평소대로 처리했고(revert 될 입력이면 revert) 응답만 받지 못한 것이다.
+        sent=False — 보내기 전(시뮬레이션·nonce 조회 중)에 끊겼다. before_broadcast 는 불리지 않고 상태도 그대로다.
+                     tx_pending 을 선점하지 않은 채로 ChainUnavailable 이 오는 경로다.
+        sent=True  — 보낸 뒤 응답을 못 받았다. before_broadcast 는 불린다. landed=True 면 체인에 기록됐고,
+                     False 면 닿지 않았다. revert 할 입력은 실제처럼 시뮬레이션에서 ChainRevert 로 먼저 끝난다.
+        지정은 그 단계에 실제로 도달한 호출이 쓴다 — 검사에서 걸리거나 콜백이 실패한 호출은 지정을 남긴다.
         """
         _check_method(method)
-        self._unavailable[method] = landed
+        if landed and not sent:
+            raise ValueError("보내지 않은 트랜잭션은 체인에 기록될 수 없다 (sent=False 면 landed=False)")
+        self._unavailable[method] = (sent, landed)
 
     def block_next(self, reason: BlockReason = BlockReason.BUDGET_EXCEEDED) -> None:
         """다음 양수 지출(EXPENSE) record_pending 을 BLOCKED 로 저장한다.
@@ -95,24 +112,43 @@ class FakeChainClient:
         """fake_signature 가 담은 주소. payload 는 보지 않는다 — 가짜 서명은 값에 묶여 있지 않다."""
         return _signer(check_signature(signature))
 
-    async def record_pending(self, request: RecordRequest, signature: str) -> TxResult:
+    async def record_pending(
+        self, request: RecordRequest, signature: str, before_broadcast: Optional[BeforeBroadcast] = None
+    ) -> TxResult:
         signature = check_signature(signature)
-        return self._send("record_pending", lambda: self._record(request, signature))
+        return await self._send("record_pending", lambda tx: self._record(request, signature, tx), before_broadcast)
 
-    async def confirm_entry(self, approval: ConfirmApproval, signature: str) -> TxResult:
+    async def confirm_entry(
+        self, approval: ConfirmApproval, signature: str, before_broadcast: Optional[BeforeBroadcast] = None
+    ) -> TxResult:
         signature = check_signature(signature)
-        return self._send("confirm_entry", lambda: self._confirm(approval, signature))
+        return await self._send("confirm_entry", lambda tx: self._confirm(approval, signature, tx), before_broadcast)
 
-    async def reject_entry(self, decision: RejectDecision, signature: str) -> TxResult:
+    async def reject_entry(
+        self, decision: RejectDecision, signature: str, before_broadcast: Optional[BeforeBroadcast] = None
+    ) -> TxResult:
         signature = check_signature(signature)
-        return self._send("reject_entry", lambda: self._reject(decision, signature))
+        return await self._send("reject_entry", lambda tx: self._reject(decision, signature, tx), before_broadcast)
 
     async def get_entry(self, entry_id: int) -> Optional[ChainEntry]:
         return self._entries.get(entry_id)
 
+    async def tx_result(self, tx_hash: str, entry_id: int) -> Optional[TxResult]:
+        """들어간 트랜잭션의 결과. 검사에서 걸렸거나(보내지 않음) unavailable_next(landed=False) 로 닿지 않은 hash 는 None.
+
+        가짜의 revert 는 모두 보내기 전(검사)에 나서, 블록에 들어가 실패로 끝난 트랜잭션(ChainRevert)은 만들지 않는다.
+        """
+        landed = self._landed.get(check_tx_hash(tx_hash))
+        if landed is None:
+            return None
+        landed_id, result = landed
+        if landed_id != entry_id:
+            raise ChainUnavailable(f"결과 이벤트를 찾지 못했다 — 이 트랜잭션은 id={landed_id} 의 것이다 (tx={tx_hash})")
+        return result
+
     # ------------------------------------------------------------ 컨트랙트 흉내
 
-    def _record(self, r: RecordRequest, signature: str) -> TxResult:
+    def _record(self, r: RecordRequest, signature: str, tx_hash: str) -> Prepared:
         # 1 시한 (fail_next 도 여기서 난다)
         self._precheck("record_pending", r.deadline)
         # 2~5 입력 자체. id 0·term 형식은 RecordRequest 가 먼저 막는다
@@ -140,15 +176,15 @@ class FakeChainClient:
             self._check_correction(r)
         # 9 예산 term 대조는 예산 상태가 필요해 fail_next 로만 난다
         # 10 양수 지출의 예산 판정. 음수 정정(환불)은 건너뛴다
-        status, block_reason = EntryStatus.PENDING, None
+        status, block_reason, uses_block_next = EntryStatus.PENDING, None, False
         if r.kind == EntryKind.EXPENSE and r.amount > 0:
             if r.budget_id == 0:
                 # 0 은 "없음"으로 예약돼 있어 (docs/HASHING.md §2.1) 체인에서는 존재하지 않는 예산이다
                 status, block_reason = EntryStatus.BLOCKED, BlockReason.BUDGET_NOT_FOUND
             elif self._block is not None:
-                status, block_reason, self._block = EntryStatus.BLOCKED, self._block, None
+                status, block_reason, uses_block_next = EntryStatus.BLOCKED, self._block, True
 
-        self._entries[r.id] = ChainEntry(
+        entry = ChainEntry(
             id=r.id,
             hash=r.hash,
             amount=r.amount,
@@ -161,7 +197,13 @@ class FakeChainClient:
             registrant=_signer(signature),
             approver=ZERO_ADDRESS,
         )
-        return TxResult(tx_hash=self._next_tx(), status=status, block_reason=block_reason)
+
+        def commit() -> None:
+            self._entries[r.id] = entry
+            if uses_block_next:  # 보내지 않았으면(콜백 실패) 다음 지출에 그대로 남는다
+                self._block = None
+
+        return r.id, TxResult(tx_hash=tx_hash, status=status, block_reason=block_reason), commit
 
     def _check_correction(self, r: RecordRequest) -> None:
         target = self._entries.get(r.corrects_id)
@@ -180,7 +222,7 @@ class FakeChainClient:
                 raise ChainRevert(RevertReason.CORRECTION_BUDGET_MISMATCH, f"expected={target.budget_id}")
             self._check_cap(r.corrects_id, r.amount)
 
-    def _confirm(self, a: ConfirmApproval, signature: str) -> TxResult:
+    def _confirm(self, a: ConfirmApproval, signature: str, tx_hash: str) -> Prepared:
         self._precheck("confirm_entry", a.deadline)
         entry = self._pending_entry(a.id)
         if entry.hash != a.hash:
@@ -195,33 +237,80 @@ class FakeChainClient:
         if entry.corrects_id and entry.amount < 0:
             self._check_cap(entry.corrects_id, entry.amount)
         # 예산 소모(spend)·환불(refund) 실패는 예산 상태가 필요해 fail_next 로만 난다
-        self._entries[entry.id] = entry.model_copy(update={"status": EntryStatus.CONFIRMED, "approver": approver})
-        self._update_net(entry)
-        return TxResult(tx_hash=self._next_tx(), status=EntryStatus.CONFIRMED)
 
-    def _reject(self, d: RejectDecision, signature: str) -> TxResult:
+        def commit() -> None:
+            self._entries[entry.id] = entry.model_copy(update={"status": EntryStatus.CONFIRMED, "approver": approver})
+            self._update_net(entry)
+
+        return entry.id, TxResult(tx_hash=tx_hash, status=EntryStatus.CONFIRMED), commit
+
+    def _reject(self, d: RejectDecision, signature: str, tx_hash: str) -> Prepared:
         self._precheck("reject_entry", d.deadline)
         entry = self._pending_entry(d.id)
         self._check_commit(entry, d.entry_commit)
         if d.reason_hash == ZERO_BYTES32:
             raise ChainRevert(RevertReason.REASON_REQUIRED, f"id={d.id} (반려 사유 없음)")
         approver = self._approver(entry, signature)
-        self._entries[entry.id] = entry.model_copy(update={"status": EntryStatus.REJECTED, "approver": approver})
-        return TxResult(tx_hash=self._next_tx(), status=EntryStatus.REJECTED)
+
+        def commit() -> None:
+            self._entries[entry.id] = entry.model_copy(update={"status": EntryStatus.REJECTED, "approver": approver})
+
+        return entry.id, TxResult(tx_hash=tx_hash, status=EntryStatus.REJECTED), commit
 
     # ------------------------------------------------------------ 내부
 
-    def _send(self, method: str, apply: Callable[[], TxResult]) -> TxResult:
-        """unavailable_next 로 지정된 호출이면 연결 실패를 흉내 낸다."""
-        landed = self._unavailable.pop(method, None)
-        if landed is None:
-            return apply()
-        if landed:
+    async def _send(
+        self, method: str, prepare: Callable[[str], Prepared], before_broadcast: Optional[BeforeBroadcast]
+    ) -> TxResult:
+        """검사 → before_broadcast → 상태 변경. 실제 구현의 시뮬레이션 → 콜백 → 전송 순서와 같다.
+
+        실제 구현은 릴레이어 lock 안에서 시뮬레이션부터 receipt 까지 하므로, 같은 id 를 동시에 보내면 두 번째는
+        ENTRY_ALREADY_EXISTS 다. 가짜도 lock 안에서 한 줄로 처리해 콜백이 await 하는 동안 다른 호출이 끼어들지 못한다.
+        검사에서 걸리면(revert) 콜백 없이 끝나고, 콜백이 예외를 던지면 상태와 지정(block_next·unavailable_next)이 그대로다.
+        """
+        # 콜백은 lock 을 쥔 채 불린다. 그 안에서 다시 쓰면 실제 구현처럼 바로 오류다 (기다리면 영원히 멈춘다)
+        if self._lock_owner is asyncio.current_task():
+            raise RuntimeError(
+                "before_broadcast 안에서 같은 릴레이어로 보내거나 닫을 수 없다 — 릴레이어 lock 을 쥔 채 불려 영원히 기다린다"
+            )
+        async with self._lock():
+            self._lock_owner = asyncio.current_task()
             try:
-                apply()
-            except ChainRevert:
-                pass  # 체인에서 revert 됐어도 응답을 못 받았으니 호출한 쪽은 모른다
-        raise ChainUnavailable(f"unavailable_next 로 지정 (landed={landed})")
+                return await self._send_locked(method, prepare, before_broadcast)
+            finally:
+                self._lock_owner = None
+
+    async def _send_locked(
+        self, method: str, prepare: Callable[[str], Prepared], before_broadcast: Optional[BeforeBroadcast]
+    ) -> TxResult:
+        scenario = self._unavailable.get(method)
+        if scenario is not None and not scenario[0]:
+            del self._unavailable[method]
+            raise ChainUnavailable("unavailable_next 로 지정 (보내기 전)")
+        tx_hash = self._next_tx()
+        entry_id, result, commit = prepare(tx_hash)
+        if before_broadcast is not None:
+            await before_broadcast(tx_hash)
+        if scenario is not None:
+            del self._unavailable[method]
+            landed = scenario[1]
+            if landed:
+                self._land(tx_hash, entry_id, result, commit)
+            raise ChainUnavailable(f"unavailable_next 로 지정 (보낸 뒤, landed={landed})")
+        self._land(tx_hash, entry_id, result, commit)
+        return result
+
+    def _land(self, tx_hash: str, entry_id: int, result: TxResult, commit: Callable[[], None]) -> None:
+        """블록에 들어갔다 — 상태를 바꾸고 결과를 hash 로 남긴다 (tx_result)."""
+        commit()
+        self._landed[tx_hash] = (entry_id, result)
+
+    def _lock(self) -> asyncio.Lock:
+        # asyncio.Lock 은 처음 경합한 이벤트 루프에 묶인다. 테스트마다 루프가 바뀌니(asyncio.run) 루프별로 만든다
+        loop = asyncio.get_running_loop()
+        if self._send_lock is None or self._lock_loop is not loop:
+            self._send_lock, self._lock_loop = asyncio.Lock(), loop
+        return self._send_lock
 
     def _precheck(self, method: str, deadline: int) -> None:
         forced = self._fail.pop(method, None)
@@ -270,4 +359,4 @@ class FakeChainClient:
 
     def _next_tx(self) -> str:
         self._tx_count += 1
-        return "0x" + hashlib.sha256(f"fake-tx-{self._tx_count}".encode()).hexdigest()
+        return "0x" + hashlib.sha256(f"fake-tx-{self._tx_salt}-{self._tx_count}".encode()).hexdigest()
