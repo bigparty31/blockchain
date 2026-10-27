@@ -273,6 +273,14 @@ class _MySbtScreenState extends State<MySbtScreen> {
     );
   }
 
+  /// 서버가 분명히 「발급받은 적 없음」이라고 답했을 때 (스토리보드 6 ②).
+  ///
+  /// **「미보유」라고 못박아 말한다.** 조회 실패 화면([_buildLookupFailed])이
+  /// 「확인할 수 없습니다」인 것과 짝을 이루는 문구다 — 두 화면이 서로 다른 말을
+  /// 해야 학생이 「안 낸 것」과 「지금 확인이 안 되는 것」을 구분할 수 있다.
+  /// 학기를 같이 적는 이유는 SBT 가 학기 단위라서다. 지난 학기에 납부했어도
+  /// 이번 학기 것은 따로 발급되므로, 어느 학기 이야기인지 밝히지 않으면
+  /// 납부한 적 있는 학생이 화면을 오해한다.
   Widget _buildNoMembership() {
     return Container(
       padding: const EdgeInsets.all(28),
@@ -283,10 +291,28 @@ class _MySbtScreenState extends State<MySbtScreen> {
               size: 48, color: AppTheme.textSub.withOpacity(0.5)),
           const SizedBox(height: 14),
           const Text(
+            '미보유',
+            style: TextStyle(
+              fontSize: 20,
+              fontWeight: FontWeight.bold,
+              color: AppTheme.textMain,
+              letterSpacing: -0.5,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            TermInfo.currentTerm,
+            style: TextStyle(
+              fontSize: 12,
+              color: AppTheme.textSub.withOpacity(0.95),
+            ),
+          ),
+          const SizedBox(height: 12),
+          const Text(
             '학생회비 납부 확인이 필요합니다',
             style: TextStyle(
-              fontSize: 16,
-              fontWeight: FontWeight.bold,
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
               color: AppTheme.textMain,
             ),
           ),

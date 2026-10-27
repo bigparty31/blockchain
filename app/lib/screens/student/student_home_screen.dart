@@ -31,6 +31,14 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
   SnapshotModel? _snapshot;
   int _unseen = 0;
 
+  /// 마지막 조회가 중간에 깨졌는지 (스토리보드 2 ⑥ 「조회 실패」).
+  ///
+  /// **빈 화면으로 두면 안 된다.** 조회가 깨지면 `_entries` 와 `_budgets` 가 빈
+  /// 채로 남아 잔액 ₩0 + 「편성된 예산이 없습니다」가 뜨는데, 그것은 스토리보드
+  /// 2-B 의 **학기 초** 화면과 글자 하나 다르지 않다. 학생은 「아직 아무것도
+  /// 안 쓴 학기」라고 읽고 넘어간다 — 사실은 아무것도 못 읽은 것인데도.
+  bool _loadFailed = false;
+
   @override
   void initState() {
     super.initState();
@@ -42,6 +50,9 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
   /// 보인다. 여기서는 추측이 아니라 실제 경로가 있다 — `fetchBudgets` 와
   /// `fetchLatestSnapshot` 은 응답을 한 번에 변환해서, 예산 한 건이나 스냅샷 모양이
   /// 어긋나면 그대로 던진다.
+  ///
+  /// **깨졌으면 깨졌다고 말한다** ([_loadFailed]). 예외를 삼키고 빈 화면을 두면
+  /// 「못 읽음」이 「아직 아무 일도 없음」으로 읽힌다.
   Future<void> _load() async {
     if (mounted) setState(() => _loading = true);
 
@@ -57,7 +68,20 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
         _budgets = budgets;
         _snapshot = snapshot;
         _unseen = EntryMerge.unseenCount(entries, lastSeen);
+        _loadFailed = false;
       });
+    } catch (_) {
+      // 반쯤 채워진 값으로 숫자를 그리지 않는다 — 예산만 깨져도 잔액·합계가
+      // 멀쩡해 보이면 학생은 예산 칸이 비어 있는 것을 「편성 전」으로 읽는다.
+      if (mounted) {
+        setState(() {
+          _entries = [];
+          _budgets = [];
+          _snapshot = null;
+          _unseen = 0;
+          _loadFailed = true;
+        });
+      }
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -93,6 +117,12 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
               const SliverFillRemaining(
                 hasScrollBody: false,
                 child: Center(child: CircularProgressIndicator()),
+              )
+            // 조회가 깨졌으면 숫자를 하나도 그리지 않는다 (스토리보드 2 ⑥).
+            else if (_loadFailed)
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(20, 20, 20, 32),
+                sliver: SliverToBoxAdapter(child: _LoadFailed(onRetry: _load)),
               )
             else
               SliverPadding(
@@ -406,10 +436,16 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
             ),
           ),
           const SizedBox(height: 14),
-          ...List.generate(items.length, (i) {
-            return Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: Row(
+          // 범례는 **금액이 아니라 비율**이다 (스토리보드 2 ⑤ — `행사비 45%`).
+          // 바로 위 누적 막대가 비율을 그리고 있어서, 옆에 금액을 붙이면 읽는
+          // 사람이 막대 길이와 숫자를 맞춰 보려다 어긋난다. 항목별 금액은
+          // 수입·지출 내역에서 건별로 볼 수 있다.
+          Wrap(
+            spacing: 14,
+            runSpacing: 8,
+            children: List.generate(items.length, (i) {
+              return Row(
+                mainAxisSize: MainAxisSize.min,
                 children: [
                   Container(
                     width: 10,
@@ -419,16 +455,16 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
                       borderRadius: BorderRadius.circular(3),
                     ),
                   ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      items[i].key,
-                      style: const TextStyle(
-                          fontSize: 13, color: AppTheme.textMain),
-                    ),
-                  ),
+                  const SizedBox(width: 6),
                   Text(
-                    Fmt.won(items[i].value),
+                    items[i].key,
+                    style: const TextStyle(
+                        fontSize: 13, color: AppTheme.textMain),
+                  ),
+                  const SizedBox(width: 5),
+                  Text(
+                    // 반올림해서 정수 퍼센트로 — 범례에 소수점은 읽히지 않는다.
+                    '${(items[i].value * 100 / total).round()}%',
                     style: const TextStyle(
                       fontSize: 13,
                       fontWeight: FontWeight.bold,
@@ -436,9 +472,9 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
                     ),
                   ),
                 ],
-              ),
-            );
-          }),
+              );
+            }),
+          ),
         ],
       ),
     );
@@ -557,6 +593,59 @@ class _ActionTile extends StatelessWidget {
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// 대시보드를 못 읽었을 때 (스토리보드 2 ⑥ 「조회 실패」)
+///
+/// 「편성된 예산이 없습니다」([_EmptyBudgets])와 **문구가 겹치면 안 된다.**
+/// 하나는 읽어 보니 비어 있다는 뜻이고 하나는 읽지를 못했다는 뜻인데, 학생이
+/// 보는 화면에서 그 둘이 같아 보이면 장애가 정상으로 넘어간다.
+class _LoadFailed extends StatelessWidget {
+  final Future<void> Function() onRetry;
+  const _LoadFailed({required this.onRetry});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(28),
+      decoration: AppTheme.cardDecoration,
+      child: Column(
+        children: [
+          Icon(Icons.cloud_off_rounded,
+              size: 48, color: AppTheme.textSub.withOpacity(0.5)),
+          const SizedBox(height: 14),
+          const Text(
+            '불러올 수 없습니다',
+            style: TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.bold,
+              color: AppTheme.textMain,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            '장부를 불러오지 못했습니다. 내역이 없다는 뜻이 아니라 지금 조회가 '
+            '안 된다는 뜻입니다.',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 12,
+              color: AppTheme.textSub.withOpacity(0.95),
+              height: 1.5,
+            ),
+          ),
+          const SizedBox(height: 18),
+          SizedBox(
+            width: double.infinity,
+            child: GradientButton(
+              onPressed: () => onRetry(),
+              label: '다시 시도',
+              icon: Icons.refresh_rounded,
+            ),
+          ),
+        ],
       ),
     );
   }

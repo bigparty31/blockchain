@@ -665,13 +665,18 @@ class _EntryDetailScreenState extends State<EntryDetailScreen> {
               ),
             ],
           ),
-          if (receipt.expected != null) ...[
-            const SizedBox(height: 8),
-            _hashLine('기록된 해시', receipt.expected!),
-          ],
-          if (receipt.actual != null) ...[
-            const SizedBox(height: 4),
-            _hashLine('내려받은 파일의 해시', receipt.actual!),
+          // 해시 두 줄은 **어긋났을 때만** 보여준다. 통과했을 때는 바로 위
+          // 한 문장이 같은 말을 이미 다 하고, 잘린 해시 두 줄을 눈으로 비교하는
+          // 학생은 없다. 반면 어긋났을 때는 이 두 값이 이의 제기에 붙일 증거가 된다.
+          if (receipt.state == CheckState.failed) ...[
+            if (receipt.expected != null) ...[
+              const SizedBox(height: 8),
+              _hashLine('기록된 해시', receipt.expected!),
+            ],
+            if (receipt.actual != null) ...[
+              const SizedBox(height: 4),
+              _hashLine('내려받은 파일의 해시', receipt.actual!),
+            ],
           ],
         ],
       ),
@@ -1048,12 +1053,11 @@ class _VerificationCard extends StatelessWidget {
                     ? '재계산한 값이 기록된 값과 다름'
                     : '대조할 해시가 없음',
           ),
-          const SizedBox(height: 10),
-          _hashRow('앱에서 재계산한 값', r.recomputedHash, color),
-          const SizedBox(height: 6),
-          // 「무엇과 비교했는가」를 정확히 말한다. 대조하지 못했는데 값을 나란히
-          // 보여주면 비교한 것처럼 읽힌다.
-          if (r.comparedAgainst == null)
+          // 「무엇과 비교했는가」는 **접지 않는다.** 배지의 의미 자체를 바꾸는
+          // 말이라 (대조 못 한 것을 통과로 읽으면 안 된다) 값과 달리 펼쳐 봐야
+          // 할 것이 아니다.
+          if (r.comparedAgainst == null) ...[
+            const SizedBox(height: 8),
             Text(
               r.chainDataAvailable
                   ? '체인에 아직 해시가 기록되지 않아 대조하지 못했습니다. '
@@ -1064,22 +1068,34 @@ class _VerificationCard extends StatelessWidget {
                 color: AppTheme.textSub.withOpacity(0.9),
                 height: 1.4,
               ),
-            )
-          else ...[
-            _hashRow(
-              r.onChainHash != null ? '블록체인에 기록된 값' : '서버가 내려준 값',
-              r.comparedAgainst!,
-              color,
             ),
-            if (r.onChainHash == null) ...[
-              const SizedBox(height: 4),
-              Text(
-                '체인 값을 직접 읽지 못해 서버 값과 비교했습니다.',
-                style:
-                    TextStyle(fontSize: 10, color: AppTheme.textSub.withOpacity(0.9)),
-              ),
-            ],
+          ] else if (r.onChainHash == null) ...[
+            const SizedBox(height: 8),
+            Text(
+              '체인 값을 직접 읽지 못해 서버 값과 비교했습니다.',
+              style: TextStyle(fontSize: 10, color: AppTheme.textSub.withOpacity(0.9)),
+            ),
           ],
+
+          const SizedBox(height: 8),
+          // 값 **자체**는 접어 둔다. 비교는 이미 1단계 배지가 해줬고, 잘린 해시를
+          // 눈으로 맞춰 보는 학생은 없다. 어긋났을 때만 펼친 채로 시작한다.
+          HashDisclosure(
+            autoExpand: r.hashState == CheckState.failed,
+            children: [
+              _hashRow(context, '앱에서 재계산한 값', r.recomputedHash, color),
+              // 대조하지 못했는데 값을 나란히 보여주면 비교한 것처럼 읽힌다.
+              if (r.comparedAgainst != null) ...[
+                const SizedBox(height: 6),
+                _hashRow(
+                  context,
+                  r.onChainHash != null ? '블록체인에 기록된 값' : '서버가 내려준 값',
+                  r.comparedAgainst!,
+                  color,
+                ),
+              ],
+            ],
+          ),
 
           const SizedBox(height: 16),
 
@@ -1205,29 +1221,120 @@ class _VerificationCard extends StatelessWidget {
     );
   }
 
-  Widget _hashRow(String label, String hash, Color color) {
+  /// 해시 한 줄. **탭하면 잘리지 않은 전체 값이 복사된다.**
+  ///
+  /// 화면에 그리는 것은 가운데를 잘라낸 값이라 그 자체로는 아무 데도 옮길 수
+  /// 없다. 값을 펼쳐 보는 유일한 쓸모가 어긋났을 때 이의 제기에 붙이는 것인데
+  /// (`_HashDisclosure`), 복사가 안 되면 그 쓸모가 화면 안에서 끝난다.
+  Widget _hashRow(BuildContext context, String label, String hash, Color color) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(label, style: const TextStyle(fontSize: 10, color: AppTheme.textSub)),
         const SizedBox(height: 2),
-        Container(
-          width: double.infinity,
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: color.withOpacity(0.2)),
-          ),
-          child: Text(
-            Fmt.shortHash(hash, head: 18, tail: 10),
-            style: const TextStyle(
-              fontSize: 11,
-              fontFamily: 'monospace',
-              color: AppTheme.textMain,
+        GestureDetector(
+          onTap: () {
+            Clipboard.setData(ClipboardData(text: hash));
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('$label을 복사했습니다'),
+                behavior: SnackBarBehavior.floating,
+                duration: const Duration(seconds: 2),
+              ),
+            );
+          },
+          child: Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: color.withOpacity(0.2)),
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    Fmt.shortHash(hash, head: 18, tail: 10),
+                    style: const TextStyle(
+                      fontSize: 11,
+                      fontFamily: 'monospace',
+                      color: AppTheme.textMain,
+                    ),
+                  ),
+                ),
+                const Icon(Icons.copy_rounded, size: 12, color: AppTheme.textSub),
+              ],
             ),
           ),
         ),
+      ],
+    );
+  }
+}
+
+/// 해시 값 두 줄의 접기·펼치기.
+///
+/// **기본은 접힘이다.** 잘린 해시를 눈으로 맞춰 보는 학생은 없고, 그 비교
+/// 결과는 이미 1단계 배지에 나와 있다. 값을 나란히 깔아 두는 것이 검증력을
+/// 더해 주지도 않는다 — 가운데가 잘린 그 두 줄도 결국 앱이 골라 보여준
+/// 값이라, 믿는 대상이 배지에서 문자열로 옮겨 갈 뿐이다.
+///
+/// **어긋났을 때는 다르다.** 그때는 이 두 값이 학생이 이의 제기에 붙일 수
+/// 있는 증거가 되므로 ([autoExpand]) 처음부터 펼친 채로 둔다. 접어 두는 것은
+/// 「평소엔 배지만, 깨졌을 때만 값」이라는 뜻이고, 값을 없애는 것이 아니다.
+///
+/// 화면 바깥으로 공개한 이유는 [canObject] 와 같다 — 「기본은 접힘, 불일치면
+/// 펼침」은 눈에 안 보이는 회귀라 테스트로 직접 못박아 두기 위해서다.
+class HashDisclosure extends StatefulWidget {
+  /// 1단계가 불일치로 판정됐는지 — 펼친 상태로 시작할 조건이다.
+  final bool autoExpand;
+  final List<Widget> children;
+
+  const HashDisclosure({
+    super.key,
+    required this.autoExpand,
+    required this.children,
+  });
+
+  @override
+  State<HashDisclosure> createState() => _HashDisclosureState();
+}
+
+class _HashDisclosureState extends State<HashDisclosure> {
+  late bool _open = widget.autoExpand;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () => setState(() => _open = !_open),
+          child: Row(
+            children: [
+              Icon(
+                _open ? Icons.expand_less_rounded : Icons.expand_more_rounded,
+                size: 15,
+                color: AppTheme.textSub,
+              ),
+              const SizedBox(width: 3),
+              Text(
+                _open ? '해시 값 숨기기' : '해시 값 보기',
+                style: const TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  color: AppTheme.textSub,
+                ),
+              ),
+            ],
+          ),
+        ),
+        if (_open) ...[
+          const SizedBox(height: 8),
+          ...widget.children,
+        ],
       ],
     );
   }
