@@ -48,10 +48,20 @@ enum EntryStatus {
   final String label;
   const EntryStatus(this.code, this.label);
 
+  /// 모르는 코드는 **고치지 않고 던진다.**
+  ///
+  /// 예전에는 `PENDING` 으로 떨어뜨렸는데, 그러면 백엔드가 상태를 하나 늘렸을 때
+  /// 학생 화면이 모르는 상태를 **「승인대기」라고 잘못 말한다.** enum 값은
+  /// `docs/enums.md` 에 고정돼 있고 어긋나면 조용히 넘어가는 대신 드러나야 한다
+  /// (CLAUDE.md 「타협 불가능한 도메인 규칙」 1).
   static EntryStatus fromCode(String code) {
     return EntryStatus.values.firstWhere(
       (e) => e.code == code,
-      orElse: () => EntryStatus.PENDING,
+      orElse: () => throw ArgumentError.value(
+        code,
+        'code',
+        'docs/enums.md 에 없는 entry status',
+      ),
     );
   }
 }

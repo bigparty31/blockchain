@@ -205,10 +205,18 @@ class StatusBadge extends StatelessWidget {
 
 /// 그라디언트 버튼
 class GradientButton extends StatelessWidget {
-  final VoidCallback onPressed;
+  /// null 이면 눌러도 아무 일도 일어나지 않는다.
+  final VoidCallback? onPressed;
   final String label;
   final IconData? icon;
   final LinearGradient gradient;
+
+  /// 회색으로 그릴지 여부. **누를 수 있는지와는 별개다.**
+  ///
+  /// 스토리보드 4 ⑤ 처럼 회색이어도 눌러서 「왜 안 되는지」를 토스트로
+  /// 알려줘야 하는 경우가 있다. 겉모습은 [enabled], 탭 동작은 [onPressed] 로
+  /// 따로 정한다 — 완전히 죽이려면 [onPressed] 를 null 로 둔다.
+  final bool enabled;
 
   const GradientButton({
     super.key,
@@ -216,21 +224,25 @@ class GradientButton extends StatelessWidget {
     required this.label,
     this.icon,
     this.gradient = AppTheme.primaryGradient,
+    this.enabled = true,
   });
 
   @override
   Widget build(BuildContext context) {
     return Container(
       decoration: BoxDecoration(
-        gradient: gradient,
+        gradient: enabled ? gradient : null,
+        color: enabled ? null : AppTheme.divider,
         borderRadius: BorderRadius.circular(14),
-        boxShadow: [
-          BoxShadow(
-            color: gradient.colors.first.withOpacity(0.35),
-            blurRadius: 14,
-            offset: const Offset(0, 6),
-          ),
-        ],
+        boxShadow: enabled
+            ? [
+                BoxShadow(
+                  color: gradient.colors.first.withOpacity(0.35),
+                  blurRadius: 14,
+                  offset: const Offset(0, 6),
+                ),
+              ]
+            : null,
       ),
       child: Material(
         color: Colors.transparent,
@@ -243,15 +255,16 @@ class GradientButton extends StatelessWidget {
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 if (icon != null) ...[
-                  Icon(icon, color: Colors.white, size: 20),
+                  Icon(icon,
+                      color: enabled ? Colors.white : AppTheme.textSub, size: 20),
                   const SizedBox(width: 8),
                 ],
                 // Flexible: 좁은 화면·큰 글자에서 글자가 넘치지 않고 줄바꿈된다 (RenderFlex overflow 방지).
                 Flexible(
                   child: Text(label,
                     textAlign: TextAlign.center,
-                    style: const TextStyle(
-                      color: Colors.white,
+                    style: TextStyle(
+                      color: enabled ? Colors.white : AppTheme.textSub,
                       fontWeight: FontWeight.bold,
                       fontSize: 15,
                       letterSpacing: 0.3,

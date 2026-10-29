@@ -15,6 +15,13 @@ class TermInfo {
   /// 현재 학기 이름. 서버에 학기 API 가 생기면 그 값으로 바꾼다.
   static const String currentTerm = '2026학년도 2학기';
 
+  /// 현재 학기의 **온체인 학기 코드** `YYYYS` (`terms.term_code`, `Entry.term`).
+  ///
+  /// DB 의 `term_id`(1, 2…)와 다른 값이다. 지금은 데모 데이터를 만들 때만 쓴다 —
+  /// 실제 항목의 학기는 `EntryResponse.term_code` 로 받아야 하며, 화면이 이 상수를
+  /// 모든 항목에 갖다 붙이면 **지난 학기 항목까지 이번 학기라고 말하게 된다.**
+  static const int currentTermCode = 20262;
+
   /// 소속 학과. 서버가 내려주지 않는다.
   static const String department = '컴퓨터공학과';
 

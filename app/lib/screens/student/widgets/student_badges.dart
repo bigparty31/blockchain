@@ -243,6 +243,47 @@ class CorrectionBadge extends StatelessWidget {
 /// 서버에 연결되지 않아 개발용 예시 데이터를 보여주고 있을 때 띄운다.
 /// **조용히 폴백하면 안 된다** — 보고 있는 것이 실제 원장인지 예시인지
 /// 구분되지 않으면 이 앱의 검증 배지는 아무 의미가 없다.
+/// 파싱에 실패해 목록에서 빠진 항목이 있을 때 띄우는 안내.
+///
+/// 빠진 사실을 숨기면 학생은 「내역이 원래 이게 다」로 오해한다. 이 앱의
+/// 존재 이유가 「학생이 직접 검증한다」라서, 못 보여준 게 있으면 못 보여줬다고
+/// 말해야 한다.
+class SkippedEntriesBanner extends StatelessWidget {
+  final int count;
+
+  const SkippedEntriesBanner({super.key, required this.count});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: AppTheme.expense.withOpacity(0.10),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: AppTheme.expense.withOpacity(0.45)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.error_outline_rounded, size: 18, color: AppTheme.expense),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              '일부 내역 $count건을 표시하지 못했습니다',
+              style: const TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.bold,
+                color: AppTheme.expense,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class DemoDataBanner extends StatelessWidget {
   const DemoDataBanner({super.key});
 
