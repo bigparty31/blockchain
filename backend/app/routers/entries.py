@@ -30,6 +30,7 @@ from app.models import Budget as DBBudget, Entry as DBEntry, Term as DBTerm, Use
 from app.schemas.auth import Role
 from app.schemas.entry import (
     BlockReason,
+    COUNTERPARTY_MAX_LENGTH,
     EntryConfirmRequest,
     EntryConfirmResponse,
     EntryCreate,
@@ -179,6 +180,12 @@ async def create_entry(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="거래처와 지출 목적은 빈 문자열일 수 없습니다.",
+        )
+
+    if len(canonical_counterparty) > COUNTERPARTY_MAX_LENGTH:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"거래처는 최대 {COUNTERPARTY_MAX_LENGTH}자까지 입력할 수 있습니다.",
         )
 
     # 3. KST 자정 타임스탬프 검사
