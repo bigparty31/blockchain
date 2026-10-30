@@ -1,6 +1,13 @@
 from enum import Enum
 from typing import Optional
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, field_validator
+
+from app.utils.hashing import canonical
+
+COUNTERPARTY_MAX_LENGTH = 100
+RECEIPT_PATH_MAX_LENGTH = 255
+RECEIPT_HASH_MAX_LENGTH = 66
+OCR_APPROVAL_NO_MAX_LENGTH = 50
 
 
 class EntryKind(str, Enum):
@@ -72,18 +79,27 @@ class EntryCreate(BaseModel):
     term_id: int = Field(1, description="학기 ID")
     kind: EntryKind = Field(EntryKind.EXPENSE, description="수입/지출 구분")
     amount: int = Field(..., description="금액 (원 단위, 정수)")
-    counterparty: str = Field(..., description="거래처 (상호명)")
+    counterparty: str = Field(..., max_length=COUNTERPARTY_MAX_LENGTH, description="거래처 (상호명, 최대 100자)")
     purpose: str = Field(..., description="사용 목적")
     budget_id: Optional[int] = Field(None, description="배정 예산 ID")
     occurred_at: int = Field(..., description="거래 일시 (Unix Timestamp KST 자정)")
-    receipt_path: Optional[str] = Field(None, description="영수증 이미지 경로")
-    receipt_hash: Optional[str] = Field(None, description="영수증 SHA-256 해시")
+    receipt_path: Optional[str] = Field(None, max_length=RECEIPT_PATH_MAX_LENGTH, description="영수증 이미지 경로")
+    receipt_hash: Optional[str] = Field(None, max_length=RECEIPT_HASH_MAX_LENGTH, description="영수증 SHA-256 해시")
     ocr_amount: Optional[int] = Field(None, description="OCR 인식 금액")
-    ocr_approval_no: Optional[str] = Field(None, description="영수증 카드 승인번호")
+    ocr_approval_no: Optional[str] = Field(None, max_length=OCR_APPROVAL_NO_MAX_LENGTH, description="영수증 카드 승인번호")
     ocr_paid_at: Optional[int] = Field(None, description="OCR 인식 결제 일시 (실제 시각)")
     ocr_status: Optional[OCRStatus] = Field(None, description="OCR 판독 상태")
     corrects_entry_id: Optional[int] = Field(None, description="정정 등록 시 대상 Entry ID")
     correction_reason: Optional[CorrectionReason] = Field(None, description="정정 사유")
+
+    @field_validator("counterparty", mode="before")
+    @classmethod
+    def _normalize_counterparty_before_length(cls, v):
+        # 앞뒤 공백(U+0020) 제거 및 NFC 정규화를 먼저 수행해 NFD 한글·공백 때문에 100자 제한에 오탐되지 않게 함.
+        # 탭·NBSP·제어문자 등은 canonical()이 지우지 않으므로 라우터의 validate_text_for_hash(400)가 그대로 잡는다.
+        if isinstance(v, str):
+            return canonical(v)
+        return v
 
 
 class EntryCreateResponse(BaseModel):
