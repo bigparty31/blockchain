@@ -24,6 +24,12 @@ python -m venv .venv
 
 # 패키지 설치
 pip install -r requirements.txt
+
+# DB 스키마 생성 및 기본 시드 데이터(사용자·학기·예산) 주입
+alembic upgrade head
+python -m scripts.seed
+# (선택) CHAIN_FAKE=1 단독 데모용 예시 내역 3건까지 함께 넣을 때:
+# python -m scripts.seed --with-demo-entries
 ```
 
 ### 1.2 서버 실행
