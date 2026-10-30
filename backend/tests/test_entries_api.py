@@ -379,6 +379,38 @@ def test_ocr_duplication_conflict(auth_header):
     assert "이미 등록된 영수증입니다" in res.json()["detail"]
 
 
+def test_create_income_with_budget_returns_400(auth_header):
+    """수입(INCOME) 내역에는 예산을 연결할 수 없으며 400 Bad Request가 반환되어야 함 (ck_entries_income_no_budget)"""
+    income_with_budget = {
+        "term_id": 1,
+        "kind": "INCOME",
+        "amount": 50000,
+        "counterparty": "학생회비납부자",
+        "purpose": "학생회비 납부",
+        "budget_id": 1,
+        "occurred_at": 1788793200,
+    }
+    res = client.post("/entries", json=income_with_budget, headers=auth_header(Role.TREASURER))
+    assert res.status_code == 400
+    assert "수입 내역에는 예산을 연결할 수 없습니다" in res.json()["detail"]
+
+
+def test_create_income_without_budget_succeeds(auth_header):
+    """수입(INCOME) 내역에 예산이 없으면 정상적으로 201 Created 초안 등록 성공해야 함"""
+    income_without_budget = {
+        "term_id": 1,
+        "kind": "INCOME",
+        "amount": 50000,
+        "counterparty": "학생회비납부자",
+        "purpose": "학생회비 납부",
+        "budget_id": None,
+        "occurred_at": 1788793200,
+    }
+    res = client.post("/entries", json=income_without_budget, headers=auth_header(Role.TREASURER))
+    assert res.status_code == 201
+    assert "id" in res.json()
+
+
 # ---------------------------------------------------------------- 역할 권한 검사
 
 DRAFT_BODY = {
