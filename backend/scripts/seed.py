@@ -4,8 +4,9 @@
     cd backend && python -m scripts.seed --with-demo-entries
 
 동작 원칙:
-- 멱등성(idempotent) 보장: 이미 존재하는 행은 건드리지 않고 누락된 기본 행만 추가한다.
+- 멱등성(idempotent) 보장: 이미 일치하는 행은 건드리지 않고 누락된 기본 행만 추가한다.
   컨테이너 기동 시 `alembic upgrade head && python -m scripts.seed` 형태로 매번 실행해도 안전하다.
+  단, 시드 대상 PK·고유키(id·학번·지갑·학기·예산 항목)가 기존 DB 행과 불일치 충돌하면 조용히 건너뛰지 않고 `RuntimeError`로 중단한다.
 - `app/auth/users.py` 의 `SEED_USERS`(id 1~5)를 정본으로 읽어 `users` 테이블을 채운다.
   DB 의 `ck_users_wallet_address_lower` 제약조건을 충족하기 위해 `wallet_address` 는 소문자로 변환한다.
 - 실제 블록체인(Hardhat) 노드와 함께 띄울 때 체인에 없는 트랜잭션 해시가 DB 에 남지 않도록,
@@ -19,7 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Sequence
 
-from sqlalchemy import inspect, or_, text
+from sqlalchemy import func, inspect, or_, text
 from sqlalchemy.orm import Session
 
 # `python scripts/seed.py` 직접 실행 시에도 `app` 패키지를 찾을 수 있도록 경로 보정
@@ -138,15 +139,42 @@ def seed_database(db: Session, *, with_demo_entries: bool = False) -> SeedResult
 
     try:
         # 1. 사용자 (SEED_USERS id=1..5, 지갑 주소는 소문자 정규화)
+        # 로그인·JWT는 SEED_USERS의 고정 id(1..5)를 기준으로 동작하고 entries 등은 DB users.id를 FK로 참조하므로,
+        # 다른 id가 동일 학번·지갑·인덱스를 선점했거나 같은 id에 다른 계정 정보가 들어 있으면 조용히 건너뛰지 않고 중단한다.
         for u in auth_users.SEED_USERS:
+            expected_role = u.role.value if hasattr(u.role, "value") else str(u.role)
             lower_wallet = u.wallet_address.lower() if u.wallet_address else None
             user_conds = [DBUser.id == u.id, DBUser.student_no == u.student_no]
             if u.wallet_index is not None:
                 user_conds.append(DBUser.wallet_index == u.wallet_index)
             if lower_wallet is not None:
-                user_conds.append(DBUser.wallet_address == lower_wallet)
-            exists = db.query(DBUser).filter(or_(*user_conds)).first()
-            if exists is not None:
+                user_conds.append(func.lower(DBUser.wallet_address) == lower_wallet)
+            matched_users = db.query(DBUser).filter(or_(*user_conds)).order_by(DBUser.id).all()
+            if matched_users:
+                exact = (
+                    len(matched_users) == 1
+                    and matched_users[0].id == u.id
+                    and matched_users[0].student_no == u.student_no
+                    and matched_users[0].role == expected_role
+                    and matched_users[0].wallet_index == u.wallet_index
+                    and (
+                        matched_users[0].wallet_address.lower()
+                        if matched_users[0].wallet_address
+                        else None
+                    )
+                    == lower_wallet
+                )
+                if not exact:
+                    conflict_desc = ", ".join(
+                        f"(id={row.id}, student_no={row.student_no!r}, role={row.role!r}, "
+                        f"wallet_index={row.wallet_index}, wallet_address={row.wallet_address!r})"
+                        for row in matched_users
+                    )
+                    raise RuntimeError(
+                        f"시드 사용자 불일치 충돌: 기대값 (id={u.id}, student_no={u.student_no!r}, "
+                        f"role={expected_role!r}, wallet_index={u.wallet_index}, wallet_address={lower_wallet!r}) "
+                        f"와 충돌하는 기존 DB 행이 있습니다: {conflict_desc}"
+                    )
                 continue
             db.add(
                 DBUser(
@@ -154,7 +182,7 @@ def seed_database(db: Session, *, with_demo_entries: bool = False) -> SeedResult
                     student_no=u.student_no,
                     password_hash=u.password_hash,
                     name=u.name,
-                    role=u.role.value if hasattr(u.role, "value") else str(u.role),
+                    role=expected_role,
                     wallet_index=u.wallet_index,
                     wallet_address=lower_wallet,
                 )
@@ -163,7 +191,7 @@ def seed_database(db: Session, *, with_demo_entries: bool = False) -> SeedResult
         db.flush()
 
         # 2. 학기 (id=1, 2026-2학기, term_code=20262)
-        term = (
+        matched_terms = (
             db.query(DBTerm)
             .filter(
                 or_(
@@ -172,9 +200,10 @@ def seed_database(db: Session, *, with_demo_entries: bool = False) -> SeedResult
                     DBTerm.name == DEFAULT_TERM_NAME,
                 )
             )
-            .first()
+            .order_by(DBTerm.id)
+            .all()
         )
-        if term is None:
+        if not matched_terms:
             term = DBTerm(
                 id=DEFAULT_TERM_ID,
                 term_code=DEFAULT_TERM_CODE,
@@ -185,19 +214,36 @@ def seed_database(db: Session, *, with_demo_entries: bool = False) -> SeedResult
             db.add(term)
             db.flush()
             terms_created += 1
+        else:
+            term = matched_terms[0]
+            if not (
+                len(matched_terms) == 1
+                and term.id == DEFAULT_TERM_ID
+                and term.term_code == DEFAULT_TERM_CODE
+                and term.name == DEFAULT_TERM_NAME
+            ):
+                conflict_desc = ", ".join(
+                    f"(id={row.id}, term_code={row.term_code}, name={row.name!r})"
+                    for row in matched_terms
+                )
+                raise RuntimeError(
+                    f"시드 학기 불일치 충돌: 기대값 (id={DEFAULT_TERM_ID}, term_code={DEFAULT_TERM_CODE}, "
+                    f"name={DEFAULT_TERM_NAME!r}) 와 충돌하는 기존 DB 행이 있습니다: {conflict_desc}"
+                )
 
         # 3. 예산 및 버전 이력 (id=1 행사비 v1/v2, id=2 사업비 v1, id=3 운영비 v1)
         budget_ids_by_category: dict[str, int] = {}
         for budget_id, category, versions in DEFAULT_BUDGETS:
-            budget = (
+            matched_budgets = (
                 db.query(DBBudget)
                 .filter(
                     (DBBudget.id == budget_id)
                     | ((DBBudget.term_id == term.id) & (DBBudget.category == category))
                 )
-                .first()
+                .order_by(DBBudget.id)
+                .all()
             )
-            if budget is None:
+            if not matched_budgets:
                 budget = DBBudget(
                     id=budget_id,
                     term_id=term.id,
@@ -208,6 +254,22 @@ def seed_database(db: Session, *, with_demo_entries: bool = False) -> SeedResult
                 db.add(budget)
                 db.flush()
                 budgets_created += 1
+            else:
+                budget = matched_budgets[0]
+                if not (
+                    len(matched_budgets) == 1
+                    and budget.id == budget_id
+                    and budget.term_id == term.id
+                    and budget.category == category
+                ):
+                    conflict_desc = ", ".join(
+                        f"(id={row.id}, term_id={row.term_id}, category={row.category!r})"
+                        for row in matched_budgets
+                    )
+                    raise RuntimeError(
+                        f"시드 예산 불일치 충돌: 기대값 (id={budget_id}, term_id={term.id}, "
+                        f"category={category!r}) 와 충돌하는 기존 DB 행이 있습니다: {conflict_desc}"
+                    )
             budget_ids_by_category[category] = budget.id
 
             for ver_no, planned_amount, revision_reason, approver_id in versions:

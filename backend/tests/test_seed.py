@@ -166,28 +166,66 @@ def test_seed_without_migrations_raises_clear_error(tmp_path):
         engine.dispose()
 
 
-def test_seed_respects_existing_unique_wallet_and_term_name(tmp_path):
-    """다른 id/학번으로 동일 지갑이나 학기명이 먼저 들어 있어도 UNIQUE/FK 충돌 없이 동작해야 함"""
-    from datetime import datetime, timezone
-
-    db_file = tmp_path / "partial.db"
+def test_seed_raises_on_conflicting_user_and_rolls_back(tmp_path):
+    """다른 id가 시드 지갑·학번을 선점했거나 같은 id에 다른 계정 정보가 있으면 RuntimeError로 중단·롤백해야 함"""
+    db_file = tmp_path / "conflict_user.db"
     _run_migrations(db_file)
     engine = _make_engine(db_file)
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     try:
         treasurer_seed = next(u for u in users.SEED_USERS if u.role == Role.TREASURER)
         with SessionLocal() as db:
-            # 다른 id(20)로 동일 총무 지갑이 이미 등록되어 있고, 다른 id(10)로 동일 학기명("2026-2학기")이 존재하는 상황
+            # 리뷰 재현 시나리오: id=20 이 총무 지갑을 먼저 점유한 상태
             db.add(
                 User(
                     id=20,
                     student_no="20990020",
                     password_hash=treasurer_seed.password_hash,
-                    name="기존총무",
+                    name="충돌총무",
                     role="TREASURER",
                     wallet_address=treasurer_seed.wallet_address.lower(),
                 )
             )
+            db.commit()
+
+            with pytest.raises(RuntimeError, match="시드 사용자 불일치 충돌"):
+                seed_database(db)
+
+            # 앞선 루프에서 추가하려던 id=1 학생까지 포함해 전체 롤백되어야 함
+            remaining_ids = [u.id for u in db.query(User).order_by(User.id).all()]
+            assert remaining_ids == [20]
+
+            # 같은 id(2)에 다른 학번·지갑이 들어 있는 경우에도 중단해야 함
+            db.query(User).delete()
+            db.add(
+                User(
+                    id=2,
+                    student_no="20990002",
+                    password_hash=treasurer_seed.password_hash,
+                    name="다른계정",
+                    role="TREASURER",
+                    wallet_address="0x" + "a" * 40,
+                )
+            )
+            db.commit()
+
+            with pytest.raises(RuntimeError, match="시드 사용자 불일치 충돌"):
+                seed_database(db)
+    finally:
+        engine.dispose()
+
+
+def test_seed_raises_on_conflicting_term_or_budget(tmp_path):
+    """학기(id/term_code/name)나 예산(id/term_id/category)이 일부만 일치하면 엉뚱한 행에 연결하지 않고 중단해야 함"""
+    from datetime import datetime, timezone
+
+    db_file = tmp_path / "conflict_term_budget.db"
+    _run_migrations(db_file)
+    engine = _make_engine(db_file)
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    try:
+        with SessionLocal() as db:
+            # 1) 학기명은 같지만 id·term_code가 다른 행이 있는 경우
             db.add(
                 Term(
                     id=10,
@@ -197,21 +235,69 @@ def test_seed_respects_existing_unique_wallet_and_term_name(tmp_path):
                     ended_at=datetime(2027, 2, 28, tzinfo=timezone.utc),
                 )
             )
+            db.commit()
+
+            with pytest.raises(RuntimeError, match="시드 학기 불일치 충돌"):
+                seed_database(db)
+
+            assert db.query(User).count() == 0
+
+            # 2) 학기는 정상이지만 id=1 예산에 "행사비" 대신 "사업비"가 들어 있는 경우
+            db.query(Term).delete()
+            db.add(
+                Term(
+                    id=1,
+                    term_code=20262,
+                    name="2026-2학기",
+                    started_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+                    ended_at=datetime(2027, 2, 28, tzinfo=timezone.utc),
+                )
+            )
             db.add(
                 Budget(
-                    id=30,
-                    term_id=10,
+                    id=1,
+                    term_id=1,
                     category="사업비",
                     expires_at=datetime(2026, 12, 14, tzinfo=timezone.utc),
                 )
             )
             db.commit()
 
-            result = seed_database(db, with_demo_entries=True)
-            assert result.users_created == len(users.SEED_USERS) - 1
-            assert result.terms_created == 0
-            assert result.budgets_created == 2
-            assert result.entries_created == 3
+            with pytest.raises(RuntimeError, match="시드 예산 불일치 충돌"):
+                seed_database(db)
+
+            assert db.query(BudgetVersion).count() == 0
+    finally:
+        engine.dispose()
+
+
+def test_seed_coexists_with_non_conflicting_extra_users(tmp_path):
+    """시드 범위(id=1..5)와 겹치지 않는 일반 사용자 행이 이미 있어도 정상 시드 및 재실행이 가능해야 함"""
+    db_file = tmp_path / "extra_user.db"
+    _run_migrations(db_file)
+    engine = _make_engine(db_file)
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    try:
+        student_seed = next(u for u in users.SEED_USERS if u.role == Role.STUDENT)
+        with SessionLocal() as db:
+            db.add(
+                User(
+                    id=20,
+                    student_no="20259999",
+                    password_hash=student_seed.password_hash,
+                    name="추가학생",
+                    role="STUDENT",
+                    wallet_index=99,
+                )
+            )
+            db.commit()
+
+            result = seed_database(db)
+            assert result.users_created == len(users.SEED_USERS)
+            assert result.terms_created == 1
+            assert result.budgets_created == 3
+            assert result.budget_versions_created == 4
+            assert [u.id for u in db.query(User).order_by(User.id).all()] == [1, 2, 3, 4, 5, 20]
     finally:
         engine.dispose()
 
