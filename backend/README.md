@@ -24,7 +24,14 @@ python -m venv .venv
 
 # 패키지 설치
 pip install -r requirements.txt
+
+# DB 스키마 생성 및 기본 시드 데이터(사용자·학기·예산) 주입
+alembic upgrade head
+python -m scripts.seed
+# (선택) CHAIN_FAKE=1 단독 데모용 예시 내역 3건까지 함께 넣을 때:
+# python -m scripts.seed --with-demo-entries
 ```
+- **실제 Hardhat 체인 연동 시 주의**: `python -m scripts.seed`는 오프체인 DB에만 기본 예산(`id=1..3`)을 넣으며, `contracts/scripts/deploy.ts`는 온체인 `BudgetToken`을 발행하지 않습니다. 실제 노드와 함께 띄운 상태에서는 온체인 예산 발행(`BudgetToken.issue`) 전까지 `budget_id=1..3` 지출 제출이 체인에서 `BUDGET_NOT_FOUND`로 `BLOCKED` 처리됩니다.
 
 ### 1.2 서버 실행
 ```powershell
