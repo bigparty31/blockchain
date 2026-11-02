@@ -1012,5 +1012,3 @@ def test_create_entry_optional_string_max_lengths(auth_header, field, value):
     }
     res = client.post("/entries", json=body, headers=auth_header(Role.TREASURER))
     assert res.status_code == 422
-
-
