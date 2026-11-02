@@ -970,3 +970,22 @@ def test_confirm_when_chain_unavailable_on_get_entry_returns_503(auth_header, mo
     assert res.status_code == 503
     assert "블록체인 네트워크와 통신할 수 없습니다." in res.json()["detail"]
 
+def test_get_entry_by_id_success(auth_header):
+    """GET /entries/{id} 단건 상세 조회 및 term_code 반환 검증"""
+    # id=1 (시드 확정 항목)
+    res = client.get("/entries/1")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["id"] == 1
+    assert data["term_id"] == 1
+    assert data["term_code"] == 20261
+    assert data["counterparty"] == "한결문구"
+    assert data["amount"] == 35000
+    assert data["status"] == "CONFIRMED"
+
+
+def test_get_entry_by_id_not_found():
+    """존재하지 않는 ID 단건 조회 시 404 Not Found 검증"""
+    res = client.get("/entries/99999")
+    assert res.status_code == 404
+    assert "찾을 수 없습니다" in res.json()["detail"]
