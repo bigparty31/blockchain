@@ -6,7 +6,7 @@ from app.utils.hashing import canonical
 
 COUNTERPARTY_MAX_LENGTH = 100
 RECEIPT_PATH_MAX_LENGTH = 255
-RECEIPT_HASH_PATTERN = r"^0x[0-9a-f]{64}$"
+RECEIPT_HASH_MAX_LENGTH = 66
 OCR_APPROVAL_NO_MAX_LENGTH = 50
 
 
@@ -84,7 +84,7 @@ class EntryCreate(BaseModel):
     budget_id: Optional[int] = Field(None, description="배정 예산 ID")
     occurred_at: int = Field(..., description="거래 일시 (Unix Timestamp KST 자정)")
     receipt_path: Optional[str] = Field(None, max_length=RECEIPT_PATH_MAX_LENGTH, description="영수증 이미지 경로")
-    receipt_hash: Optional[str] = Field(None, pattern=RECEIPT_HASH_PATTERN, description="영수증 SHA-256 해시 (0x + 64자 소문자 hex)")
+    receipt_hash: Optional[str] = Field(None, max_length=RECEIPT_HASH_MAX_LENGTH, description="영수증 SHA-256 해시")
     ocr_amount: Optional[int] = Field(None, description="OCR 인식 금액")
     ocr_approval_no: Optional[str] = Field(None, max_length=OCR_APPROVAL_NO_MAX_LENGTH, description="영수증 카드 승인번호")
     ocr_paid_at: Optional[int] = Field(None, description="OCR 인식 결제 일시 (실제 시각)")

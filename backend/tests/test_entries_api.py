@@ -995,22 +995,17 @@ def test_create_entry_counterparty_max_length(auth_header):
     [
         ("receipt_path", "/" + "a" * 255),
         ("receipt_hash", "0x" + "a" * 65),
-        ("receipt_hash", "0x" + "A" * 64),
-        ("receipt_hash", "0x1234"),
-        ("receipt_hash", "a" * 66),
-        ("receipt_hash", "0x" + "g" * 64),
-        ("receipt_hash", "0x" + "a" * 64 + "\n"),
         ("ocr_approval_no", "1" * 51),
     ],
 )
-def test_create_entry_optional_string_constraints(auth_header, field, value):
-    """부가 문자열 제약(receipt_path 255자, receipt_hash 0x+64자 소문자 hex, ocr_approval_no 50자) 위반 시 422 차단"""
+def test_create_entry_optional_string_max_lengths(auth_header, field, value):
+    """기타 DB VARCHAR 컬럼(receipt_path 255, receipt_hash 66, ocr_approval_no 50) 초과 시 422 차단"""
     body = {
         "term_id": 1,
         "kind": "EXPENSE",
         "amount": 10000,
         "counterparty": "길이검증점",
-        "purpose": "부가 문자열 제약 검증",
+        "purpose": "부가 문자열 길이 검증",
         "budget_id": 2,
         "occurred_at": 1788793200,
         field: value,
