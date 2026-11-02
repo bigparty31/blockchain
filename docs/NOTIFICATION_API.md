@@ -1,6 +1,6 @@
 # 알림 API 명세 (초안)
 
-작성 손종인 · 대상 이승호, 장정아(알림함·뱃지·폴링), 김경윤(이벤트 호출), 장석연(`kind` 승인) · 근거 PRD v0.13 §4.8, §4.9, §8
+작성 손종인 · 대상 이승호(알림함·뱃지·폴링), 김경윤(이벤트 호출), 장석연(`kind` 승인) · 근거 PRD v0.13 §4.1, §4.3, §4.8, §4.9, §8
 
 **구현 전 초안이다.** 앱은 이 형태로 먼저 만들 수 있다. 경로와 응답 형태는 PRD에 없어 제안한 값이고, 「확인이 필요한 것」이 정해지면 바뀔 수 있다. 구현 완료 후 확정본을 `docs/API.md`에 옮긴다.
 
@@ -8,6 +8,7 @@
 
 - 세 API 모두 `Authorization: Bearer <access_token>`이 필요하다. 오류는 `API.md` 인증 §3과 같다
 - 역할 제한은 없고, **본인 알림만** 조회·처리한다
+- **학생은 알림을 받지 않는다** (§4.8). 학생이 호출하면 빈 목록과 `0`이 온다
 - 시각은 다른 API와 같이 Unix 초(정수)다
 - 1단계에서 앱은 폴링으로 받는다. FCM과 `DeviceToken` API는 2단계라 여기 없다
 
@@ -30,7 +31,6 @@
     "kind": "ENTRY_REGISTERED",
     "entry_id": 34,
     "budget_revision_request_id": null,
-    "objection_id": null,
     "body": "새 지출 내역이 등록되었습니다. 승인이 필요합니다.",
     "created_at": 1793548800,
     "read_at": null,
@@ -40,7 +40,7 @@
 ```
 
 - `body`는 서버가 만든 문구다. 앱은 그대로 표시한다
-- 어디로 이동할지는 `entry_id`·`budget_revision_request_id`·`objection_id` 중 값이 있는 것으로 정한다
+- 어디로 이동할지는 `entry_id`·`budget_revision_request_id` 중 값이 있는 것으로 정한다
 - 앱이 모르는 `kind`가 와도 `body`를 표시한다. 오류로 처리하지 않는다
 
 ## 2. 안 읽은 수 (`GET /notifications/unread-count`)
@@ -64,38 +64,77 @@
 
 ## 재알림과 읽음
 
+- 임원이 처리할 건에만 붙는다 (§4.8). 아래 표에서 「재알림」이 O인 종류다
 - 주기는 PRD 그대로다: 24시간 뒤, 이후 24시간마다 최대 3회, 72시간이 지나면 다른 승인자에게도 알린다. 간격은 서버 설정값이다
 - **읽음은 처리가 아니다.** 읽어도 처리되지 않으면 재알림이 간다
 - 재알림은 같은 알림 행의 `read_at`을 비우고 `remind_count`를 올린다. 새 알림이 아니지만 뱃지에 다시 잡히고 목록 위로 올라온다
 - 처리되면 받는 사람 전원의 알림이 목록과 재알림에서 빠진다
 
-## `kind` 값 (제안 — 승인 필요)
+## `kind` 값
 
-이벤트와 받는 사람은 §4.8이다. **`kind` 이름은 제안이고 `docs/enums.md`에 올리려면 장석연 승인이 필요하다.** 「재알림」은 PRD에 구분이 없어 제안한 값이다.
+이벤트와 받는 사람은 §4.8이다. `kind` 이름은 제안이고, `docs/enums.md`에는 장석연 승인을 거쳐 §4.8 표의 이벤트만 올린다. 이의 제기는 v0.13 범위 밖이라 없다.
 
 | `kind` | 이벤트 | 받는 사람 | 연결 | 재알림 |
 |---|---|---|---|---|
 | `ENTRY_REGISTERED` | 지출·수입·정정 등록 | 감사 전원, 회장 | `entry_id` | O |
+| `ENTRY_REVISION_REQUESTED` | T4 수정 요청 (§4.3, 아래 확인 필요) | 감사 전원, 회장 | `entry_id` | O |
 | `ENTRY_CONFIRMED` | 확정 | 총무 | `entry_id` | |
 | `ENTRY_REJECTED` | 반려 | 총무 | `entry_id` | |
 | `ENTRY_CONFIRM_FAILED` | 확정 실패 | 총무 | `entry_id` | |
 | `ENTRY_BLOCKED` | `BLOCKED` | 총무, 회장 | `entry_id` | |
-| `REVISION_REQUESTED` | 증액 요청 | 회장 | `budget_revision_request_id` | O |
+| `REVISION_REQUESTED` | 증액 요청, 시한 만료 후 재서명 요청 (§4.1) | 회장 | `budget_revision_request_id` | O |
 | `REVISION_PRESIDENT_SIGNED` | 회장 서명 완료 | 감사 | `budget_revision_request_id` | O |
 | `REVISION_APPROVED` | 증액 승인 | 총무, 회장 | `budget_revision_request_id` | |
 | `REVISION_REJECTED` | 증액 반려 | 총무, 회장 | `budget_revision_request_id` | |
-| `OBJECTION_RAISED` | 이의 제기 | 감사, 회장 | `objection_id` | O |
-| `OBJECTION_ANSWERED` | 이의 답변 | 제기한 학생 | `objection_id` | |
-| `ROLE_CHANGE_REQUESTED` | 롤 변경 서명 요청 | 상대 서명자 | 없음 | O |
-| `PRESIDENT_RECOVERY_PROPOSED` | 회장 복구 제안 | 회장, 감사 | 없음 | |
-| `RECLASSIFY_PAIR_UNCONFIRMED` | 재분류 짝 미확정 | 해당 처리자 | `entry_id` | O |
-| `SIGNATURE_DEADLINE_NEAR` | 서명 시한 임박 | 해당 처리자 | `budget_revision_request_id` | |
+| `ROLE_CHANGE_REQUESTED` | 롤 변경 서명 요청 (시연할 때만) | 상대 서명자 | 없음 | |
+| `PRESIDENT_RECOVERY_PROPOSED` | 회장 복구 제안 (시연할 때만) | 회장, 감사 | 없음 | |
+| `RECLASSIFY_PAIR_UNCONFIRMED` | 재분류 짝 미확정 | 해당 처리자 | `entry_id` | |
+| `SIGNATURE_DEADLINE_NEAR` | 서명 시한 임박 | 해당 처리자 | `budget_revision_request_id` | O |
+
+## 서버 함수 (김경윤 호출용)
+
+위치는 `app/services/notifications.py`다. **11/7 테이블이 생기기 전까지는 아무것도 하지 않는 빈 함수다.** 호출은 지금부터 넣어도 된다.
+
+```python
+def create_notification(
+    db: Session,
+    kind: NotificationKind,
+    *,
+    entry_id: Optional[int] = None,
+    budget_revision_request_id: Optional[int] = None,
+    user_ids: Optional[Iterable[int]] = None,
+) -> None:
+    """알림 행을 db 세션에 추가한다. commit 하지 않는다."""
+
+
+def resolve_notifications(
+    db: Session,
+    *,
+    entry_id: Optional[int] = None,
+    budget_revision_request_id: Optional[int] = None,
+) -> None:
+    """처리된 건의 알림을 받는 사람 전원에게서 닫는다. commit 하지 않는다."""
+```
+
+- **상태 변경과 같은 세션으로 부르고, 호출한 쪽이 함께 commit 한다** (§4.8). 롤백되면 알림도 남지 않는다
+- 받는 사람은 `kind`에 따라 함수가 정한다. `user_ids`는 「해당 처리자」처럼 표만으로 정해지지 않는 종류에만 넘긴다
+
+**호출 위치 (제안)**
+
+| 이벤트 | 어디서 | 담당 |
+|---|---|---|
+| 등록, `BLOCKED`, 확정, 반려, 확정 실패 | `chain_tx.py`의 상태 반영 단계 | 손종인 |
+| T4 수정 요청 | 수정 요청 라우터 | 김경윤 |
+| 증액 요청, 회장 서명 완료, 증액 승인·반려 | 예산 라우터 | 김경윤 |
+| 시한 만료 후 재서명 요청 | 만료 처리 함수 | 김경윤 |
+| 재분류 짝 미확정, 서명 시한 임박 | 재알림 작업 | 손종인 |
+
+체인을 거치는 항목 이벤트를 `chain_tx.py`에 둔 이유: 상태 반영은 `chain_tx.py`가 자기 세션으로 commit 하고 라우터는 그 결과만 받는다. 그래서 라우터에서 부르면 §4.8의 「같은 트랜잭션」이 될 수 없다. 재제출로 같은 건의 결과를 다시 받아도 상태가 실제로 바뀔 때 한 번만 기록된다.
 
 ## 확인이 필요한 것
 
 | 대상 | 내용 |
 |---|---|
-| 장석연 | `kind` 이름을 `docs/enums.md`에 올려도 되는가 |
-| 장석연 | S14는 학생 알림함에 「내 관련 확정」을 넣지만 §4.8 표에서 확정은 총무에게만 간다. 학생 수신은 이의 답변만으로 보는가 |
-| 장석연 | 「재알림」 구분이 맞는가. 처리가 필요한 종류에만 다시 보내는 것으로 잡았다 |
-| 이승호, 장정아 | 경로와 응답 형태로 화면을 만들 수 있는가. 폴링은 화면 동기화(§4.9)와 같은 15초를 제안한다 |
+| 장석연 | §4.3은 T4 수정 요청을 감사·회장에게 알린다고 하지만 §4.8 표에 없다. `ENTRY_REVISION_REQUESTED`를 표에 추가해도 되는가 |
+| 장석연, 김경윤 | §4.8은 라우터 호출을 김경윤으로 적었다. 위 「호출 위치」대로 등록·확정·반려는 `chain_tx.py`에서 기록해도 되는가 |
+| 이승호 | 경로와 응답 형태로 화면을 만들 수 있는가. 폴링은 화면 동기화(§4.9)와 같은 15초를 제안한다 |
