@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 
 from app.auth import users
@@ -13,6 +14,7 @@ from app.chain import ChainUnavailable, FakeChainClient, fake_signature, get_cha
 from app.chain.models import BlockReason
 from app.database import Base, get_db
 from app.main import app
+from app.routers import entries as entries_router
 from app.models import (
     Budget as DBBudget,
     Entry as DBEntry,
@@ -660,6 +662,13 @@ def test_reject_entry_success(auth_header):
     assert data["id"] == entry_id
     assert data["status"] == "REJECTED"
 
+    with _test_session_factory() as db:
+        row = db.query(DBEntry).filter(DBEntry.id == entry_id).first()
+        assert row.status == "REJECTED"
+        assert row.tx_confirm is not None
+        assert row.rejected_by == 3
+        assert row.reject_reason == "영수증 식별 불가로 인한 반려"
+
 
 def test_confirm_ocr_mismatch_requires_warning_reason(auth_header):
     """OCR 불일치(AMOUNT_MISMATCH) 항목 승인 시 warning_reason 누락 시 400 Bad Request 차단 검증"""
@@ -909,6 +918,100 @@ def test_reject_blocked_when_confirm_in_flight(auth_header):
         row = db.query(DBEntry).filter(DBEntry.id == entry_id).first()
         assert row.status == "PENDING"
         assert row.rejected_by is None
+
+
+def _pending_entry(auth_header) -> int:
+    now = int(time.time())
+    draft_body = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 25000,
+        "counterparty": "반려선점문구",
+        "purpose": "반려 선점 검증",
+        "budget_id": 2,
+        "occurred_at": 1788793200,
+    }
+    entry_id = client.post("/entries", json=draft_body, headers=auth_header(Role.TREASURER)).json()["id"]
+    res = client.post(
+        f"/entries/{entry_id}/submit",
+        json={"deadline": now + 600, "signature": fake_signature(TREASURER_WALLET)},
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res.status_code == 200
+    return entry_id
+
+
+def _reject_request(entry_id: int, auth_header):
+    body = {
+        "deadline": int(time.time()) + 600,
+        "signature": fake_signature(AUDITOR_WALLET),
+        "reject_reason": "영수증 식별 불가로 인한 반려",
+    }
+    return client.post(f"/entries/{entry_id}/reject", json=body, headers=auth_header(Role.AUDITOR))
+
+
+def test_reject_reason_is_not_exposed_until_the_rejection_lands(auth_header):
+    """반려 선점 때 적은 사유·반려자는 체인에서 끝나기 전에는 응답에 없다 (실패하면 비워지는 값이다)"""
+    entry_id = _pending_entry(auth_header)
+    with _test_session_factory() as db:
+        row = db.query(DBEntry).filter(DBEntry.id == entry_id).first()
+        row.tx_confirm = "0x" + "7" * 64
+        row.rejected_by = 3
+        row.reject_reason = "아직 체인에 없는 사유"
+        db.commit()
+
+    listed = next(e for e in client.get("/entries").json() if e["id"] == entry_id)
+    assert listed["status"] == "PENDING"
+    assert listed["reject_reason"] is None and listed["rejected_by"] is None
+
+
+def test_rejected_entry_shows_its_reason(auth_header):
+    entry_id = _pending_entry(auth_header)
+    assert _reject_request(entry_id, auth_header).status_code == 200
+    listed = next(e for e in client.get("/entries").json() if e["id"] == entry_id)
+    assert listed["status"] == "REJECTED"
+    assert (listed["rejected_by"], listed["reject_reason"]) == (3, "영수증 식별 불가로 인한 반려")
+
+
+def test_reject_retry_of_its_own_claim_reaches_the_relay_with_no_open_transaction(auth_header, monkeypatch):
+    """내 반려의 ② 는 라우터가 막지 않는다. 릴레이를 부를 때 라우터 세션에 열린 트랜잭션이 없다 (CHAIN_CLIENT §3)"""
+    entry_id = _pending_entry(auth_header)
+    with _test_session_factory() as db:
+        row = db.query(DBEntry).filter(DBEntry.id == entry_id).first()
+        row.tx_confirm = "0x" + "7" * 64
+        row.rejected_by = 3
+        row.reject_reason = "영수증 식별 불가로 인한 반려"
+        db.commit()
+    seen = []
+
+    async def relay(db, **_):
+        seen.append(db.in_transaction())
+
+    monkeypatch.setattr(entries_router, "relay_reject", relay)
+    assert _reject_request(entry_id, auth_header).status_code == 200
+    assert seen == [False]
+
+
+@pytest.mark.parametrize(
+    "path, relay_name, signer, role",
+    [
+        ("reject", "relay_reject", AUDITOR_WALLET, Role.AUDITOR),
+        ("confirm", "relay_confirm", AUDITOR_WALLET, Role.AUDITOR),
+    ],
+)
+def test_database_failure_during_the_relay_is_503(auth_header, monkeypatch, path, relay_name, signer, role):
+    """다시 요청하면 복구되는 상황이다. 일반 서버 오류(500)로 내보내지 않는다"""
+    entry_id = _pending_entry(auth_header)
+
+    async def relay(*args, **kwargs):
+        raise OperationalError("UPDATE entries", {}, Exception("연결 끊김 (흉내)"))
+
+    monkeypatch.setattr(entries_router, relay_name, relay)
+    body = {"deadline": int(time.time()) + 600, "signature": fake_signature(signer), "reject_reason": "사유", "warning_reason": None}
+    if path == "confirm":
+        body.pop("reject_reason")
+    res = client.post(f"/entries/{entry_id}/{path}", json=body, headers=auth_header(role))
+    assert res.status_code == 503
 
 
 def test_confirm_or_reject_when_chain_entry_missing_returns_404(auth_header):
