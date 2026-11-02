@@ -9,6 +9,7 @@ import 'screens/council/expense_create_screen.dart';
 import 'screens/council/hardware_test_screen.dart';
 import 'screens/council/income_create_screen.dart';
 import 'screens/council/inquiry_response_screen.dart';
+import 'screens/president/budget_plan_screen.dart';
 import 'screens/student/entry_detail_screen.dart';
 import 'screens/student/entry_list_screen.dart';
 import 'screens/student/my_sbt_screen.dart';
@@ -61,6 +62,10 @@ class AppRoutes {
 
   /// 카메라·생체인증 실기 테스트. 인자 없음
   static const councilHardwareTest = '/council/hardware-test';
+
+  // ── 회장 (screens/president/) ───────────────────────────────
+  /// 예산 편성. 인자: [UserRole] (회장이 아니면 화면이 안내만 보여준다)
+  static const presidentBudgetPlan = '/president/budget';
 }
 
 /// `MaterialApp.onGenerateRoute` 에 연결하는 라우터.
@@ -105,6 +110,11 @@ class AppRouter {
         return _page(settings, (_) => const InquiryResponseScreen());
       case AppRoutes.councilHardwareTest:
         return _page(settings, (_) => const HardwareTestScreen());
+
+      // 회장
+      case AppRoutes.presidentBudgetPlan:
+        if (args is! UserRole) return _badArguments(settings, 'UserRole');
+        return _page(settings, (_) => BudgetPlanScreen(role: args));
     }
     return null;
   }
