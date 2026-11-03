@@ -8,6 +8,10 @@ from app.schemas.entry import (
 )
 from app.schemas.balance import BalanceResponse
 from app.schemas.budget import BudgetResponse
+from app.schemas.budget_revision import (
+    BudgetRevisionRequestCreate,
+    BudgetRevisionResponse,
+)
 
 __all__ = [
     "EntryResponse",
@@ -18,4 +22,6 @@ __all__ = [
     "OCRStatus",
     "BalanceResponse",
     "BudgetResponse",
+    "BudgetRevisionRequestCreate",
+    "BudgetRevisionResponse",
 ]
