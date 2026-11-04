@@ -1,19 +1,26 @@
 import 'package:flutter/material.dart';
 import '../../core/enums.dart';
 import '../../core/app_theme.dart';
+import '../../services/auth_service.dart';
 import 'reason_dialog.dart';
 
-/// 경고가 있는 항목인가 — OCR 이 일치하지 않으면(`MATCH` 가 아니면) 경고다.
+/// OCR 이 경고인가 — `MATCH` 와 `NO_NUMBER`(승인번호가 없는 계좌이체 등)는 정상이다 (PRD §6).
+bool _ocrIsWarning(OcrStatus? s) => s != OcrStatus.MATCH && s != OcrStatus.NO_NUMBER;
+
+/// 경고가 있는 항목인가 — OCR 이 경고이거나 카테고리 경고가 있으면 경고다.
 /// 경고를 무시하고 승인하려면 사유가 필수다 (`hadWarning` + `warningReasonHash`).
 /// OCR 불일치·중복뿐 아니라 카테고리 경고(`category_warning`)도 경고다 —
 /// 빼면 카테고리 경고 건이 사유 없이 승인된다.
 bool _hasWarning(Map<String, dynamic> item) =>
-    item['ocrStatus'] != OcrStatus.MATCH || item['categoryWarning'] == true;
+    _ocrIsWarning(item['ocrStatus'] as OcrStatus?) || item['categoryWarning'] == true;
 
 /// 경고 원인 문구. OCR·카테고리가 겹치면 둘 다 적는다.
 String _warningLabel(Map<String, dynamic> item) {
   final parts = <String>[
-    if (item['ocrStatus'] != OcrStatus.MATCH) 'OCR ${(item['ocrStatus'] as OcrStatus).label}',
+    if (item['ocrStatus'] == OcrStatus.DUPLICATE && item['duplicateOf'] != null)
+      '영수증 중복(기존 #${item['duplicateOf']})'
+    else if (_ocrIsWarning(item['ocrStatus'] as OcrStatus?))
+      'OCR ${(item['ocrStatus'] as OcrStatus).label}',
     if (item['categoryWarning'] == true) '카테고리 경고',
   ];
   return parts.join('·');
@@ -25,22 +32,11 @@ const _budgetFailReasons = {
   'BudgetExpired': '예산 집행 기간이 지났어요',
 };
 
-/// [이승호 담당: app/lib/screens/council/]
-/// 3. 승인 대기 목록 화면 (감사 / 회장)
-class ApprovalListScreen extends StatefulWidget {
-  const ApprovalListScreen({super.key});
-
-  @override
-  State<ApprovalListScreen> createState() => _ApprovalListScreenState();
-}
-
-class _ApprovalListScreenState extends State<ApprovalListScreen>
-    with SingleTickerProviderStateMixin {
-  late TabController _tabController;
-
-  final List<Map<String, dynamic>> _items = [
+/// **목업** 승인 대상 목록. 서버가 붙으면 `GET /entries` 의 `PENDING` 항목으로 바꾼다.
+List<Map<String, dynamic>> buildApprovalMockItems() => [
     {
       'id': 2,
+      'createdBy': 2,
       'title': '청년피자 개강총회 다과 주문',
       'merchant': '청년피자',
       'amount': 120000,
@@ -88,6 +84,32 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
       'receiptInfo': '카드 매출전표 (승인번호: 55021877)',
     },
     {
+      'id': 8,
+      'title': '신입생 환영회 문구류 구매',
+      'merchant': '한결문구',
+      'amount': 35000,
+      'category': '행사비',
+      'date': '2026-09-15 09:50',
+      'status': EntryStatus.PENDING,
+      // 이미 확정된 #1 과 승인번호·결제일·금액이 같다 → 막지 않고 경고로 올라온다 (PRD §6)
+      'ocrStatus': OcrStatus.DUPLICATE,
+      'duplicateOf': 1,
+      'receiptInfo': '카드 매출전표 (승인번호: 12345678 · 내역 #1 과 같음)',
+    },
+    {
+      // 감사 이감사(3)가 총무이던 때 등록한 수입 건 — 3번 계정이 로그인하면 이 건은 승인·반려할 수 없다.
+      'id': 9,
+      'title': '학교 지원금',
+      'merchant': '학생처',
+      'amount': 2000000,
+      'category': '지원금',
+      'date': '2026-09-16 10:00',
+      'status': EntryStatus.PENDING,
+      'ocrStatus': OcrStatus.MATCH,
+      'createdBy': 3,
+      'receiptInfo': '수입 건 — 영수증 없음',
+    },
+    {
       'id': 1,
       'title': '한결문구 신입생 환영회 물품 구매',
       'merchant': '한결문구',
@@ -98,7 +120,48 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
       'ocrStatus': OcrStatus.MATCH,
       'receiptInfo': '간이과세 세금계산서',
     },
-  ];
+    ];
+
+/// 로그인한 사람이 이 건의 등록자인가. 등록자는 자기 건을 승인·반려할 수 없다 —
+/// 컨트랙트가 `SelfApproval` 로 되돌리지만 화면이 먼저 막는다 (스토리보드 12-E).
+bool isOwnEntry(Map<String, dynamic> item, int? currentUserId) =>
+    currentUserId != null && item['createdBy'] == currentUserId;
+
+/// 홈 화면 배너에 쓰는 승인 대기 건수.
+int approvalMockPendingCount() =>
+    buildApprovalMockItems().where((e) => e['status'] == EntryStatus.PENDING).length;
+
+/// [이승호 담당: app/lib/screens/council/]
+/// 3. 승인 대기 목록 화면 (감사 / 회장)
+///
+/// 감사·회장만 열 수 있다. 로그인하지 않았거나 총무·학생이면 [_NoAccess] 를 보여 준다 (홈에서 메뉴를 숨기는 것과 별개로,
+/// 경로로 직접 들어와도 막는다). [role]·[currentUserId] 를 주지 않으면 로그인 세션([AuthService.session]) 값을 쓴다.
+class ApprovalListScreen extends StatefulWidget {
+  final UserRole? role;
+  final int? currentUserId;
+
+  /// 목록 재료. 주지 않으면 목업 목록을 쓴다 (테스트·화면 캡처용).
+  final List<Map<String, dynamic>>? items;
+
+  const ApprovalListScreen({super.key, this.role, this.currentUserId, this.items});
+
+  /// 화면에 적용되는 역할. 인자가 없으면 로그인한 사람의 역할이다.
+  UserRole? get effectiveRole => role ?? AuthService().session?.role;
+
+  /// 화면에 적용되는 사용자 id. 본인 등록 건 판정에 쓴다.
+  int? get effectiveUserId => currentUserId ?? AuthService().session?.userId;
+
+  bool get allowed => effectiveRole == UserRole.AUDITOR || effectiveRole == UserRole.PRESIDENT;
+
+  @override
+  State<ApprovalListScreen> createState() => _ApprovalListScreenState();
+}
+
+class _ApprovalListScreenState extends State<ApprovalListScreen>
+    with SingleTickerProviderStateMixin {
+  late TabController _tabController;
+
+  late final List<Map<String, dynamic>> _items = widget.items ?? buildApprovalMockItems();
 
   @override
   void initState() {
@@ -267,6 +330,9 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
                   children: [
                     _DetailRow(icon: Icons.description_rounded, label: '대상', value: item['title']),
                     _DetailRow(icon: Icons.monetization_on_rounded, label: '금액', value: '${item['amount']}원 (${item['category']})'),
+                    // 서명 대상 — 승인자가 무엇에 서명하는지 보고 서명한다 (entryCommit: 종류·날짜·예산·등록자)
+                    _DetailRow(icon: Icons.event_rounded, label: '사용일', value: '${item['date']}'.split(' ').first),
+                    const _DetailRow(icon: Icons.person_rounded, label: '등록자', value: '김총무'),
                   ],
                 ),
               ),
@@ -469,6 +535,7 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
 
   @override
   Widget build(BuildContext context) {
+    if (!widget.allowed) return const _NoAccess();
     final pendingCount = _items.where((e) => e['status'] == EntryStatus.PENDING).length;
 
     return Scaffold(
@@ -476,7 +543,7 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
       appBar: AppBar(
         title: Column(
           children: [
-            const Text('지출 승인 목록',
+            const Text('승인 대기',
               style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white, fontSize: 16),
             ),
             Text('감사 · 회장 전용',
@@ -586,6 +653,7 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
           item: item,
           status: status,
           onReceipt: () => _showReceiptDialog(item),
+          own: isOwnEntry(item, widget.effectiveUserId),
           onApprove: () => _onApprove(item),
           onReject: () => _onReject(item),
         );
@@ -594,14 +662,70 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
   }
 }
 
+/// 승인 권한이 없는 사람이 승인 화면에 들어왔을 때 (서버의 403 과 같은 뜻).
+class _NoAccess extends StatelessWidget {
+  const _NoAccess();
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: AppTheme.bgPage,
+      appBar: AppBar(
+        title: const Text('승인 대기', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white)),
+        backgroundColor: const Color(0xFF8B5CF6),
+        foregroundColor: Colors.white,
+        centerTitle: true,
+      ),
+      body: const Center(
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.lock_rounded, size: 40, color: AppTheme.textSub),
+              SizedBox(height: 12),
+              Text('이 작업을 할 권한이 없습니다.',
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: AppTheme.textMain),
+              ),
+              SizedBox(height: 6),
+              Text('승인·반려는 감사·회장만 할 수 있어요.',
+                style: TextStyle(fontSize: 13, color: AppTheme.textSub),
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 누를 수 없는 회색 버튼 (본인 등록 건).
+class _DisabledAction extends StatelessWidget {
+  final String label;
+  const _DisabledAction({required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      alignment: Alignment.center,
+      decoration: BoxDecoration(color: const Color(0xFFE5E7EB), borderRadius: BorderRadius.circular(10)),
+      child: Text(label, style: const TextStyle(fontSize: 12, color: Color(0xFF9CA3AF))),
+    );
+  }
+}
+
 class _ApprovalCard extends StatelessWidget {
   final Map<String, dynamic> item;
   final EntryStatus status;
+  final bool own;
   final VoidCallback onReceipt, onApprove, onReject;
 
   const _ApprovalCard({
     required this.item,
     required this.status,
+    this.own = false,
     required this.onReceipt,
     required this.onApprove,
     required this.onReject,
@@ -705,7 +829,33 @@ class _ApprovalCard extends StatelessWidget {
             const Divider(color: AppTheme.divider, height: 1),
             const SizedBox(height: 12),
 
-            if (status == EntryStatus.PENDING)
+            if (status == EntryStatus.PENDING && own) ...[
+              Text('등록자와 승인자가 같아 처리할 수 없어요',
+                style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: AppTheme.textSub),
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: onReceipt,
+                      icon: const Icon(Icons.receipt_long_rounded, size: 15),
+                      label: const Text('영수증', style: TextStyle(fontSize: 12)),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: AppTheme.primary,
+                        side: const BorderSide(color: AppTheme.divider),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                        padding: const EdgeInsets.symmetric(vertical: 10),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  const Expanded(child: _DisabledAction(label: '반려')),
+                  const SizedBox(width: 8),
+                  const Expanded(flex: 2, child: _DisabledAction(label: '승인 서명')),
+                ],
+              ),
+            ] else if (status == EntryStatus.PENDING)
               Row(
                 children: [
                   Expanded(

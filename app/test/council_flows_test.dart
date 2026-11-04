@@ -113,7 +113,7 @@ void main() {
       tester.view.physicalSize = const Size(411, 1200);
       tester.view.devicePixelRatio = 1.0;
       addTearDown(tester.view.reset);
-      await tester.pumpWidget(const MaterialApp(home: ApprovalListScreen()));
+      await tester.pumpWidget(MaterialApp(home: ApprovalListScreen(role: UserRole.AUDITOR, currentUserId: 5)));
       await tester.pumpAndSettle();
     }
 
@@ -147,7 +147,7 @@ void main() {
     testWidgets('OCR 경고가 있는 항목은 사유 없이 승인할 수 없다', (tester) async {
       await pumpScreen(tester);
 
-      expect(find.textContaining('경고 무시 사유가 필요해요'), findsNWidgets(2)); // OCR 1건 + 카테고리 1건
+      expect(find.textContaining('경고 무시 사유가 필요해요'), findsNWidgets(3)); // OCR 불일치 1건 + 카테고리 1건 + 영수증 중복 1건
 
       // 경고 항목은 목록의 세 번째 카드 (id 6)
       await tester.tap(find.text('승인 서명').at(2));
