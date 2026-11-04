@@ -1,9 +1,13 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import '../../core/enums.dart';
 import '../../core/app_theme.dart';
 import '../../core/dev_flags.dart';
 import '../../core/logout_action.dart';
 import '../../services/api_service.dart';
+import '../../services/notification_service.dart';
+import 'notification_inbox_screen.dart';
 import 'expense_create_screen.dart';
 import 'income_create_screen.dart';
 import 'approval_list_screen.dart';
@@ -35,21 +39,46 @@ class CouncilHomeScreen extends StatefulWidget {
 /// 총무가 지출을 등록하면 늘고, 다른 감사가 먼저 승인하면 줄어든다. 고정값을 두면
 /// 0건이어도 몇 건이 있다고 말한다. 서버 건수를 읽고, 화면에서 돌아올 때와
 /// 새로고침을 누를 때 다시 읽는다.
-class _CouncilHomeScreenState extends State<CouncilHomeScreen> {
+class _CouncilHomeScreenState extends State<CouncilHomeScreen> with WidgetsBindingObserver {
   UserRole get role => widget.role;
 
   /// 승인 대기 건수. **null 은 0 이 아니라 「모름」이다** ([ApiService.fetchPendingCount]).
   int? _pendingCount;
   bool _loading = true;
 
+  /// 안 읽은 알림 수. null 은 「모름」이다 ([NotificationService.unreadCount]).
+  int? _unread;
+
+  /// 홈이 열려 있는 동안 15초마다 다시 읽는다 (PRD v0.14 §4.8 · §4.9).
+  Timer? _poll;
+
   @override
   void initState() {
     super.initState();
-    _load();
+    WidgetsBinding.instance.addObserver(this);
+    _refreshAll();
+    _poll = Timer.periodic(NotificationService.pollInterval, (_) => _refreshAll(silent: true));
   }
 
-  Future<void> _load() async {
-    if (mounted) setState(() => _loading = true);
+  @override
+  void dispose() {
+    _poll?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  /// 앱으로 돌아오면 다시 읽는다.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _refreshAll(silent: true);
+  }
+
+  /// 승인 대기 건수와 안 읽은 알림 수를 함께 다시 읽는다.
+  /// [silent] 면 배지를 「확인 중」으로 바꾸지 않는다 — 15초마다 배지가 깜빡이지 않게.
+  Future<void> _refreshAll({bool silent = false}) => Future.wait([_load(silent: silent), _loadUnread()]);
+
+  Future<void> _load({bool silent = false}) async {
+    if (!silent && mounted) setState(() => _loading = true);
     final count = await ApiService().fetchPendingCount();
     if (!mounted) return;
     setState(() {
@@ -58,11 +87,16 @@ class _CouncilHomeScreenState extends State<CouncilHomeScreen> {
     });
   }
 
+  Future<void> _loadUnread() async {
+    final count = await NotificationService.unreadCount();
+    if (mounted) setState(() => _unread = count);
+  }
+
   /// 다른 화면에 갔다 돌아오면 다시 읽는다 — 승인하고 왔는데 숫자가 그대로면
   /// 감사는 방금 처리한 건이 안 들어간 줄로 읽는다.
   Future<void> _openAndReload(Widget screen) async {
     await Navigator.push(context, MaterialPageRoute(builder: (_) => screen));
-    if (mounted) await _load();
+    if (mounted) await _refreshAll();
   }
 
   // 역할별 타이틀 및 설정
@@ -118,11 +152,15 @@ class _CouncilHomeScreenState extends State<CouncilHomeScreen> {
             backgroundColor: AppTheme.primary,
             foregroundColor: Colors.white,
             actions: [
+              _NotificationBell(
+                unread: _unread,
+                onTap: () => _openAndReload(NotificationInboxScreen(role: role)),
+              ),
               // 대기 건수는 다른 사람이 등록·승인하면 바뀐다. 갱신할 길이 없으면
               // 감사는 낡은 숫자를 보고 이미 처리된 건에 서명을 보내 409 를 맞는다.
               IconButton(
                 key: const Key('council_refresh'),
-                onPressed: _loading ? null : _load,
+                onPressed: _loading ? null : _refreshAll,
                 icon: const Icon(Icons.refresh_rounded),
                 tooltip: '새로고침',
               ),
@@ -414,7 +452,7 @@ class _CouncilHomeScreenState extends State<CouncilHomeScreen> {
                   transitionDuration: const Duration(milliseconds: 300),
                 ),
               ).then((_) {
-                if (mounted) _load();
+                if (mounted) _refreshAll();
               });
             }
           },
@@ -529,6 +567,30 @@ class _ApprovalHighlightBanner extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+// ── 알림 종 · 안 읽은 수 뱃지 ──────────────────────────────────
+class _NotificationBell extends StatelessWidget {
+  /// 안 읽은 수. null 은 「모름」 — 숫자를 지어내지 않고 뱃지를 달지 않는다.
+  final int? unread;
+  final VoidCallback onTap;
+  const _NotificationBell({required this.unread, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final n = unread;
+    return IconButton(
+      key: const Key('notification_bell'),
+      onPressed: onTap,
+      tooltip: n == null ? '알림 (안 읽은 수를 확인하지 못했어요)' : '알림 · 안 읽음 $n건',
+      icon: Badge(
+        key: const Key('notification_unread_badge'),
+        isLabelVisible: n != null && n > 0,
+        label: Text(n != null && n > 99 ? '99+' : '${n ?? 0}'),
+        child: const Icon(Icons.notifications_rounded),
       ),
     );
   }
