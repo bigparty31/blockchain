@@ -1,18 +1,27 @@
 import 'package:flutter/material.dart';
 import '../../core/enums.dart';
 import '../../core/app_theme.dart';
+import '../../core/dev_flags.dart';
 import '../../core/logout_action.dart';
 import '../../services/api_service.dart';
 import 'expense_create_screen.dart';
 import 'income_create_screen.dart';
 import 'approval_list_screen.dart';
+import 'budget_revision_screen.dart';
+import 'correction_approval_screen.dart';
 import 'correction_screen.dart';
+import 'my_entries_screen.dart';
 import 'inquiry_response_screen.dart';
 import 'hardware_test_screen.dart';
 import '../president/budget_plan_screen.dart';
 
 /// [이승호 담당: app/lib/screens/council/]
-/// 총무·감사·회장 역할별 맞춤 메인 대시보드 화면
+/// 역할별 홈 (스토리보드 0).
+///
+/// 기록을 만드는 사람(총무)과 확정하는 사람(감사·회장)을 화면에서 가른다.
+/// - 총무: 지출·수입 등록, 내 등록 현황, 정정 등록, 예산 개정 요청. **승인·이의 답변은 두지 않는다.**
+/// - 감사: 승인 대기, 정정 승인, 이의 답변, 예산 개정 승인, 결산, QR 스캐너.
+/// - 회장: 승인 대기, 정정 승인, 이의 답변, 예산 개정 서명, 예산 편성·발행, 결산, QR 스캐너. 등록 메뉴는 둘 다 두지 않는다.
 class CouncilHomeScreen extends StatefulWidget {
   final UserRole role;
   const CouncilHomeScreen({super.key, this.role = UserRole.TREASURER});
@@ -23,12 +32,9 @@ class CouncilHomeScreen extends StatefulWidget {
 
 /// 홈이 상태를 갖는 이유 — **승인 대기 건수는 계속 바뀐다.**
 ///
-/// 총무가 지출을 등록하면 늘고, 다른 감사가 먼저 승인하면 줄어든다. 전에는
-/// `'대기 3건'` 이 문자열 상수로 박혀 있어서 0건이어도 3건이라고 말했다.
-///
-/// 작성지침 화면 14 의 「들어오는 경로」가 **"대시보드 상단 미답변 건수 배지"**
-/// 이므로 이의 미답변 건수도 여기 붙는다 — `GET /objections` 가 서버에 생기면
-/// [_load] 에 한 줄 더하는 자리다.
+/// 총무가 지출을 등록하면 늘고, 다른 감사가 먼저 승인하면 줄어든다. 고정값을 두면
+/// 0건이어도 몇 건이 있다고 말한다. 서버 건수를 읽고, 화면에서 돌아올 때와
+/// 새로고침을 누를 때 다시 읽는다.
 class _CouncilHomeScreenState extends State<CouncilHomeScreen> {
   UserRole get role => widget.role;
 
@@ -52,19 +58,12 @@ class _CouncilHomeScreenState extends State<CouncilHomeScreen> {
     });
   }
 
-  /// 승인 목록을 보고 돌아오면 다시 읽는다 — 승인하고 왔는데 숫자가 그대로면
+  /// 다른 화면에 갔다 돌아오면 다시 읽는다 — 승인하고 왔는데 숫자가 그대로면
   /// 감사는 방금 처리한 건이 안 들어간 줄로 읽는다.
   Future<void> _openAndReload(Widget screen) async {
     await Navigator.push(context, MaterialPageRoute(builder: (_) => screen));
     if (mounted) await _load();
   }
-
-  // [개발 참고: API 및 패키지 연동]
-  // 1. 지출 등록: image_picker (영수증 촬영/OCR) · POST /entries
-  // 2. 수입 등록: POST /entries
-  // 3. 승인 대기 목록: local_auth (생체인증 서명) · PUT /entries/:id/approve
-  // 4. 장부 정정 신청: enums.md (정정 사유) · POST /corrections
-  // 5. 학생 이의 답변: GET /inquiries · POST /inquiries/:id/answer
 
   // 역할별 타이틀 및 설정
   String get _portalTitle {
@@ -87,7 +86,7 @@ class _CouncilHomeScreenState extends State<CouncilHomeScreen> {
         return '학생회장 전용 (최종 승인 및 예산 총괄)';
       case UserRole.TREASURER:
       default:
-        return '총무 · 회계 전용 (장부 집행 및 수납 관리)';
+        return '총무 전용 (등록 · 정정 · 예산 개정 요청)';
     }
   }
 
@@ -99,11 +98,12 @@ class _CouncilHomeScreenState extends State<CouncilHomeScreen> {
         return '학생회장 모드';
       case UserRole.TREASURER:
       default:
-        return '총무·회계 모드';
+        return '총무 모드';
     }
   }
 
   bool get _isApprover => role == UserRole.AUDITOR || role == UserRole.PRESIDENT;
+  bool get _isPresident => role == UserRole.PRESIDENT;
 
   @override
   Widget build(BuildContext context) {
@@ -117,18 +117,16 @@ class _CouncilHomeScreenState extends State<CouncilHomeScreen> {
             pinned: true,
             backgroundColor: AppTheme.primary,
             foregroundColor: Colors.white,
-            // 임원 세션이 기기에 남은 채 다음 사람이 앱을 켜면 등록·승인 화면까지
-            // 열린다. 로그아웃은 학생 홈과 같은 위젯을 쓴다 (core/logout_action.dart)
             actions: [
               // 대기 건수는 다른 사람이 등록·승인하면 바뀐다. 갱신할 길이 없으면
-              // 감사는 낡은 숫자를 보고 이미 처리된 건에 서명을 보내 409 를 맞는다
-              // (작성지침 화면 12 「이미 처리됨」 프레임).
+              // 감사는 낡은 숫자를 보고 이미 처리된 건에 서명을 보내 409 를 맞는다.
               IconButton(
                 key: const Key('council_refresh'),
                 onPressed: _loading ? null : _load,
                 icon: const Icon(Icons.refresh_rounded),
                 tooltip: '새로고침',
               ),
+              // 임원 세션이 기기에 남은 채 다음 사람이 앱을 켜면 등록·승인 화면까지 열린다.
               const LogoutAction(),
             ],
             flexibleSpace: FlexibleSpaceBar(
@@ -190,23 +188,41 @@ class _CouncilHomeScreenState extends State<CouncilHomeScreen> {
 
                   // 2. 역할별 핵심 업무 최상단 강조 영역
                   if (_isApprover) ...[
-                    // 감사/회장: 승인 대기 목록 VIP 하이라이트 배너
+                    // 감사/회장: 처리할 건수를 먼저 보여 준다
                     _ApprovalHighlightBanner(
-                      roleName: role == UserRole.AUDITOR ? '감사' : '학생회장',
                       pendingCount: _pendingCount,
                       loading: _loading,
-                      onTap: () => _openAndReload(const ApprovalListScreen()),
+                      onTap: () => _openAndReload(ApprovalListScreen(role: role)),
+                    ),
+                    const SizedBox(height: 12),
+                    if (_isPresident) ...[
+                      _SignRequestBanner(
+                        count: budgetRevisionMockSignCount(),
+                        onTap: () => _notice(context, Icons.construction_rounded, '예산 개정 서명 화면은 준비 중입니다.'),
+                      ),
+                      const SizedBox(height: 12),
+                    ],
+                    _UnansweredBanner(
+                      count: inquiryMockUnansweredCount(),
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(builder: (_) => const InquiryResponseScreen()),
+                      ),
                     ),
                     const SizedBox(height: 20),
                   ] else ...[
-                    // 총무/회계: 지출 & 수입 등록 퀵 액션 배너
+                    // 총무: 지출 & 수입 등록, 내 등록 건 상태
                     _TreasurerQuickActions(context: context),
+                    const SizedBox(height: 12),
+                    const _MyEntryStatus(),
                     const SizedBox(height: 20),
                   ],
 
-                  // 3. 하드웨어 테스트 배너
-                  _HardwareBanner(context: context),
-                  const SizedBox(height: 24),
+                  // 3. 실기 검증 메뉴 — 개발용. 발표·배포 빌드에는 없다 (kDevTools)
+                  if (kDevTools) ...[
+                    _HardwareBanner(context: context),
+                    const SizedBox(height: 24),
+                  ],
 
                   // 4. 전체 업무 메뉴
                   Row(
@@ -222,7 +238,7 @@ class _CouncilHomeScreenState extends State<CouncilHomeScreen> {
                         ),
                       ),
                       Text(
-                        _isApprover ? '결재 권한 활성화' : '집행 권한 활성화',
+                        _isApprover ? '승인·반려 권한' : '등록 권한',
                         style: TextStyle(fontSize: 12, color: AppTheme.primary, fontWeight: FontWeight.w600),
                       ),
                     ],
@@ -241,67 +257,136 @@ class _CouncilHomeScreenState extends State<CouncilHomeScreen> {
     );
   }
 
-  Widget _buildMenuGrid(BuildContext context) {
-    final menus = [
-      _MenuData(
-        title: '지출 등록',
-        subtitle: '영수증 촬영·첨부 및 지출 신청',
-        icon: Icons.receipt_long_rounded,
-        badge: _isApprover ? '총무 전용 🔒' : '영수증 첨부',
-        isLocked: _isApprover,
-        gradient: const LinearGradient(colors: [Color(0xFF6C63FF), Color(0xFF9B59D6)]),
-        target: const ExpenseCreateScreen(),
-      ),
-      _MenuData(
-        title: '수입 등록',
-        subtitle: '학생회비·학교지원금 수납 내역',
-        icon: Icons.savings_rounded,
-        badge: _isApprover ? '총무 전용 🔒' : '장부 기록',
-        isLocked: _isApprover,
-        gradient: const LinearGradient(colors: [Color(0xFF06B6D4), Color(0xFF0EA5E9)]),
-        target: const IncomeCreateScreen(),
-      ),
-      _MenuData(
-        title: '승인 대기 목록',
-        subtitle: '생체인증 전자서명으로 최종 승인',
-        icon: Icons.fingerprint_rounded,
-        badge: _isApprover ? '⭐ 핵심 결재' : '진행 현황',
-        isLocked: false,
-        gradient: const LinearGradient(colors: [Color(0xFF8B5CF6), Color(0xFFEC4899)]),
-        target: const ApprovalListScreen(),
-      ),
-      _MenuData(
-        title: '장부 정정 신청',
-        subtitle: '오기입·환불·재분류 정정 요청',
-        icon: Icons.edit_note_rounded,
-        badge: _isApprover ? '정정 검토' : '정정 요청',
-        isLocked: false,
-        gradient: const LinearGradient(colors: [Color(0xFFF59E0B), Color(0xFFEF4444)]),
-        target: const CorrectionScreen(),
-      ),
-      _MenuData(
-        title: '학생 이의 답변',
-        subtitle: '지출 이의 확인 및 소명 작성',
-        icon: Icons.question_answer_rounded,
-        badge: _isApprover ? '소명 열람' : '소명 작성',
-        isLocked: false,
-        gradient: const LinearGradient(colors: [Color(0xFF10B981), Color(0xFF06B6D4)]),
-        target: const InquiryResponseScreen(),
-      ),
-      // 회장에게만 보인다. 감사 계정에는 회색도 아니고 아예 없다 (스토리보드 15).
-      // 회장 하단 내비게이션이 정해지면(중간발표 이후) 그쪽으로 옮긴다.
-      if (role == UserRole.PRESIDENT)
-        _MenuData(
-          title: '예산 편성',
-          subtitle: '학기 예산 편성·확정',
-          icon: Icons.account_balance_rounded,
-          badge: '회장 전용',
-          isLocked: false,
-          gradient: const LinearGradient(colors: [Color(0xFF6C63FF), Color(0xFF06B6D4)]),
-          target: BudgetPlanScreen(role: role),
-        ),
-    ];
+  List<_MenuData> get _menus => _isApprover
+      ? [
+          _MenuData(
+            title: '승인 대기',
+            subtitle: '생체인증 서명으로 승인·반려',
+            icon: Icons.fingerprint_rounded,
+            badge: '핵심 결재',
+            gradient: LinearGradient(colors: [Color(0xFF8B5CF6), Color(0xFFEC4899)]),
+            target: ApprovalListScreen(role: role),
+          ),
+          _MenuData(
+            title: '정정 승인',
+            subtitle: '원본과 정정 증감분 대조',
+            icon: Icons.rule_rounded,
+            badge: '대조 후 서명',
+            gradient: LinearGradient(colors: [Color(0xFFF59E0B), Color(0xFFEF4444)]),
+            target: CorrectionApprovalScreen(role: role),
+          ),
+          _MenuData(
+            title: '이의 답변',
+            subtitle: '학생 이의 확인 및 답변',
+            icon: Icons.question_answer_rounded,
+            badge: '답변 작성',
+            gradient: LinearGradient(colors: [Color(0xFF10B981), Color(0xFF06B6D4)]),
+            target: InquiryResponseScreen(),
+          ),
+          if (_isPresident) ...[
+            _MenuData(
+              title: '예산 개정 서명',
+              subtitle: '총무 증액 요청에 회장 요청 서명',
+              icon: Icons.trending_up_rounded,
+              badge: '준비 중',
+              gradient: LinearGradient(colors: [Color(0xFF3B82F6), Color(0xFF6C63FF)]),
+            ),
+            // 회장에게만 보인다. 감사 계정에는 회색도 아니고 아예 없다 (스토리보드 15).
+            // 회장 하단 내비게이션이 정해지면(중간발표 이후) 그쪽으로 옮긴다.
+            _MenuData(
+              title: '예산 편성·발행',
+              subtitle: '학기 초 항목별 편성·발행, 마감 후 회수',
+              icon: Icons.account_balance_wallet_rounded,
+              badge: '회장 서명',
+              gradient: LinearGradient(colors: [Color(0xFF14B8A6), Color(0xFF06B6D4)]),
+              target: BudgetPlanScreen(role: role),
+            ),
+          ] else
+            _MenuData(
+              title: '예산 개정 승인',
+              subtitle: '회장 요청 서명 후 감사 승인 서명',
+              icon: Icons.trending_up_rounded,
+              badge: '준비 중',
+              gradient: LinearGradient(colors: [Color(0xFF3B82F6), Color(0xFF6C63FF)]),
+            ),
+          _MenuData(
+            title: '결산',
+            subtitle: '요약 카드·메타지표·PDF 내보내기',
+            icon: Icons.assessment_rounded,
+            badge: '준비 중',
+            gradient: LinearGradient(colors: [Color(0xFFF59E0B), Color(0xFFFB923C)]),
+          ),
+          _MenuData(
+            title: 'QR 스캐너',
+            subtitle: '행사 입장 시 SBT 보유 확인',
+            icon: Icons.qr_code_scanner_rounded,
+            badge: '준비 중',
+            gradient: LinearGradient(colors: [Color(0xFF6366F1), Color(0xFF8B5CF6)]),
+          ),
+        ]
+      : const [
+          _MenuData(
+            title: '지출 등록',
+            subtitle: '영수증 촬영·첨부 및 지출 등록',
+            icon: Icons.receipt_long_rounded,
+            badge: '영수증 필수',
+            gradient: LinearGradient(colors: [Color(0xFF6C63FF), Color(0xFF9B59D6)]),
+            target: ExpenseCreateScreen(),
+          ),
+          _MenuData(
+            title: '수입 등록',
+            subtitle: '학생회비·지원금 입금 내역',
+            icon: Icons.savings_rounded,
+            badge: '예산 검사 없음',
+            gradient: LinearGradient(colors: [Color(0xFF06B6D4), Color(0xFF0EA5E9)]),
+            target: IncomeCreateScreen(),
+          ),
+          _MenuData(
+            title: '내 등록 현황',
+            subtitle: '초안·대기·확정·반려·차단',
+            icon: Icons.list_alt_rounded,
+            badge: '상태별 확인',
+            gradient: LinearGradient(colors: [Color(0xFF8B5CF6), Color(0xFF6C63FF)]),
+            target: MyEntriesScreen(),
+          ),
+          _MenuData(
+            title: '정정 등록',
+            subtitle: '확정 건의 증감분을 새로 기록',
+            icon: Icons.edit_note_rounded,
+            badge: '정정 요청',
+            gradient: LinearGradient(colors: [Color(0xFFF59E0B), Color(0xFFEF4444)]),
+            target: CorrectionScreen(),
+          ),
+          _MenuData(
+            title: '예산 개정 요청',
+            subtitle: '차단된 지출을 근거로 증액 요청',
+            icon: Icons.trending_up_rounded,
+            badge: '증액만 가능',
+            gradient: LinearGradient(colors: [Color(0xFF3B82F6), Color(0xFF6C63FF)]),
+            target: BudgetRevisionScreen(),
+          ),
+        ];
 
+  void _notice(BuildContext context, IconData icon, String text) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Row(
+          children: [
+            Icon(icon, color: Colors.white, size: 18),
+            const SizedBox(width: 8),
+            Expanded(child: Text(text)),
+          ],
+        ),
+        backgroundColor: AppTheme.textMain,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
+  Widget _buildMenuGrid(BuildContext context) {
+    final menus = _menus;
     return GridView.builder(
       shrinkWrap: true,
       physics: const NeverScrollableScrollPhysics(),
@@ -316,34 +401,21 @@ class _CouncilHomeScreenState extends State<CouncilHomeScreen> {
         final m = menus[index];
         return _MenuCard(
           data: m,
-          number: index + 1,
           onTap: () {
-            if (m.isLocked) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  content: Row(
-                    children: [
-                      const Icon(Icons.lock_rounded, color: Colors.white, size: 18),
-                      const SizedBox(width: 8),
-                      Text('${m.title}은(는) 총무(TREASURER) 전용 권한입니다.'),
-                    ],
-                  ),
-                  backgroundColor: AppTheme.textMain,
-                  behavior: SnackBarBehavior.floating,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                  duration: const Duration(seconds: 2),
-                ),
-              );
+            final target = m.target;
+            if (target == null) {
+              _notice(context, Icons.construction_rounded, '${m.title} 화면은 준비 중입니다.');
             } else {
               Navigator.push(
                 context,
                 PageRouteBuilder(
-                  pageBuilder: (_, a, __) => m.target,
-                  transitionsBuilder: (_, a, __, child) =>
-                    FadeTransition(opacity: a, child: child),
+                  pageBuilder: (_, a, __) => target,
+                  transitionsBuilder: (_, a, __, child) => FadeTransition(opacity: a, child: child),
                   transitionDuration: const Duration(milliseconds: 300),
                 ),
-              );
+              ).then((_) {
+                if (mounted) _load();
+              });
             }
           },
         );
@@ -354,25 +426,16 @@ class _CouncilHomeScreenState extends State<CouncilHomeScreen> {
 
 // ── 감사/회장 전용 승인 대기 VIP 배너 ──────────────────────────
 class _ApprovalHighlightBanner extends StatelessWidget {
-  final String roleName;
-  final VoidCallback onTap;
   /// 승인 대기 건수. **null 은 「모름」이다** (조회 실패) — 0 건과 다르게 적는다.
   final int? pendingCount;
 
   /// 아직 읽는 중.
   final bool loading;
+  final VoidCallback onTap;
+  const _ApprovalHighlightBanner({required this.pendingCount, required this.loading, required this.onTap});
 
-  const _ApprovalHighlightBanner({
-    required this.roleName,
-    required this.onTap,
-    required this.pendingCount,
-    required this.loading,
-  });
-
-  /// 배지 문구. 네 상태를 **모두 다르게** 적는다.
-  ///
-  /// 모름을 「대기 없음」으로 적으면 승인을 기다리는 지출이 있는데도 감사가
-  /// 할 일이 없다고 읽고 넘어간다. 그래서 못 읽은 것은 못 읽었다고 말한다.
+  /// 배지 문구. 네 상태를 **모두 다르게** 적는다 — 못 읽은 것을 「대기 없음」으로
+  /// 적으면 승인을 기다리는 지출이 있는데도 감사가 할 일이 없다고 읽고 넘어간다.
   String get _badgeLabel {
     if (loading) return '확인 중';
     final count = pendingCount;
@@ -414,11 +477,11 @@ class _ApprovalHighlightBanner extends StatelessWidget {
                     color: Colors.white.withOpacity(0.25),
                     borderRadius: BorderRadius.circular(20),
                   ),
-                  child: Row(
+                  child: const Row(
                     children: [
-                      const Icon(Icons.star_rounded, size: 14, color: Colors.white),
-                      const SizedBox(width: 4),
-                      Text('$roleName 최우선 결재 업무', style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold)),
+                      Icon(Icons.star_rounded, size: 14, color: Colors.white),
+                      SizedBox(width: 4),
+                      Text('먼저 처리할 일', style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold)),
                     ],
                   ),
                 ),
@@ -438,12 +501,12 @@ class _ApprovalHighlightBanner extends StatelessWidget {
             ),
             const SizedBox(height: 14),
             const Text(
-              '3. 승인 대기 목록 (생체 서명)',
+              '승인 대기',
               style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.white),
             ),
             const SizedBox(height: 4),
             Text(
-              '총무가 등록한 지출·정정 건을 검토하고 지문/Face ID로 최종 승인합니다.',
+              '총무가 등록한 건을 검토하고 지문/Face ID 서명으로 승인·반려합니다.',
               style: TextStyle(fontSize: 12, color: Colors.white.withOpacity(0.9), height: 1.4),
             ),
             const SizedBox(height: 14),
@@ -458,7 +521,7 @@ class _ApprovalHighlightBanner extends StatelessWidget {
                 children: [
                   Icon(Icons.fingerprint_rounded, color: Colors.white, size: 18),
                   SizedBox(width: 6),
-                  Text('지금 결재 검토하기', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13)),
+                  Text('검토하러 가기', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13)),
                   SizedBox(width: 4),
                   Icon(Icons.arrow_forward_rounded, color: Colors.white, size: 16),
                 ],
@@ -471,7 +534,140 @@ class _ApprovalHighlightBanner extends StatelessWidget {
   }
 }
 
-// ── 총무/회계 전용 지출 & 수입 등록 퀵 액션 배너 ─────────────────
+// ── 감사/회장: 미답변 이의 건수 ─────────────────────────────────
+class _UnansweredBanner extends StatelessWidget {
+  final int count;
+  final VoidCallback onTap;
+  const _UnansweredBanner({required this.count, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: count > 0 ? AppTheme.expense.withOpacity(0.35) : AppTheme.divider),
+          boxShadow: AppTheme.softShadow,
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.mark_unread_chat_alt_rounded, color: count > 0 ? AppTheme.expense : AppTheme.textSub, size: 20),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                count > 0 ? '미답변 이의 $count건' : '미답변 이의가 없습니다',
+                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: AppTheme.textMain),
+              ),
+            ),
+            const Icon(Icons.arrow_forward_ios_rounded, size: 14, color: AppTheme.textSub),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 회장 홈 배너용 예시 — 총무가 올린 증액 요청 중 회장 서명 대기 건수.
+int budgetRevisionMockSignCount() => 1;
+
+// ── 회장: 서명할 증액 요청 건수 ─────────────────────────────────
+class _SignRequestBanner extends StatelessWidget {
+  final int count;
+  final VoidCallback onTap;
+  const _SignRequestBanner({required this.count, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: count > 0 ? AppTheme.primary.withOpacity(0.35) : AppTheme.divider),
+          boxShadow: AppTheme.softShadow,
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.draw_rounded, color: count > 0 ? AppTheme.primary : AppTheme.textSub, size: 20),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                count > 0 ? '서명할 증액 요청 $count건' : '서명할 증액 요청이 없습니다',
+                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: AppTheme.textMain),
+              ),
+            ),
+            const Icon(Icons.arrow_forward_ios_rounded, size: 14, color: AppTheme.textSub),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ── 총무: 내 등록 건 상태 (대기 · 반려 · 차단) ─────────────────────
+class _MyEntryStatus extends StatefulWidget {
+  const _MyEntryStatus();
+
+  @override
+  State<_MyEntryStatus> createState() => _MyEntryStatusState();
+}
+
+class _MyEntryStatusState extends State<_MyEntryStatus> {
+  int? _pending, _rejected, _blocked;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final entries = await ApiService().fetchEntries();
+    if (!mounted) return;
+    int count(EntryStatus st) => entries.where((e) => e.status == st).length;
+    setState(() {
+      _pending = count(EntryStatus.PENDING);
+      _rejected = count(EntryStatus.REJECTED);
+      _blocked = count(EntryStatus.BLOCKED);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    Widget chip(String label, int? n, Color color) => Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+          decoration: BoxDecoration(color: color.withOpacity(0.12), borderRadius: BorderRadius.circular(20)),
+          child: Text('$label ${n ?? '-'}', style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.bold)),
+        );
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: AppTheme.softShadow,
+      ),
+      // Wrap: 좁은 화면·큰 글자에서 칩이 다음 줄로 내려간다
+      child: Wrap(
+        crossAxisAlignment: WrapCrossAlignment.center,
+        spacing: 8,
+        runSpacing: 8,
+        children: [
+          const Text('내 등록 건', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: AppTheme.textMain)),
+          chip('대기', _pending, AppTheme.pending),
+          chip('반려', _rejected, AppTheme.expense),
+          chip('차단', _blocked, AppTheme.textSub),
+        ],
+      ),
+    );
+  }
+}
+
+// ── 총무 전용 지출 & 수입 등록 퀵 액션 배너 ─────────────────
 class _TreasurerQuickActions extends StatelessWidget {
   final BuildContext context;
   const _TreasurerQuickActions({required this.context});
@@ -526,7 +722,7 @@ class _TreasurerQuickActions extends StatelessWidget {
                       children: [
                         Icon(Icons.receipt_long_rounded, color: Colors.white, size: 24),
                         SizedBox(height: 10),
-                        Text('1. 지출 등록', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 14)),
+                        Text('지출 등록', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 14)),
                         SizedBox(height: 2),
                         Text('영수증 촬영·첨부', style: TextStyle(color: Colors.white70, fontSize: 11)),
                       ],
@@ -560,7 +756,7 @@ class _TreasurerQuickActions extends StatelessWidget {
                       children: [
                         Icon(Icons.savings_rounded, color: Colors.white, size: 24),
                         SizedBox(height: 10),
-                        Text('2. 수입 등록', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 14)),
+                        Text('수입 등록', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 14)),
                         SizedBox(height: 2),
                         Text('학생회비 수납 기록', style: TextStyle(color: Colors.white70, fontSize: 11)),
                       ],
@@ -585,28 +781,8 @@ class _BalanceCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Text('학생회비 장부 잔액',
-                style: TextStyle(color: Colors.white70, fontSize: 13),
-              ),
-              // [개발 참고: GET /balance 연동]
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.2),
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: const Row(
-                  children: [
-                    Icon(Icons.sync_rounded, size: 12, color: Colors.white),
-                    SizedBox(width: 4),
-                    Text('실시간 연동', style: TextStyle(color: Colors.white, fontSize: 11)),
-                  ],
-                ),
-              ),
-            ],
+          const Text('학생회비 장부 잔액',
+            style: TextStyle(color: Colors.white70, fontSize: 13),
           ),
           const SizedBox(height: 8),
           const Text('₩ 4,965,000',
@@ -732,25 +908,26 @@ class _HardwareBanner extends StatelessWidget {
 class _MenuData {
   final String title, subtitle, badge;
   final IconData icon;
-  final bool isLocked;
   final LinearGradient gradient;
-  final Widget target;
+
+  /// 이동할 화면. null 이면 아직 만들지 않은 화면이다 (「준비 중」).
+  final Widget? target;
   const _MenuData({
     required this.title,
     required this.subtitle,
     required this.icon,
     required this.badge,
-    required this.isLocked,
     required this.gradient,
-    required this.target,
+    this.target,
   });
+
+  bool get isDimmed => target == null;
 }
 
 class _MenuCard extends StatelessWidget {
   final _MenuData data;
-  final int number;
   final VoidCallback onTap;
-  const _MenuCard({required this.data, required this.number, required this.onTap});
+  const _MenuCard({required this.data, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -758,39 +935,26 @@ class _MenuCard extends StatelessWidget {
       onTap: onTap,
       child: AnimatedOpacity(
         duration: const Duration(milliseconds: 200),
-        opacity: data.isLocked ? 0.65 : 1.0,
+        opacity: data.isDimmed ? 0.65 : 1.0,
         child: Container(
           padding: const EdgeInsets.all(16),
           decoration: BoxDecoration(
             color: Colors.white,
             borderRadius: BorderRadius.circular(20),
             boxShadow: AppTheme.softShadow,
-            border: data.isLocked ? Border.all(color: Colors.grey.withOpacity(0.3)) : null,
+            border: data.isDimmed ? Border.all(color: Colors.grey.withOpacity(0.3)) : null,
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Container(
-                    width: 44,
-                    height: 44,
-                    decoration: BoxDecoration(
-                      gradient: data.gradient,
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Icon(data.icon, color: Colors.white, size: 22),
-                  ),
-                  Text('$number',
-                    style: TextStyle(
-                      fontSize: 28,
-                      fontWeight: FontWeight.w800,
-                      color: Colors.grey.withOpacity(0.15),
-                      height: 1,
-                    ),
-                  ),
-                ],
+              Container(
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  gradient: data.gradient,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Icon(data.icon, color: Colors.white, size: 22),
               ),
               const Spacer(),
               Text(data.title,
@@ -810,7 +974,7 @@ class _MenuCard extends StatelessWidget {
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
                 decoration: BoxDecoration(
-                  color: data.isLocked
+                  color: data.isDimmed
                       ? Colors.grey.withOpacity(0.15)
                       : data.gradient.colors.first.withOpacity(0.1),
                   borderRadius: BorderRadius.circular(6),
@@ -818,7 +982,7 @@ class _MenuCard extends StatelessWidget {
                 child: Text(data.badge,
                   style: TextStyle(
                     fontSize: 10,
-                    color: data.isLocked ? Colors.grey[700] : data.gradient.colors.first,
+                    color: data.isDimmed ? Colors.grey[700] : data.gradient.colors.first,
                     fontWeight: FontWeight.bold,
                   ),
                 ),
