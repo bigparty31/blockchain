@@ -106,7 +106,36 @@ def create_budget_revision(
             detail=f"학기 ID {payload.term_id}를 찾을 수 없습니다.",
         )
 
-    # 2. 차단 지출(blocked_entry_id) 검증 (지정된 경우)
+    # 2. 예산 매핑 검증 (PRD §4.1: 증액은 기존 예산에 대해서만 가능하므로 없으면 404)
+    target_budget = None
+    if payload.budget_id is not None:
+        target_budget = db.query(Budget).filter(Budget.id == payload.budget_id).first()
+        if not target_budget:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"예산 ID {payload.budget_id}를 찾을 수 없습니다.",
+            )
+        if target_budget.term_id != payload.term_id or target_budget.category != payload.category:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="지정된 예산의 학기 또는 카테고리가 일치하지 않습니다.",
+            )
+    else:
+        # term_id와 category로 기존 예산 식별
+        target_budget = (
+            db.query(Budget)
+            .filter(Budget.term_id == payload.term_id, Budget.category == payload.category)
+            .first()
+        )
+        if not target_budget:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"해당 학기({payload.term_id}) 및 카테고리('{payload.category}')에 해당하는 기존 예산이 존재하지 않습니다.",
+            )
+
+    target_budget_id = target_budget.id
+
+    # 3. 차단 지출(blocked_entry_id) 검증 (지정된 경우)
     if payload.blocked_entry_id is not None:
         entry = db.query(Entry).filter(Entry.id == payload.blocked_entry_id).first()
         if not entry:
@@ -119,35 +148,21 @@ def create_budget_revision(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="차단 지출의 학기와 증액 요청 학기가 일치하지 않습니다.",
             )
+        if entry.kind != "EXPENSE":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="차단 지출 연동은 지출(EXPENSE) 내역만 가능합니다.",
+            )
         if entry.status not in ("BLOCKED", "PENDING"):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"지출 상태가 {entry.status}입니다. 차단 지출 연동은 BLOCKED 또는 PENDING 지출만 가능합니다.",
             )
-
-    # 3. 예산 매핑 검증
-    target_budget_id = payload.budget_id
-    if target_budget_id is not None:
-        budget = db.query(Budget).filter(Budget.id == target_budget_id).first()
-        if not budget:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"예산 ID {target_budget_id}를 찾을 수 없습니다.",
-            )
-        if budget.term_id != payload.term_id or budget.category != payload.category:
+        if entry.budget_id is not None and entry.budget_id != target_budget_id:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="지정된 예산의 학기 또는 카테고리가 일치하지 않습니다.",
+                detail="차단 지출의 예산과 증액 요청 대상 예산이 일치하지 않습니다.",
             )
-    else:
-        # term_id와 category로 기존 예산 매핑 시도
-        budget = (
-            db.query(Budget)
-            .filter(Budget.term_id == payload.term_id, Budget.category == payload.category)
-            .first()
-        )
-        if budget:
-            target_budget_id = budget.id
 
     # 4. 증액 요청 엔티티 생성 (PENDING, 사유 정규화)
     clean_reason = canonical_text(payload.reason)

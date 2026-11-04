@@ -187,7 +187,7 @@ erDiagram
         bigint user_id FK,UK "학생 ID (활성SBT 부분UK 참여)"
         bigint term_id FK,UK "학기 ID (활성SBT 부분UK 참여)"
         bigint token_id UK "ERC-721 토큰 ID"
-        varchar commit_hash "학번+salt 해시 커밋"
+        varchar burn_reason "소각 사유 (REFUND, WITHDRAWAL)"
         timestamptz minted_at "발행 일시"
         timestamptz burned_at "소각 일시"
     }
@@ -413,17 +413,17 @@ erDiagram
 | `user_id` | `BIGINT` | N | - | **FK** -> `users(id)` ON DELETE RESTRICT |
 | `term_id` | `BIGINT` | N | - | **FK** -> `terms(id)` ON DELETE RESTRICT |
 | `token_id` | `BIGINT` | N | - | **UNIQUE**, 온체인 ERC-721 토큰 ID |
-| `commit_hash` | `VARCHAR(66)` | N | - | 학번+salt 커밋 해시 (개인정보 보호, 온체인 기록) |
+| `burn_reason` | `VARCHAR(30)` | Y | NULL | 소각 사유 (`REFUND`, `WITHDRAWAL`) |
 | `minted_at` | `TIMESTAMPTZ` | N | `now()` | 발급 일시 |
 | `burned_at` | `TIMESTAMPTZ` | Y | NULL | 소각/환불 회수 일시 |
 | `created_at` | `TIMESTAMPTZ` | N | `now()` | 등록 일시 |
 
 - **테이블 제약조건**:
   - `CONSTRAINT ck_memberships_burn_date CHECK (burned_at IS NULL OR burned_at >= minted_at)`
+  - `CONSTRAINT ck_memberships_burn_reason CHECK (burn_reason IS NULL OR burn_reason IN ('REFUND', 'WITHDRAWAL'))`
 - **인덱스**:
   - `uq_memberships_active_user_term ON memberships (user_id, term_id) WHERE burned_at IS NULL` (**활성 SBT 학기당 1인 1발급 보장 및 소각 후 재발행 허용 부분 유니크 인덱스**)
   - `idx_memberships_lookup ON memberships (user_id, term_id)`
-  - `idx_memberships_commit_hash ON memberships (commit_hash)`
 
 ---
 
@@ -727,14 +727,15 @@ CREATE TABLE memberships (
     user_id BIGINT NOT NULL,
     term_id BIGINT NOT NULL,
     token_id BIGINT NOT NULL,
-    commit_hash VARCHAR(66) NOT NULL,
+    burn_reason VARCHAR(30) NULL,
     minted_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     burned_at TIMESTAMPTZ NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT fk_memberships_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT,
     CONSTRAINT fk_memberships_term FOREIGN KEY (term_id) REFERENCES terms(id) ON DELETE RESTRICT,
     CONSTRAINT uq_memberships_token_id UNIQUE (token_id),
-    CONSTRAINT ck_memberships_burn_date CHECK (burned_at IS NULL OR burned_at >= minted_at)
+    CONSTRAINT ck_memberships_burn_date CHECK (burned_at IS NULL OR burned_at >= minted_at),
+    CONSTRAINT ck_memberships_burn_reason CHECK (burn_reason IS NULL OR burn_reason IN ('REFUND', 'WITHDRAWAL'))
 );
 
 -- 활성 SBT 학기당 1인 1발급 보장 및 소각 후 재발행 허용 부분 유니크 인덱스 (스토리보드 17번, FR-SBT-01/07)
@@ -743,7 +744,6 @@ ON memberships (user_id, term_id)
 WHERE burned_at IS NULL;
 
 CREATE INDEX idx_memberships_lookup ON memberships (user_id, term_id);
-CREATE INDEX idx_memberships_commit_hash ON memberships (commit_hash);
 
 
 -- 7. 이의 제기 테이블 (objections)

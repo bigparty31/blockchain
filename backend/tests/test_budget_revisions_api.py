@@ -114,6 +114,46 @@ def setup_test_db(tmp_path):
         )
         db.add(confirmed_entry)
 
+        # 6. Budget 2 (id=2, 행사비)
+        budget2 = DBBudget(
+            id=2,
+            term_id=1,
+            category="행사비",
+            expires_at=datetime.fromtimestamp(1798704000, tz=timezone.utc),
+        )
+        db.add(budget2)
+
+        # 7. Income Entry (id=12, PENDING 상태 수입)
+        income_entry = DBEntry(
+            id=12,
+            term_id=1,
+            kind="INCOME",
+            amount=100000,
+            counterparty="동문회",
+            purpose="지원금",
+            budget_id=None,
+            occurred_at=1788793200,
+            status="PENDING",
+            created_by=2,
+        )
+        db.add(income_entry)
+
+        # 8. 행사비 차단 지출 (id=13, BLOCKED 지출이지만 budget_id=2)
+        diff_budget_entry = DBEntry(
+            id=13,
+            term_id=1,
+            kind="EXPENSE",
+            amount=700000,
+            counterparty="공연기획사",
+            purpose="축제 무대 음향",
+            budget_id=2,
+            occurred_at=1788793200,
+            status="BLOCKED",
+            block_reason="BUDGET_EXCEEDED",
+            created_by=2,
+        )
+        db.add(diff_budget_entry)
+
         db.commit()
 
     def override_get_db():
@@ -227,9 +267,40 @@ def test_create_budget_revision_term_not_found(auth_header):
     assert response.status_code == 404
 
 
+def test_create_budget_revision_target_budget_not_found(auth_header):
+    """기존 예산이 없는 항목으로 증액 요청 시 404 Not Found를 반환한다 (PRD §4.1)."""
+    # 1. 등록되지 않은 카테고리로 요청
+    res1 = client.post(
+        "/budget-revisions",
+        json={
+            "term_id": 1,
+            "category": "존재하지않는예산",
+            "requested_amount": 100000,
+            "reason": "없는 예산 증액 시도",
+        },
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res1.status_code == 404
+    assert "기존 예산이 존재하지 않습니다" in res1.json()["detail"]
+
+    # 2. 존재하지 않는 budget_id 직접 지정
+    res2 = client.post(
+        "/budget-revisions",
+        json={
+            "term_id": 1,
+            "category": "운영비",
+            "budget_id": 99999,
+            "requested_amount": 100000,
+            "reason": "없는 budget_id 지정",
+        },
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res2.status_code == 404
+
+
 def test_create_budget_revision_blocked_entry_validation(auth_header):
-    """존재하지 않거나 차단 상태가 아닌 지출을 blocked_entry_id로 지정하면 거부된다."""
-    # 1. 존재하지 않는 entry_id
+    """존재하지 않거나, 지출(EXPENSE)이 아니거나, 차단 상태가 아니거나, 예산이 불일치하는 연동은 거부된다."""
+    # 1. 존재하지 않는 entry_id (404)
     res1 = client.post(
         "/budget-revisions",
         json={
@@ -243,7 +314,7 @@ def test_create_budget_revision_blocked_entry_validation(auth_header):
     )
     assert res1.status_code == 404
 
-    # 2. 이미 CONFIRMED된 entry_id 연동 시도
+    # 2. 이미 CONFIRMED된 entry_id 연동 시도 (차단 건 아님 -> 400)
     res2 = client.post(
         "/budget-revisions",
         json={
@@ -256,6 +327,36 @@ def test_create_budget_revision_blocked_entry_validation(auth_header):
         headers=auth_header(Role.TREASURER),
     )
     assert res2.status_code == 400
+
+    # 3. 수입(INCOME) 내역 연동 시도 (지출만 가능 -> 400)
+    res3 = client.post(
+        "/budget-revisions",
+        json={
+            "term_id": 1,
+            "category": "운영비",
+            "requested_amount": 100000,
+            "reason": "수입 내역 연동 시도",
+            "blocked_entry_id": 12,
+        },
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res3.status_code == 400
+    assert "지출(EXPENSE)" in res3.json()["detail"]
+
+    # 4. 다른 예산(행사비 id=2)의 차단 지출을 운영비 증액 요청에 연동 시도 (예산 불일치 -> 400)
+    res4 = client.post(
+        "/budget-revisions",
+        json={
+            "term_id": 1,
+            "category": "운영비",
+            "requested_amount": 100000,
+            "reason": "다른 예산 차단 지출 연동 시도",
+            "blocked_entry_id": 13,
+        },
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res4.status_code == 400
+    assert "예산과 증액 요청 대상 예산이 일치하지 않습니다" in res4.json()["detail"]
 
 
 def test_list_and_get_budget_revisions(auth_header):

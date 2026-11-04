@@ -213,6 +213,55 @@ def test_alembic_upgrade_and_insert_autoincrement(tmp_path):
     )
     conn.commit()
 
+    # budget_revision_requests 회장 서명자 == 감사 승인자 동일인 차단 검증 (ck_budget_rev_pres_aud_diff)
+    with pytest.raises(sqlite3.IntegrityError):
+        cur.execute(
+            "INSERT INTO budget_revision_requests("
+            "term_id, category, budget_id, requested_amount, reason, requested_by, status, "
+            "president_signed_by, president_signature, president_signed_at, signature_deadline, signed_version, "
+            "resolved_by, resolved_at, tx_increase"
+            ") VALUES ("
+            "1, '행사비', 1, 500000, '회장=감사 동일인 불가', 1, 'APPROVED', "
+            "2, '0x1234', '2026-11-04 10:00:00', 1793548800, 1, "
+            "2, '2026-11-04 11:00:00', '0xabcdef1234567890'"
+            ");"
+        )
+    conn.rollback()
+
+    # budget_revision_requests APPROVED 시 resolved_by/resolved_at 누락 차단 검증 (ck_budget_rev_resolved)
+    with pytest.raises(sqlite3.IntegrityError):
+        cur.execute(
+            "INSERT INTO budget_revision_requests("
+            "term_id, category, budget_id, requested_amount, reason, requested_by, status, "
+            "president_signed_by, president_signature, president_signed_at, signature_deadline, signed_version, "
+            "resolved_by, resolved_at, tx_increase"
+            ") VALUES ("
+            "1, '행사비', 1, 500000, '승인자 누락', 1, 'APPROVED', "
+            "2, '0x1234', '2026-11-04 10:00:00', 1793548800, 1, "
+            "NULL, NULL, '0xabcdef1234567890'"
+            ");"
+        )
+    conn.rollback()
+
+    # memberships burn_reason 허용값('REFUND', 'WITHDRAWAL') 검증 (ck_memberships_burn_reason)
+    cur.execute(
+        "INSERT INTO memberships(user_id, term_id, token_id, burn_reason, minted_at, burned_at) "
+        "VALUES (1, 1, 101, 'REFUND', '2026-09-01 10:00:00', '2026-09-10 10:00:00');"
+    )
+    cur.execute(
+        "INSERT INTO memberships(user_id, term_id, token_id, burn_reason, minted_at, burned_at) "
+        "VALUES (2, 1, 102, 'WITHDRAWAL', '2026-09-01 10:00:00', '2026-09-15 10:00:00');"
+    )
+    conn.commit()
+
+    # memberships 잘못된 burn_reason 차단 검증 (ck_memberships_burn_reason)
+    with pytest.raises(sqlite3.IntegrityError):
+        cur.execute(
+            "INSERT INTO memberships(user_id, term_id, token_id, burn_reason, minted_at) "
+            "VALUES (3, 1, 103, 'INVALID_REASON', '2026-09-01 10:00:00');"
+        )
+    conn.rollback()
+
     conn.close()
 
     # 3. 마이그레이션 롤백(downgrade base) 검증

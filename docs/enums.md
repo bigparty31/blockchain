@@ -74,3 +74,13 @@
 | --- | --- |
 | `OPEN` | 미답변 |
 | `ANSWERED` | 답변 완료 |
+
+
+## burn_reason
+
+`memberships.burn_reason`. SBT 소각/환불 회수 사유.
+
+| 값 | 설명 |
+| --- | --- |
+| `REFUND` | 학생회비 환불 |
+| `WITHDRAWAL` | 자퇴/제적 등 학적 변동 |

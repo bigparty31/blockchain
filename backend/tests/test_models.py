@@ -11,6 +11,7 @@ SQLAlchemy 모델 무결성 및 스키마 검증 테스트 (정본 검증)
 from datetime import datetime, timezone, timedelta
 import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
 from app.models import (
@@ -298,7 +299,6 @@ def test_membership_burned_reissue_allowed(db_session):
         user_id=student.id,
         term_id=term.id,
         token_id=101,
-        commit_hash="0x" + "11" * 32,
         burned_at=now,
     )
     db_session.add(sbt1)
@@ -309,7 +309,6 @@ def test_membership_burned_reissue_allowed(db_session):
         user_id=student.id,
         term_id=term.id,
         token_id=102,
-        commit_hash="0x" + "22" * 32,
         burned_at=None,
     )
     db_session.add(sbt2)
@@ -527,25 +526,36 @@ def test_entry_other_correction_reason_and_revision_requested_at(db_session):
     assert entry2.correction_reason == "OTHER"
 
 
-def test_membership_commit_hash_nullable_and_burn_reason(db_session):
-    """PRD v0.13 Membership.commit_hash NULL 허용 및 burn_reason 필드 검증"""
+def test_membership_burn_reason_and_ck_constraint(db_session):
+    """PRD v0.13/v0.14 Membership.commit_hash 삭제 및 burn_reason CHECK 제약 검증"""
     now = datetime.now(timezone.utc)
     term = Term(term_code=20267, name="2026-7학기", started_at=now, ended_at=now + timedelta(days=100))
     student = User(student_no="20248888", password_hash="dummy", name="학생2", role="STUDENT", wallet_index=188)
     db_session.add_all([term, student])
     db_session.flush()
 
-    # commit_hash=None 허용 (v0.13 SBT commitment 제거)
+    # 정상 burn_reason='REFUND' 저장 (commit_hash 컬럼은 삭제됨)
     sbt = Membership(
         user_id=student.id,
         term_id=term.id,
         token_id=201,
-        commit_hash=None,
         burn_reason="REFUND",
         burned_at=now,
     )
     db_session.add(sbt)
     db_session.flush()
     assert sbt.id > 0
-    assert sbt.commit_hash is None
     assert sbt.burn_reason == "REFUND"
+
+    # 잘못된 burn_reason은 ck_memberships_burn_reason 위반으로 차단
+    sbt_invalid = Membership(
+        user_id=student.id,
+        term_id=term.id,
+        token_id=202,
+        burn_reason="INVALID_REASON",
+        burned_at=now,
+    )
+    db_session.add(sbt_invalid)
+    with pytest.raises(IntegrityError):
+        db_session.flush()
+    db_session.rollback()
