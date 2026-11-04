@@ -12,6 +12,7 @@ import '../models/membership_model.dart';
 import '../models/objection_model.dart';
 import '../models/onchain_entry_model.dart';
 import '../models/snapshot_model.dart';
+import 'auth_service.dart';
 
 /// 이의 제기가 서버에 닿지 못했을 때.
 ///
@@ -240,8 +241,9 @@ class StudentApiService {
 
     final url = path.startsWith('http') ? path : '${ApiConfig.baseUrl}$path';
     try {
-      final res = await client.get(Uri.parse(url)).timeout(_timeout);
+      final res = await client.get(Uri.parse(url), headers: _headers).timeout(_timeout);
       if (res.statusCode == 200) return res.bodyBytes;
+      await _checkUnauthorized(res.statusCode);
     } catch (_) {}
 
     // 서버 항목의 영수증을 못 받았을 때 데모 바이트를 돌려주면 「영수증이 바뀌었다」는
@@ -292,13 +294,14 @@ class StudentApiService {
       final res = await client
           .post(
             Uri.parse('${ApiConfig.baseUrl}/objections'),
-            headers: {'Content-Type': 'application/json'},
+            headers: {'Content-Type': 'application/json', ..._headers},
             body: jsonEncode({'entry_id': entryId, 'content': content}),
           )
           .timeout(_timeout);
       if (res.statusCode == 200 || res.statusCode == 201) {
         return ObjectionModel.fromJson(jsonDecode(utf8.decode(res.bodyBytes)));
       }
+      await _checkUnauthorized(res.statusCode);
     } catch (_) {}
 
     if (!_usingDemoData) throw const ObjectionFailed();
@@ -341,11 +344,14 @@ class StudentApiService {
   Future<MembershipResult> fetchMyMembership() async {
     try {
       final res = await client
-          .get(Uri.parse('${ApiConfig.baseUrl}/memberships/me'))
+          .get(Uri.parse('${ApiConfig.baseUrl}/memberships/me'), headers: _headers)
           .timeout(_timeout);
       if (res.statusCode == 200) {
         return parseMembership(jsonDecode(utf8.decode(res.bodyBytes)));
       }
+      // 401 도 「모름」이다 — 미보유가 아니다. 세션이 끊긴 것뿐이라, 미납으로 읽으면
+      // 납부한 학생에게 「납부 확인이 필요합니다」가 뜬다.
+      await _checkUnauthorized(res.statusCode);
 
       // 서버가 **대답은 했는데** 읽을 수 없는 경우다 (404 · 5xx · 모양이 다른 200).
       // **여기서 데모 값을 끼워 넣지 않는다.** `_usingDemoData` 는 초기값이 true 이고
@@ -426,12 +432,27 @@ class StudentApiService {
 
   Future<dynamic> _getJson(String url) async {
     try {
-      final res = await client.get(Uri.parse(url)).timeout(_timeout);
+      final res = await client.get(Uri.parse(url), headers: _headers).timeout(_timeout);
       if (res.statusCode == 200) {
         return jsonDecode(utf8.decode(res.bodyBytes));
       }
+      await _checkUnauthorized(res.statusCode);
     } catch (_) {}
     return null;
+  }
+
+  /// 로그인한 세션의 토큰. 로그인 전이면 비어 있다.
+  ///
+  /// 조회 API 는 지금 토큰 없이도 되지만(docs/API.md 「인증」 3), 붙여 두면
+  /// 서버가 인증을 요구하도록 바뀔 때 앱이 조용히 빈 화면이 되지 않는다.
+  Map<String, String> get _headers => AuthService().authHeaders;
+
+  /// `401` 이면 세션을 비우고 로그인 화면으로 돌려보낸다 (`main.dart` 가 받는다).
+  ///
+  /// **데모 폴백으로 넘기지 않는다.** 만료된 세션에 예시 데이터를 보여주면
+  /// 학생은 로그인이 끊긴 줄 모르고 예시 장부를 실제 장부로 읽는다.
+  Future<void> _checkUnauthorized(int statusCode) async {
+    if (statusCode == 401) await AuthService().reportUnauthorized();
   }
 
   // ══ 데모 데이터 ════════════════════════════════════════════
