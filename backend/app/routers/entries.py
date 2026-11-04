@@ -96,6 +96,9 @@ async def _get_chain_registrant(entry_id: int, chain: ChainClient) -> str:
 
 def _to_schema(entry: DBEntry) -> EntryResponse:
     """DB Entry ORM 모델을 EntryResponse 스키마로 변환"""
+    # 선점 때 미리 적은 값이다. 체인에서 끝나기 전에는 내보내지 않는다 (실패하면 비워진다). 앱의 단건 검증은 체인 approver 가
+    # 비어 있는데 approved_by 만 있으면 위조로 판정한다 (entry_verifier.dart)
+    confirmed = entry.status == EntryStatus.CONFIRMED.value
     rejected = entry.status == EntryStatus.REJECTED.value
     return EntryResponse(
         id=entry.id,
@@ -115,11 +118,10 @@ def _to_schema(entry: DBEntry) -> EntryResponse:
         ocr_paid_at=entry.ocr_paid_at,
         ocr_status=OCRStatus(entry.ocr_status) if entry.ocr_status else None,
         category_warning=entry.category_warning,
-        warning_ack_reason=entry.warning_ack_reason,
+        warning_ack_reason=entry.warning_ack_reason if confirmed else None,
         status=EntryStatus(entry.status) if entry.status else None,
         created_by=entry.created_by,
-        approved_by=entry.approved_by,
-        # 반려 선점 때 미리 적은 값이다. 체인에서 반려가 끝나기 전에는 내보내지 않는다 (실패하면 비워진다)
+        approved_by=entry.approved_by if confirmed else None,
         rejected_by=entry.rejected_by if rejected else None,
         reject_reason=entry.reject_reason if rejected else None,
         tx_pending=entry.tx_pending,
@@ -485,6 +487,13 @@ async def confirm_entry(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="PENDING 상태의 항목만 확정할 수 있습니다.",
+        )
+
+    # 반려가 선점 중이면 체인을 읽기 전에 409 (노드가 죽은 ② 에서도 503 이 아니다). 내 확정의 재시도는 relay_confirm 이 결과를 확인한다
+    if target.tx_confirm and target.rejected_by is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="반려 처리 중인 내역은 확정할 수 없습니다.",
         )
 
     # 학기 코드 조회

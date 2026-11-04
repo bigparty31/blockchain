@@ -467,10 +467,11 @@ def test_concurrent_submits_record_once(engine):
     chain = Chain()
     entry_id = draft(engine)
     outcomes = run_together(engine, chain, entry_id)
+    # 둘째가 첫째의 선점을 읽은 뒤 결과를 확인하면 같은 내용이라 둘 다 성공이다 (같은 hash). 어느 쪽이든 체인에는 한 건이다
     results = [o for o in outcomes if not isinstance(o, BaseException)]
     conflicts = [o for o in outcomes if isinstance(o, EntryConflict)]
-    assert len(results) == 1 and len(conflicts) == 1, outcomes
-    assert row(engine, entry_id)["tx_pending"] == results[0].tx_hash
+    assert results and len(results) + len(conflicts) == 2, outcomes
+    assert {r.tx_hash for r in results} == {row(engine, entry_id)["tx_pending"]}
 
 
 def test_concurrent_submit_while_the_first_is_unknown_is_not_sent(engine):
@@ -590,8 +591,47 @@ def test_concurrent_confirmations_confirm_once(engine, db):
             return await asyncio.gather(approve(a, chain, entry_id), approve(b, chain, entry_id), return_exceptions=True)
 
     outcomes = asyncio.run(both())
-    assert sorted(type(o).__name__ for o in outcomes)[0] in ("EntryAlreadyRecorded", "EntryInFlight"), outcomes
-    assert sum(not isinstance(o, BaseException) for o in outcomes) == 1
+    # 둘째가 첫째의 선점을 읽은 뒤 결과를 확인하면 같은 내용이라 둘 다 성공이다 (아래 시험). 어느 쪽이든 체인에는 한 건이다
+    results = [o for o in outcomes if not isinstance(o, BaseException)]
+    conflicts = [o for o in outcomes if isinstance(o, EntryConflict)]
+    assert results and len(results) + len(conflicts) == 2, outcomes
+    saved = row(engine, entry_id)
+    assert saved["status"] == "CONFIRMED"
+    assert {r.tx_hash for r in results} == {saved["tx_confirm"]}
+
+
+def test_same_approval_arriving_while_the_first_is_being_saved_succeeds_without_sending(engine, db, monkeypatch):
+    # 간헐 실패의 원인인 순서를 고정한다. 첫 요청이 체인 전송을 끝내고 DB 반영 전일 때 같은 승인이 온다.
+    # 둘째는 보내지 않고 저장된 hash 로 결과를 확인해 성공한다. 체인에는 한 건이고 둘 다 같은 hash 다
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    sends_before = chain.sends
+    original = chain_tx._Store.settle
+
+    async def both():
+        landed, resume = asyncio.Event(), asyncio.Event()
+        calls = []
+
+        async def held(self, *args):
+            calls.append(args)
+            if len(calls) == 1:
+                landed.set()
+                await resume.wait()
+            await original(self, *args)
+
+        monkeypatch.setattr(chain_tx._Store, "settle", held)
+        with Session(engine) as a, Session(engine) as b:
+            first = asyncio.create_task(approve(a, chain, entry_id))
+            await landed.wait()
+            second = await approve(b, chain, entry_id)
+            resume.set()
+            return await first, second
+
+    first, second = asyncio.run(both())
+    assert first == second
+    assert first.status is EntryStatus.CONFIRMED
+    assert chain.sends == sends_before + 1
+    assert row(engine, entry_id)["tx_confirm"] == first.tx_hash
 
 
 @pytest.mark.parametrize("state", ["draft", "blocked"])

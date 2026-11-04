@@ -59,11 +59,11 @@ class EntryResponse(BaseModel):
     warning_ack_reason: Optional[str] = Field(None, description="경고 무시 승인 사유")
     status: Optional[EntryStatus] = Field(None, description="장부 상태 (초안은 null, 온체인은 PENDING | CONFIRMED | REJECTED | BLOCKED)")
     created_by: int = Field(..., description="등록자 User ID (총무)")
-    approved_by: Optional[int] = Field(None, description="승인자 User ID (감사)")
+    approved_by: Optional[int] = Field(None, description="승인자 User ID (감사·회장). CONFIRMED 일 때만 값이 있다")
     rejected_by: Optional[int] = Field(None, description="반려자 User ID (감사/회장)")
     reject_reason: Optional[str] = Field(None, description="반려 사유")
     tx_pending: Optional[str] = Field(None, description="Pending 등록 트랜잭션 해시")
-    tx_confirm: Optional[str] = Field(None, description="Confirmed 승인 트랜잭션 해시")
+    tx_confirm: Optional[str] = Field(None, description="확정 또는 반려 트랜잭션 해시. 처리 중에도 채워진다")
     corrects_entry_id: Optional[int] = Field(None, description="정정 대상 원본 Entry ID")
     correction_reason: Optional[CorrectionReason] = Field(None, description="정정 사유 유형")
 

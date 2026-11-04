@@ -973,6 +973,50 @@ def test_rejected_entry_shows_its_reason(auth_header):
     assert (listed["rejected_by"], listed["reject_reason"]) == (3, "영수증 식별 불가로 인한 반려")
 
 
+def test_approver_is_not_exposed_until_the_confirmation_lands(auth_header):
+    """확정 선점 때 적은 승인자·경고 사유는 체인에서 끝나기 전에는 응답에 없다. 앱 단건 검증이 승인자 불일치로 판정한다"""
+    entry_id = _pending_entry(auth_header)
+    with _test_session_factory() as db:
+        row = db.query(DBEntry).filter(DBEntry.id == entry_id).first()
+        row.tx_confirm = "0x" + "7" * 64
+        row.approved_by = 3
+        row.warning_ack_reason = "아직 체인에 없는 사유"
+        db.commit()
+
+    listed = next(e for e in client.get("/entries").json() if e["id"] == entry_id)
+    assert listed["status"] == "PENDING"
+    assert listed["approved_by"] is None and listed["warning_ack_reason"] is None
+    assert listed["tx_confirm"] == "0x" + "7" * 64
+
+
+def test_confirmed_entry_shows_its_approver(auth_header):
+    entry_id = _pending_entry(auth_header)
+    body = {"deadline": int(time.time()) + 600, "signature": fake_signature(AUDITOR_WALLET), "warning_reason": None}
+    assert client.post(f"/entries/{entry_id}/confirm", json=body, headers=auth_header(Role.AUDITOR)).status_code == 200
+    listed = next(e for e in client.get("/entries").json() if e["id"] == entry_id)
+    assert (listed["status"], listed["approved_by"]) == ("CONFIRMED", 3)
+
+
+def test_confirm_is_refused_before_reading_the_chain_while_a_rejection_is_in_flight(auth_header, monkeypatch):
+    """반려가 처리 중이고 노드가 죽어 있어도 503 이 아니라 409 다"""
+    entry_id = _pending_entry(auth_header)
+    with _test_session_factory() as db:
+        row = db.query(DBEntry).filter(DBEntry.id == entry_id).first()
+        row.tx_confirm = "0x" + "7" * 64
+        row.rejected_by = 3
+        row.reject_reason = "처리 중인 반려"
+        db.commit()
+
+    async def chain_is_down(*_):
+        raise AssertionError("체인을 읽으면 안 된다")
+
+    monkeypatch.setattr(entries_router, "_get_chain_registrant", chain_is_down)
+    body = {"deadline": int(time.time()) + 600, "signature": fake_signature(AUDITOR_WALLET), "warning_reason": None}
+    res = client.post(f"/entries/{entry_id}/confirm", json=body, headers=auth_header(Role.AUDITOR))
+    assert res.status_code == 409
+    assert "반려 처리 중인 내역은 확정할 수 없습니다." in res.json()["detail"]
+
+
 def test_reject_retry_of_its_own_claim_reaches_the_relay_with_no_open_transaction(auth_header, monkeypatch):
     """내 반려의 ② 는 라우터가 막지 않는다. 릴레이를 부를 때 라우터 세션에 열린 트랜잭션이 없다 (CHAIN_CLIENT §3)"""
     entry_id = _pending_entry(auth_header)
