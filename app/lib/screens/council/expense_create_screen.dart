@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 import '../../core/enums.dart';
 import '../../core/app_theme.dart';
+import '../../core/format.dart';
 import '../../core/hashing.dart';
+import '../../services/api_service.dart';
+import 'budget_revision_screen.dart';
 import 'input_rules.dart';
 import 'registration_result.dart';
 
@@ -28,6 +31,26 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
   bool _submitting = false;
 
   final List<String> _budgetCategories = ['행사비', '사업비', '운영비'];
+
+  /// 예산 항목별 잔량 (`GET /budgets`). 고르기 전에 남은 예산을 보여 준다 (스토리보드 7 ③).
+  Map<String, int> _remaining = const {};
+
+  @override
+  void initState() {
+    super.initState();
+    _loadBudgets();
+  }
+
+  Future<void> _loadBudgets() async {
+    final budgets = await ApiService().fetchBudgets();
+    if (!mounted) return;
+    setState(() => _remaining = {for (final b in budgets) b.category: b.remainingAmount});
+  }
+
+  String _budgetLabel(String category) {
+    final left = _remaining[category];
+    return left == null ? category : '$category · 잔량 ${Fmt.won(left)}';
+  }
 
   @override
   void dispose() {
@@ -67,7 +90,7 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
           children: [
             Icon(Icons.check_circle_rounded, color: Colors.white, size: 18),
             SizedBox(width: 10),
-            Expanded(child: Text('영수증 첨부 완료! OCR로 자동 입력되었습니다.')),
+            Expanded(child: Text('영수증 첨부 완료 (목업: 예시 값을 채웠어요)')),
           ],
         ),
         backgroundColor: AppTheme.primary,
@@ -112,15 +135,30 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
       context,
       kindLabel: '지출',
       rows: [
-        ('항목', _titleController.text),
+        ('목적', _titleController.text),
         ('사용처', _merchantController.text),
         ('금액', '${int.parse(_amountController.text)}원'),
-        ('예산분류', _selectedBudgetCategory),
+        ('예산 항목', _selectedBudgetCategory),
       ],
       result: result,
       occurredAtNote: '전송값 occurred_at: $_occurredAt (사용일 KST 00:00)',
+      onBudgetRevision: _openBudgetRevision,
     );
     if (done && mounted) Navigator.pop(context);
+  }
+
+  /// 차단 안내 → 예산 개정 요청. 차단된 지출이 근거로 붙고 예산 항목이 골라져 넘어간다.
+  void _openBudgetRevision() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => BudgetRevisionScreen(
+          initialCategory: _selectedBudgetCategory,
+          basisTitle: _titleController.text,
+          basisAmount: int.tryParse(_amountController.text),
+        ),
+      ),
+    );
   }
 
   @override
@@ -210,8 +248,8 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
                               style: TextStyle(fontSize: 14, color: AppTheme.textMain, fontWeight: FontWeight.w600),
                             ),
                             const SizedBox(height: 4),
-                            // [개발 연동: image_picker 및 ML Kit OCR]
-                            const Text('영수증 촬영 시 금액 및 일자 자동 인식',
+                            // OCR 은 값을 채워 주지 않는다 — 판독값을 입력값과 대조해 경고만 한다 (PRD §6)
+                            const Text('OCR이 영수증 금액을 입력값과 대조해요',
                               style: TextStyle(fontSize: 12, color: AppTheme.textSub),
                             ),
                           ],
@@ -226,11 +264,11 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
               TextFormField(
                 controller: _titleController,
                 decoration: AppTheme.inputDecoration(
-                  label: '지출 항목명 *',
+                  label: '목적 *',
                   hint: '예: 신입생 오리엔테이션 다과 구매',
                   icon: Icons.description_rounded,
                 ),
-                validator: (v) => InputRules.singleLine(v, fieldName: '항목명'),
+                validator: (v) => InputRules.singleLine(v, fieldName: '목적'),
               ),
               const SizedBox(height: 14),
 
@@ -257,7 +295,7 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
               ),
               const SizedBox(height: 14),
 
-              // 예산 카테고리
+              // 예산 항목 (잔량 표시)
               Container(
                 decoration: BoxDecoration(
                   color: const Color(0xFFFAF9FF),
@@ -269,13 +307,15 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
                   isExpanded: true,
                   icon: const Icon(Icons.keyboard_arrow_down_rounded, color: AppTheme.primary),
                   decoration: InputDecoration(
-                    labelText: '예산 카테고리 *',
+                    labelText: '예산 항목 *',
                     labelStyle: const TextStyle(color: AppTheme.textSub, fontSize: 14),
                     border: InputBorder.none,
                     prefixIcon: const Icon(Icons.category_rounded, color: AppTheme.primary, size: 20),
                     contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
                   ),
-                  items: _budgetCategories.map((c) => DropdownMenuItem(value: c, child: Text(c))).toList(),
+                  items: _budgetCategories
+                      .map((c) => DropdownMenuItem(value: c, child: Text(_budgetLabel(c), overflow: TextOverflow.ellipsis)))
+                      .toList(),
                   onChanged: (val) => setState(() => _selectedBudgetCategory = val!),
                 ),
               ),
@@ -330,12 +370,7 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
               ),
               const SizedBox(height: 28),
 
-              GradientButton(
-                onPressed: _submitExpense,
-                label: _submitting ? '제출 중...' : '제출하기',
-                icon: Icons.upload_rounded,
-              ),
-              const SizedBox(height: 10),
+              // 스토리보드 7: ⑦ 초안 저장 → ⑧ 제출 순서
               OutlinedButton.icon(
                 onPressed: _submitting ? null : _saveDraft,
                 icon: const Icon(Icons.save_outlined),
@@ -346,6 +381,12 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
                   side: const BorderSide(color: AppTheme.primary),
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
                 ),
+              ),
+              const SizedBox(height: 10),
+              GradientButton(
+                onPressed: _submitExpense,
+                label: _submitting ? '제출 중...' : '제출하기',
+                icon: Icons.upload_rounded,
               ),
               const SizedBox(height: 8),
               const Center(
