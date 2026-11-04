@@ -143,6 +143,15 @@ def setup_test_db(tmp_path):
         )
         db.add(diff_budget_entry)
 
+        # 9. 만료된 예산 (id=3, category="만료예산", 과거 시각)
+        expired_budget = DBBudget(
+            id=3,
+            term_id=1,
+            category="만료예산",
+            expires_at=datetime.fromtimestamp(1000000000, tz=timezone.utc),
+        )
+        db.add(expired_budget)
+
         db.commit()
 
     def override_get_db():
@@ -250,6 +259,22 @@ def test_create_budget_revision_term_not_found(auth_header):
         headers=auth_header(Role.TREASURER),
     )
     assert response.status_code == 404
+
+
+def test_create_budget_revision_expired_budget_rejected(auth_header):
+    """집행 마감일(expires_at)이 경과한 예산은 증액 요청 시 400 Bad Request로 차단된다 (IBudgetToken.sol BudgetExpired)."""
+    response = client.post(
+        "/budget-revisions",
+        json={
+            "term_id": 1,
+            "category": "만료예산",
+            "requested_amount": 100000,
+            "reason": "마감 지난 예산 증액 시도",
+        },
+        headers=auth_header(Role.TREASURER),
+    )
+    assert response.status_code == 400
+    assert "마감일" in response.json()["detail"] and "경과" in response.json()["detail"]
 
 
 def test_create_budget_revision_target_budget_not_found(auth_header):
