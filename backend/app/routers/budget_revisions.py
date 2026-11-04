@@ -88,7 +88,7 @@ def create_budget_revision(
 ):
     """PRD v0.13 §4.1: 총무가 예산 증액을 요청하는 1단계 API입니다.
     - 증액 요청액(requested_amount)은 증액분(> 0)이어야 합니다.
-    - 한도 초과/기간 만료로 차단(BLOCKED)된 지출이 있는 경우 blocked_entry_id를 연계합니다.
+    - 한도 초과 등으로 차단(BLOCKED)된 지출이 있는 경우 blocked_entry_id를 연계합니다 (마감 경과 예산은 증액 불가).
     - 사유는 canonical_text로 정규화되어 저장됩니다.
     - 등록 시 status는 'PENDING'으로 설정됩니다.
     """
@@ -131,6 +131,18 @@ def create_budget_revision(
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"해당 학기({payload.term_id}) 및 카테고리('{payload.category}')에 해당하는 기존 예산이 존재하지 않습니다.",
+            )
+
+    # 마감일(expires_at) 만료 검사 (PRD §4.1, IBudgetToken.sol: 마감 지난 예산은 BudgetExpired로 거부되므로 사전 차단)
+    now = datetime.now(timezone.utc)
+    if target_budget.expires_at is not None:
+        expires_at = target_budget.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at < now:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"집행 마감일({target_budget.expires_at})이 경과한 예산은 증액할 수 없습니다.",
             )
 
     target_budget_id = target_budget.id

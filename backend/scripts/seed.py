@@ -65,7 +65,7 @@ DEFAULT_BUDGETS = (
     ),
 )
 
-REQUIRED_TABLES = ("users", "terms", "budgets", "budget_versions", "entries")
+REQUIRED_TABLES = ("users", "terms", "budgets", "budget_versions", "entries", "budget_revision_requests")
 
 
 @dataclass(frozen=True)
