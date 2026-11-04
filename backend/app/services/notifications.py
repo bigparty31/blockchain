@@ -2,6 +2,7 @@
 
 지금은 호출 자리를 먼저 잡는 빈 함수다. Notification 테이블이 생기면(11/7) 같은 시그니처로 채운다.
 상태 변경과 같은 세션으로 부르고 호출한 쪽이 함께 commit 한다 — 롤백되면 알림도 남지 않는다.
+문구(Notification.body)는 인자로 받지 않는다. 서버가 kind 로 만든다 — 앱은 받은 문구를 그대로 표시한다.
 """
 from enum import Enum
 from typing import Iterable, Optional
@@ -10,8 +11,10 @@ from sqlalchemy.orm import Session
 
 
 class NotificationKind(str, Enum):
+    """docs/enums.md notification kind 와 같다. 값을 바꾸면 양쪽을 같이 고친다."""
+
     ENTRY_REGISTERED = "ENTRY_REGISTERED"
-    ENTRY_REVISION_REQUESTED = "ENTRY_REVISION_REQUESTED"
+    ENTRY_EDIT_REQUESTED = "ENTRY_EDIT_REQUESTED"
     ENTRY_CONFIRMED = "ENTRY_CONFIRMED"
     ENTRY_REJECTED = "ENTRY_REJECTED"
     ENTRY_CONFIRM_FAILED = "ENTRY_CONFIRM_FAILED"
