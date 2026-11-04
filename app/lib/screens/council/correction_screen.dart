@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../../core/entry_merge.dart';
 import '../../core/enums.dart';
 import '../../core/app_theme.dart';
@@ -531,14 +532,18 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
 
               TextFormField(
                 controller: _detailController,
-                maxLines: 4,
+                // 상세 사유는 정정 항목의 `purpose` 로 저장된다 (PRD §4.4). `purpose` 는 한 줄 텍스트라
+                // 줄바꿈이 들어가면 서버가 400 이다 — 입력 단계에서 줄바꿈을 받지 않는다.
+                maxLines: 1,
+                inputFormatters: [FilteringTextInputFormatter.deny(RegExp(r'[\r\n]'))],
+                textInputAction: TextInputAction.done,
                 decoration: AppTheme.inputDecoration(
                   label: '정정 상세 사유 *',
                   hint: '예: 실제 영수증 확인 결과 부가세 포함 금액 정정 요청',
                   icon: Icons.notes_rounded,
                 ),
-                // 이 사유는 텍스트 해시 대상이다 — 빈 값·제어문자·보이지 않는 공백은 서버가 400 (HASHING §3).
-                validator: (v) => InputRules.requiredReason(v, fieldName: '상세 사유'),
+                // `meta_hash` 에 들어가는 한 줄 텍스트 규칙 (HASHING §1.1) — 제어문자·보이지 않는 공백·빈 값 거부.
+                validator: (v) => InputRules.singleLine(v, fieldName: '상세 사유'),
               ),
               const SizedBox(height: 16),
 

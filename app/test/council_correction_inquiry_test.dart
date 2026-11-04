@@ -39,6 +39,16 @@ void main() {
       await tester.pumpAndSettle();
     }
 
+    testWidgets('상세 사유는 한 줄이다 — purpose 로 저장되므로 줄바꿈을 받지 않는다 (PRD §4.4)', (tester) async {
+      await pumpScreen(tester);
+      final field = find.widgetWithText(TextFormField, '정정 상세 사유 *');
+      final textField = find.descendant(of: field, matching: find.byType(TextField));
+      expect(tester.widget<TextField>(textField).maxLines, 1);
+
+      await tester.enterText(field, '첫 줄\n둘째 줄');
+      expect(tester.widget<TextField>(textField).controller!.text, isNot(contains('\n')));
+    });
+
     // 서버가 없어 ApiService 가 더미(#1 확정 지출 35,000원, #2 대기, #3 확정 수입)로 폴백한다.
     Future<void> lookup(WidgetTester tester, String id) async {
       await tester.enterText(find.widgetWithText(TextFormField, '정정 대상 내역 ID (Entry ID) *'), id);
@@ -90,13 +100,20 @@ void main() {
       await lookup(tester, '1');
       await tester.enterText(amountField(), '30000');
 
-      for (final blank in ['', '  \n\t ']) {
+      for (final blank in ['', '   ']) {
         await tester.enterText(detailField(), blank);
         await tester.tap(find.text('정정 제출하기'));
         await tester.pumpAndSettle();
         expect(find.textContaining('상세 사유를 입력해 주세요'), findsOneWidget, reason: '"$blank"');
         expect(find.text('정정 등록 완료!'), findsNothing);
       }
+
+      // purpose 는 한 줄 텍스트라 탭도 제어문자로 거부한다 (HASHING §1.1).
+      await tester.enterText(detailField(), ' \t ');
+      await tester.tap(find.text('정정 제출하기'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('제어문자는 쓸 수 없어요'), findsOneWidget);
+      expect(find.text('정정 등록 완료!'), findsNothing);
     });
 
     testWidgets('정상 입력이면 증감분으로 접수된다', (tester) async {

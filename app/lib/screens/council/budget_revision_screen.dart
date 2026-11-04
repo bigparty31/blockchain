@@ -85,7 +85,9 @@ class _BudgetRevisionScreenState extends State<BudgetRevisionScreen> {
     if (_submitting || !_formKey.currentState!.validate()) return;
     setState(() => _submitting = true);
     final amount = int.parse(_amountController.text);
-    final reason = _reasonController.text.trim();
+    // trim() 을 쓰지 않는다 — BOM 처리가 서버(Python)와 달라 사유 해시가 갈린다 (input_rules.dart 머리말).
+    // 정본화는 서명용 해시를 만들 때 Hashing.canonicalText 가 한다.
+    final reason = _reasonController.text;
     await showDialog<void>(
       context: context,
       builder: (ctx) => Dialog(

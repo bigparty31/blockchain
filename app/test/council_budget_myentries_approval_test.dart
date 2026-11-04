@@ -234,7 +234,7 @@ void main() {
   });
 
   group('OCR 경고 판정 (PRD §6)', () {
-    Map<String, dynamic> item(OcrStatus ocr) => {
+    Map<String, dynamic> item(OcrStatus? ocr) => {
           'id': 90,
           'createdBy': 2,
           'title': '계좌이체 건',
@@ -247,7 +247,7 @@ void main() {
           'receiptInfo': '계좌이체',
         };
 
-    Future<void> approve(WidgetTester tester, OcrStatus ocr) async {
+    Future<void> approve(WidgetTester tester, OcrStatus? ocr) async {
       await pump(tester, ApprovalListScreen(role: UserRole.AUDITOR, currentUserId: 4, items: [item(ocr)]));
       await tester.tap(find.text('승인 서명').first);
       await tester.pumpAndSettle();
@@ -255,6 +255,13 @@ void main() {
 
     testWidgets('NO_NUMBER(승인번호 없음)는 정상이라 사유 없이 바로 서명한다', (tester) async {
       await approve(tester, OcrStatus.NO_NUMBER);
+      expect(find.text('집행 최종 승인'), findsOneWidget);
+      expect(find.text('경고 무시 승인 사유'), findsNothing);
+    });
+
+    testWidgets('OCR 을 돌리지 않은 건(null — 영수증 없는 수입)은 정상이다', (tester) async {
+      // 서버도 null 을 정상으로 본다. 경고로 보고 사유를 보내면 400 이다.
+      await approve(tester, null);
       expect(find.text('집행 최종 승인'), findsOneWidget);
       expect(find.text('경고 무시 승인 사유'), findsNothing);
     });

@@ -4,8 +4,12 @@ import '../../core/app_theme.dart';
 import '../../services/auth_service.dart';
 import 'reason_dialog.dart';
 
-/// OCR 이 경고인가 — `MATCH` 와 `NO_NUMBER`(승인번호가 없는 계좌이체 등)는 정상이다 (PRD §6).
-bool _ocrIsWarning(OcrStatus? s) => s != OcrStatus.MATCH && s != OcrStatus.NO_NUMBER;
+/// OCR 이 경고인가 — `MISMATCH`·`DUPLICATE`·`UNREADABLE` 만 경고다 (PRD §6).
+///
+/// `MATCH`·`NO_NUMBER`(승인번호가 없는 계좌이체 등)와 OCR 을 돌리지 않은 건(null — 영수증 없는 수입)은
+/// 정상이다. 서버도 같은 기준이라, null 을 경고로 보고 사유를 보내면 400 이 돌아온다.
+bool _ocrIsWarning(OcrStatus? s) =>
+    s == OcrStatus.MISMATCH || s == OcrStatus.DUPLICATE || s == OcrStatus.UNREADABLE;
 
 /// 경고가 있는 항목인가 — OCR 이 경고이거나 카테고리 경고가 있으면 경고다.
 /// 경고를 무시하고 승인하려면 사유가 필수다 (`hadWarning` + `warningReasonHash`).
