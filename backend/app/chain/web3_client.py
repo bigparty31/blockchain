@@ -459,7 +459,14 @@ class Web3ChainClient:
     async def reject_entry(
         self, decision: RejectDecision, signature: str, before_broadcast: Optional[BeforeBroadcast] = None
     ) -> TxResult:
-        raise NotImplementedError("반려 릴레이는 이번 범위가 아니다")
+        # entryCommit·사유 해시는 앱이 서명한 값 그대로 보낸다. 사유 없음·등록 값과 다름은 시뮬레이션에서 걸린다 (가스 0)
+        return await self._relay_signed(
+            self._ledger.functions.rejectEntry,
+            decision,
+            signature,
+            before_broadcast,
+            ((self._ledger.events.EntryRejected, EntryStatus.REJECTED),),
+        )
 
     async def tx_result(self, tx_hash: str, entry_id: int) -> Optional[TxResult]:
         self._ensure_open()
@@ -491,7 +498,7 @@ class Web3ChainClient:
     async def _relay_signed(
         self, function, payload, signature: str, before_broadcast: Optional[BeforeBroadcast], outcomes: tuple
     ) -> TxResult:
-        """서명된 구조체를 원장 함수로 릴레이하고 결과 이벤트로 판정한다 (등록·확정 공용).
+        """서명된 구조체를 원장 함수로 릴레이하고 결과 이벤트로 판정한다 (등록·확정·반려 공용).
 
         구조체는 서명 대상과 같은 typed data 의 message 로 만든다 — 필드 순서·인코딩의 정본이 한 곳이다.
         """
@@ -599,7 +606,7 @@ class Web3ChainClient:
     async def _event_result(self, tx_hash: str, receipt: dict, entry_id: int, outcomes: tuple) -> TxResult:
         """방금 보낸 트랜잭션의 결과. 이벤트가 없으면 체인 상태로 판정한다 — 방금 보낸 것이라 그 상태가 이 트랜잭션의 결과다.
 
-        등록은 EntryBlocked → BLOCKED(사유 포함), EntryPending → PENDING. 확정은 EntryConfirmed → CONFIRMED.
+        등록은 EntryBlocked → BLOCKED(사유 포함), EntryPending → PENDING. 확정은 EntryConfirmed → CONFIRMED. 반려는 EntryRejected → REJECTED.
         """
         result = self._find_event(tx_hash, receipt, entry_id, outcomes)
         if result is not None:

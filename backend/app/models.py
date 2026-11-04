@@ -226,7 +226,7 @@ class Entry(Base):
     rejected_by = Column(BigInteger, ForeignKey("users.id", ondelete="RESTRICT"), nullable=True, doc="반려 감사/회장 ID")
     reject_reason = Column(Text, nullable=True, doc="반려 사유")
     tx_pending = Column(String(66), nullable=True, doc="대기/차단 기록 TX 해시")
-    tx_confirm = Column(String(66), nullable=True, doc="최종 확정 TX 해시")
+    tx_confirm = Column(String(66), nullable=True, doc="확정 또는 반려 TX 해시 (한 칸을 함께 선점한다)")
     corrects_entry_id = Column(BigInteger, ForeignKey("entries.id", ondelete="RESTRICT"), nullable=True, doc="정정 대상 원본 Entry ID")
     correction_reason = Column(String(30), nullable=True, doc="INPUT_ERROR, RECEIPT_RECHECK, REFUND, RECLASSIFY")
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), doc="등록 일시")
