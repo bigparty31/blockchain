@@ -84,9 +84,12 @@ def upgrade() -> None:
 
     with op.batch_alter_table('memberships', schema=None) as batch_op:
         batch_op.add_column(sa.Column('burn_reason', sa.String(length=30), nullable=True))
-        batch_op.alter_column('commit_hash',
-               existing_type=sa.VARCHAR(length=66),
-               nullable=True)
+        batch_op.create_check_constraint(
+            'ck_memberships_burn_reason',
+            "burn_reason IS NULL OR burn_reason IN ('REFUND', 'WITHDRAWAL')"
+        )
+        batch_op.drop_index('idx_memberships_commit_hash')
+        batch_op.drop_column('commit_hash')
 
 
 def downgrade() -> None:
@@ -96,9 +99,9 @@ def downgrade() -> None:
     op.execute("UPDATE budget_revision_requests SET status = 'PENDING' WHERE status = 'PRESIDENT_SIGNED'")
 
     with op.batch_alter_table('memberships', schema=None) as batch_op:
-        batch_op.alter_column('commit_hash',
-               existing_type=sa.VARCHAR(length=66),
-               nullable=False)
+        batch_op.add_column(sa.Column('commit_hash', sa.String(length=66), nullable=False, server_default='0x0000000000000000000000000000000000000000000000000000000000000000'))
+        batch_op.create_index('idx_memberships_commit_hash', ['commit_hash'], unique=False)
+        batch_op.drop_constraint('ck_memberships_burn_reason', type_='check')
         batch_op.drop_column('burn_reason')
 
     with op.batch_alter_table('entries', schema=None) as batch_op:

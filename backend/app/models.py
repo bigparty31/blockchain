@@ -199,7 +199,7 @@ class BudgetRevisionRequest(Base):
         CheckConstraint("requested_amount > 0", name="ck_budget_rev_amount"),
         CheckConstraint(
             "status != 'PRESIDENT_SIGNED' OR (president_signed_by IS NOT NULL AND president_signature IS NOT NULL AND president_signed_at IS NOT NULL AND signature_deadline IS NOT NULL AND signed_version IS NOT NULL)",
-            name="ck_budget_rev_president_fields",
+            name="ck_budget_rev_pres_signed_fields",
         ),
         CheckConstraint("status NOT IN ('APPROVED', 'REJECTED') OR (resolved_by IS NOT NULL AND resolved_at IS NOT NULL)", name="ck_budget_rev_resolved"),
         CheckConstraint("status != 'REJECTED' OR reject_reason IS NOT NULL", name="ck_budget_rev_reject_reason"),
@@ -369,7 +369,6 @@ class Membership(Base):
     user_id = Column(BigInteger, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, doc="학생 ID")
     term_id = Column(BigInteger, ForeignKey("terms.id", ondelete="RESTRICT"), nullable=False, doc="학기 ID")
     token_id = Column(BigInteger, nullable=False, unique=True, doc="온체인 ERC-721 토큰 ID")
-    commit_hash = Column(String(66), nullable=True, doc="학번+salt 커밋 해시 (PRD v0.13에서 폐지되어 nullable)")
     burn_reason = Column(String(30), nullable=True, doc="소각 사유 (REFUND, WITHDRAWAL)")
     minted_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), doc="발급 일시")
     burned_at = Column(DateTime(timezone=True), nullable=True, doc="소각/환불 회수 일시")
@@ -381,6 +380,7 @@ class Membership(Base):
 
     __table_args__ = (
         CheckConstraint("burned_at IS NULL OR burned_at >= minted_at", name="ck_memberships_burn_date"),
+        CheckConstraint("burn_reason IS NULL OR burn_reason IN ('REFUND', 'WITHDRAWAL')", name="ck_memberships_burn_reason"),
         Index(
             "uq_memberships_active_user_term",
             "user_id",
@@ -390,7 +390,6 @@ class Membership(Base):
             sqlite_where=text("burned_at IS NULL"),
         ),
         Index("idx_memberships_lookup", "user_id", "term_id"),
-        Index("idx_memberships_commit_hash", "commit_hash"),
     )
 
 
