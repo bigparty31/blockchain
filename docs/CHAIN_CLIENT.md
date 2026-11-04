@@ -225,7 +225,7 @@ chain.unavailable_next("confirm_entry", landed=True)                # 체인엔 
 - ~~한 id에 확정·반려 서명을 둘 다 릴레이하지 않는 장치~~ → 서비스 계층. 확정·반려가 `tx_confirm` 한 칸을 선점한다 (§3)
 - ~~앱이 서명에 쓸 EIP-712 도메인을 내려주는 경로~~ → `GET /chain/domains` (API.md 「체인」). 배포 기록은 `app/chain/deployment.py`가 읽고, 실제 릴레이어도 여기서 주소를 읽는다
 - ~~③에서 서버가 서명자를 먼저 복구해 확인할지~~ → 확인한다. 서비스가 `ChainClient.signer_of`로 복구한 주소를 기대 지갑과 비교하고, 다르면 체인에 보내지 않는다 (§4). 서비스가 `app/chain/eip712.py`를 직접 부르지 않는 이유는 FakeChainClient로도 같은 흐름을 테스트하기 위해서다
-- 예산·롤 릴레이 — `BudgetToken`(발행·증액·회수)과 `RoleManager`(롤 변경·회장 복구)도 서명 + 릴레이어 방식이다. 같은 모양으로 메서드를 더한다. 두 컨트랙트에는 원장과 이름이 같은 에러(`TermRequired`·`ReservedId` 등)가 있어 **어느 컨트랙트에서 났는지까지** 보고 분류한다
+- 예산 발행·증액 → §9. 남은 것: 회수(`reclaim`, P2)와 `RoleManager`(롤 변경·회장 복구)는 같은 모양으로 메서드를 더한다. `RoleManager`도 원장과 이름이 같은 에러가 있으니 `BudgetRevertReason`처럼 사유 enum과 해석기를 따로 둔다
 - ~~반려 사유·경고 사유 필수 검사~~ → `REASON_REQUIRED`·`REASON_NOT_ALLOWED`로 반영됨
 - ~~`tx_pending` 3상태~~ → `app/services/chain_tx.py` (§3). 남은 것: ②가 오래 남은 항목의 정리(관리자 해제·정리 작업)와 재시도는 다음 범위 — 노드가 트랜잭션을 잃었거나(receipt 없음), 원장을 다시 배포해 옛 receipt의 로그가 새 원장 것이 아닐 때(결과 이벤트 없음) ②가 풀리지 않는다. 다시 배포하면 DB도 초기화한다. 반려의 ② 정리도 같은 범위다. API.md에 409(처리 중·이미 기록됨) 응답을 넣는 것은 등록·승인 API 담당이 정한다
 
@@ -271,3 +271,75 @@ cd backend && .venv/bin/python -m scripts.relayer_smoke
 - 마지막 줄이 "관문 2·확정 통과" 또는 "관문 2 실패"이고 종료 코드는 0 또는 1이다
 - 항목 id는 8000억 + 실행 시각(밀리초) × 10(지금은 18조대)이라 등록 API의 DB id(1부터)와 겹치지 않고, 몇 번이고 다시 실행해도 된다. 노드를 재시작하면 기록은 사라진다
 - 총무·감사 키로 서명하는 "앱 역할"이라 서버 코드 밖(`backend/scripts/`)에 있고 로컬 체인(31337)에서만 돈다. 로컬 계정 배치와 앱 서명은 `backend/scripts/local_chain.py`가 정본이다
+
+## 9. 예산 발행·증액
+
+코드 `backend/app/services/budget_relay.py`, 서명 대상 `IssueRequest`·`IncreaseRequest`. 경계는 김경윤과 합의한 대로다.
+
+| 맡는 쪽 | 하는 일 |
+| --- | --- |
+| 예산·증액 API (김경윤) | 권한 확인, `signer_of`로 서명자 대조, DB 저장, 결과의 hash·`version` 기록, `tx_increase` 선점·해제 |
+| `budget_relay` (손종인) | 서명 모양과 사유 해시 확인, 체인 전송, 결과 분류. DB를 읽거나 쓰지 않는다 |
+
+```python
+outcome = await relay_issue(chain, request, signature)                 # 회장 서명 1개
+outcome = await relay_increase(chain, request, reason, president_sig, auditor_sig,
+                               previous_tx_hash=tx_increase)           # 같은 값에 회장·감사 서명
+```
+
+**도메인이 원장과 다르다.** 발행·증액은 `/chain/domains`의 `BudgetToken` 도메인으로 서명한다. 원장 도메인으로 서명하면 서명자가 다른 주소로 복구된다. 기대값은 `backend/tests/fixtures/eip712_vectors.json`의 `budgetDomain`·`budgetVectors`다.
+
+**항목명은 `category_hash(name)`로 해시한다.** `docs/CONTRACTS.md` category 표에 있는 이름만 받는다. 나쁜 문자를 골라 막으면 `U+200B` 같은 보이지 않는 문자가 통과해 같아 보이는 이름이 다른 예산이 된다.
+
+**결과는 예외가 아니라 값으로 돌려준다.** 발행은 한 줄이 트랜잭션 하나라 일부만 성공할 수 있다. 한 줄이 실패해도 앞줄 결과를 잃지 않고 다음 줄을 보낼 수 있다.
+
+| `BudgetRelayStatus` | 앱 `BudgetIssueStatus` | 뜻 |
+| --- | --- | --- |
+| `ISSUED` | `issued` | 기록됐다 |
+| `ALREADY_ISSUED` | `alreadyIssued` | 같은 학기·항목의 예산이 이미 있다. 응답을 잃은 시도가 사실은 성공한 경우도 여기로 온다. `existing`이 체인의 그 예산이다 |
+| `INCREASED` | | 증액이 기록됐다. `version`은 올라간 값이다 |
+| `REJECTED` | `rejected` | 들어가지 않았다. `reason`은 아래 표 |
+| `NO_RESPONSE` | `noResponse` | 결과를 모른다. **고쳐서 보내면 안 된다.** 같은 값으로 다시 부르면 결과를 확인한다 |
+| `NOT_SENT` | `rejected` | 릴레이어가 보낼 수 없는 상태다(`ChainSetupError`). 들어가지 않았다. 단건 API면 503이다 |
+
+`ALREADY_ISSUED`이면 서명한 값이 아니라 `existing`을 믿는다. `existing.id`가 요청과 다르면 DB의 예산 id가 체인과 어긋난 것이고(DB 초기화 등), 그 id로 등록한 지출은 `BUDGET_NOT_FOUND`로 막힌다. 금액도 서명과 다를 수 있다.
+
+`reason` 값:
+
+| 값 | 뜻 |
+| --- | --- |
+| Solidity 에러 이름 | `BudgetRevertReason`. 체인이 거부했다 |
+| `Unknown` | revert는 확실하지만 원인을 해석할 수 없다 |
+| `MalformedSignature` | 서명 모양이 틀렸다. 보내지 않았다 → 400 |
+| `ReasonHashMismatch` | 사유 원문의 SHA256이 서명된 `reason_hash`와 다르다. 보내지 않았다 → 400 |
+
+**발행은 어떤 revert든 체인을 먼저 읽는다.** 시한이 지난 재시도는 `SignatureExpired`로 걸리지만 앞선 시도가 이미 들어갔을 수 있다. 학기·항목으로 찾아 있으면 `ALREADY_ISSUED`다. `BudgetAlreadyExists`인데 그 id에 다른 예산이 있으면 `REJECTED`다. 이미 있다고 거부됐는데 읽히지 않으면 대기열에 있는 것이라 `NO_RESPONSE`다 — 시뮬레이션은 다음 블록, 조회는 최신 블록 기준이다.
+
+**증액은 `previous_tx_hash`가 필수 인자다.** 처음이면 `None`, 재시도면 저장한 `tx_increase`를 넘긴다. 컨트랙트는 시한을 version보다 먼저 본다. 응답을 잃은 증액이 사실은 들어갔어도 시한이 지난 재시도는 `SignatureExpired`이고, 이를 보고 재서명하면 **한 번 승인한 증액이 두 번 들어간다.** version으로도 판단할 수 없다 — 다른 증액으로도 오른다.
+
+| 앞선 hash의 상태 | 처리 |
+| --- | --- |
+| 들어갔다 | 보내지 않고 `INCREASED` (앞선 hash·version) |
+| 아직 블록에 없다, 확인하지 못했다 | 보내지 않고 `NO_RESPONSE` (앞선 hash). 지금 보내면 둘 다 들어갈 수 있다 |
+| 실패로 끝났다 | 이 요청의 서명으로 보낸다 |
+
+**이 보호는 hash를 잃지 않아야 성립한다.** 칸(`tx_increase`)이 머지되기 전에는 증액 API를 열지 않는다. `before_broadcast`에서 보내기 전에 칸을 채운다. 노드가 트랜잭션을 잃어 영원히 블록에 없는 경우의 정리는 §3의 ②와 같이 다음 범위다.
+
+**증액의 `REJECTED` 중 따로 처리할 것** (PRD §4.1). 앞선 hash가 들어가지 않은 것이 확인된 뒤의 결과다.
+
+- `SignatureExpired` — `PRESIDENT_SIGNED` → `PENDING`으로 되돌리고 회장에게 재서명을 요청한다
+- `VersionMismatch` — 서명한 version이 낡았다. 재서명한다
+
+**선점 규칙.**
+
+| 결과 | 칸 |
+| --- | --- |
+| `failed_tx_hash` 있음 | 체인에 남지 않은 hash다. 칸에 이 값이 있으면 비운다 |
+| `NO_RESPONSE`의 `tx_hash` | 결과를 모르는 hash다. 칸에 둔다 |
+| 앞선 hash가 실패해 새로 보냄 | `before_broadcast`에서 칸을 새 hash로 바꾼다 |
+
+`before_broadcast`가 던진 예외(선점 실패 등)는 그대로 올라간다. 이때는 보내지 않았다. `ALREADY_ISSUED`의 `failed_tx_hash`는 이번 시도의 hash라 `tx_issue`에 저장하지 않는다.
+
+**revert 사유는 `BudgetRevertReason`이다.** `RevertReason`과 따로 둔다. `TermRequired`처럼 이름이 같아도 컨트랙트가 다르고, 원장 호출에서는 이 에러들이 나지 않는다. 연결할 때 전부 BudgetToken ABI에 있는지 확인한다. 해석할 수 없는 revert는 여기서도 `RevertReason.UNKNOWN`이다.
+
+**`FakeChainClient`** — `IBudgetToken`의 검사 순서대로 흉내 낸다. 회장 여부는 `fail_next("issue_budget", BudgetRevertReason.NOT_PRESIDENT)`로만 나고, 증액의 두 서명자가 같으면 `NOT_AUDITOR`다. 발행한 예산은 원장의 예산 판정과 이어져 있지 않다 — 원장 쪽은 여전히 `block_next`·`fail_next`로 지정한다. 대기열과 실패로 끝난 트랜잭션은 만들지 못해, 그 경로는 `tests/test_budget_relay.py`의 실제 체인 시험이 본다.
