@@ -35,6 +35,7 @@ def upgrade() -> None:
         # CHECK 제약 갱신 및 추가 (PRESIDENT_SIGNED 허용 및 Maker-Checker 규칙)
         batch_op.drop_constraint('ck_budget_rev_status', type_='check')
         batch_op.drop_constraint('ck_budget_rev_resolved', type_='check')
+        batch_op.drop_constraint('ck_budget_rev_amount', type_='check')
         batch_op.create_check_constraint(
             'ck_budget_rev_status',
             "status IN ('PENDING', 'PRESIDENT_SIGNED', 'APPROVED', 'REJECTED')"
@@ -42,6 +43,10 @@ def upgrade() -> None:
         batch_op.create_check_constraint(
             'ck_budget_rev_resolved',
             "status NOT IN ('APPROVED', 'REJECTED') OR (resolved_by IS NOT NULL AND resolved_at IS NOT NULL)"
+        )
+        batch_op.create_check_constraint(
+            'ck_budget_rev_amount',
+            "requested_amount > 0"
         )
         batch_op.create_check_constraint(
             'ck_budget_rev_pres_signed_fields',
@@ -115,6 +120,7 @@ def downgrade() -> None:
         batch_op.drop_constraint('ck_budget_rev_pres_aud_diff', type_='check')
         batch_op.drop_constraint('ck_budget_rev_req_pres_diff', type_='check')
         batch_op.drop_constraint('ck_budget_rev_pres_signed_fields', type_='check')
+        batch_op.drop_constraint('ck_budget_rev_amount', type_='check')
         batch_op.drop_constraint('ck_budget_rev_resolved', type_='check')
         batch_op.drop_constraint('ck_budget_rev_status', type_='check')
         batch_op.create_check_constraint(
@@ -124,6 +130,10 @@ def downgrade() -> None:
         batch_op.create_check_constraint(
             'ck_budget_rev_resolved',
             "status = 'PENDING' OR (resolved_by IS NOT NULL AND resolved_at IS NOT NULL)"
+        )
+        batch_op.create_check_constraint(
+            'ck_budget_rev_amount',
+            "requested_amount >= 0"
         )
         batch_op.drop_constraint('fk_budget_rev_president_signed_by', type_='foreignkey')
         batch_op.drop_constraint('fk_budget_rev_blocked_entry', type_='foreignkey')
