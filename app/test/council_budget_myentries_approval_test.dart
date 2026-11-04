@@ -6,9 +6,12 @@ import 'package:student_council_app/screens/council/budget_revision_screen.dart'
 import 'package:student_council_app/screens/council/correction_approval_screen.dart';
 import 'package:student_council_app/screens/council/expense_create_screen.dart';
 import 'package:student_council_app/screens/council/my_entries_screen.dart';
+import 'package:student_council_app/services/api_service.dart';
 
 /// 차단 안내 → 예산 개정 요청, 내 등록 현황, 정정 승인.
 void main() {
+  // 목업 화면 테스트 — 서버 없이 시연용 더미로 돈다. 실패 표시는 api_unavailable_test.dart 가 본다 (PRD v0.14 §7.3).
+  setUp(() => ApiService.useDemoData = true);
   Future<void> pump(WidgetTester tester, Widget home) async {
     tester.view.physicalSize = const Size(411, 2400);
     tester.view.devicePixelRatio = 1.0;

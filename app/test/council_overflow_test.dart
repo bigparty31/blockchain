@@ -6,6 +6,7 @@ import 'package:student_council_app/screens/council/correction_screen.dart';
 import 'package:student_council_app/screens/council/expense_create_screen.dart';
 import 'package:student_council_app/screens/council/income_create_screen.dart';
 import 'package:student_council_app/screens/council/inquiry_response_screen.dart';
+import 'package:student_council_app/services/api_service.dart';
 
 /// 총무·감사 화면이 좁은 폰·큰 글자에서 픽셀이 넘치지(RenderFlex overflow) 않는지 본다.
 ///
@@ -15,6 +16,8 @@ import 'package:student_council_app/screens/council/inquiry_response_screen.dart
 /// 좁은 폰(320·360dp)과 큰 글자(시스템 글자 크기 130%·150%)에서도 확인한다.
 /// 넘침은 Flutter 가 예외로 던지므로 `takeException` 으로 잡는다.
 void main() {
+  // 목업 화면 테스트 — 서버 없이 시연용 더미로 돈다. 실패 표시는 api_unavailable_test.dart 가 본다 (PRD v0.14 §7.3).
+  setUp(() => ApiService.useDemoData = true);
   const widths = [320.0, 360.0, 411.0];
   const scales = [1.0, 1.3, 1.5];
 

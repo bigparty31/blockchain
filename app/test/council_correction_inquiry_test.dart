@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:student_council_app/screens/council/correction_screen.dart';
 import 'package:student_council_app/screens/council/input_rules.dart';
 import 'package:student_council_app/screens/council/inquiry_response_screen.dart';
+import 'package:student_council_app/services/api_service.dart';
 
 /// 정정 화면은 **증감분**을 기록하고, 이의 답변은 **다시 답변할 수 없다**.
 ///
@@ -11,6 +12,8 @@ import 'package:student_council_app/screens/council/inquiry_response_screen.dart
 ///   (`core/entry_merge.dart`, HASHING 샘플 3 `-20000`). 새 총액을 보내면 금액이 두 배가 된다.
 /// - `IObjectionRegistry.answer` 는 이미 답변된 이의를 `ObjectionAlreadyAnswered` 로 거부한다.
 void main() {
+  // 목업 화면 테스트 — 서버 없이 시연용 더미로 돈다. 실패 표시는 api_unavailable_test.dart 가 본다 (PRD v0.14 §7.3).
+  setUp(() => ApiService.useDemoData = true);
   group('InputRules — 내역 ID · 올바른 금액', () {
     test('내역 ID 는 1 이상의 정수다 (0 은 「없음」으로 예약)', () {
       expect(InputRules.entryId('1'), isNull);

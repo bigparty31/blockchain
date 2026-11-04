@@ -41,10 +41,20 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
     _loadBudgets();
   }
 
+  /// 예산 잔량을 못 읽었다. 잔량 없이 항목만 보이고, 못 읽었다고 적는다.
+  bool _budgetsFailed = false;
+
   Future<void> _loadBudgets() async {
-    final budgets = await ApiService().fetchBudgets();
-    if (!mounted) return;
-    setState(() => _remaining = {for (final b in budgets) b.category: b.remainingAmount});
+    try {
+      final budgets = await ApiService().fetchBudgets();
+      if (!mounted) return;
+      setState(() {
+        _budgetsFailed = false;
+        _remaining = {for (final b in budgets) b.category: b.remainingAmount};
+      });
+    } on ApiUnavailable {
+      if (mounted) setState(() => _budgetsFailed = true);
+    }
   }
 
   String _budgetLabel(String category) {
@@ -121,10 +131,21 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
     setState(() => _submitting = true);
 
     // 목업: 서버 연동 전에는 예산 잔량으로 BLOCKED 를 흉내 낸다.
-    final result = await simulateExpenseRegistration(
-      category: _selectedBudgetCategory,
-      amount: int.parse(_amountController.text),
-    );
+    final RegistrationResult result;
+    try {
+      result = await simulateExpenseRegistration(
+        category: _selectedBudgetCategory,
+        amount: int.parse(_amountController.text),
+      );
+    } on ApiUnavailable catch (e) {
+      // 예산을 확인하지 못했으면 제출하지 않는다 — 통과로 간주하지 않는다.
+      if (!mounted) return;
+      setState(() => _submitting = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('${e.message} 제출하지 않았어요.'), behavior: SnackBarBehavior.floating),
+      );
+      return;
+    }
     if (!mounted) return;
     setState(() => _submitting = false);
     await _showResult(result);
@@ -319,6 +340,12 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
                   onChanged: (val) => setState(() => _selectedBudgetCategory = val!),
                 ),
               ),
+              if (_budgetsFailed)
+                const Padding(
+                  padding: EdgeInsets.only(top: 6, left: 4),
+                  child: Text('예산 잔량을 불러오지 못했어요.',
+                      key: Key('budgets_failed'), style: TextStyle(fontSize: 12, color: AppTheme.expense)),
+                ),
               const SizedBox(height: 14),
 
               // 날짜 선택

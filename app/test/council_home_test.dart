@@ -15,6 +15,9 @@ import 'package:student_council_app/services/api_service.dart';
 /// 기록을 만드는 사람과 확정하는 사람을 화면에서 가른다 — 총무 홈에는 승인·이의 답변이 없고,
 /// 감사·회장 홈에는 등록 메뉴가 없다. 승인 대기 건수 배지의 네 상태는 `council_pending_count_test.dart` 가 본다.
 void main() {
+  // 목업 화면 테스트 — 서버 없이 시연용 더미로 돈다. 실패 표시는 api_unavailable_test.dart 가 본다 (PRD v0.14 §7.3).
+  setUp(() => ApiService.useDemoData = true);
+
   /// 승인 대기 [pending] 건이 있는 `GET /entries` 서버.
   void serveEntries(int pending) {
     ApiService.client = MockClient((_) async => http.Response(

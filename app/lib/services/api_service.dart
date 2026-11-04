@@ -4,13 +4,38 @@ import '../core/api_config.dart';
 import '../models/balance_model.dart';
 import '../models/budget_model.dart';
 import '../models/entry_model.dart';
+import '../core/dev_flags.dart';
 import '../core/enums.dart';
 
+/// 서버에서 읽지 못했다 (연결 실패·200 이 아닌 응답·형식 오류). [what] 은 화면에 쓰는 대상 이름.
+class ApiUnavailable implements Exception {
+  final String what;
+  const ApiUnavailable(this.what);
+
+  String get message => '$what을(를) 불러오지 못했어요. 잠시 후 다시 시도해 주세요.';
+
+  @override
+  String toString() => 'ApiUnavailable: $what';
+}
+
 /// 백엔드 FastAPI 서버(backend/app/main.py)와의 통신 서비스
+///
+/// **조회가 실패하면 [ApiUnavailable] 을 던진다. 더미 값으로 덮지 않는다** (PRD v0.14 §7.3).
+/// 덮으면 서버가 죽어도 더미 건이 화면에 보이고, 임원이 그 건에 서명하게 된다.
+/// 시연용 더미는 개발 빌드(`DEV_TOOLS`)에서만 켠다 — [useDemoData].
 class ApiService {
   static final ApiService _instance = ApiService._internal();
   factory ApiService() => _instance;
   ApiService._internal();
+
+  /// 조회 실패 시 시연용 더미를 쓸지. 기본은 개발 빌드(`DEV_TOOLS`)에서만 켜진다.
+  /// 목업 화면 테스트처럼 더미가 필요한 곳은 직접 켠다.
+  static bool useDemoData = kDevTools;
+
+  /// 더미를 쓸 수 없으면 던진다.
+  static void _demoOrThrow(String what) {
+    if (!useDemoData) throw ApiUnavailable(what);
+  }
 
   /// HTTP 클라이언트. **테스트에서 갈아끼운다.**
   ///
@@ -31,7 +56,8 @@ class ApiService {
       }
     } catch (_) {}
 
-    // 서버 미구동 시 fallback 더미 (backend/app/routers/balance.py와 동일한 값)
+    // 서버 미구동 시 fallback 더미 (backend/app/routers/balance.py와 동일한 값) — 개발 빌드에서만
+    _demoOrThrow('장부 잔액');
     return BalanceModel(balance: 4965000, income: 5000000, expense: 35000);
   }
 
@@ -45,7 +71,8 @@ class ApiService {
       }
     } catch (_) {}
 
-    // 서버 미구동 시 fallback 더미 (backend/app/routers/budgets.py 기준)
+    // 서버 미구동 시 fallback 더미 (backend/app/routers/budgets.py 기준) — 개발 빌드에서만
+    _demoOrThrow('예산 목록');
     return [
       BudgetModel(
         id: 1,
@@ -73,7 +100,8 @@ class ApiService {
       }
     } catch (_) {}
 
-    // 서버 미구동 시 fallback 더미 (backend/app/routers/entries.py 기준)
+    // 서버 미구동 시 fallback 더미 (backend/app/routers/entries.py 기준) — 개발 빌드에서만
+    _demoOrThrow('내역');
     return [
       EntryModel(
         id: 1,

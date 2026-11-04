@@ -11,6 +11,9 @@ import 'package:student_council_app/services/api_service.dart';
 /// 사유 필수·KST 자정·BLOCKED 표시는 어기면 서버가 400 으로 거부하거나
 /// 서명 뒤 `HASH_MISMATCH` 로 되돌아오는 규칙이다 (docs/HASHING.md).
 void main() {
+  // 목업 화면 테스트 — 서버 없이 시연용 더미로 돈다. 실패 표시는 api_unavailable_test.dart 가 본다 (PRD v0.14 §7.3).
+  setUp(() => ApiService.useDemoData = true);
+
   group('InputRules — 한 줄 텍스트 (§1.1)', () {
     test('정상 입력은 통과한다', () {
       expect(InputRules.singleLine('한결문구', fieldName: '사용처'), isNull);
