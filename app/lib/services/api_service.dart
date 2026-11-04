@@ -12,10 +12,19 @@ class ApiService {
   factory ApiService() => _instance;
   ApiService._internal();
 
+  /// HTTP 클라이언트. **테스트에서 갈아끼운다.**
+  ///
+  /// 패키지 함수 `http.get` 을 직접 부르면 테스트가 실제 네트워크를 타고, 결과가
+  /// 「그 머신에 서버가 떠 있는지」에 따라 달라진다 (`student_api_service.dart`
+  /// 의 `client` 주석에 같은 사고가 적혀 있다).
+  static http.Client client = http.Client();
+
+  static const _timeout = Duration(seconds: 3);
+
   /// 1. GET /balance (장부 잔액 조회)
   Future<BalanceModel> fetchBalance() async {
     try {
-      final response = await http.get(Uri.parse(ApiConfig.balance)).timeout(const Duration(seconds: 3));
+      final response = await client.get(Uri.parse(ApiConfig.balance)).timeout(_timeout);
       if (response.statusCode == 200) {
         final Map<String, dynamic> data = jsonDecode(utf8.decode(response.bodyBytes));
         return BalanceModel.fromJson(data);
@@ -29,7 +38,7 @@ class ApiService {
   /// 2. GET /budgets (예산 편성 및 잔량 조회)
   Future<List<BudgetModel>> fetchBudgets() async {
     try {
-      final response = await http.get(Uri.parse(ApiConfig.budgets)).timeout(const Duration(seconds: 3));
+      final response = await client.get(Uri.parse(ApiConfig.budgets)).timeout(_timeout);
       if (response.statusCode == 200) {
         final List<dynamic> data = jsonDecode(utf8.decode(response.bodyBytes));
         return data.map((json) => BudgetModel.fromJson(json)).toList();
@@ -57,7 +66,7 @@ class ApiService {
   /// 3. GET /entries (수입·지출 내역 목록 조회)
   Future<List<EntryModel>> fetchEntries() async {
     try {
-      final response = await http.get(Uri.parse(ApiConfig.entries)).timeout(const Duration(seconds: 3));
+      final response = await client.get(Uri.parse(ApiConfig.entries)).timeout(_timeout);
       if (response.statusCode == 200) {
         final List<dynamic> data = jsonDecode(utf8.decode(response.bodyBytes));
         return data.map((json) => EntryModel.fromJson(json)).toList();
@@ -115,5 +124,40 @@ class ApiService {
         createdBy: 2,
       ),
     ];
+  }
+
+  /// 4. 승인 대기(`PENDING`) 건수. 총무·감사 홈의 배지가 쓴다.
+  ///
+  /// **못 읽으면 null 이다. 더미로 메우지 않는다.**
+  /// [fetchEntries] 는 서버가 없으면 더미를 돌려주는데, 그 더미에는 `PENDING` 이
+  /// 한 건 들어 있다. 그것을 세면 서버가 꺼져 있을 때 「대기 1건」이 뜬다 —
+  /// 고치려던 `'대기 3건'` 하드코딩과 같은 종류의 **지어낸 숫자**다.
+  ///
+  /// 0 과 null 도 구분해야 한다. 못 읽은 것을 0 으로 내리면 감사 화면에
+  /// 「대기 없음」이 떠서, 승인을 기다리는 지출이 있는데도 할 일이 없다고 읽는다
+  /// (학생 쪽 `_loadFailed`·`MembershipResult.failed` 와 같은 판단).
+  ///
+  /// `docs/enums.md` 에 없는 status 를 만나면 [EntryStatus.fromCode] 가 던진다.
+  /// 그 한 건 때문에 건수 전체를 잃지 않도록 항목 단위로 건너뛴다.
+  Future<int?> fetchPendingCount() async {
+    try {
+      final response = await client.get(Uri.parse(ApiConfig.entries)).timeout(_timeout);
+      if (response.statusCode != 200) return null;
+
+      final data = jsonDecode(utf8.decode(response.bodyBytes));
+      if (data is! List) return null;
+
+      var pending = 0;
+      for (final e in data) {
+        // 초안(status IS NULL)은 아직 체인에 올라가지 않아 승인 대상이 아니다.
+        if (e is! Map || e['status'] == null) continue;
+        try {
+          if (EntryStatus.fromCode(e['status'] as String) == EntryStatus.PENDING) pending++;
+        } catch (_) {}
+      }
+      return pending;
+    } catch (_) {
+      return null;
+    }
   }
 }

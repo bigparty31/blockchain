@@ -3,6 +3,7 @@ import '../../core/app_theme.dart';
 import '../../core/entry_merge.dart';
 import '../../core/enums.dart';
 import '../../core/format.dart';
+import '../../core/logout_action.dart';
 import '../../core/term_info.dart';
 import '../../models/budget_model.dart';
 import '../../models/entry_model.dart';
@@ -235,6 +236,7 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
           icon: const Icon(Icons.refresh_rounded),
           tooltip: '새로고침',
         ),
+        const LogoutAction(),
       ],
     );
   }

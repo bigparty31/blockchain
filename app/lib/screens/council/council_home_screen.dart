@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import '../../core/enums.dart';
 import '../../core/app_theme.dart';
+import '../../core/logout_action.dart';
+import '../../services/api_service.dart';
 import 'expense_create_screen.dart';
 import 'income_create_screen.dart';
 import 'approval_list_screen.dart';
@@ -10,9 +12,51 @@ import 'hardware_test_screen.dart';
 
 /// [이승호 담당: app/lib/screens/council/]
 /// 총무·감사·회장 역할별 맞춤 메인 대시보드 화면
-class CouncilHomeScreen extends StatelessWidget {
+class CouncilHomeScreen extends StatefulWidget {
   final UserRole role;
   const CouncilHomeScreen({super.key, this.role = UserRole.TREASURER});
+
+  @override
+  State<CouncilHomeScreen> createState() => _CouncilHomeScreenState();
+}
+
+/// 홈이 상태를 갖는 이유 — **승인 대기 건수는 계속 바뀐다.**
+///
+/// 총무가 지출을 등록하면 늘고, 다른 감사가 먼저 승인하면 줄어든다. 전에는
+/// `'대기 3건'` 이 문자열 상수로 박혀 있어서 0건이어도 3건이라고 말했다.
+///
+/// 작성지침 화면 14 의 「들어오는 경로」가 **"대시보드 상단 미답변 건수 배지"**
+/// 이므로 이의 미답변 건수도 여기 붙는다 — `GET /objections` 가 서버에 생기면
+/// [_load] 에 한 줄 더하는 자리다.
+class _CouncilHomeScreenState extends State<CouncilHomeScreen> {
+  UserRole get role => widget.role;
+
+  /// 승인 대기 건수. **null 은 0 이 아니라 「모름」이다** ([ApiService.fetchPendingCount]).
+  int? _pendingCount;
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    if (mounted) setState(() => _loading = true);
+    final count = await ApiService().fetchPendingCount();
+    if (!mounted) return;
+    setState(() {
+      _pendingCount = count;
+      _loading = false;
+    });
+  }
+
+  /// 승인 목록을 보고 돌아오면 다시 읽는다 — 승인하고 왔는데 숫자가 그대로면
+  /// 감사는 방금 처리한 건이 안 들어간 줄로 읽는다.
+  Future<void> _openAndReload(Widget screen) async {
+    await Navigator.push(context, MaterialPageRoute(builder: (_) => screen));
+    if (mounted) await _load();
+  }
 
   // [개발 참고: API 및 패키지 연동]
   // 1. 지출 등록: image_picker (영수증 촬영/OCR) · POST /entries
@@ -72,6 +116,20 @@ class CouncilHomeScreen extends StatelessWidget {
             pinned: true,
             backgroundColor: AppTheme.primary,
             foregroundColor: Colors.white,
+            // 임원 세션이 기기에 남은 채 다음 사람이 앱을 켜면 등록·승인 화면까지
+            // 열린다. 로그아웃은 학생 홈과 같은 위젯을 쓴다 (core/logout_action.dart)
+            actions: [
+              // 대기 건수는 다른 사람이 등록·승인하면 바뀐다. 갱신할 길이 없으면
+              // 감사는 낡은 숫자를 보고 이미 처리된 건에 서명을 보내 409 를 맞는다
+              // (작성지침 화면 12 「이미 처리됨」 프레임).
+              IconButton(
+                key: const Key('council_refresh'),
+                onPressed: _loading ? null : _load,
+                icon: const Icon(Icons.refresh_rounded),
+                tooltip: '새로고침',
+              ),
+              const LogoutAction(),
+            ],
             flexibleSpace: FlexibleSpaceBar(
               background: Container(
                 decoration: const BoxDecoration(gradient: AppTheme.headerGradient),
@@ -134,10 +192,9 @@ class CouncilHomeScreen extends StatelessWidget {
                     // 감사/회장: 승인 대기 목록 VIP 하이라이트 배너
                     _ApprovalHighlightBanner(
                       roleName: role == UserRole.AUDITOR ? '감사' : '학생회장',
-                      onTap: () => Navigator.push(
-                        context,
-                        MaterialPageRoute(builder: (_) => const ApprovalListScreen()),
-                      ),
+                      pendingCount: _pendingCount,
+                      loading: _loading,
+                      onTap: () => _openAndReload(const ApprovalListScreen()),
                     ),
                     const SizedBox(height: 20),
                   ] else ...[
@@ -286,7 +343,30 @@ class CouncilHomeScreen extends StatelessWidget {
 class _ApprovalHighlightBanner extends StatelessWidget {
   final String roleName;
   final VoidCallback onTap;
-  const _ApprovalHighlightBanner({required this.roleName, required this.onTap});
+  /// 승인 대기 건수. **null 은 「모름」이다** (조회 실패) — 0 건과 다르게 적는다.
+  final int? pendingCount;
+
+  /// 아직 읽는 중.
+  final bool loading;
+
+  const _ApprovalHighlightBanner({
+    required this.roleName,
+    required this.onTap,
+    required this.pendingCount,
+    required this.loading,
+  });
+
+  /// 배지 문구. 네 상태를 **모두 다르게** 적는다.
+  ///
+  /// 모름을 「대기 없음」으로 적으면 승인을 기다리는 지출이 있는데도 감사가
+  /// 할 일이 없다고 읽고 넘어간다. 그래서 못 읽은 것은 못 읽었다고 말한다.
+  String get _badgeLabel {
+    if (loading) return '확인 중';
+    final count = pendingCount;
+    if (count == null) return '확인 불가';
+    if (count == 0) return '대기 없음';
+    return '대기 $count건';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -335,7 +415,11 @@ class _ApprovalHighlightBanner extends StatelessWidget {
                     color: Colors.white,
                     borderRadius: BorderRadius.circular(20),
                   ),
-                  child: const Text('대기 3건', style: TextStyle(color: Color(0xFF8B5CF6), fontSize: 12, fontWeight: FontWeight.bold)),
+                  child: Text(
+                    _badgeLabel,
+                    key: const Key('approval_pending_badge'),
+                    style: const TextStyle(color: Color(0xFF8B5CF6), fontSize: 12, fontWeight: FontWeight.bold),
+                  ),
                 ),
               ],
             ),
