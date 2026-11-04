@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -9,6 +11,7 @@ import 'package:student_council_app/screens/council/council_home_screen.dart';
 import 'package:student_council_app/screens/council/expense_create_screen.dart';
 import 'package:student_council_app/screens/council/registration_result.dart';
 import 'package:student_council_app/services/api_service.dart';
+import 'package:student_council_app/services/auth_service.dart';
 
 /// **조회가 실패하면 실패로 보여 준다. 더미 값으로 덮지 않는다** (PRD v0.14 §7.3).
 ///
@@ -57,6 +60,65 @@ void main() {
         simulateExpenseRegistration(category: '행사비', amount: 1000),
         throwsA(isA<ApiUnavailable>()),
       );
+    });
+  });
+
+  group('401 · 403', () {
+    /// 가짜 서버로 로그인해 토큰을 갖게 한다 (`logout_test.dart` 와 같은 방식).
+    Future<void> login() async {
+      AuthService.store = MemoryTokenStore();
+      AuthService().resetAttempts();
+      http.Response json(Object body) =>
+          http.Response(jsonEncode(body), 200, headers: {'content-type': 'application/json; charset=utf-8'});
+      AuthService.client = MockClient((req) async => req.url.path == '/auth/login'
+          ? json({'access_token': 'token-auditor', 'token_type': 'bearer', 'role': 'AUDITOR', 'name': '감사'})
+          : json({'id': 3, 'student_no': '20240003', 'name': '감사', 'role': 'AUDITOR'}));
+      await AuthService().login('20240003', 'userPassword123!');
+    }
+
+    tearDown(() async {
+      AuthService().onUnauthorized = null;
+      await AuthService().logout();
+      AuthService.client = http.Client();
+    });
+
+    test('로그인 토큰을 붙여 보낸다', () async {
+      await login();
+      String? auth;
+      ApiService.client = MockClient((req) async {
+        auth = req.headers['Authorization'];
+        return http.Response('[]', 200);
+      });
+      await ApiService().fetchEntries();
+      expect(auth, 'Bearer token-auditor');
+    });
+
+    test('403 은 권한 없음이다 — 개발 빌드여도 더미로 메우지 않는다', () async {
+      ApiService.useDemoData = true;
+      ApiService.client = MockClient((_) async => http.Response('{}', 403));
+      await expectLater(
+        ApiService().fetchEntries(),
+        throwsA(isA<ApiForbidden>().having((e) => e.message, 'message', '이 작업을 할 권한이 없어요.')),
+      );
+      expect(await ApiService().fetchPendingCount(), isNull);
+    });
+
+    test('401 은 세션을 비우고 로그인 화면으로 보낸다', () async {
+      await login();
+      var sentToLogin = false;
+      AuthService().onUnauthorized = () => sentToLogin = true;
+      ApiService.useDemoData = true;
+      ApiService.client = MockClient((_) async => http.Response('{}', 401));
+
+      await expectLater(ApiService().fetchBudgets(), throwsA(isA<ApiUnauthorized>()));
+      expect(AuthService().session, isNull);
+      expect(sentToLogin, isTrue);
+    });
+
+    testWidgets('화면은 403 이유를 그대로 적는다', (tester) async {
+      ApiService.client = MockClient((_) async => http.Response('{}', 403));
+      await pump(tester, const CouncilHomeScreen(role: UserRole.TREASURER));
+      expect(find.text('이 작업을 할 권한이 없어요.'), findsOneWidget);
     });
   });
 

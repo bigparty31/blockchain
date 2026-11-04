@@ -52,20 +52,20 @@ class _BudgetRevisionScreenState extends State<BudgetRevisionScreen> {
     super.dispose();
   }
 
-  /// 예산 목록을 못 읽었다. 항목을 고를 수 없으니 요청도 보낼 수 없다 — 못 읽었다고 적는다.
-  bool _budgetsFailed = false;
+  /// 예산 목록을 못 읽은 이유. 항목을 고를 수 없으니 요청도 보낼 수 없다 — 이유를 적는다.
+  String? _budgetsError;
 
   Future<void> _loadBudgets() async {
     final List<BudgetModel> budgets;
     try {
       budgets = await ApiService().fetchBudgets();
-    } on ApiUnavailable {
-      if (mounted) setState(() => _budgetsFailed = true);
+    } on ApiUnavailable catch (e) {
+      if (mounted) setState(() => _budgetsError = e.message);
       return;
     }
     if (!mounted) return;
     setState(() {
-      _budgetsFailed = false;
+      _budgetsError = null;
       _budgets = budgets;
       _category ??= budgets.isEmpty ? null : budgets.first.category;
       // 차단 지출이 근거면 모자란 만큼을 기본 증액분으로 채워 둔다.
@@ -238,12 +238,12 @@ class _BudgetRevisionScreenState extends State<BudgetRevisionScreen> {
                 onChanged: (v) => setState(() => _category = v),
                 validator: (v) => v == null ? '예산 항목을 골라 주세요' : null,
               ),
-              if (_budgetsFailed)
+              if (_budgetsError != null)
                 Row(
                   children: [
-                    const Expanded(
-                      child: Text('예산 목록을 불러오지 못했어요.',
-                          key: Key('budgets_failed'), style: TextStyle(fontSize: 12, color: AppTheme.expense)),
+                    Expanded(
+                      child: Text(_budgetsError!,
+                          key: const Key('budgets_failed'), style: const TextStyle(fontSize: 12, color: AppTheme.expense)),
                     ),
                     TextButton(onPressed: _loadBudgets, child: const Text('다시 시도')),
                   ],

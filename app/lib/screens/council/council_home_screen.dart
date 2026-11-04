@@ -682,8 +682,8 @@ class _MyEntryStatus extends StatefulWidget {
 class _MyEntryStatusState extends State<_MyEntryStatus> {
   int? _pending, _rejected, _blocked;
 
-  /// 내역을 못 읽었다. 건수를 「-」로 두고 못 읽었다고 적는다 — 0 건으로 내리지 않는다.
-  bool _failed = false;
+  /// 내역을 못 읽은 이유. 건수를 「-」로 두고 이유를 적는다 — 0 건으로 내리지 않는다.
+  String? _error;
 
   @override
   void initState() {
@@ -697,13 +697,13 @@ class _MyEntryStatusState extends State<_MyEntryStatus> {
       if (!mounted) return;
       int count(EntryStatus st) => entries.where((e) => e.status == st).length;
       setState(() {
-        _failed = false;
+        _error = null;
         _pending = count(EntryStatus.PENDING);
         _rejected = count(EntryStatus.REJECTED);
         _blocked = count(EntryStatus.BLOCKED);
       });
-    } on ApiUnavailable {
-      if (mounted) setState(() => _failed = true);
+    } on ApiUnavailable catch (e) {
+      if (mounted) setState(() => _error = e.message);
     }
   }
 
@@ -731,10 +731,10 @@ class _MyEntryStatusState extends State<_MyEntryStatus> {
           chip('대기', _pending, AppTheme.pending),
           chip('반려', _rejected, AppTheme.expense),
           chip('차단', _blocked, AppTheme.textSub),
-          if (_failed)
-            const Text('내역을 불러오지 못했어요',
-                key: Key('my_entry_status_failed'),
-                style: TextStyle(fontSize: 12, color: AppTheme.expense)),
+          if (_error != null)
+            Text(_error!,
+                key: const Key('my_entry_status_failed'),
+                style: const TextStyle(fontSize: 12, color: AppTheme.expense)),
         ],
       ),
     );

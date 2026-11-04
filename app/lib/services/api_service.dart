@@ -6,6 +6,7 @@ import '../models/budget_model.dart';
 import '../models/entry_model.dart';
 import '../core/dev_flags.dart';
 import '../core/enums.dart';
+import 'auth_service.dart';
 
 /// 서버에서 읽지 못했다 (연결 실패·200 이 아닌 응답·형식 오류). [what] 은 화면에 쓰는 대상 이름.
 class ApiUnavailable implements Exception {
@@ -15,7 +16,23 @@ class ApiUnavailable implements Exception {
   String get message => '$what을(를) 불러오지 못했어요. 잠시 후 다시 시도해 주세요.';
 
   @override
-  String toString() => 'ApiUnavailable: $what';
+  String toString() => '$runtimeType: $what';
+}
+
+/// 401 — 로그인이 끝났다. [AuthService.reportUnauthorized] 가 로그인 화면으로 보낸다.
+class ApiUnauthorized extends ApiUnavailable {
+  const ApiUnauthorized(super.what);
+
+  @override
+  String get message => '로그인이 끝났어요. 다시 로그인해 주세요.';
+}
+
+/// 403 — 로그인은 됐지만 이 역할로는 할 수 없다 (예: 총무가 승인 목록을 부름).
+class ApiForbidden extends ApiUnavailable {
+  const ApiForbidden(super.what);
+
+  @override
+  String get message => '이 작업을 할 권한이 없어요.';
 }
 
 /// 백엔드 FastAPI 서버(backend/app/main.py)와의 통신 서비스
@@ -46,14 +63,31 @@ class ApiService {
 
   static const _timeout = Duration(seconds: 3);
 
+  /// GET + 로그인 토큰 ([AuthService.authHeaders]).
+  ///
+  /// 401·403 은 「서버가 없다」와 다르다 — **더미로 메우지 않고** 바로 던진다.
+  /// - 401: 세션이 끝났다. [AuthService.reportUnauthorized] 가 세션을 비우고 로그인 화면으로 보낸다.
+  /// - 403: 이 역할로는 볼 수 없다. 화면이 「권한이 없어요」를 띄운다.
+  static Future<http.Response> _get(String url, String what) async {
+    final res = await client.get(Uri.parse(url), headers: AuthService().authHeaders).timeout(_timeout);
+    if (res.statusCode == 401) {
+      await AuthService().reportUnauthorized();
+      throw ApiUnauthorized(what);
+    }
+    if (res.statusCode == 403) throw ApiForbidden(what);
+    return res;
+  }
+
   /// 1. GET /balance (장부 잔액 조회)
   Future<BalanceModel> fetchBalance() async {
     try {
-      final response = await client.get(Uri.parse(ApiConfig.balance)).timeout(_timeout);
+      final response = await _get(ApiConfig.balance, '장부 잔액');
       if (response.statusCode == 200) {
         final Map<String, dynamic> data = jsonDecode(utf8.decode(response.bodyBytes));
         return BalanceModel.fromJson(data);
       }
+    } on ApiUnavailable {
+      rethrow;
     } catch (_) {}
 
     // 서버 미구동 시 fallback 더미 (backend/app/routers/balance.py와 동일한 값) — 개발 빌드에서만
@@ -64,11 +98,13 @@ class ApiService {
   /// 2. GET /budgets (예산 편성 및 잔량 조회)
   Future<List<BudgetModel>> fetchBudgets() async {
     try {
-      final response = await client.get(Uri.parse(ApiConfig.budgets)).timeout(_timeout);
+      final response = await _get(ApiConfig.budgets, '예산 목록');
       if (response.statusCode == 200) {
         final List<dynamic> data = jsonDecode(utf8.decode(response.bodyBytes));
         return data.map((json) => BudgetModel.fromJson(json)).toList();
       }
+    } on ApiUnavailable {
+      rethrow;
     } catch (_) {}
 
     // 서버 미구동 시 fallback 더미 (backend/app/routers/budgets.py 기준) — 개발 빌드에서만
@@ -93,11 +129,13 @@ class ApiService {
   /// 3. GET /entries (수입·지출 내역 목록 조회)
   Future<List<EntryModel>> fetchEntries() async {
     try {
-      final response = await client.get(Uri.parse(ApiConfig.entries)).timeout(_timeout);
+      final response = await _get(ApiConfig.entries, '내역');
       if (response.statusCode == 200) {
         final List<dynamic> data = jsonDecode(utf8.decode(response.bodyBytes));
         return data.map((json) => EntryModel.fromJson(json)).toList();
       }
+    } on ApiUnavailable {
+      rethrow;
     } catch (_) {}
 
     // 서버 미구동 시 fallback 더미 (backend/app/routers/entries.py 기준) — 개발 빌드에서만
@@ -169,7 +207,8 @@ class ApiService {
   /// 그 한 건 때문에 건수 전체를 잃지 않도록 항목 단위로 건너뛴다.
   Future<int?> fetchPendingCount() async {
     try {
-      final response = await client.get(Uri.parse(ApiConfig.entries)).timeout(_timeout);
+      // 401·403 도 null(모름)이다. 401 이면 _get 이 이미 로그인 화면으로 보냈다.
+      final response = await _get(ApiConfig.entries, '승인 대기 건수');
       if (response.statusCode != 200) return null;
 
       final data = jsonDecode(utf8.decode(response.bodyBytes));

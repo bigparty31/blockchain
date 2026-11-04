@@ -41,19 +41,19 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
     _loadBudgets();
   }
 
-  /// 예산 잔량을 못 읽었다. 잔량 없이 항목만 보이고, 못 읽었다고 적는다.
-  bool _budgetsFailed = false;
+  /// 예산 잔량을 못 읽은 이유. 잔량 없이 항목만 보이고, 이유를 적는다.
+  String? _budgetsError;
 
   Future<void> _loadBudgets() async {
     try {
       final budgets = await ApiService().fetchBudgets();
       if (!mounted) return;
       setState(() {
-        _budgetsFailed = false;
+        _budgetsError = null;
         _remaining = {for (final b in budgets) b.category: b.remainingAmount};
       });
-    } on ApiUnavailable {
-      if (mounted) setState(() => _budgetsFailed = true);
+    } on ApiUnavailable catch (e) {
+      if (mounted) setState(() => _budgetsError = e.message);
     }
   }
 
@@ -340,11 +340,11 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
                   onChanged: (val) => setState(() => _selectedBudgetCategory = val!),
                 ),
               ),
-              if (_budgetsFailed)
-                const Padding(
-                  padding: EdgeInsets.only(top: 6, left: 4),
-                  child: Text('예산 잔량을 불러오지 못했어요.',
-                      key: Key('budgets_failed'), style: TextStyle(fontSize: 12, color: AppTheme.expense)),
+              if (_budgetsError != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 6, left: 4),
+                  child: Text(_budgetsError!,
+                      key: const Key('budgets_failed'), style: const TextStyle(fontSize: 12, color: AppTheme.expense)),
                 ),
               const SizedBox(height: 14),
 

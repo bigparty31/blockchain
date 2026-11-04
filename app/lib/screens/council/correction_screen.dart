@@ -39,14 +39,14 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
     ApiService().fetchBudgets().then((b) {
       if (mounted) setState(() => _budgets = b);
     }, onError: (Object e) {
-      // 예산 목록은 이름 표시와 재분류 대상 고르기에 쓴다. 못 읽었으면 재분류 칸에 그렇게 적는다.
+      // 예산 목록은 이름 표시와 재분류 대상 고르기에 쓴다. 못 읽었으면 재분류 칸에 이유를 적는다.
       if (e is! ApiUnavailable) throw e;
-      if (mounted) setState(() => _budgetsFailed = true);
+      if (mounted) setState(() => _budgetsError = e.message);
     });
   }
 
-  /// 예산 목록을 못 읽었다.
-  bool _budgetsFailed = false;
+  /// 예산 목록을 못 읽은 이유.
+  String? _budgetsError;
 
   String _budgetName(int? id) {
     for (final b in _budgets) {
@@ -496,11 +496,11 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
                   onChanged: (v) => setState(() => _newBudgetId = v),
                   validator: (v) => v == null ? '옮겨 갈 예산 항목을 골라 주세요' : null,
                 ),
-                if (_budgetsFailed)
-                  const Padding(
-                    padding: EdgeInsets.only(top: 6, left: 4),
-                    child: Text('예산 목록을 불러오지 못했어요.',
-                        key: Key('budgets_failed'), style: TextStyle(fontSize: 12, color: AppTheme.expense)),
+                if (_budgetsError != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6, left: 4),
+                    child: Text(_budgetsError!,
+                        key: const Key('budgets_failed'), style: const TextStyle(fontSize: 12, color: AppTheme.expense)),
                   ),
                 const SizedBox(height: 8),
                 Container(
