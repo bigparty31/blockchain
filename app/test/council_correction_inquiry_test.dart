@@ -52,7 +52,7 @@ void main() {
     }
 
     Finder amountField() => find.widgetWithText(TextFormField, '수정 후 올바른 금액(원) *');
-    Finder detailField() => find.widgetWithText(TextFormField, '정정 상세 사유 및 소명 내용 *');
+    Finder detailField() => find.widgetWithText(TextFormField, '정정 상세 사유 *');
 
     testWidgets('조회하면 현재 금액을 보여 주고, 올바른 금액을 넣으면 증감분을 계산한다', (tester) async {
       await pumpScreen(tester);
@@ -78,11 +78,11 @@ void main() {
       await tester.enterText(amountField(), '35000');
       await tester.enterText(detailField(), '영수증 재확인 결과 금액 그대로');
 
-      await tester.tap(find.text('정정 신청 제출하기'));
+      await tester.tap(find.text('정정 제출하기'));
       await tester.pumpAndSettle();
 
       expect(find.textContaining('현재 금액과 같아요'), findsOneWidget);
-      expect(find.text('정정 신청 접수 완료!'), findsNothing);
+      expect(find.text('정정 등록 완료!'), findsNothing);
     });
 
     testWidgets('정정 상세 사유는 비거나 공백만 있으면 안 된다', (tester) async {
@@ -92,10 +92,10 @@ void main() {
 
       for (final blank in ['', '  \n\t ']) {
         await tester.enterText(detailField(), blank);
-        await tester.tap(find.text('정정 신청 제출하기'));
+        await tester.tap(find.text('정정 제출하기'));
         await tester.pumpAndSettle();
         expect(find.textContaining('상세 사유를 입력해 주세요'), findsOneWidget, reason: '"$blank"');
-        expect(find.text('정정 신청 접수 완료!'), findsNothing);
+        expect(find.text('정정 등록 완료!'), findsNothing);
       }
     });
 
@@ -105,12 +105,66 @@ void main() {
       await tester.enterText(amountField(), '30000');
       await tester.enterText(detailField(), '실제 영수증 확인 결과 금액 정정');
 
-      await tester.tap(find.text('정정 신청 제출하기'));
+      await tester.tap(find.text('정정 제출하기'));
       await tester.pumpAndSettle();
 
-      expect(find.text('정정 신청 접수 완료!'), findsOneWidget);
+      expect(find.text('정정 등록 완료!'), findsOneWidget);
       expect(find.text('금액 변경: ₩ 35,000 → ₩ 30,000'), findsOneWidget);
       expect(find.text('기록되는 정정 금액: -₩ 5,000'), findsOneWidget, reason: '기록되는 정정 금액은 증감분');
+    });
+
+    Future<void> chooseReclassify(WidgetTester tester) async {
+      // 예산 목록(GET /budgets → 서버가 없으면 예시 데이터)이 실제 시간으로 도착할 때까지 기다린다
+      for (var i = 0; i < 30; i++) {
+        await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 100)));
+        await tester.pump();
+        if (find.textContaining('예산 #').evaluate().isEmpty) break;
+      }
+      await tester.ensureVisible(find.textContaining('재분류'));
+      await tester.tap(find.textContaining('재분류'));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('재분류를 고르면 금액 대신 새 예산 항목을 고르고, 정정 2건이 미리 보인다', (tester) async {
+      await pumpScreen(tester);
+      await lookup(tester, '1'); // #1 은 사업비 35,000원
+      await chooseReclassify(tester);
+      expect(find.text('수정 후 올바른 금액(원) *'), findsNothing);
+      expect(find.text('새 예산 항목 *'), findsOneWidget);
+      expect(find.textContaining('① 새 예산 +₩ 35,000 (먼저)'), findsOneWidget);
+      expect(find.textContaining('② 사업비 -₩ 35,000 (나중)'), findsOneWidget);
+    });
+
+    testWidgets('새 예산 항목을 고르지 않으면 제출되지 않는다', (tester) async {
+      await pumpScreen(tester);
+      await lookup(tester, '1');
+      await chooseReclassify(tester);
+      await tester.enterText(detailField(), '예산 항목을 잘못 골랐어요');
+      await tester.ensureVisible(find.text('정정 제출하기'));
+      await tester.tap(find.text('정정 제출하기'));
+      await tester.pumpAndSettle();
+      expect(find.text('옮겨 갈 예산 항목을 골라 주세요'), findsOneWidget);
+      expect(find.text('재분류 정정 2건 등록 완료!'), findsNothing);
+    });
+
+    testWidgets('새 예산을 고르면 +/− 정정 2건이 등록되고, 원래 예산은 후보에서 빠진다', (tester) async {
+      await pumpScreen(tester);
+      await lookup(tester, '1');
+      await chooseReclassify(tester);
+      await tester.ensureVisible(find.byType(DropdownButtonFormField<int>));
+      await tester.tap(find.byType(DropdownButtonFormField<int>));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('사업비 · 잔량'), findsNothing, reason: '원래 예산(사업비)은 고를 수 없다');
+      await tester.tap(find.textContaining('행사비 · 잔량').last);
+      await tester.pumpAndSettle();
+      await tester.enterText(detailField(), '예산 항목을 잘못 골랐어요');
+      await tester.ensureVisible(find.text('정정 제출하기'));
+      await tester.tap(find.text('정정 제출하기'));
+      await tester.pumpAndSettle();
+      expect(find.text('재분류 정정 2건 등록 완료!'), findsOneWidget);
+      expect(find.textContaining('행사비 +₩ 35,000'), findsNWidgets(2), reason: '미리보기 + 완료 다이얼로그');
+      expect(find.textContaining('사업비 -₩ 35,000'), findsNWidgets(2));
+      expect(find.text('정정 등록 완료!'), findsNothing, reason: '1건짜리 정정으로 올라가면 안 된다');
     });
 
     testWidgets('확정되지 않은 내역·없는 내역은 정정 대상이 될 수 없다', (tester) async {
@@ -130,10 +184,10 @@ void main() {
       await tester.enterText(find.widgetWithText(TextFormField, '정정 대상 내역 ID (Entry ID) *'), '1');
       await tester.enterText(amountField(), '30000');
       await tester.enterText(detailField(), '금액 정정');
-      await tester.tap(find.text('정정 신청 제출하기'));
+      await tester.tap(find.text('정정 제출하기'));
       await tester.pumpAndSettle();
       expect(find.textContaining('먼저 [내역 조회]'), findsOneWidget);
-      expect(find.text('정정 신청 접수 완료!'), findsNothing);
+      expect(find.text('정정 등록 완료!'), findsNothing);
 
       await lookup(tester, '1');
       expect(find.textContaining('현재 금액 ₩ 35,000'), findsOneWidget);
@@ -175,7 +229,7 @@ void main() {
       await tester.tap(find.text('답변 등록'));
       await tester.pumpAndSettle();
       expect(find.text('답변을 입력해 주세요'), findsOneWidget);
-      expect(find.textContaining('소명 답변이 등록되었습니다'), findsNothing);
+      expect(find.textContaining('답변이 등록되었습니다'), findsNothing);
     });
 
     testWidgets('답변하면 완료로 바뀌고 다시 답변할 수 없다', (tester) async {
@@ -187,7 +241,7 @@ void main() {
       await tester.tap(find.text('답변 등록'));
       await tester.pumpAndSettle();
 
-      expect(find.textContaining('소명 답변이 등록되었습니다'), findsOneWidget);
+      expect(find.textContaining('답변이 등록되었습니다'), findsOneWidget);
       expect(find.text('답변 작성하기'), findsNothing, reason: '답변한 이의에는 다시 답변할 수 없다');
       expect(find.text('답변은 블록체인에 기록되어 수정할 수 없어요'), findsNWidgets(2));
     });

@@ -3,11 +3,12 @@ import '../../core/entry_merge.dart';
 import '../../core/enums.dart';
 import '../../core/app_theme.dart';
 import '../../core/format.dart';
+import '../../models/budget_model.dart';
 import '../../services/api_service.dart';
 import 'input_rules.dart';
 
 /// [이승호 담당: app/lib/screens/council/]
-/// 4. 정정 신청 화면
+/// 4. 정정 등록 화면 (스토리보드 10)
 class CorrectionScreen extends StatefulWidget {
   const CorrectionScreen({super.key});
 
@@ -23,6 +24,27 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
 
   CorrectionReason _selectedReason = CorrectionReason.INPUT_ERROR;
   bool _hasCorrectionReceipt = false;
+
+  /// 재분류에서 옮겨 갈 예산. 예산 목록은 `GET /budgets` (서버가 없으면 예시 데이터).
+  List<BudgetModel> _budgets = const [];
+  int? _newBudgetId;
+
+  bool get _isReclassify => _selectedReason == CorrectionReason.RECLASSIFY;
+
+  @override
+  void initState() {
+    super.initState();
+    ApiService().fetchBudgets().then((b) {
+      if (mounted) setState(() => _budgets = b);
+    });
+  }
+
+  String _budgetName(int? id) {
+    for (final b in _budgets) {
+      if (b.id == id) return b.category;
+    }
+    return id == null ? '예산 없음' : '예산 #$id';
+  }
 
   /// 조회한 정정 대상(정정 체인). 조회 전이거나 정정할 수 없으면 null.
   EntryChain? _target;
@@ -116,10 +138,78 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
     super.dispose();
   }
 
+  /// 재분류 — 정정 2건으로 올린다 (PRD §4.4). 새 예산에 증액(+)을 **먼저**, 원래 예산에 감액(−)을 **나중에**
+  /// 확정한다. 순서는 서버가 강제하고, 둘 중 하나만 확정된 동안은 「재분류 진행 중」으로 보인다.
+  void _submitReclassify() {
+    final target = _target!;
+    final amount = target.finalAmount;
+    final from = target.original.budgetId;
+    showDialog(
+      context: context,
+      builder: (ctx) => Dialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 60,
+                height: 60,
+                decoration: BoxDecoration(color: AppTheme.pending.withOpacity(0.12), shape: BoxShape.circle),
+                child: const Icon(Icons.swap_horiz_rounded, color: AppTheme.pending, size: 28),
+              ),
+              const SizedBox(height: 16),
+              const Text('재분류 정정 2건 등록 완료!',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: AppTheme.textMain),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 12),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(color: AppTheme.bgPage, borderRadius: BorderRadius.circular(12)),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _InfoRow(label: '대상 내역', value: '#${target.original.id} ${target.original.counterparty}'),
+                    _InfoRow(label: '① 먼저', value: '${_budgetName(_newBudgetId)} ${_signed(amount)}'),
+                    _InfoRow(label: '② 나중', value: '${_budgetName(from)} ${_signed(-amount)}'),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Text('① 이 확정된 뒤에만 ② 를 승인할 수 있어요. 순서는 서버가 확인해요. 한쪽만 확정된 동안은 「재분류 진행 중」으로 표시돼요.',
+                style: TextStyle(color: AppTheme.textSub, fontSize: 12, height: 1.4),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 4),
+              const Text('※ 서버 연동 전 목업 결과예요', style: TextStyle(color: AppTheme.textSub, fontSize: 11)),
+              const SizedBox(height: 16),
+              SizedBox(
+                width: double.infinity,
+                child: GradientButton(
+                  onPressed: () { Navigator.pop(ctx); Navigator.pop(context); },
+                  label: '확인',
+                  icon: Icons.check_rounded,
+                  gradient: const LinearGradient(colors: [Color(0xFFF59E0B), Color(0xFFEF4444)]),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   void _submitCorrection() {
     final valid = _formKey.currentState!.validate();
     if (_target == null) {
       setState(() => _targetError ??= '먼저 [내역 조회] 로 정정할 내역을 확인해 주세요.');
+      return;
+    }
+    if (_isReclassify) {
+      if (valid) _submitReclassify();
       return;
     }
     if (valid) {
@@ -144,7 +234,7 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
                   child: const Icon(Icons.send_rounded, color: AppTheme.pending, size: 28),
                 ),
                 const SizedBox(height: 16),
-                const Text('정정 신청 접수 완료!',
+                const Text('정정 등록 완료!',
                   style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: AppTheme.textMain),
                 ),
                 const SizedBox(height: 12),
@@ -202,7 +292,7 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
     return Scaffold(
       backgroundColor: AppTheme.bgPage,
       appBar: AppBar(
-        title: const Text('장부 정정 신청', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white)),
+        title: const Text('정정 등록', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white)),
         flexibleSpace: Container(
           decoration: const BoxDecoration(
             gradient: LinearGradient(
@@ -342,7 +432,7 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Text(reason.label,
+                                Text(reason == CorrectionReason.RECLASSIFY ? '${reason.label} (정정 2건)' : reason.label,
                                   style: TextStyle(
                                     fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
                                     color: isSelected ? AppTheme.textMain : AppTheme.textMain,
@@ -370,24 +460,22 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
               _SectionLabel(label: '정정 내용'),
               const SizedBox(height: 12),
 
-              TextFormField(
-                controller: _correctedAmountController,
-                keyboardType: TextInputType.number,
-                decoration: AppTheme.inputDecoration(
-                  label: '수정 후 올바른 금액(원) *',
-                  hint: '예: 30000 (현재 금액과의 차이가 정정 금액으로 기록돼요)',
-                  icon: Icons.price_change_rounded,
+              if (_isReclassify) ...[
+                DropdownButtonFormField<int>(
+                  value: _newBudgetId,
+                  isExpanded: true,
+                  decoration: AppTheme.inputDecoration(
+                    label: '새 예산 항목 *',
+                    hint: '옮겨 갈 예산 항목을 고르세요',
+                    icon: Icons.swap_horiz_rounded,
+                  ),
+                  items: _budgets
+                      .where((b) => b.id != _target?.original.budgetId)
+                      .map((b) => DropdownMenuItem(value: b.id, child: Text('${b.category} · 잔량 ${Fmt.won(b.remainingAmount)}', overflow: TextOverflow.ellipsis)))
+                      .toList(),
+                  onChanged: (v) => setState(() => _newBudgetId = v),
+                  validator: (v) => v == null ? '옮겨 갈 예산 항목을 골라 주세요' : null,
                 ),
-                onChanged: (_) => setState(() {}),
-                validator: (v) {
-                  final format = InputRules.nonNegativeAmount(v, fieldName: '올바른 금액');
-                  if (format != null) return format;
-                  // 정정 항목의 금액(증감분)은 0 일 수 없다 (컨트랙트 ZeroAmount).
-                  if (_delta == 0) return '현재 금액과 같아요. 금액이 바뀌지 않는 정정은 기록할 수 없어요.';
-                  return null;
-                },
-              ),
-              if (_delta != null && _delta != 0) ...[
                 const SizedBox(height: 8),
                 Container(
                   padding: const EdgeInsets.all(12),
@@ -397,11 +485,47 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
                     border: Border.all(color: AppTheme.divider),
                   ),
                   child: Text(
-                    '기록되는 정정 금액: ${_signed(_delta!)}\n'
-                    '(현재 ${Fmt.won(_target!.finalAmount)} → 올바른 ${Fmt.won(_correctedAmount!)}, 증감분만 새 항목으로 기록돼요)',
+                    _target == null
+                        ? '먼저 정정할 내역을 조회해 주세요.'
+                        : '정정 2건이 등록돼요.\n① ${_newBudgetId == null ? '새 예산' : _budgetName(_newBudgetId)} ${_signed(_target!.finalAmount)} (먼저)\n'
+                            '② ${_budgetName(_target!.original.budgetId)} ${_signed(-_target!.finalAmount)} (나중)',
                     style: const TextStyle(fontSize: 12, height: 1.5, color: AppTheme.textMain),
                   ),
                 ),
+              ] else ...[
+                TextFormField(
+                  controller: _correctedAmountController,
+                  keyboardType: TextInputType.number,
+                  decoration: AppTheme.inputDecoration(
+                    label: '수정 후 올바른 금액(원) *',
+                    hint: '예: 30000 (현재 금액과의 차이가 정정 금액으로 기록돼요)',
+                    icon: Icons.price_change_rounded,
+                  ),
+                  onChanged: (_) => setState(() {}),
+                  validator: (v) {
+                    final format = InputRules.nonNegativeAmount(v, fieldName: '올바른 금액');
+                    if (format != null) return format;
+                    // 정정 항목의 금액(증감분)은 0 일 수 없다 (컨트랙트 ZeroAmount).
+                    if (_delta == 0) return '현재 금액과 같아요. 금액이 바뀌지 않는 정정은 기록할 수 없어요.';
+                    return null;
+                  },
+                ),
+                if (_delta != null && _delta != 0) ...[
+                  const SizedBox(height: 8),
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: AppTheme.bgPage,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: AppTheme.divider),
+                    ),
+                    child: Text(
+                      '기록되는 정정 금액: ${_signed(_delta!)}\n'
+                      '(현재 ${Fmt.won(_target!.finalAmount)} → 올바른 ${Fmt.won(_correctedAmount!)}, 증감분만 새 항목으로 기록돼요)',
+                      style: const TextStyle(fontSize: 12, height: 1.5, color: AppTheme.textMain),
+                    ),
+                  ),
+                ],
               ],
               const SizedBox(height: 14),
 
@@ -409,7 +533,7 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
                 controller: _detailController,
                 maxLines: 4,
                 decoration: AppTheme.inputDecoration(
-                  label: '정정 상세 사유 및 소명 내용 *',
+                  label: '정정 상세 사유 *',
                   hint: '예: 실제 영수증 확인 결과 부가세 포함 금액 정정 요청',
                   icon: Icons.notes_rounded,
                 ),
@@ -489,7 +613,7 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
 
               GradientButton(
                 onPressed: _submitCorrection,
-                label: '정정 신청 제출하기',
+                label: '정정 제출하기',
                 icon: Icons.send_rounded,
                 gradient: const LinearGradient(
                   colors: [Color(0xFFF59E0B), Color(0xFFEF4444)],
