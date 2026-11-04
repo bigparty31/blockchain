@@ -7,9 +7,18 @@ import '../../services/api_service.dart';
 ///
 /// 예산 초과·마감·미존재는 revert 가 아니라 **`BLOCKED` 로 저장**된다
 /// (`IAccountingLedger`). 서버는 제출 응답에 `status` 와 `block_reason` 을 담아 준다.
+///
+/// 등록은 두 단계다 (RELAY §1). ① 초안 저장 — 서버 DB 에만 있고 체인에는 없다.
+/// ② 제출 — 서명해 체인에 올리면 `PENDING` 또는 `BLOCKED`. 초안은 상태값이 아니라
+/// 단계라서 [status] 가 `null` 이다.
 class RegistrationResult {
-  final EntryStatus status; // PENDING | BLOCKED
+  final EntryStatus? status; // 초안 null | PENDING | BLOCKED
   final BlockReason? blockReason; // BLOCKED 일 때만
+
+  /// ① 초안 저장 — 아직 체인에 올라가지 않았다.
+  const RegistrationResult.draft()
+      : status = null,
+        blockReason = null;
 
   const RegistrationResult.pending()
       : status = EntryStatus.PENDING,
@@ -19,6 +28,7 @@ class RegistrationResult {
       : status = EntryStatus.BLOCKED,
         blockReason = reason;
 
+  bool get isDraft => status == null;
   bool get isBlocked => status == EntryStatus.BLOCKED;
 }
 
@@ -44,7 +54,7 @@ Future<RegistrationResult> simulateExpenseRegistration({
   return const RegistrationResult.pending();
 }
 
-/// 등록 결과 다이얼로그. `PENDING` 이면 true(화면을 닫아도 됨), `BLOCKED` 면 false(입력 화면에 남음).
+/// 등록 결과 다이얼로그. 초안·`PENDING` 이면 true(화면을 닫아도 됨), `BLOCKED` 면 false(입력 화면에 남음).
 Future<bool> showRegistrationResultDialog(
   BuildContext context, {
   required String kindLabel, // '지출' | '수입'
@@ -57,6 +67,7 @@ Future<bool> showRegistrationResultDialog(
     context: context,
     builder: (ctx) {
       final blocked = result.isBlocked;
+      final draft = result.isDraft;
       final accent = blocked ? AppTheme.expense : gradient.colors.first;
       return Dialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
@@ -69,10 +80,10 @@ Future<bool> showRegistrationResultDialog(
                 width: 60,
                 height: 60,
                 decoration: BoxDecoration(color: accent.withOpacity(0.12), shape: BoxShape.circle),
-                child: Icon(blocked ? Icons.block_rounded : Icons.check_rounded, color: accent, size: 30),
+                child: Icon(blocked ? Icons.block_rounded : draft ? Icons.edit_note_rounded : Icons.check_rounded, color: accent, size: 30),
               ),
               const SizedBox(height: 16),
-              Text(blocked ? '$kindLabel 등록이 차단되었어요' : '$kindLabel 등록 완료!',
+              Text(blocked ? '$kindLabel 등록이 차단되었어요' : draft ? '$kindLabel 초안 저장 완료' : '$kindLabel 제출 완료!',
                 style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: AppTheme.textMain),
               ),
               const SizedBox(height: 12),
@@ -130,8 +141,13 @@ Future<bool> showRegistrationResultDialog(
                     ],
                   ),
                 ),
-              ] else
-                const Text('PENDING 상태로 등록되었습니다',
+              ] else if (draft)
+                const Text('초안으로만 저장했어요. 아직 제출 전이라 체인에 기록되지 않았고, 제출해야 승인 대기에 올라가요',
+                  style: TextStyle(color: AppTheme.textSub, fontSize: 13, height: 1.4),
+                  textAlign: TextAlign.center,
+                )
+              else
+                const Text('제출했어요. PENDING 상태로 체인에 기록되었습니다',
                   style: TextStyle(color: AppTheme.textSub, fontSize: 13),
                 ),
               if (occurredAtNote != null) ...[

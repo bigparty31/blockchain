@@ -379,6 +379,38 @@ def test_ocr_duplication_conflict(auth_header):
     assert "이미 등록된 영수증입니다" in res.json()["detail"]
 
 
+def test_create_income_with_budget_returns_400(auth_header):
+    """수입(INCOME) 내역에는 예산을 연결할 수 없으며 400 Bad Request가 반환되어야 함 (ck_entries_income_no_budget)"""
+    income_with_budget = {
+        "term_id": 1,
+        "kind": "INCOME",
+        "amount": 50000,
+        "counterparty": "학생회비납부자",
+        "purpose": "학생회비 납부",
+        "budget_id": 1,
+        "occurred_at": 1788793200,
+    }
+    res = client.post("/entries", json=income_with_budget, headers=auth_header(Role.TREASURER))
+    assert res.status_code == 400
+    assert "수입 내역에는 예산을 연결할 수 없습니다" in res.json()["detail"]
+
+
+def test_create_income_without_budget_succeeds(auth_header):
+    """수입(INCOME) 내역에 예산이 없으면 정상적으로 201 Created 초안 등록 성공해야 함"""
+    income_without_budget = {
+        "term_id": 1,
+        "kind": "INCOME",
+        "amount": 50000,
+        "counterparty": "학생회비납부자",
+        "purpose": "학생회비 납부",
+        "budget_id": None,
+        "occurred_at": 1788793200,
+    }
+    res = client.post("/entries", json=income_without_budget, headers=auth_header(Role.TREASURER))
+    assert res.status_code == 201
+    assert "id" in res.json()
+
+
 # ---------------------------------------------------------------- 역할 권한 검사
 
 DRAFT_BODY = {
@@ -938,3 +970,77 @@ def test_confirm_when_chain_unavailable_on_get_entry_returns_503(auth_header, mo
     assert res.status_code == 503
     assert "블록체인 네트워크와 통신할 수 없습니다." in res.json()["detail"]
 
+
+# ---------------------------------------------------------------- 문자열 길이 제한 (DB VARCHAR 정합성)
+
+
+def test_create_entry_counterparty_max_length(auth_header):
+    """counterparty(DB VARCHAR(100)) 길이 검증 — NFC·앞뒤 공백 제거 기준 100자 이하 허용, 101자 이상 422 차단"""
+    import unicodedata
+
+    base_body = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 10000,
+        "purpose": "상호명 길이 검증",
+        "budget_id": 2,
+        "occurred_at": 1788793200,
+    }
+
+    # 1. 정확히 100자 -> 201 통과
+    res_100 = client.post(
+        "/entries",
+        json={**base_body, "counterparty": "가" * 100},
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_100.status_code == 201
+
+    # 2. 앞뒤 공백 포함 104자이나 정본화 후 100자 -> 201 통과
+    res_padded = client.post(
+        "/entries",
+        json={**base_body, "counterparty": "  " + ("나" * 100) + "  "},
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_padded.status_code == 201
+
+    # 3. NFD 조합형 한글 100음절(코드포인트 300개)이나 NFC 정본화 후 100자 -> 201 통과
+    nfd_100 = unicodedata.normalize("NFD", "한" * 100)
+    assert len(nfd_100) > 100
+    res_nfd = client.post(
+        "/entries",
+        json={**base_body, "counterparty": nfd_100},
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_nfd.status_code == 201
+
+    # 4. 101자 -> 422 차단 (Postgres DataError -> 503 방지)
+    res_101 = client.post(
+        "/entries",
+        json={**base_body, "counterparty": "가" * 101},
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_101.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("receipt_path", "/" + "a" * 255),
+        ("receipt_hash", "0x" + "a" * 65),
+        ("ocr_approval_no", "1" * 51),
+    ],
+)
+def test_create_entry_optional_string_max_lengths(auth_header, field, value):
+    """기타 DB VARCHAR 컬럼(receipt_path 255, receipt_hash 66, ocr_approval_no 50) 초과 시 422 차단"""
+    body = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 10000,
+        "counterparty": "길이검증점",
+        "purpose": "부가 문자열 길이 검증",
+        "budget_id": 2,
+        "occurred_at": 1788793200,
+        field: value,
+    }
+    res = client.post("/entries", json=body, headers=auth_header(Role.TREASURER))
+    assert res.status_code == 422

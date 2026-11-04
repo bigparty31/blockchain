@@ -150,9 +150,24 @@ void main() {
         await pump(tester, const ExpenseCreateScreen());
         await tester.tap(find.text('영수증 촬영 또는 사진 첨부')); // 목업 자동 입력: 35,000원 · 행사비
         await tester.pumpAndSettle();
-        await tester.tap(find.text('지출 등록 신청하기'));
-        await waitFor(tester, find.text('지출 등록 완료!'));
-        expect(find.text('지출 등록 완료!'), findsOneWidget);
+        await tester.tap(find.text('제출하기'));
+        await waitFor(tester, find.text('지출 제출 완료!'));
+        expect(find.text('지출 제출 완료!'), findsOneWidget);
+        final ex = tester.takeException();
+        expect(ex, isNull, reason: '넘침: $ex');
+      });
+
+      testWidgets('지출 초안 저장은 체인 검사 없이 초안 다이얼로그 · $label', (tester) async {
+        await pump(tester, const ExpenseCreateScreen());
+        await tester.tap(find.text('영수증 촬영 또는 사진 첨부'));
+        await tester.pumpAndSettle();
+        // 예산을 넘는 금액이어도 초안은 BLOCKED 가 아니다 — 체인에 올리지 않았기 때문
+        await tester.enterText(find.widgetWithText(TextFormField, '지출 금액(원) *'), '3000000000');
+        await tester.ensureVisible(find.text('초안으로 저장'));
+        await tester.tap(find.text('초안으로 저장'));
+        await waitFor(tester, find.text('지출 초안 저장 완료'));
+        expect(find.text('지출 초안 저장 완료'), findsOneWidget);
+        expect(find.text('지출 등록이 차단되었어요'), findsNothing);
         final ex = tester.takeException();
         expect(ex, isNull, reason: '넘침: $ex');
       });
@@ -162,7 +177,7 @@ void main() {
         await tester.tap(find.text('영수증 촬영 또는 사진 첨부'));
         await tester.pumpAndSettle();
         await tester.enterText(find.widgetWithText(TextFormField, '지출 금액(원) *'), '3000000000');
-        await tester.tap(find.text('지출 등록 신청하기'));
+        await tester.tap(find.text('제출하기'));
         await waitFor(tester, find.text('지출 등록이 차단되었어요'));
         expect(find.text('지출 등록이 차단되었어요'), findsOneWidget);
         final ex = tester.takeException();

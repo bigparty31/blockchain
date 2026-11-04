@@ -188,7 +188,14 @@ async def create_entry(
             detail="occurred_at은 사용일의 KST 자정(00:00:00 KST) Unix timestamp 초 단위여야 합니다.",
         )
 
-    # 4. 영수증 중복 검사 (DB)
+    # 4. 수입 내역 예산 연결 차단 (DB 제약 ck_entries_income_no_budget 사전 검증)
+    if entry.kind == EntryKind.INCOME and entry.budget_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="수입 내역에는 예산을 연결할 수 없습니다.",
+        )
+
+    # 5. 영수증 중복 검사 (DB)
     if entry.ocr_approval_no and entry.ocr_paid_at:
         try:
             existing_db = (
@@ -213,7 +220,7 @@ async def create_entry(
                 detail=f"이미 등록된 영수증입니다 (내역 ID: {existing_db.id}, 승인번호: {entry.ocr_approval_no}).",
             )
 
-    # 5. meta_hash 계산
+    # 6. meta_hash 계산
     computed_meta_hash = calculate_meta_hash(
         amount=entry.amount,
         counterparty=canonical_counterparty,
@@ -222,7 +229,7 @@ async def create_entry(
         receipt_hash=entry.receipt_hash,
     )
 
-    # 6. DB 초안 생성 (쓰기 경로는 실제 DB 전용)
+    # 7. DB 초안 생성 (쓰기 경로는 실제 DB 전용)
     try:
         db_entry = DBEntry(
             term_id=entry.term_id,

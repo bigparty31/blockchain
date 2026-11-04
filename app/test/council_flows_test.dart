@@ -147,7 +147,7 @@ void main() {
     testWidgets('OCR 경고가 있는 항목은 사유 없이 승인할 수 없다', (tester) async {
       await pumpScreen(tester);
 
-      expect(find.textContaining('경고 무시 사유가 필요해요'), findsOneWidget);
+      expect(find.textContaining('경고 무시 사유가 필요해요'), findsNWidgets(2)); // OCR 1건 + 카테고리 1건
 
       // 경고 항목은 목록의 세 번째 카드 (id 6)
       await tester.tap(find.text('승인 서명').at(2));
@@ -159,6 +159,26 @@ void main() {
       expect(find.text('집행 최종 승인'), findsNothing, reason: '사유 없이 서명 단계로 가면 안 된다');
 
       await tester.enterText(find.byType(TextFormField), 'OCR 금액 불일치, 영수증 원본 확인함');
+      await tester.tap(find.text('다음'));
+      await tester.pumpAndSettle();
+      expect(find.text('집행 최종 승인'), findsOneWidget);
+    });
+
+    testWidgets('카테고리 경고만 있는 항목도 사유 없이 승인할 수 없다 (hadWarning)', (tester) async {
+      await pumpScreen(tester);
+
+      expect(find.textContaining('카테고리 경고 — 승인하려면'), findsOneWidget);
+
+      // 카테고리 경고 항목은 목록의 네 번째 카드 (id 7, OCR 은 일치)
+      await tester.tap(find.text('승인 서명').at(3));
+      await tester.pumpAndSettle();
+      expect(find.text('경고 무시 승인 사유'), findsOneWidget);
+
+      await tester.tap(find.text('다음'));
+      await tester.pumpAndSettle();
+      expect(find.text('집행 최종 승인'), findsNothing, reason: '사유 없이 서명 단계로 가면 안 된다');
+
+      await tester.enterText(find.byType(TextFormField), '카테고리 재확인, 운영비로 맞음');
       await tester.tap(find.text('다음'));
       await tester.pumpAndSettle();
       expect(find.text('집행 최종 승인'), findsOneWidget);

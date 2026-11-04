@@ -86,26 +86,35 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
         _selectedDate.day,
       );
 
+  /// ① 초안 저장 — 서버에만 저장한다. 체인 검사(BLOCKED)도 서명도 하지 않는다.
+  Future<void> _saveDraft() async {
+    if (_submitting || !_formKey.currentState!.validate()) return;
+    await _showResult(const RegistrationResult.draft());
+  }
+
+  /// ② 제출 — 서명해 체인에 올린다. 결과는 `PENDING` 또는 `BLOCKED`.
   Future<void> _submitExpense() async {
     if (_submitting || !_formKey.currentState!.validate()) return;
     setState(() => _submitting = true);
 
-    final amount = int.parse(_amountController.text);
     // 목업: 서버 연동 전에는 예산 잔량으로 BLOCKED 를 흉내 낸다.
     final result = await simulateExpenseRegistration(
       category: _selectedBudgetCategory,
-      amount: amount,
+      amount: int.parse(_amountController.text),
     );
     if (!mounted) return;
     setState(() => _submitting = false);
+    await _showResult(result);
+  }
 
+  Future<void> _showResult(RegistrationResult result) async {
     final done = await showRegistrationResultDialog(
       context,
       kindLabel: '지출',
       rows: [
         ('항목', _titleController.text),
         ('사용처', _merchantController.text),
-        ('금액', '$amount원'),
+        ('금액', '${int.parse(_amountController.text)}원'),
         ('예산분류', _selectedBudgetCategory),
       ],
       result: result,
@@ -323,12 +332,24 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
 
               GradientButton(
                 onPressed: _submitExpense,
-                label: _submitting ? '확인 중...' : '지출 등록 신청하기',
+                label: _submitting ? '제출 중...' : '제출하기',
                 icon: Icons.upload_rounded,
+              ),
+              const SizedBox(height: 10),
+              OutlinedButton.icon(
+                onPressed: _submitting ? null : _saveDraft,
+                icon: const Icon(Icons.save_outlined),
+                label: const Text('초안으로 저장'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: AppTheme.primary,
+                  minimumSize: const Size.fromHeight(48),
+                  side: const BorderSide(color: AppTheme.primary),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                ),
               ),
               const SizedBox(height: 8),
               const Center(
-                child: Text('등록 후 감사/회장 승인 대기 상태(PENDING)로 저장됩니다',
+                child: Text('초안 저장은 체인에 올리지 않아요. 제출하면 감사/회장 승인 대기(PENDING)로 기록됩니다',
                   style: TextStyle(fontSize: 12, color: AppTheme.textSub),
                   textAlign: TextAlign.center,
                 ),
