@@ -223,7 +223,7 @@ class AuthService {
     );
 
     await store.write(token);
-    _session = session;
+    _setSession(session);
     _failedAttempts = 0;
     _lockedUntil = null;
     return session;
@@ -240,7 +240,7 @@ class AuthService {
 
     try {
       final me = await _fetchMe(token);
-      _session = Session(
+      _setSession(Session(
         userId: me.userId,
         studentNo: me.studentNo,
         name: me.name,
@@ -248,11 +248,11 @@ class AuthService {
         token: token,
         // 로그인 응답에만 있는 값이라 되살릴 때는 모른다. 필요한 화면이 /users/wallets 로 받는다.
         walletAddress: null,
-      );
+      ));
       return _session;
     } on _Unauthorized {
       await store.clear();
-      _session = null;
+      _setSession(null);
       return null;
     } catch (_) {
       return null;
@@ -261,10 +261,21 @@ class AuthService {
 
   /// 로그아웃. 토큰을 지우고 세션을 비운다.
   Future<void> logout() async {
-    _session = null;
+    _setSession(null);
     _failedAttempts = 0;
     _lockedUntil = null;
     await store.clear();
+  }
+
+  /// 세션을 바꾸는 **유일한 통로**.
+  ///
+  /// 역할이 바뀌면 앱이 붙는 서버도 바뀐다 (PRD v0.14 §9.1 — 학생 서버 / 학생회 서버).
+  /// 세션만 바꾸고 [ApiConfig.activeRole] 을 안 바꾸면, 임원이 로그인했는데 요청은
+  /// 학생 서버로 나가고 **학생 서버가 임원 토큰을 받지 않아 전부 거부된다.**
+  /// 두 값이 갈리지 않도록 한 함수에서만 바꾼다.
+  void _setSession(Session? session) {
+    _session = session;
+    ApiConfig.activeRole = session?.role;
   }
 
   /// 다른 서비스가 `401` 을 받았을 때 부른다. 세션을 비우고 [onUnauthorized] 를 알린다.

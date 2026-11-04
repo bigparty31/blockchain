@@ -726,8 +726,8 @@ class _EntryDetailScreenState extends State<EntryDetailScreen> {
           ),
           const SizedBox(height: 4),
           Text(
-            '등록 시 해시만 먼저 기록(Pending)하고, 승인 시 확정(Confirm)됩니다. '
-            '두 기록이 모두 남아 승인 전 변경을 추적할 수 있습니다.',
+            '등록 시 해시만 먼저 기록(Pending)하고, 승인되면 확정·반려되면 반려가 '
+            '두 번째 기록으로 남습니다. 두 기록이 모두 남아 승인 전 변경을 추적할 수 있습니다.',
             style: TextStyle(
               fontSize: 11,
               color: AppTheme.textSub.withOpacity(0.9),
@@ -736,7 +736,7 @@ class _EntryDetailScreenState extends State<EntryDetailScreen> {
           ),
           const SizedBox(height: 12),
           _txRow('Pending 트랜잭션', _entry.txPending),
-          _txRow('Confirm 트랜잭션', _entry.txConfirm),
+          _txRow(_secondTxLabel, _entry.txConfirm),
           // `block_number` 가 응답에 실려 오면 자동으로 값이 뜬다 (S10).
           // 그때까지만 아래 안내가 대신 자리를 지킨다.
           if (_entry.blockNumber != null)
@@ -752,6 +752,27 @@ class _EntryDetailScreenState extends State<EntryDetailScreen> {
         ],
       ),
     );
+  }
+
+  /// 두 번째 온체인 기록의 이름. **`tx_confirm` 은 확정과 반려가 같이 쓰는 칸이다**
+  /// (`backend/app/services/chain_tx.py` — 반려도 이 칸에 선점하고 기록한다).
+  ///
+  /// 그래서 무조건 「Confirm 트랜잭션」이라고 적으면 **반려된 지출의 반려 기록을
+  /// 학생이 「확정 트랜잭션」으로 읽는다.** 반려된 건에 확정 기록이 있다고 말하는 셈이라,
+  /// 이 화면이 하려는 일(무엇이 어떻게 처리됐는지 보여주기)과 정반대가 된다.
+  /// 손종인 님 전달 사항(11/4).
+  ///
+  /// 상태를 모르는 경우(`PENDING` 인데 값이 있는 선점 중 등)에는 **단정하지 않는다** —
+  /// 둘 중 어느 것인지 모르므로 둘 다 적는다.
+  String get _secondTxLabel {
+    switch (_entry.status) {
+      case EntryStatus.CONFIRMED:
+        return '확정 트랜잭션';
+      case EntryStatus.REJECTED:
+        return '반려 트랜잭션';
+      default:
+        return '확정·반려 기록';
+    }
   }
 
   Widget _txRow(String label, String? hash) {
