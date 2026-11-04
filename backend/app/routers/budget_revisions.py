@@ -12,6 +12,7 @@ from app.schemas.budget_revision import (
     BudgetRevisionRequestCreate,
     BudgetRevisionResponse,
 )
+from app.utils.hashing import canonical_text
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,7 @@ def create_budget_revision(
     """PRD v0.13 §4.1: 총무가 예산 증액을 요청하는 1단계 API입니다.
     - 증액 요청액(requested_amount)은 증액분(> 0)이어야 합니다.
     - 한도 초과/기간 만료로 차단(BLOCKED)된 지출이 있는 경우 blocked_entry_id를 연계합니다.
+    - 사유는 canonical_text로 정규화되어 저장됩니다.
     - 등록 시 status는 'PENDING'으로 설정됩니다.
     """
     if payload.requested_amount <= 0:
@@ -54,7 +56,7 @@ def create_budget_revision(
             detail=f"학기 ID {payload.term_id}를 찾을 수 없습니다.",
         )
 
-    # 2. 차단 지출(blocked_entry_id) 연동 시 유효성 검증
+    # 2. 차단 지출(blocked_entry_id) 검증 (지정된 경우)
     if payload.blocked_entry_id is not None:
         entry = db.query(Entry).filter(Entry.id == payload.blocked_entry_id).first()
         if not entry:
@@ -97,27 +99,30 @@ def create_budget_revision(
         if budget:
             target_budget_id = budget.id
 
-    # 4. 증액 요청 엔티티 생성 (PENDING)
+    # 4. 증액 요청 엔티티 생성 (PENDING, 사유 정규화)
+    clean_reason = canonical_text(payload.reason)
     revision_req = BudgetRevisionRequest(
         term_id=payload.term_id,
         category=payload.category,
         budget_id=target_budget_id,
         blocked_entry_id=payload.blocked_entry_id,
         requested_amount=payload.requested_amount,
-        reason=payload.reason,
+        reason=clean_reason,
         requested_by=current_user.id,
         status="PENDING",
     )
     db.add(revision_req)
-    db.commit()
-    db.refresh(revision_req)
+    db.flush()
 
     # 5. D4 합의: 알림 생성 (알림 모듈 준비 시 safe-call)
     try:
-        from app.services.notifications import create_notification  # type: ignore
-        create_notification("BUDGET_REVISION_REQUESTED", revision_id=revision_req.id)
+        from app.services.notifications import NotificationKind, create_notification
+        create_notification(db, NotificationKind.REVISION_REQUESTED, budget_revision_request_id=revision_req.id)
     except Exception:
         pass
+
+    db.commit()
+    db.refresh(revision_req)
 
     return revision_req
 

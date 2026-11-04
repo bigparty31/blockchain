@@ -35,6 +35,18 @@
 | `RECEIPT_RECHECK` | 영수증 재확인 |
 | `REFUND` | 환불 |
 | `RECLASSIFY` | 재분류 |
+| `OTHER` | 기타 정정 사유 (상세 사유 purpose 입력 필수) |
+
+## budget revision status
+
+`budget_revision_requests.status`. 온체인 값이 아니다.
+
+| 값 | 설명 |
+| --- | --- |
+| `PENDING` | 대기 (총무 등록 완료) |
+| `PRESIDENT_SIGNED` | 회장 EIP-712 서명 완료 |
+| `APPROVED` | 감사 최종 승인 및 온체인 증액 반영 완료 |
+| `REJECTED` | 회장 또는 감사 반려 |
 
 ## ocr_status
 

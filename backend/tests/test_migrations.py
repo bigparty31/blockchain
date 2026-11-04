@@ -2,6 +2,7 @@
 Alembic 마이그레이션 DDL 정합성 및 자동 증가(autoincrement) / 기본값(server_default) 검증 테스트
 - 팀원 피드백 5: SQLite에서 sa.BigInteger() 단독 사용 시 autoincrement 실패 방지
 - 팀원 피드백 6: ORM 외 직접 DDL/SQL INSERT 시 server_default 주입 검증
+- 팀원 피드백 (PR #33): PRESIDENT_SIGNED CHECK 제약 허용 및 OTHER 정정 사유 검증
 """
 
 import os
@@ -16,7 +17,9 @@ def test_alembic_upgrade_and_insert_autoincrement(tmp_path):
     1. alembic upgrade head 수행
     2. id 컬럼을 명시하지 않고 raw SQL INSERT 수행 시 SQLite autoincrement가 정상 작동하는지 검증
     3. server_default가 명시된 컬럼(version, status 등)이 DB 레벨에서 정상 채워지는지 검증
-    4. alembic downgrade base 로 롤백이 깔끔하게 수행되는지 검증
+    4. PRESIDENT_SIGNED 상태 저장 시 CHECK 제약 통과 검증 (PR #33)
+    5. correction_reason='OTHER' 저장 시 CHECK 제약 통과 검증 (PR #33)
+    6. alembic downgrade base 로 롤백이 깔끔하게 수행되는지 검증
     """
     db_file = tmp_path / "migration_test.db"
     db_url = f"sqlite:///{db_file.as_posix()}"
@@ -54,10 +57,14 @@ def test_alembic_upgrade_and_insert_autoincrement(tmp_path):
     assert term_row is not None
     assert term_row[0] == 1  # autoincrement로 id=1 채번 확인
 
-    # users INSERT (피드백 4번 password_hash 포함)
+    # users INSERT (피드백 4번 password_hash 포함, 총무 id=1, 회장 id=2)
     cur.execute(
         "INSERT INTO users(student_no, password_hash, name, role, wallet_address) "
         "VALUES ('20210001', '$2b$12$dummyhash', '김총무', 'TREASURER', '0x1111111111111111111111111111111111111111');"
+    )
+    cur.execute(
+        "INSERT INTO users(student_no, password_hash, name, role, wallet_address) "
+        "VALUES ('20210002', '$2b$12$dummyhash', '박회장', 'PRESIDENT', '0x2222222222222222222222222222222222222222');"
     )
     conn.commit()
 
@@ -117,6 +124,38 @@ def test_alembic_upgrade_and_insert_autoincrement(tmp_path):
     assert correction_row[0] == 2
     assert correction_row[1] == -5000
     assert correction_row[2] == 1
+
+    # entries correction_reason='OTHER' 검증 (PR #33)
+    cur.execute(
+        "INSERT INTO entries(term_id, kind, amount, counterparty, purpose, budget_id, occurred_at, created_by, corrects_entry_id, correction_reason) "
+        "VALUES (1, 'EXPENSE', 1000, '기타문구', '기타 정정 사유 입력', NULL, 1788793200, 1, 1, 'OTHER');"
+    )
+    conn.commit()
+
+    cur.execute("SELECT id, correction_reason FROM entries WHERE id = 3;")
+    other_entry_row = cur.fetchone()
+    assert other_entry_row is not None
+    assert other_entry_row[1] == 'OTHER'
+
+    # budget_revision_requests PRESIDENT_SIGNED 상태 INSERT 검증 (PR #33 피드백)
+    cur.execute(
+        "INSERT INTO budget_revision_requests("
+        "term_id, category, budget_id, requested_amount, reason, requested_by, status, "
+        "president_signed_by, president_signature, president_signed_at, signature_deadline, signed_version"
+        ") VALUES ("
+        "1, '행사비', 1, 500000, '축제 무대 확장', 1, 'PRESIDENT_SIGNED', "
+        "2, '0x1234567890abcdef', '2026-11-04 10:00:00', 1793548800, 1"
+        ");"
+    )
+    conn.commit()
+
+    cur.execute("SELECT id, status, president_signed_by, signed_version FROM budget_revision_requests WHERE id = 1;")
+    rev_row = cur.fetchone()
+    assert rev_row is not None
+    assert rev_row[0] == 1
+    assert rev_row[1] == 'PRESIDENT_SIGNED'
+    assert rev_row[2] == 2
+    assert rev_row[3] == 1
 
     conn.close()
 
