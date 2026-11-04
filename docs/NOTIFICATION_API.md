@@ -72,12 +72,12 @@
 
 ## `kind` 값
 
-이벤트와 받는 사람은 §4.8이다. `kind` 이름은 제안이고, `docs/enums.md`에는 장석연 승인을 거쳐 §4.8 표의 이벤트만 올린다. 이의 제기는 v0.13 범위 밖이라 없다.
+이벤트와 받는 사람은 §4.8이다. 값은 `docs/enums.md`의 notification kind와 같다 (PR #31). 증액 쪽은 `REVISION_*`, T4 수정 요청은 `ENTRY_EDIT_REQUESTED`다 — 「개정」은 예산 용어다. 이의 제기는 v0.13 범위 밖이라 없다.
 
 | `kind` | 이벤트 | 받는 사람 | 연결 | 재알림 |
 |---|---|---|---|---|
 | `ENTRY_REGISTERED` | 지출·수입·정정 등록 | 감사 전원, 회장 | `entry_id` | O |
-| `ENTRY_REVISION_REQUESTED` | T4 수정 요청 (§4.3, 아래 확인 필요) | 감사 전원, 회장 | `entry_id` | O |
+| `ENTRY_EDIT_REQUESTED` | T4 수정 요청 (§4.3) | 감사 전원, 회장 | `entry_id` | O |
 | `ENTRY_CONFIRMED` | 확정 | 총무 | `entry_id` | |
 | `ENTRY_REJECTED` | 반려 | 총무 | `entry_id` | |
 | `ENTRY_CONFIRM_FAILED` | 확정 실패 | 총무 | `entry_id` | |
@@ -118,6 +118,7 @@ def resolve_notifications(
 
 - **상태 변경과 같은 세션으로 부르고, 호출한 쪽이 함께 commit 한다** (§4.8). 롤백되면 알림도 남지 않는다
 - 받는 사람은 `kind`에 따라 함수가 정한다. `user_ids`는 「해당 처리자」처럼 표만으로 정해지지 않는 종류에만 넘긴다
+- 문구(`body`)는 인자로 받지 않는다. 서버가 `kind`로 만든다
 
 **호출 위치 (제안)**
 
@@ -135,6 +136,6 @@ def resolve_notifications(
 
 | 대상 | 내용 |
 |---|---|
-| 장석연 | §4.3은 T4 수정 요청을 감사·회장에게 알린다고 하지만 §4.8 표에 없다. `ENTRY_REVISION_REQUESTED`를 표에 추가해도 되는가 |
+| 장석연 | §4.8 표에 「T4 수정 요청 → 감사 전원, 회장」 행 추가 (PR #31 리뷰에서 추가하기로 함, PRD 반영 대기) |
 | 장석연, 김경윤 | §4.8은 라우터 호출을 김경윤으로 적었다. 위 「호출 위치」대로 등록·확정·반려는 `chain_tx.py`에서 기록해도 되는가 |
 | 이승호 | 경로와 응답 형태로 화면을 만들 수 있는가. 폴링은 화면 동기화(§4.9)와 같은 15초를 제안한다 |
