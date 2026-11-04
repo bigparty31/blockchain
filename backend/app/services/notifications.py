@@ -46,4 +46,8 @@ def resolve_notifications(
     entry_id: Optional[int] = None,
     budget_revision_request_id: Optional[int] = None,
 ) -> None:
-    """처리된 건의 알림을 받는 사람 전원에게서 닫는다. commit 하지 않는다."""
+    """처리된 건의 알림 중 재알림 대상 종류만 받는 사람 전원에게서 닫는다. commit 하지 않는다.
+
+    확정·반려 같은 결과 통보는 닫지 않는다. 한 처리에서 create_notification 도 부르면 이 함수를 먼저 부른다 —
+    순서가 바뀌면 방금 만든 다음 단계 알림(REVISION_PRESIDENT_SIGNED 등)까지 닫힌다.
+    """
