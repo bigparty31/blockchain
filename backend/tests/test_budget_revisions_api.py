@@ -555,3 +555,32 @@ def test_auditor_approve_forbidden_for_non_auditor(auth_header, role):
         headers=auth_header(role),
     )
     assert response.status_code == 403
+
+
+def test_reject_budget_revision_fails_when_tx_increase_in_flight(auth_header):
+    """온체인 증액 릴레이 진행 중(tx_increase 존재)인 요청은 반려할 수 없다 (409 Conflict)."""
+    rev_id = _create_pending_revision(auth_header)
+    future_deadline = int(time.time()) + 86400
+    client.post(
+        f"/budget-revisions/{rev_id}/sign",
+        json={
+            "president_signature": "0x" + "aa" * 65,
+            "signature_deadline": future_deadline,
+            "signed_version": 1,
+        },
+        headers=auth_header(Role.PRESIDENT),
+    )
+
+    with _test_session_factory() as db:
+        rev = db.query(DBBudgetRevisionRequest).filter_by(id=rev_id).first()
+        rev.tx_increase = "0x" + "99" * 32
+        db.commit()
+
+    # 반려 시도
+    response = client.post(
+        f"/budget-revisions/{rev_id}/reject",
+        json={"reject_reason": "지금 반려 시도"},
+        headers=auth_header(Role.AUDITOR),
+    )
+    assert response.status_code == 409
+    assert "온체인 증액 릴레이가 진행 중인" in response.json()["detail"]

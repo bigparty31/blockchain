@@ -57,6 +57,11 @@ def expire_budget_revision_if_needed(revision: BudgetRevisionRequest, db: Sessio
         revision.president_signed_at = None
         revision.signature_deadline = None
         revision.signed_version = None
+        try:
+            from app.services.notifications import NotificationKind, create_notification
+            create_notification(db, NotificationKind.REVISION_REQUESTED, budget_revision_request_id=revision.id)
+        except Exception:
+            pass
         db.commit()
         db.refresh(revision)
         return True
@@ -231,15 +236,15 @@ def sign_budget_revision(
     revision.signed_version = payload.signed_version
     revision.status = "PRESIDENT_SIGNED"
 
-    db.commit()
-    db.refresh(revision)
-
-    # D4 알림
+    # D4 알림 (커밋 전 동일 트랜잭션 추가)
     try:
-        from app.services.notifications import create_notification  # type: ignore
-        create_notification("BUDGET_REVISION_PRESIDENT_SIGNED", revision_id=revision.id)
+        from app.services.notifications import NotificationKind, create_notification
+        create_notification(db, NotificationKind.REVISION_PRESIDENT_SIGNED, budget_revision_request_id=revision.id)
     except Exception:
         pass
+
+    db.commit()
+    db.refresh(revision)
 
     return revision
 
@@ -280,20 +285,27 @@ def reject_budget_revision(
             detail="증액을 요청한 총무 본인은 반려할 수 없습니다.",
         )
 
+    if revision.tx_increase:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="온체인 증액 릴레이가 진행 중인 요청은 반려할 수 없습니다.",
+        )
+
+    clean_reject_reason = canonical_text(payload.reject_reason)
     revision.resolved_by = current_user.id
     revision.resolved_at = datetime.now(timezone.utc)
-    revision.reject_reason = payload.reject_reason
+    revision.reject_reason = clean_reject_reason
     revision.status = "REJECTED"
+
+    # D4 알림 (커밋 전 동일 트랜잭션 추가)
+    try:
+        from app.services.notifications import NotificationKind, create_notification
+        create_notification(db, NotificationKind.REVISION_REJECTED, budget_revision_request_id=revision.id)
+    except Exception:
+        pass
 
     db.commit()
     db.refresh(revision)
-
-    # D4 알림
-    try:
-        from app.services.notifications import create_notification  # type: ignore
-        create_notification("BUDGET_REVISION_REJECTED", revision_id=revision.id)
-    except Exception:
-        pass
 
     return revision
 
@@ -398,15 +410,15 @@ def approve_budget_revision(
     )
     db.add(new_budget_version)
 
-    db.commit()
-    db.refresh(revision)
-
-    # D4 알림
+    # D4 알림 (커밋 전 동일 트랜잭션 추가)
     try:
-        from app.services.notifications import create_notification  # type: ignore
-        create_notification("BUDGET_REVISION_APPROVED", revision_id=revision.id)
+        from app.services.notifications import NotificationKind, create_notification
+        create_notification(db, NotificationKind.REVISION_APPROVED, budget_revision_request_id=revision.id)
     except Exception:
         pass
+
+    db.commit()
+    db.refresh(revision)
 
     return revision
 
