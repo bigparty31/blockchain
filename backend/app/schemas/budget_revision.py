@@ -12,6 +12,20 @@ class BudgetRevisionRequestCreate(BaseModel):
     blocked_entry_id: Optional[int] = Field(None, description="근거가 된 차단 지출 ID (BLOCKED 상태)")
 
 
+class BudgetRevisionSignRequest(BaseModel):
+    president_signature: str = Field(..., max_length=132, description="회장의 EIP-712 IncreaseRequest 서명값 (0x...)")
+    signature_deadline: int = Field(..., gt=0, description="서명 만료 시한 (Unix Timestamp)")
+    signed_version: int = Field(..., ge=1, description="서명 당시 예산 버전")
+
+
+class BudgetRevisionRejectRequest(BaseModel):
+    reject_reason: str = Field(..., min_length=1, max_length=500, description="반려 사유")
+
+
+class BudgetRevisionApproveRequest(BaseModel):
+    auditor_signature: Optional[str] = Field(None, max_length=132, description="감사의 EIP-712 서명값 (0x...)")
+
+
 class BudgetRevisionResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

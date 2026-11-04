@@ -10,6 +10,9 @@ from app.schemas.balance import BalanceResponse
 from app.schemas.budget import BudgetResponse
 from app.schemas.budget_revision import (
     BudgetRevisionRequestCreate,
+    BudgetRevisionSignRequest,
+    BudgetRevisionRejectRequest,
+    BudgetRevisionApproveRequest,
     BudgetRevisionResponse,
 )
 
@@ -23,5 +26,8 @@ __all__ = [
     "BalanceResponse",
     "BudgetResponse",
     "BudgetRevisionRequestCreate",
+    "BudgetRevisionSignRequest",
+    "BudgetRevisionRejectRequest",
+    "BudgetRevisionApproveRequest",
     "BudgetRevisionResponse",
 ]
