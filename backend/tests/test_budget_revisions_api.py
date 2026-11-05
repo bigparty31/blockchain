@@ -15,6 +15,7 @@ from app.main import app
 from app.models import (
     Budget as DBBudget,
     BudgetRevisionRequest as DBBudgetRevisionRequest,
+    BudgetVersion as DBBudgetVersion,
     Entry as DBEntry,
     Term as DBTerm,
     User as DBUser,
@@ -63,7 +64,7 @@ def setup_test_db(tmp_path):
         )
         db.add(term)
 
-        # 3. Budget (id=1, 운영비)
+        # 3. Budget (id=1, 운영비) + v1
         budget = DBBudget(
             id=1,
             term_id=1,
@@ -71,6 +72,15 @@ def setup_test_db(tmp_path):
             expires_at=datetime.fromtimestamp(1798704000, tz=timezone.utc),
         )
         db.add(budget)
+        db.add(
+            DBBudgetVersion(
+                budget_id=1,
+                version=1,
+                planned_amount=1_000_000,
+                revision_reason=None,
+                approved_by=4,
+            )
+        )
 
         # 4. Blocked Entry (id=10, 한도 초과 차단 지출)
         blocked_entry = DBEntry(
@@ -103,7 +113,7 @@ def setup_test_db(tmp_path):
         )
         db.add(confirmed_entry)
 
-        # 6. Budget 2 (id=2, 행사비)
+        # 6. Budget 2 (id=2, 행사비) + v1
         budget2 = DBBudget(
             id=2,
             term_id=1,
@@ -111,6 +121,15 @@ def setup_test_db(tmp_path):
             expires_at=datetime.fromtimestamp(1798704000, tz=timezone.utc),
         )
         db.add(budget2)
+        db.add(
+            DBBudgetVersion(
+                budget_id=2,
+                version=1,
+                planned_amount=2_000_000,
+                revision_reason=None,
+                approved_by=4,
+            )
+        )
 
         # 7. Income Entry (id=12, PENDING 상태 수입)
         income_entry = DBEntry(
@@ -401,3 +420,32 @@ def test_list_and_get_budget_revisions(auth_header):
     # 4. 존재하지 않는 ID 단건 조회 (404)
     not_found_res = client.get("/budget-revisions/99999", headers=auth_header(Role.AUDITOR))
     assert not_found_res.status_code == 404
+
+
+def test_create_budget_revision_rejects_draft_budget_without_version(auth_header):
+    """아직 발행되지 않아 BudgetVersion 이력이 없는 초안 예산(POST /budgets 1단계)은 증액 요청 시 400으로 거부된다."""
+    with _test_session_factory() as db:
+        db.add(
+            DBBudget(
+                id=4,
+                term_id=1,
+                category="복지비",
+                expires_at=datetime.fromtimestamp(1798704000, tz=timezone.utc),
+                tx_issue=None,
+            )
+        )
+        db.commit()
+
+    res = client.post(
+        "/budget-revisions",
+        json={
+            "term_id": 1,
+            "category": "복지비",
+            "requested_amount": 200000,
+            "reason": "초안 예산 증액 시도",
+        },
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res.status_code == 400
+    assert "초안 예산" in res.json()["detail"]
+

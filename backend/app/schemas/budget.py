@@ -3,7 +3,9 @@ from pydantic import BaseModel, Field, ConfigDict
 
 UINT64_MAX = (1 << 64) - 1
 UINT256_MAX = (1 << 256) - 1
-MAX_AMOUNT = (1 << 63) - 1
+MAX_AMOUNT = 10**15
+# Python datetime.fromtimestamp 상한 (9999-12-31 23:59:59 UTC)
+MAX_UNIX_SECONDS = 253_402_300_799
 
 
 class BudgetResponse(BaseModel):
@@ -21,22 +23,19 @@ class BudgetResponse(BaseModel):
 
 
 class BudgetIssueCreate(BaseModel):
-    """예산 최초 편성·발행 요청 스키마 (1단계 ID 발급 및 서명 포함 1-step 발행 모두 지원)"""
+    """예산 최초 편성 1단계 초안 ID 발급 요청 스키마"""
 
-    id: Optional[int] = Field(None, ge=1, le=UINT64_MAX, description="이미 채번된 예산 ID (선택)")
     term_id: int = Field(..., ge=1, description="학기 ID (terms.id)")
-    category: str = Field(..., min_length=1, max_length=50, description="예산 항목명 (docs/CONTRACTS.md 승인 항목표)")
+    category: str = Field(..., min_length=1, max_length=50, description="예산 지출 항목명 (docs/CONTRACTS.md EXPENSE 8종)")
     planned_amount: int = Field(..., gt=0, le=MAX_AMOUNT, description="최초 편성 금액 (원 단위 양의 정수)")
-    expires_at: int = Field(..., ge=0, le=UINT64_MAX, description="예산 집행 유효 만료 시각 (Unix 초)")
-    deadline: Optional[int] = Field(None, ge=0, le=UINT256_MAX, description="EIP-712 IssueRequest 서명 유효 시한 (Unix 초)")
-    signature: Optional[str] = Field(None, description="회장의 EIP-712 IssueRequest 서명값 (0x + 130자리 hex)")
+    expires_at: int = Field(..., ge=0, le=MAX_UNIX_SECONDS, description="예산 집행 유효 만료 시각 (Unix 초)")
 
 
 class BudgetIssueSubmit(BaseModel):
     """1단계로 채번된 예산 ID에 대한 회장 기기 서명 제출 스키마"""
 
     planned_amount: int = Field(..., gt=0, le=MAX_AMOUNT, description="최초 편성 금액 (원 단위 양의 정수)")
-    expires_at: Optional[int] = Field(None, ge=0, le=UINT64_MAX, description="예산 만료 시각 Unix 초 (미지정 시 저장된 만료일 사용)")
+    expires_at: Optional[int] = Field(None, ge=0, le=MAX_UNIX_SECONDS, description="예산 만료 시각 Unix 초 (미지정 시 저장된 만료일 사용)")
     deadline: int = Field(..., ge=0, le=UINT256_MAX, description="EIP-712 IssueRequest 서명 유효 시한 (Unix 초)")
     signature: str = Field(..., description="회장의 EIP-712 IssueRequest 서명값 (0x + 130자리 hex)")
 

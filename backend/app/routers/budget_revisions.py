@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import User, get_current_user, require_roles
 from app.database import get_db
-from app.models import Budget, BudgetRevisionRequest, Entry, Term, User as DBUser
+from app.models import Budget, BudgetRevisionRequest, BudgetVersion, Entry, Term, User as DBUser
 from app.schemas.auth import Role
 from app.schemas.budget_revision import (
     BudgetRevisionRequestCreate,
@@ -97,6 +97,18 @@ def create_budget_revision(
             )
 
     target_budget_id = target_budget.id
+
+    # 아직 발행되지 않은 초안 예산(BudgetVersion 이력이 없는 예산)은 증액할 수 없다 (tx_issue로 거르면 시드 예산이 막히므로 버전 유무로 검사)
+    has_version = (
+        db.query(BudgetVersion.id)
+        .filter(BudgetVersion.budget_id == target_budget_id)
+        .first()
+    )
+    if not has_version:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"예산 ID {target_budget_id}('{target_budget.category}')는 아직 편성·발행 버전 이력이 없는 초안 예산이므로 증액할 수 없습니다.",
+        )
 
     # 3. 차단 지출(blocked_entry_id) 검증 (지정된 경우)
     if payload.blocked_entry_id is not None:

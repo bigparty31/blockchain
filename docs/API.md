@@ -127,16 +127,44 @@
 ```
 
 ### 2. 예산 최초 편성 (`POST /budgets`, `POST /budgets/{id}/submit`)
-- **설명**: 학기 초 회장이 항목별 예산을 최초 등록하고 EIP-712 `IssueRequest` 서명으로 온체인 발행(`relay_issue`)합니다. (`PRESIDENT` 전용)
-- **지원 흐름**:
-  - **2단계 흐름**: Step 1 `POST /budgets` (서명 생략)로 `id`, `term_code`, `category_hash` 초안(`status: "DRAFT"`) 발급 → 앱에서 `IssueRequest` 서명 → Step 2 `POST /budgets/{id}/submit` (또는 `POST /budgets`에 `id`, `signature`, `deadline` 포함)로 온체인 발행(`status: "ISSUED"`).
-  - **1단계 흐름**: `POST /budgets` 요청에 `signature`, `deadline`을 함께 전달해 즉시 검증 및 온체인 발행.
+- **설명**: 학기 초 회장이 항목별 예산을 최초 등록하고 EIP-712 `IssueRequest` 서명으로 온체인 발행(`relay_issue`)합니다. (`PRESIDENT` 전용, 지출 `EXPENSE` 8종 항목만 허용)
+- **2단계 발행 흐름**:
+  1. **1단계 (`POST /budgets`)**: `term_id`, `category`, `planned_amount`, `expires_at`을 보내 서명 대상 `id`, `term_code`, `category_hash` 초안(`status: "DRAFT"`, `201 Created`)을 발급받습니다.
+  2. **2단계 (`POST /budgets/{id}/submit`)**: 앱에서 `IssueRequest`에 회장 기기 서명을 수행한 뒤 `planned_amount`, `expires_at`, `deadline`, `signature`를 제출해 온체인 발행(`200 OK`, `status: "ISSUED" | "ALREADY_ISSUED" | "REJECTED" | "NO_RESPONSE"`)을 완료합니다.
 
-**Request (`POST /budgets`)**
+**Request (`POST /budgets` - 1단계 초안 ID 발급)**
 ```json
 {
   "term_id": 1,
   "category": "행사비",
+  "planned_amount": 2500000,
+  "expires_at": 1797260399
+}
+```
+
+**Response (`201 Created` - 1단계 초안)**
+```json
+{
+  "id": 1,
+  "term_id": 1,
+  "term_code": 20262,
+  "category": "행사비",
+  "category_hash": "0x...",
+  "planned_amount": 2500000,
+  "expires_at": 1797260399,
+  "version": 1,
+  "status": "DRAFT",
+  "issue_status": null,
+  "tx_hash": null,
+  "reason": null,
+  "existing_id": null,
+  "message": "예산 초안 ID가 준비되었습니다. 회장 기기 서명을 제출해 주세요."
+}
+```
+
+**Request (`POST /budgets/{id}/submit` - 2단계 서명 제출)**
+```json
+{
   "planned_amount": 2500000,
   "expires_at": 1797260399,
   "deadline": 1797263999,
@@ -144,12 +172,12 @@
 }
 ```
 
-**Response (`201 Created`)**
+**Response (`200 OK` - 2단계 온체인 발행 완료)**
 ```json
 {
   "id": 1,
   "term_id": 1,
-  "term_code": 20261,
+  "term_code": 20262,
   "category": "행사비",
   "category_hash": "0x...",
   "planned_amount": 2500000,
@@ -157,7 +185,10 @@
   "version": 1,
   "status": "ISSUED",
   "issue_status": "issued",
-  "tx_hash": "0x..."
+  "tx_hash": "0x...",
+  "reason": null,
+  "existing_id": null,
+  "message": "예산 토큰이 온체인에 발행되었습니다."
 }
 ```
 
