@@ -37,6 +37,8 @@
 | `RECLASSIFY` | 재분류 |
 | `OTHER` | 기타 |
 
+`OTHER`는 상세 사유를 `purpose`에 입력한다.
+
 ## budget revision status
 
 `budget_revision_requests.status`. 온체인 값이 아니다.
