@@ -5,6 +5,7 @@ import 'core/role_home.dart';
 import 'router.dart';
 import 'screens/login_screen.dart';
 import 'services/auth_service.dart';
+import 'services/student_api_service.dart';
 
 void main() {
   runApp(const StudentCouncilApp());
@@ -29,11 +30,21 @@ class _StudentCouncilAppState extends State<StudentCouncilApp> {
     // 어느 화면에서든 토큰이 거부되면(401) 로그인으로 되돌린다.
     // 이것이 없으면 만료된 세션으로 화면이 빈 채 떠 있고, 학생은 왜 안 보이는지 모른다.
     AuthService().onUnauthorized = _forceLogin;
+
+    // 세션이 비워질 때 **서비스 싱글턴에 남은 세션 상태**도 비운다.
+    // 토큰만 지우면 이의 목록·데모 깃발·마지막 확인 항목 id 가 살아 있어서
+    // 같은 기기의 다음 사람에게 이전 사용자의 것이 보인다
+    // (`StudentApiService.resetSessionState`). 여기서 연결하는 이유는 그 서비스가
+    // `AuthService` 를 import 하므로 반대 방향이 순환 import 가 되기 때문이다.
+    AuthService().onSessionCleared = () {
+      StudentApiService().resetSessionState();
+    };
   }
 
   @override
   void dispose() {
     AuthService().onUnauthorized = null;
+    AuthService().onSessionCleared = null;
     super.dispose();
   }
 
@@ -43,10 +54,18 @@ class _StudentCouncilAppState extends State<StudentCouncilApp> {
       MaterialPageRoute(builder: (_) => const LoginScreen()),
       (route) => false,
     );
+    // 기기에서 토큰을 지우지 못했으면 그 사실도 말한다 — 「다시 로그인하세요」만
+    // 보여주면 사용자는 기기에 세션이 남은 것을 모른다 ([TokenClearFailed]).
     _messengerKey.currentState?.showSnackBar(
-      const SnackBar(
-        content: Text('세션이 만료되었습니다. 다시 로그인해 주세요.'),
+      SnackBar(
+        content: Text(
+          AuthService().tokenClearFailed
+              ? '세션이 만료되었습니다. 다만 이 기기에서 로그인 정보를 지우지 못했습니다 — '
+                  '공용 기기라면 앱 데이터를 삭제해 주세요.'
+              : '세션이 만료되었습니다. 다시 로그인해 주세요.',
+        ),
         behavior: SnackBarBehavior.floating,
+        duration: Duration(seconds: AuthService().tokenClearFailed ? 6 : 4),
       ),
     );
   }

@@ -8,6 +8,7 @@ import '../../core/enums.dart';
 import '../../core/format.dart';
 import '../../models/entry_model.dart';
 import '../../models/objection_model.dart';
+import '../../services/auth_service.dart';
 import '../../services/student_api_service.dart';
 import 'objection_screen.dart';
 import 'widgets/student_badges.dart';
@@ -146,8 +147,20 @@ class _EntryDetailScreenState extends State<EntryDetailScreen> {
     }
   }
 
+  /// **예외를 여기서 잡는다.** `initState` 에서 await 되지 않으므로 올라가면
+  /// 처리되지 않은 비동기 오류가 된다 (`_verify` 와 같은 이유).
   Future<void> _loadObjections() async {
-    final list = await _api.fetchObjections(entryId: _entry.id);
+    final List<ObjectionModel> list;
+    try {
+      list = await _api.fetchObjections(entryId: _entry.id);
+    } on SessionExpired {
+      // 세션이 끊겼다 — `main.dart` 가 로그인 화면으로 보낸다. 이의 목록을
+      // 비워 두되 「이의 없음」으로 단정하지는 않는다 (아래 `_objections` 는
+      // 초기값 그대로 남는다).
+      return;
+    } catch (_) {
+      return;
+    }
     if (mounted) setState(() => _objections = list);
   }
 
@@ -1322,17 +1335,42 @@ class HashDisclosure extends StatefulWidget {
   State<HashDisclosure> createState() => _HashDisclosureState();
 }
 
-class _HashDisclosureState extends State<HashDisclosure> {
+class _HashDisclosureState extends State<HashDisclosure>
+    with AutomaticKeepAliveClientMixin {
   late bool _open = widget.autoExpand;
+
+  /// 사용자가 직접 접거나 펼쳤는지.
+  ///
+  /// 이 화면은 `ListView` 라 화면 밖으로 나간 자식을 버리고, 돌아올 때 새로
+  /// 만든다. 그러면 `_open` 이 [HashDisclosure.autoExpand] 로 되돌아가서
+  /// **펼쳐 둔 해시 값이 스크롤 한 번에 다시 접힌다.** 긴 해시를 비교하려고
+  /// 펼친 학생이 위아래로 오가며 보는 화면이라 더 그렇다.
+  ///
+  /// 손대지 않았다면 되돌아가도 상관없다 — 초기값은 [HashDisclosure.autoExpand]
+  /// 로 똑같이 재현된다. 손댄 뒤부터만 상태를 지킬 가치가 생기므로, 그때부터
+  /// [wantKeepAlive] 를 켜서 이 자식이 버려지지 않게 한다.
+  bool _touched = false;
+
+  @override
+  bool get wantKeepAlive => _touched;
+
+  void _toggle() {
+    setState(() {
+      _open = !_open;
+      _touched = true;
+    });
+    updateKeepAlive();
+  }
 
   @override
   Widget build(BuildContext context) {
+    super.build(context); // AutomaticKeepAliveClientMixin 의 요구사항
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         GestureDetector(
           behavior: HitTestBehavior.opaque,
-          onTap: () => setState(() => _open = !_open),
+          onTap: _toggle,
           child: Row(
             children: [
               Icon(

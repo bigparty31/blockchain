@@ -68,6 +68,14 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
         .animate(CurvedAnimation(parent: _animController, curve: Curves.easeOut));
     _animController.forward();
 
+    // 기기에 남은 잠금을 읽어 **화면을 열자마자** 남은 시간을 보여준다.
+    // 이것이 없으면 잠긴 상태인데 입력이 열려 보이고, 눌러 본 뒤에야 막힌다.
+    _auth.loadLock().then((_) {
+      if (!mounted) return;
+      setState(() {});
+      if (_auth.lockRemaining != null) _startLockTicker();
+    });
+
     if (_auth.lockRemaining != null) _startLockTicker();
   }
 

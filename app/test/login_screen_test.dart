@@ -73,10 +73,11 @@ void main() {
     });
   }
 
-  setUp(() {
+  setUp(() async {
     sent = [];
     AuthService.store = MemoryTokenStore();
-    AuthService().resetAttempts();
+    AuthService.lockStore = MemoryLoginLockStore();
+    await AuthService().resetAttempts();
     AuthService().onUnauthorized = null;
   });
 
@@ -257,7 +258,7 @@ void main() {
       expect(sent.length, before, reason: '차단 중인데 로그인 요청이 나갔다');
 
       // 타이머가 돌고 있으므로 테스트를 끝내기 전에 멈춘다
-      AuthService().resetAttempts();
+      await AuthService().resetAttempts();
       await tester.pumpWidget(const SizedBox());
     });
   });
@@ -307,7 +308,7 @@ void main() {
       await tester.tap(find.byKey(const Key('login_submit')));
       await pumpLoginRequest(tester);
 
-      expect(store.value, 'token-abc', reason: '토큰이 기기에 저장되지 않았다');
+      expect(store.value?.token, 'token-abc', reason: '토큰이 기기에 저장되지 않았다');
       final session = AuthService().session;
       expect(session, isNotNull);
       expect(session!.userId, 1, reason: '자기 승인 차단·푸시 토큰 연결에 user id 가 필요하다');
@@ -339,7 +340,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(AuthService().session, isNull);
-      expect(store.value, isNull, reason: 'id 없는 세션의 토큰을 저장하면 안 된다');
+      expect(store.value?.token, isNull, reason: 'id 없는 세션의 토큰을 저장하면 안 된다');
       expect(find.byType(SnackBar), findsOneWidget);
       expect(find.byType(LoginScreen), findsOneWidget, reason: '로그인 화면에 머물러야 한다');
     });
@@ -362,7 +363,7 @@ void main() {
       AuthService.client = server(meStatus: 401);
 
       expect(await AuthService().restore(), isNull);
-      expect(store.value, isNull, reason: '거부된 토큰을 남겨 두면 매번 401 을 맞는다');
+      expect(store.value?.token, isNull, reason: '거부된 토큰을 남겨 두면 매번 401 을 맞는다');
     });
 
     test('서버에 닿지 못하면 토큰을 지우지 않는다', () async {
@@ -371,7 +372,7 @@ void main() {
       AuthService.client = server(offline: true);
 
       expect(await AuthService().restore(), isNull);
-      expect(store.value, 'token-abc',
+      expect(store.value?.token, 'token-abc',
           reason: '유효한 토큰을 와이파이 문제로 버리면 다시 로그인해야 한다');
     });
 
@@ -385,13 +386,23 @@ void main() {
       AuthService().onUnauthorized = () => notified++;
 
       StudentApiService.client = MockClient((_) async => http.Response('{}', 401));
-      await StudentApiService().fetchBalance();
+
+      // **401 은 null 이 아니라 예외다.** null 로 돌려주면 호출자가 그것을
+      // 「못 읽었다」로 읽고 예시 데이터로 폴백해서, 만료된 세션에 데모 장부가
+      // 뜬다 (PRD v0.14 §7.3).
+      await expectLater(
+        StudentApiService().fetchBalance(),
+        throwsA(isA<SessionExpired>()),
+      );
 
       expect(AuthService().session, isNull);
       expect(notified, 1);
 
       // 이미 로그아웃된 뒤 또 401 을 받아도 중복으로 알리지 않는다
-      await StudentApiService().fetchBalance();
+      await expectLater(
+        StudentApiService().fetchBalance(),
+        throwsA(isA<SessionExpired>()),
+      );
       expect(notified, 1);
     });
 
