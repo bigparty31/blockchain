@@ -1,0 +1,657 @@
+import time
+from datetime import datetime, timezone
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import sessionmaker
+
+from app.auth import users
+from app.auth.security import create_access_token
+from app.chain import (
+    BudgetRevertReason,
+    ChainBudget,
+    ChainSetupError,
+    FakeChainClient,
+    fake_signature,
+    get_chain_client,
+)
+from app.chain.eip712 import category_hash
+from app.database import Base, get_db
+from app.main import app
+from app.models import (
+    Budget as DBBudget,
+    BudgetVersion as DBBudgetVersion,
+    Entry as DBEntry,
+    Term as DBTerm,
+    User as DBUser,
+)
+from app.schemas.auth import Role
+
+client = TestClient(app)
+
+TREASURER_WALLET = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+AUDITOR_WALLET = "0x90F79bf6EB2c4f870365E785982E1f101E93b906"
+PRESIDENT_WALLET = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+
+_test_session_factory = None
+_test_chain = FakeChainClient()
+
+
+@pytest.fixture(autouse=True)
+def setup_test_db(tmp_path):
+    global _test_session_factory, _test_chain
+    _test_chain = FakeChainClient()
+    db_file = tmp_path / "test_budgets_balance.db"
+    engine = create_engine(
+        f"sqlite:///{db_file}",
+        connect_args={"check_same_thread": False},
+    )
+    Base.metadata.create_all(bind=engine)
+    TestingSession = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    _test_session_factory = TestingSession
+
+    with TestingSession() as db:
+        for u in users.SEED_USERS:
+            db.add(
+                DBUser(
+                    id=u.id,
+                    student_no=u.student_no,
+                    password_hash=u.password_hash,
+                    name=u.name,
+                    role=u.role.value if hasattr(u.role, "value") else u.role,
+                    wallet_index=u.wallet_index,
+                    wallet_address=u.wallet_address.lower() if u.wallet_address else None,
+                )
+            )
+        db.add(
+            DBTerm(
+                id=1,
+                term_code=20262,
+                name="2026-2학기",
+                started_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+                ended_at=datetime(2027, 2, 28, tzinfo=timezone.utc),
+            )
+        )
+        db.add(
+            DBTerm(
+                id=2,
+                term_code=20271,
+                name="2027-1학기",
+                started_at=datetime(2027, 3, 1, tzinfo=timezone.utc),
+                ended_at=datetime(2027, 8, 31, tzinfo=timezone.utc),
+            )
+        )
+        db.commit()
+
+    def override_get_db():
+        db = TestingSession()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_chain_client] = lambda: _test_chain
+    yield
+    app.dependency_overrides.pop(get_db, None)
+    app.dependency_overrides.pop(get_chain_client, None)
+    engine.dispose()
+
+
+@pytest.fixture
+def auth_header():
+    def _make(role: Role):
+        matched = next(u for u in users.SEED_USERS if u.role == role)
+        token = create_access_token(matched.id)
+        return {"Authorization": f"Bearer {token}"}
+
+    return _make
+
+
+# ---------------------------------------------------------------- POST /budgets (A5)
+
+
+def test_post_budgets_requires_president_role(auth_header):
+    now = int(time.time())
+    body = {
+        "term_id": 1,
+        "category": "행사비",
+        "planned_amount": 2_500_000,
+        "expires_at": now + 86400,
+        "deadline": now + 600,
+        "signature": fake_signature(PRESIDENT_WALLET),
+    }
+    assert client.post("/budgets", json=body).status_code == 401
+    for forbidden_role in (Role.STUDENT, Role.TREASURER, Role.AUDITOR):
+        res = client.post("/budgets", json=body, headers=auth_header(forbidden_role))
+        assert res.status_code == 403
+
+
+@pytest.mark.parametrize(
+    "bad_category",
+    ["없는항목", " 행사비", "행사비 ", "행사비\u200b", "행사\n비"],
+)
+def test_post_budgets_rejects_unapproved_or_dirty_category(auth_header, bad_category):
+    now = int(time.time())
+    res = client.post(
+        "/budgets",
+        json={
+            "term_id": 1,
+            "category": bad_category,
+            "planned_amount": 1_000_000,
+            "expires_at": now + 86400,
+        },
+        headers=auth_header(Role.PRESIDENT),
+    )
+    assert res.status_code == 400
+
+
+def test_post_budgets_rejects_over_50_char_category(auth_header):
+    now = int(time.time())
+    res = client.post(
+        "/budgets",
+        json={
+            "term_id": 1,
+            "category": "가" * 51,
+            "planned_amount": 1_000_000,
+            "expires_at": now + 86400,
+        },
+        headers=auth_header(Role.PRESIDENT),
+    )
+    assert res.status_code == 422
+
+
+def test_post_budgets_term_not_found_returns_404(auth_header):
+    now = int(time.time())
+    res = client.post(
+        "/budgets",
+        json={
+            "term_id": 999,
+            "category": "행사비",
+            "planned_amount": 1_000_000,
+            "expires_at": now + 86400,
+        },
+        headers=auth_header(Role.PRESIDENT),
+    )
+    assert res.status_code == 404
+
+
+def test_post_budgets_one_step_issue_success(auth_header):
+    now = int(time.time())
+    expires_at = now + 86400
+    res = client.post(
+        "/budgets",
+        json={
+            "term_id": 1,
+            "category": "행사비",
+            "planned_amount": 2_500_000,
+            "expires_at": expires_at,
+            "deadline": now + 600,
+            "signature": fake_signature(PRESIDENT_WALLET),
+        },
+        headers=auth_header(Role.PRESIDENT),
+    )
+    assert res.status_code == 201
+    data = res.json()
+    assert data["id"] == 1
+    assert data["term_id"] == 1
+    assert data["term_code"] == 20262
+    assert data["category"] == "행사비"
+    assert data["category_hash"] == category_hash("행사비")
+    assert data["planned_amount"] == 2_500_000
+    assert data["expires_at"] == expires_at
+    assert data["version"] == 1
+    assert data["status"] == "ISSUED"
+    assert data["issue_status"] == "issued"
+    assert data["tx_hash"] and data["tx_hash"].startswith("0x")
+
+    with _test_session_factory() as db:
+        b = db.query(DBBudget).filter(DBBudget.id == 1).first()
+        assert b is not None and b.tx_issue == data["tx_hash"]
+        v1 = db.query(DBBudgetVersion).filter(DBBudgetVersion.budget_id == 1, DBBudgetVersion.version == 1).first()
+        assert v1 is not None
+        assert v1.planned_amount == 2_500_000
+        assert v1.tx_hash == data["tx_hash"]
+        assert v1.approved_by == 4
+
+
+def test_post_budgets_two_step_draft_and_submit(auth_header):
+    now = int(time.time())
+    expires_at = now + 86400
+
+    # 1단계: 서명 없이 ID 채번
+    res_draft = client.post(
+        "/budgets",
+        json={
+            "term_id": 1,
+            "category": "사업비",
+            "planned_amount": 1_500_000,
+            "expires_at": expires_at,
+        },
+        headers=auth_header(Role.PRESIDENT),
+    )
+    assert res_draft.status_code == 201
+    draft = res_draft.json()
+    assert draft["status"] == "DRAFT"
+    assert draft["id"] == 1
+    assert draft["term_code"] == 20262
+    assert draft["category_hash"] == category_hash("사업비")
+
+    # 미발행 초안은 GET /budgets에 노출되지 않음
+    assert client.get("/budgets").json() == []
+
+    # 2단계: POST /budgets/{id}/submit 으로 서명 제출
+    res_submit = client.post(
+        f"/budgets/{draft['id']}/submit",
+        json={
+            "planned_amount": 1_500_000,
+            "expires_at": expires_at,
+            "deadline": now + 600,
+            "signature": fake_signature(PRESIDENT_WALLET),
+        },
+        headers=auth_header(Role.PRESIDENT),
+    )
+    assert res_submit.status_code == 200
+    issued = res_submit.json()
+    assert issued["status"] == "ISSUED"
+    assert issued["issue_status"] == "issued"
+    assert issued["tx_hash"] is not None
+
+    # 발행 후 GET /budgets에 정상 노출
+    listed = client.get("/budgets").json()
+    assert len(listed) == 1
+    assert listed[0]["id"] == draft["id"]
+    assert listed[0]["category"] == "사업비"
+    assert listed[0]["planned_amount"] == 1_500_000
+    assert listed[0]["remaining_amount"] == 1_500_000
+    assert listed[0]["execution_rate"] == 0.0
+
+
+def test_post_budgets_wrong_signer_or_malformed_signature_rolls_back_and_returns_400(auth_header):
+    now = int(time.time())
+    # 1) 다른 지갑(감사) 서명 -> 400 및 DB 롤백
+    res_wrong = client.post(
+        "/budgets",
+        json={
+            "term_id": 1,
+            "category": "운영비",
+            "planned_amount": 1_000_000,
+            "expires_at": now + 86400,
+            "deadline": now + 600,
+            "signature": fake_signature(AUDITOR_WALLET),
+        },
+        headers=auth_header(Role.PRESIDENT),
+    )
+    assert res_wrong.status_code == 400
+    assert "지갑 주소" in res_wrong.json()["detail"]
+
+    # 2) 잘못된 서명 형식 -> 400
+    res_bad_sig = client.post(
+        "/budgets",
+        json={
+            "term_id": 1,
+            "category": "운영비",
+            "planned_amount": 1_000_000,
+            "expires_at": now + 86400,
+            "deadline": now + 600,
+            "signature": "0x1234",
+        },
+        headers=auth_header(Role.PRESIDENT),
+    )
+    assert res_bad_sig.status_code == 400
+
+    with _test_session_factory() as db:
+        assert db.query(DBBudget).count() == 0
+
+
+def test_post_budgets_already_issued_preserves_existing_tx_and_chain_values(auth_header):
+    now = int(time.time())
+    expires_at = now + 86400
+    body = {
+        "term_id": 1,
+        "category": "행사비",
+        "planned_amount": 2_000_000,
+        "expires_at": expires_at,
+        "deadline": now + 600,
+        "signature": fake_signature(PRESIDENT_WALLET),
+    }
+    first = client.post("/budgets", json=body, headers=auth_header(Role.PRESIDENT)).json()
+    assert first["status"] == "ISSUED"
+    first_tx = first["tx_hash"]
+
+    # 다른 금액으로 재시도해도 ALREADY_ISSUED 및 체인 existing 값(2,000,000)을 반환하고 tx_issue는 유지됨
+    second = client.post(
+        "/budgets",
+        json={**body, "planned_amount": 9_999_999, "signature": fake_signature(PRESIDENT_WALLET)},
+        headers=auth_header(Role.PRESIDENT),
+    ).json()
+    assert second["status"] == "ALREADY_ISSUED"
+    assert second["issue_status"] == "alreadyIssued"
+    assert second["planned_amount"] == 2_000_000
+    assert second["tx_hash"] == first_tx
+
+
+def test_post_budgets_chain_rejected_and_no_response_and_not_sent(auth_header):
+    now = int(time.time())
+
+    # 1) 마감 경과 예산 발행 시도 -> REJECTED (BudgetExpired)
+    res_expired = client.post(
+        "/budgets",
+        json={
+            "term_id": 1,
+            "category": "홍보비",
+            "planned_amount": 500_000,
+            "expires_at": 1,
+            "deadline": now + 600,
+            "signature": fake_signature(PRESIDENT_WALLET),
+        },
+        headers=auth_header(Role.PRESIDENT),
+    )
+    assert res_expired.status_code == 201
+    assert res_expired.json()["status"] == "REJECTED"
+    assert res_expired.json()["issue_status"] == "rejected"
+    assert res_expired.json()["reason"] == BudgetRevertReason.BUDGET_EXPIRED.value
+
+    # 2) NO_RESPONSE -> tx_issue 칸에 보낸 hash 유지
+    _test_chain.unavailable_next("issue_budget", landed=False)
+    res_no_resp = client.post(
+        "/budgets",
+        json={
+            "term_id": 1,
+            "category": "복지비",
+            "planned_amount": 800_000,
+            "expires_at": now + 86400,
+            "deadline": now + 600,
+            "signature": fake_signature(PRESIDENT_WALLET),
+        },
+        headers=auth_header(Role.PRESIDENT),
+    )
+    assert res_no_resp.status_code == 201
+    no_resp_data = res_no_resp.json()
+    assert no_resp_data["status"] == "NO_RESPONSE"
+    assert no_resp_data["issue_status"] == "noResponse"
+    assert no_resp_data["tx_hash"] is not None
+
+    with _test_session_factory() as db:
+        b_welfare = db.query(DBBudget).filter(DBBudget.category == "복지비").first()
+        assert b_welfare.tx_issue == no_resp_data["tx_hash"]
+
+    # 3) NOT_SENT (ChainSetupError) -> 단건 API는 503 반환
+    async def raise_setup_error(*args, **kwargs):
+        raise ChainSetupError("릴레이어 잔액 부족")
+
+    _test_chain.issue_budget = raise_setup_error
+    res_not_sent = client.post(
+        "/budgets",
+        json={
+            "term_id": 1,
+            "category": "회의비",
+            "planned_amount": 300_000,
+            "expires_at": now + 86400,
+            "deadline": now + 600,
+            "signature": fake_signature(PRESIDENT_WALLET),
+        },
+        headers=auth_header(Role.PRESIDENT),
+    )
+    assert res_not_sent.status_code == 503
+
+
+# ---------------------------------------------------------------- GET /budgets (A6)
+
+
+def test_get_budgets_reflects_chain_remaining_and_confirmed_expenses(auth_header):
+    now = int(time.time())
+    expires_at = now + 86400
+
+    # 행사비(id=1, 2,500,000원), 사업비(id=2, 1,500,000원) 발행
+    for cat, amt in (("행사비", 2_500_000), ("사업비", 1_500_000)):
+        res = client.post(
+            "/budgets",
+            json={
+                "term_id": 1,
+                "category": cat,
+                "planned_amount": amt,
+                "expires_at": expires_at,
+                "deadline": now + 600,
+                "signature": fake_signature(PRESIDENT_WALLET),
+            },
+            headers=auth_header(Role.PRESIDENT),
+        )
+        assert res.json()["status"] == "ISSUED"
+
+    # 체인의 행사비(id=1) spent가 30,000원인 상태 모사 + 사업비(id=2)는 DB CONFIRMED 지출 35,000원, PENDING 120,000원
+    _test_chain._budgets[1] = _test_chain._budgets[1].model_copy(update={"spent": 30_000})
+
+    with _test_session_factory() as db:
+        db.add_all(
+            [
+                DBEntry(
+                    id=1,
+                    term_id=1,
+                    kind="EXPENSE",
+                    amount=35_000,
+                    counterparty="한결문구",
+                    purpose="명찰 구매",
+                    budget_id=2,
+                    occurred_at=1788793200,
+                    meta_hash="0x" + "1" * 64,
+                    status="CONFIRMED",
+                    created_by=2,
+                    approved_by=3,
+                    tx_pending="0x" + "a" * 64,
+                    tx_confirm="0x" + "b" * 64,
+                ),
+                DBEntry(
+                    id=2,
+                    term_id=1,
+                    kind="EXPENSE",
+                    amount=120_000,
+                    counterparty="청년피자",
+                    purpose="대기중 다과",
+                    budget_id=2,
+                    occurred_at=1788706800,
+                    meta_hash="0x" + "2" * 64,
+                    status="PENDING",
+                    created_by=2,
+                    tx_pending="0x" + "c" * 64,
+                ),
+            ]
+        )
+        db.commit()
+
+    res = client.get("/budgets")
+    assert res.status_code == 200
+    budgets = res.json()
+    assert len(budgets) == 2
+
+    b_event, b_proj = budgets[0], budgets[1]
+    assert b_event["category"] == "행사비"
+    assert b_event["planned_amount"] == 2_500_000
+    assert b_event["remaining_amount"] == 2_470_000
+    assert b_event["execution_rate"] == 0.012
+
+    assert b_proj["category"] == "사업비"
+    assert b_proj["planned_amount"] == 1_500_000
+    assert b_proj["remaining_amount"] == 1_465_000
+    assert b_proj["execution_rate"] == 0.0233
+
+    # 학기 필터 검증
+    assert client.get("/budgets?term_id=2").json() == []
+    assert len(client.get("/budgets?term_id=1").json()) == 2
+
+
+# ---------------------------------------------------------------- GET /balance (B4)
+
+
+def test_get_balance_empty_db_returns_zeros():
+    res = client.get("/balance")
+    assert res.status_code == 200
+    assert res.json() == {"balance": 0, "income": 0, "expense": 0}
+
+
+def test_get_balance_aggregates_only_confirmed_entries_and_corrections():
+    with _test_session_factory() as db:
+        db.add(
+            DBBudget(
+                id=1,
+                term_id=1,
+                category="사업비",
+                expires_at=datetime.fromtimestamp(1797260399, tz=timezone.utc),
+                tx_issue="0x" + "1" * 64,
+            )
+        )
+        db.add_all(
+            [
+                # 1. 확정 수입 5,000,000원
+                DBEntry(
+                    id=1,
+                    term_id=1,
+                    kind="INCOME",
+                    amount=5_000_000,
+                    counterparty="학생회비 수납",
+                    purpose="2026-2학기 학생회비",
+                    occurred_at=1788620400,
+                    meta_hash="0x" + "1" * 64,
+                    status="CONFIRMED",
+                    created_by=2,
+                    approved_by=3,
+                    tx_pending="0x" + "a" * 64,
+                    tx_confirm="0x" + "b" * 64,
+                ),
+                # 2. 확정 지출 50,000원
+                DBEntry(
+                    id=2,
+                    term_id=1,
+                    kind="EXPENSE",
+                    amount=50_000,
+                    counterparty="한결문구",
+                    purpose="명찰 구매",
+                    budget_id=1,
+                    occurred_at=1788793200,
+                    meta_hash="0x" + "2" * 64,
+                    status="CONFIRMED",
+                    created_by=2,
+                    approved_by=3,
+                    tx_pending="0x" + "c" * 64,
+                    tx_confirm="0x" + "d" * 64,
+                ),
+                # 3. 확정 음수 정정 지출 -15,000원 (순 확정 지출 = 35,000원)
+                DBEntry(
+                    id=3,
+                    term_id=1,
+                    kind="EXPENSE",
+                    amount=-15_000,
+                    counterparty="한결문구",
+                    purpose="명찰 수량 정정 환불",
+                    budget_id=1,
+                    occurred_at=1788793200,
+                    meta_hash="0x" + "3" * 64,
+                    status="CONFIRMED",
+                    created_by=2,
+                    approved_by=3,
+                    tx_pending="0x" + "e" * 64,
+                    tx_confirm="0x" + "f" * 64,
+                    corrects_entry_id=2,
+                    correction_reason="REFUND",
+                ),
+                # 4. PENDING 지출 120,000원 (제외 대상)
+                DBEntry(
+                    id=4,
+                    term_id=1,
+                    kind="EXPENSE",
+                    amount=120_000,
+                    counterparty="청년피자",
+                    purpose="대기중 다과",
+                    budget_id=1,
+                    occurred_at=1788706800,
+                    meta_hash="0x" + "4" * 64,
+                    status="PENDING",
+                    created_by=2,
+                    tx_pending="0x" + "9" * 64,
+                ),
+                # 5. REJECTED 수입 200,000원 (제외 대상)
+                DBEntry(
+                    id=5,
+                    term_id=1,
+                    kind="INCOME",
+                    amount=200_000,
+                    counterparty="오입력 수입",
+                    purpose="반려된 수입",
+                    occurred_at=1788706800,
+                    meta_hash="0x" + "5" * 64,
+                    status="REJECTED",
+                    created_by=2,
+                    rejected_by=3,
+                    reject_reason="오입력",
+                    tx_pending="0x" + "8" * 64,
+                    tx_confirm="0x" + "7" * 64,
+                ),
+                # 6. 미제출 초안 지출 90,000원 (제외 대상)
+                DBEntry(
+                    id=6,
+                    term_id=1,
+                    kind="EXPENSE",
+                    amount=90_000,
+                    counterparty="초안상점",
+                    purpose="초안 지출",
+                    budget_id=1,
+                    occurred_at=1788706800,
+                    meta_hash="0x" + "6" * 64,
+                    status=None,
+                    created_by=2,
+                ),
+                # 7. 다른 학기(term_id=2) 확정 수입 1,000,000원
+                DBEntry(
+                    id=7,
+                    term_id=2,
+                    kind="INCOME",
+                    amount=1_000_000,
+                    counterparty="2027-1 학생회비",
+                    purpose="다음 학기 수납",
+                    occurred_at=1788706800,
+                    meta_hash="0x" + "7" * 64,
+                    status="CONFIRMED",
+                    created_by=2,
+                    approved_by=3,
+                    tx_pending="0x" + "5" * 64,
+                    tx_confirm="0x" + "6" * 64,
+                ),
+            ]
+        )
+        db.commit()
+
+    # term_id=1 필터 조회
+    res_t1 = client.get("/balance?term_id=1")
+    assert res_t1.status_code == 200
+    assert res_t1.json() == {
+        "balance": 4_965_000,
+        "income": 5_000_000,
+        "expense": 35_000,
+    }
+
+    # 전체 학기 조회
+    res_all = client.get("/balance")
+    assert res_all.status_code == 200
+    assert res_all.json() == {
+        "balance": 5_965_000,
+        "income": 6_000_000,
+        "expense": 35_000,
+    }
+
+
+def test_get_balance_db_error_returns_503(monkeypatch):
+    def broken_db():
+        class BrokenSession:
+            def query(self, *args, **kwargs):
+                raise OperationalError("SELECT", {}, Exception("DB down"))
+
+        yield BrokenSession()
+
+    app.dependency_overrides[get_db] = broken_db
+    try:
+        res = client.get("/balance")
+        assert res.status_code == 503
+    finally:
+        pass
