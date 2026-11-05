@@ -86,8 +86,12 @@
 ## 예산
 
 ### 1. 예산 현황 목록 (`GET /budgets`)
-- **설명**: 카테고리별 예산 편성액, 실시간 잔여액, 집행률을 조회합니다. (앱 예산 카드 및 프로그레스 바 바인딩용)
-- **잔량 반영 기준**: `CONFIRMED` 확정 건만 잔량 차감에 반영되며, `PENDING`(대기) 상태 건은 예산 잔량에서 차감되지 않습니다.
+- **설명**: 카테고리별 예산 편성액, 실시간 잔여액, 집행률을 조회합니다. (앱 예산 카드 및 프로그레스 바 바인딩용, 쿼리 파라미터: `term_id`)
+- **노출 및 잔량 반영 기준**:
+  - 온체인(`BudgetToken.getBudget`)에 발행 확인된 예산만 반환하며, 미발행 초안(`DRAFT`), 온체인 미발행 시드 더미 행, 체인 응답 미확인(`NO_RESPONSE`) 대기 건은 목록에서 제외됩니다.
+  - 잔량은 온체인 `ChainBudget.remaining` 기준(`CONFIRMED` 확정 건만 반영, `PENDING` 대기 건은 미차감)으로 계산합니다.
+- **오류 응답**:
+  - `503 Service Unavailable`: 블록체인 네트워크(`get_budget`) 또는 DB와 통신할 수 없을 때 (미검증 DB 추정치로 대체하지 않음)
 
 **Response (`200 OK`)**
 ```json
@@ -191,6 +195,15 @@
   "message": "예산 토큰이 온체인에 발행되었습니다."
 }
 ```
+
+| 코드 | 경우 (`POST /budgets`, `POST /budgets/{id}/submit`) |
+| --- | --- |
+| `201` / `200` | `POST /budgets` 초안 발급(`201`, `status: "DRAFT"` 또는 `"ALREADY_ISSUED"`), `POST /budgets/{id}/submit` 체인 처리 결과(`200`, `status: "ISSUED" \| "ALREADY_ISSUED" \| "REJECTED" \| "NO_RESPONSE"`) |
+| `400` | 승인되지 않은 항목 또는 지출(`EXPENSE` 8종)이 아닌 수입 항목, `expires_at` 범위 초과, 서명 형식 오류(`MalformedSignature`), 서명자 지갑 불일치 |
+| `403` | 회장(`PRESIDENT`)이 아님 |
+| `404` | 존재하지 않는 학기(`term_id`) 또는 예산(`id`) |
+| `409` | 다른 발행 요청이 이미 `tx_issue`를 선점해 처리 중이거나, 온체인에 동일 학기·항목 예산이 DB와 다른 ID(`existing.id != id`)로 이미 발행된 경우 |
+| `503` | 릴레이어 전송 불가(`NOT_SENT`, `ChainSetupError`) 또는 DB 오류 |
 
 ---
 
@@ -396,8 +409,9 @@
 ## 검증
 
 ### 1. 장부 잔액 요약 (`GET /balance`)
-- **설명**: 대시보드 상단 카드에 표시되는 계좌/장부 잔액 요약입니다. (`CONFIRMED` 확정 건만 반영)
-- **산출식**: `balance = income - expense` (`PENDING`, `BLOCKED`, `REJECTED` 건 제외)
+- **설명**: 대시보드 상단 카드에 표시되는 계좌/장부 잔액 요약입니다. (`entries` 테이블의 `CONFIRMED` 확정 건만 실시간 DB 합산, 쿼리 파라미터: `term_id`)
+- **산출식**: `balance = income - expense` (`PENDING`, `BLOCKED`, `REJECTED` 및 미제출 초안 건 제외, 확정된 음수 정정 `amount < 0` 자동 반영)
+- **오류 응답**: `503 Service Unavailable` (DB 오류)
 
 **Response (`200 OK`)**
 ```json
