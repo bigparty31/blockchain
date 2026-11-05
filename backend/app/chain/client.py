@@ -14,6 +14,7 @@ from app.chain.models import (
     BudgetTxResult,
     ChainBudget,
     ChainEntry,
+    EntryTxDetail,
     ConfirmApproval,
     IncreaseRequest,
     IssueRequest,
@@ -121,6 +122,16 @@ class ChainClient(Protocol):
             ChainRevert: 블록에 들어갔지만 실패로 끝났다. 체인에 남은 것이 없다 — 선점을 비운다. 사유는 UNKNOWN 일 수 있다.
             ChainUnavailable: 노드에 닿지 못했거나, 그 트랜잭션에 이 id 의 결과 이벤트가 없다.
             ChainSetupError: 클라이언트가 교체돼 닫혔다 (다시 요청한다). 결과를 확인하지 못한 것이다.
+        """
+        ...
+
+    async def entry_tx_detail(self, tx_hash: str, entry_id: int) -> Optional[EntryTxDetail]:
+        """그 트랜잭션이 항목에 남긴 기록을 receipt 로 읽는다. 블록 번호와 사유 해시가 있다. None 은 아직 블록에 없다는 뜻이다.
+
+        이벤트를 블록 범위로 훑지 않는다. RPC 의 조회 범위 제한에 걸리지 않게, DB 에 저장한 hash(tx_pending·tx_confirm)로 읽는다.
+
+        Raises:
+            tx_result 와 같다.
         """
         ...
 
