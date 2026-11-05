@@ -990,6 +990,8 @@ def test_auditor_approve_version_mismatch_rolls_back_to_pending(auth_header):
     )
     assert res_app2.status_code == 400
     assert "VersionMismatch" in res_app2.json()["detail"]
+    assert "서명 당시 예산 버전(1)" in res_app2.json()["detail"]
+    assert "현재 예산 버전(2)" in res_app2.json()["detail"]
     assert "재서명" in res_app2.json()["detail"]
 
     rev2_state = client.get(f"/budget-revisions/{rev2}", headers=auth_header(Role.AUDITOR)).json()
@@ -1032,11 +1034,12 @@ def test_auditor_approve_no_response_keeps_tx_increase_and_retry_recovers(auth_h
     )
     assert res1.status_code == 503
 
-    # DB 확인: status는 PRESIDENT_SIGNED 유지, tx_increase는 선점 해시 유지
+    # DB 확인: status는 PRESIDENT_SIGNED 유지, tx_increase와 resolved_by는 선점 값 유지
     with _test_session_factory() as db:
         rev = db.query(DBBudgetRevisionRequest).filter_by(id=rev_id).first()
         assert rev.status == "PRESIDENT_SIGNED"
         assert rev.tx_increase is not None
+        assert rev.resolved_by == 3
         saved_tx = rev.tx_increase
 
     # 재시도 -> previous_tx_hash로 앞선 트랜잭션 성공 결과를 확인하여 이중 증액 없이 APPROVED 확정
@@ -1049,12 +1052,162 @@ def test_auditor_approve_no_response_keeps_tx_increase_and_retry_recovers(auth_h
     data = res2.json()
     assert data["status"] == "APPROVED"
     assert data["tx_increase"] == saved_tx
+    assert data["resolved_by"] == 3
     assert _test_chain._budgets[1].issued == 1400000
     assert _test_chain._budgets[1].version == 2
 
 
+def test_auditor_approve_retry_succeeds_even_after_budget_expired(auth_header, monkeypatch):
+    """전송 응답을 잃은 뒤 예산 마감일(expires_at)이 지나더라도, tx_increase가 있으면 마감 검사를 건너뛰고 앞선 결과를 확인해 200으로 확정한다."""
+    rev_id = _create_pending_revision(auth_header, amount=400000)
+    client.post(
+        f"/budget-revisions/{rev_id}/sign",
+        json={
+            "president_signature": fake_signature(PRESIDENT_WALLET),
+            "signature_deadline": int(time.time()) + 86400,
+            "signed_version": 1,
+        },
+        headers=auth_header(Role.PRESIDENT),
+    )
+
+    _test_chain.unavailable_next("increase_budget", landed=True, sent=True)
+    orig_budget_tx_result = _test_chain.budget_tx_result
+    failed_once = False
+
+    async def fail_once(tx_hash: str, budget_id: int):
+        nonlocal failed_once
+        if not failed_once:
+            failed_once = True
+            raise ChainUnavailable("일시적 조회 실패")
+        return await orig_budget_tx_result(tx_hash, budget_id)
+
+    monkeypatch.setattr(_test_chain, "budget_tx_result", fail_once)
+
+    res1 = client.post(
+        f"/budget-revisions/{rev_id}/approve",
+        json={"auditor_signature": fake_signature(AUDITOR_WALLET)},
+        headers=auth_header(Role.AUDITOR),
+    )
+    assert res1.status_code == 503
+
+    # 응답 유실 후 예산 마감일(expires_at)이 경과한 상황 재현
+    with _test_session_factory() as db:
+        b = db.query(DBBudget).filter_by(id=1).first()
+        b.expires_at = datetime.fromtimestamp(int(time.time()) - 10, tz=timezone.utc)
+        db.commit()
+
+    # 재시도 -> 마감일 검사에 막히지 않고 앞선 온체인 성공 결과를 복구하여 APPROVED 확정
+    res2 = client.post(
+        f"/budget-revisions/{rev_id}/approve",
+        json={"auditor_signature": fake_signature(AUDITOR_WALLET)},
+        headers=auth_header(Role.AUDITOR),
+    )
+    assert res2.status_code == 200
+    data = res2.json()
+    assert data["status"] == "APPROVED"
+    assert data["resolved_by"] == 3
+    assert _test_chain._budgets[1].version == 2
+    assert _test_chain._budgets[1].issued == 1400000
+
+    with _test_session_factory() as db:
+        v2 = db.query(DBBudgetVersion).filter_by(budget_id=1, version=2).first()
+        assert v2 is not None
+        assert v2.approved_by == 3
+
+
+def test_auditor_approve_retry_by_another_auditor_returns_409_and_keeps_original_approver(auth_header, monkeypatch):
+    """감사 A(id=3)의 전송 응답이 끊긴 뒤 감사 B(id=5)가 재시도하면 409를 반환하고, DB의 resolved_by와 approved_by에는 A(id=3)가 기록된다."""
+    rev_id = _create_pending_revision(auth_header, amount=300000)
+    client.post(
+        f"/budget-revisions/{rev_id}/sign",
+        json={
+            "president_signature": fake_signature(PRESIDENT_WALLET),
+            "signature_deadline": int(time.time()) + 86400,
+            "signed_version": 1,
+        },
+        headers=auth_header(Role.PRESIDENT),
+    )
+
+    _test_chain.unavailable_next("increase_budget", landed=True, sent=True)
+    orig_budget_tx_result = _test_chain.budget_tx_result
+    failed_once = False
+
+    async def fail_once(tx_hash: str, budget_id: int):
+        nonlocal failed_once
+        if not failed_once:
+            failed_once = True
+            raise ChainUnavailable("일시적 조회 실패")
+        return await orig_budget_tx_result(tx_hash, budget_id)
+
+    monkeypatch.setattr(_test_chain, "budget_tx_result", fail_once)
+
+    # 1. 감사 A(id=3) 승인 시도 -> 체인에는 반영되었으나 응답 유실(503)
+    res_a = client.post(
+        f"/budget-revisions/{rev_id}/approve",
+        json={"auditor_signature": fake_signature(AUDITOR_WALLET)},
+        headers=auth_header(Role.AUDITOR),
+    )
+    assert res_a.status_code == 503
+
+    # 2. 다른 감사 B(id=5, 최감사)가 자신의 서명으로 재시도 -> 409 Conflict
+    auditor_b = next(u for u in users.SEED_USERS if u.id == 5)
+    auditor_b_headers = {"Authorization": f"Bearer {create_access_token(auditor_b.id)}"}
+    res_b = client.post(
+        f"/budget-revisions/{rev_id}/approve",
+        json={"auditor_signature": fake_signature(auditor_b.wallet_address)},
+        headers=auditor_b_headers,
+    )
+    assert res_b.status_code == 409
+
+    # 3. DB에는 실제 온체인 서명자인 감사 A(id=3)로 APPROVED 및 BudgetVersion이 기록되어야 함
+    with _test_session_factory() as db:
+        rev = db.query(DBBudgetRevisionRequest).filter_by(id=rev_id).first()
+        assert rev.status == "APPROVED"
+        assert rev.resolved_by == 3
+        v2 = db.query(DBBudgetVersion).filter_by(budget_id=1, version=2).first()
+        assert v2 is not None
+        assert v2.approved_by == 3
+
+
+def test_create_budget_revision_fails_when_seed_budget_not_on_chain(auth_header):
+    """DB에 BudgetVersion은 있으나 온체인에 발행되지 않은 시드 예산은 1단계(POST /budget-revisions)에서 400으로 차단된다."""
+    with _test_session_factory() as db:
+        seed_budget = DBBudget(
+            id=4,
+            term_id=1,
+            category="복지비",
+            expires_at=datetime.fromtimestamp(1798704000, tz=timezone.utc),
+            tx_issue=None,
+        )
+        db.add(seed_budget)
+        db.flush()
+        db.add(
+            DBBudgetVersion(
+                budget_id=4,
+                version=1,
+                planned_amount=800000,
+                approved_by=4,
+                tx_hash=None,
+            )
+        )
+        db.commit()
+
+    res = client.post(
+        "/budget-revisions",
+        json={
+            "term_id": 1,
+            "category": "복지비",
+            "requested_amount": 200000,
+            "reason": "온체인 미발행 시드 예산 증액 시도",
+        },
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res.status_code == 400
+    assert "온체인 발행이 완료되지 않은" in res.json()["detail"]
+
+
 def test_auditor_approve_not_sent_returns_503_and_releases_claim(auth_header, monkeypatch):
-    """NOT_SENT(ChainSetupError) 발생 시 503을 반환하고 선점된 해시가 있으면 비운다."""
+    """NOT_SENT(ChainSetupError) 발생 시 503을 반환하고 선점된 해시와 처리자(resolved_by)를 함께 비운다."""
     rev_id = _create_pending_revision(auth_header)
     client.post(
         f"/budget-revisions/{rev_id}/sign",
@@ -1066,7 +1219,9 @@ def test_auditor_approve_not_sent_returns_503_and_releases_claim(auth_header, mo
         headers=auth_header(Role.PRESIDENT),
     )
 
-    async def broken_increase(*args, **kwargs):
+    async def broken_increase(request, president_sig, auditor_sig, before_broadcast=None):
+        if before_broadcast is not None:
+            await before_broadcast("0x" + "ab" * 32)
         raise ChainSetupError("릴레이어 설정 오류")
 
     monkeypatch.setattr(_test_chain, "increase_budget", broken_increase)
@@ -1081,6 +1236,7 @@ def test_auditor_approve_not_sent_returns_503_and_releases_claim(auth_header, mo
         rev = db.query(DBBudgetRevisionRequest).filter_by(id=rev_id).first()
         assert rev.status == "PRESIDENT_SIGNED"
         assert rev.tx_increase is None
+        assert rev.resolved_by is None
 
 
 def test_concurrent_approve_does_not_double_increase(auth_header):

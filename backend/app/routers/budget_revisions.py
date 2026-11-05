@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from app.auth import User, require_roles
-from app.chain import BudgetRevertReason, ChainClient, IncreaseRequest
+from app.chain import BudgetRevertReason, ChainBudget, ChainClient, ChainError, IncreaseRequest
 from app.chain.models import check_tx_hash
 from app.chain.provider import get_chain_client
 from app.database import get_db
@@ -55,6 +55,8 @@ council_only = require_roles(Role.TREASURER, Role.PRESIDENT, Role.AUDITOR)
 
 T = TypeVar("T")
 
+_in_flight_revisions: set[int] = set()
+
 
 class _RevisionConflictError(Exception):
     """동시 승인 요청 등으로 선점 또는 반영 조건이 맞지 않을 때 발생하는 409 예외"""
@@ -62,6 +64,10 @@ class _RevisionConflictError(Exception):
 
 class _RevisionResignRequiredError(Exception):
     """승인 도중 SignatureExpired / VersionMismatch 로 PENDING 롤백된 경우 발생하는 400 예외"""
+
+
+class _BudgetExpiredError(Exception):
+    """앞선 트랜잭션이 실패(ChainRevert)한 뒤 재전송 시점에 예산 마감일이 경과한 경우 발생하는 400 예외"""
 
 
 def _is_unpooled_memory_sqlite(bind) -> bool:
@@ -98,15 +104,19 @@ async def _run_short_db(db: Session, work: Callable[[Session], T]) -> T:
     return await asyncio.to_thread(_in_session)
 
 
-def _ensure_budget_not_expired(target_budget: Budget) -> None:
-    """마감일(expires_at)이 경과한 예산은 증액 요청·서명·승인을 모두 400으로 차단한다."""
+def _is_budget_expired(target_budget: Budget) -> bool:
     if target_budget.expires_at is None:
-        return
+        return False
     expires_at = target_budget.expires_at
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
     now = datetime.now(timezone.utc)
-    if int(expires_at.timestamp()) <= int(now.timestamp()):
+    return int(expires_at.timestamp()) <= int(now.timestamp())
+
+
+def _ensure_budget_not_expired(target_budget: Budget) -> None:
+    """마감일(expires_at)이 경과한 예산은 증액 요청·서명·승인을 모두 400으로 차단한다."""
+    if _is_budget_expired(target_budget):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"집행 마감일({target_budget.expires_at})이 경과한 예산은 증액할 수 없습니다.",
@@ -131,6 +141,24 @@ def _ensure_budget_has_version(target_budget: Budget, db: Session) -> BudgetVers
             detail=f"예산 ID {target_budget.id}는 아직 온체인 발행이 완료되지 않은 초안 예산이므로 증액할 수 없습니다.",
         )
     return latest
+
+
+async def _ensure_budget_on_chain(target_budget: Budget, chain: ChainClient) -> ChainBudget:
+    """체인에 없는 예산(시드 예산 또는 미발행 초안 예산)은 앞 단계에서 400으로 차단한다."""
+    try:
+        chain_budget = await chain.get_budget(target_budget.id)
+    except ChainError as e:
+        logger.exception("온체인 예산 조회 실패 (budget_id=%s): %s", target_budget.id, e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="블록체인 네트워크와 통신할 수 없습니다.",
+        )
+    if chain_budget is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"예산 ID {target_budget.id}는 아직 온체인 발행이 완료되지 않은 초안 예산이므로 증액할 수 없습니다.",
+        )
+    return chain_budget
 
 
 def _get_target_budget(revision: BudgetRevisionRequest, db: Session) -> Budget:
@@ -197,10 +225,11 @@ def expire_budget_revision_if_needed(revision: BudgetRevisionRequest, db: Sessio
     status_code=status.HTTP_201_CREATED,
     include_in_schema=False,
 )
-def create_budget_revision(
+async def create_budget_revision(
     payload: BudgetRevisionRequestCreate,
     current_user: User = Depends(require_roles(Role.TREASURER)),
     db: Session = Depends(get_db),
+    chain: ChainClient = Depends(get_chain_client),
 ):
     """PRD §4.1: 총무가 예산 증액을 요청하는 1단계 API입니다.
     - 증액 요청액(requested_amount)은 증액분(> 0)이어야 합니다.
@@ -261,9 +290,10 @@ def create_budget_revision(
                 detail=f"해당 학기({payload.term_id}) 및 카테고리('{payload.category}')에 해당하는 기존 예산이 존재하지 않습니다.",
             )
 
-    # 3. 마감 경과 예산 및 미발행 초안 예산 차단
+    # 3. 마감 경과 예산 및 미발행 초안/시드 예산 차단
     _ensure_budget_not_expired(target_budget)
     _ensure_budget_has_version(target_budget, db)
+    await _ensure_budget_on_chain(target_budget, chain)
 
     target_budget_id = target_budget.id
 
@@ -323,7 +353,7 @@ def create_budget_revision(
     response_model=BudgetRevisionResponse,
     summary="예산 증액 회장 서명 수집 (회장 2단계)",
 )
-def sign_budget_revision(
+async def sign_budget_revision(
     id: int,
     payload: BudgetRevisionSignRequest,
     current_user: User = Depends(require_roles(Role.PRESIDENT)),
@@ -344,6 +374,7 @@ def sign_budget_revision(
     target_budget = _get_target_budget(revision, db)
     _ensure_budget_not_expired(target_budget)
     latest_version = _ensure_budget_has_version(target_budget, db)
+    await _ensure_budget_on_chain(target_budget, chain)
 
     # 시한 만료 Lazy 처리
     expire_budget_revision_if_needed(revision, db)
@@ -521,12 +552,15 @@ async def approve_budget_revision(
             detail=f"증액 요청 ID {id}를 찾을 수 없습니다.",
         )
 
-    # 대상 Budget 조회 및 마감 경과 / 초안 버전 유무 검사 (마감 경과 예산은 재서명으로 안내하지 않고 즉시 400 차단)
+    # 대상 Budget 조회 및 초안 버전 유무 검사
+    # tx_increase가 이미 선점되어 진행 중인 건은 앞선 트랜잭션 결과 확인을 위해 마감일 검사를 건너뛴다.
     target_budget = _get_target_budget(revision, db)
-    _ensure_budget_not_expired(target_budget)
     latest_version_row = _ensure_budget_has_version(target_budget, db)
+    if revision.tx_increase is None:
+        _ensure_budget_not_expired(target_budget)
+        await _ensure_budget_on_chain(target_budget, chain)
 
-    # 만료 검사 (Lazy Update)
+    # 만료 검사 (Lazy Update — tx_increase가 선점된 건은 expire_budget_revision_if_needed에서 건너뜀)
     if expire_budget_revision_if_needed(revision, db):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -570,6 +604,7 @@ async def approve_budget_revision(
 
     # 선점된 앞선 트랜잭션이 없을 때 DB 버전이 이미 올라갔다면(다른 증액이 먼저 승인됨) VersionMismatch 로 PENDING 롤백
     if revision.tx_increase is None and revision.signed_version != latest_version_row.version:
+        old_signed_version = revision.signed_version
         revision.status = "PENDING"
         revision.president_signed_by = None
         revision.president_signature = None
@@ -582,8 +617,8 @@ async def approve_budget_revision(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
-                f"서명 당시 예산 버전({inc_version if (inc_version := latest_version_row.version) else ''})이 "
-                "변경되어 PENDING 상태로 되돌아갔습니다. 회장의 재서명이 필요합니다. (VersionMismatch)"
+                f"서명 당시 예산 버전({old_signed_version})이 현재 예산 버전({latest_version_row.version})과 "
+                "일치하지 않아 PENDING 상태로 되돌아갔습니다. 회장의 재서명이 필요합니다. (VersionMismatch)"
             ),
         )
 
@@ -639,6 +674,7 @@ async def approve_budget_revision(
     revision_id = revision.id
     target_budget_id = target_budget.id
     prev_tx_hash = revision.tx_increase
+    claimed_by = revision.resolved_by
     req_reason = revision.reason
     requested_amount = revision.requested_amount
     pres_sig = revision.president_signature
@@ -654,10 +690,30 @@ async def approve_budget_revision(
             detail="데이터베이스 처리 중 오류가 발생했습니다.",
         )
 
+    if revision_id in _in_flight_revisions:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="이미 다른 승인 요청이 처리 중입니다.",
+        )
+
     async def _before_broadcast(tx_hash: str) -> None:
         checked_hash = check_tx_hash(tx_hash)
 
         def _claim(s: Session) -> None:
+            if prev_tx_hash is not None and _is_budget_expired(target_budget):
+                s.execute(
+                    update(BudgetRevisionRequest)
+                    .where(
+                        BudgetRevisionRequest.id == revision_id,
+                        BudgetRevisionRequest.tx_increase == prev_tx_hash,
+                    )
+                    .values(tx_increase=None, resolved_by=None)
+                    .execution_options(synchronize_session=False)
+                )
+                raise _BudgetExpiredError(
+                    f"집행 마감일({target_budget.expires_at})이 경과한 예산은 증액할 수 없습니다."
+                )
+
             tx_cond = (
                 BudgetRevisionRequest.tx_increase.is_(None)
                 if prev_tx_hash is None
@@ -670,7 +726,7 @@ async def approve_budget_revision(
                     BudgetRevisionRequest.status == "PRESIDENT_SIGNED",
                     tx_cond,
                 )
-                .values(tx_increase=checked_hash)
+                .values(tx_increase=checked_hash, resolved_by=current_user.id)
                 .execution_options(synchronize_session=False)
             ).rowcount
             if rows != 1:
@@ -678,213 +734,232 @@ async def approve_budget_revision(
 
         await _run_short_db(db, _claim)
 
+    _in_flight_revisions.add(revision_id)
     try:
-        outcome = await relay_increase(
-            chain,
-            inc_req,
-            req_reason,
-            pres_sig,
-            aud_sig,
-            previous_tx_hash=prev_tx_hash,
-            before_broadcast=_before_broadcast,
-        )
-    except _RevisionConflictError as e:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=str(e),
-        )
-    except SQLAlchemyError as e:
-        logger.exception("증액 선점 중 데이터베이스 오류: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="데이터베이스 처리 중 오류가 발생했습니다.",
-        )
-
-    # 선점 해제 규칙: failed_tx_hash 가 칸의 값과 같으면 비운다 (CHAIN_CLIENT.md §9)
-    if outcome.failed_tx_hash is not None:
-        failed_hash = outcome.failed_tx_hash
-
-        def _release(s: Session) -> None:
-            s.execute(
-                update(BudgetRevisionRequest)
-                .where(
-                    BudgetRevisionRequest.id == revision_id,
-                    BudgetRevisionRequest.tx_increase == failed_hash,
-                )
-                .values(tx_increase=None)
-                .execution_options(synchronize_session=False)
-            )
-
         try:
-            await _run_short_db(db, _release)
-        except SQLAlchemyError as e:
-            logger.exception("증액 선점 해제 중 데이터베이스 오류: %s", e)
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="데이터베이스 처리 중 오류가 발생했습니다.",
+            outcome = await relay_increase(
+                chain,
+                inc_req,
+                req_reason,
+                pres_sig,
+                aud_sig,
+                previous_tx_hash=prev_tx_hash,
+                before_broadcast=_before_broadcast,
             )
-
-    if outcome.status == BudgetRelayStatus.INCREASED:
-        if outcome.tx_hash is None or outcome.version is None:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="온체인 증액 결과 정보가 불완전합니다.",
-            )
-        landed_hash = outcome.tx_hash
-        landed_version = outcome.version
-
-        def _settle(s: Session) -> None:
-            rev = s.get(BudgetRevisionRequest, revision_id)
-            if rev is None:
-                raise LookupError(f"증액 요청 ID {revision_id}를 찾을 수 없습니다.")
-            if rev.status == "APPROVED":
-                if rev.tx_increase == landed_hash:
-                    return
-                raise _RevisionConflictError("이미 다른 트랜잭션으로 승인 완료된 요청입니다.")
-
-            rows = s.execute(
-                update(BudgetRevisionRequest)
-                .where(
-                    BudgetRevisionRequest.id == revision_id,
-                    BudgetRevisionRequest.status == "PRESIDENT_SIGNED",
-                    BudgetRevisionRequest.tx_increase == landed_hash,
-                )
-                .values(
-                    status="APPROVED",
-                    tx_increase=landed_hash,
-                    resolved_by=current_user.id,
-                    resolved_at=datetime.now(timezone.utc),
-                )
-                .execution_options(synchronize_session=False)
-            ).rowcount
-            if rows != 1:
-                raise _RevisionConflictError("이미 다른 승인 요청이 처리 중이거나 상태가 변경되었습니다.")
-
-            latest_bv = (
-                s.query(BudgetVersion)
-                .filter(BudgetVersion.budget_id == target_budget_id)
-                .order_by(BudgetVersion.version.desc())
-                .first()
-            )
-            if latest_bv is None:
-                raise ValueError("대상 예산의 기존 버전을 찾을 수 없습니다.")
-
-            new_planned = latest_bv.planned_amount + requested_amount
-            new_budget_version = BudgetVersion(
-                budget_id=target_budget_id,
-                version=landed_version,
-                planned_amount=new_planned,
-                revision_request_id=revision_id,
-                revision_reason=req_reason,
-                approved_by=current_user.id,
-                tx_hash=landed_hash,
-            )
-            s.add(new_budget_version)
-            try:
-                s.flush()
-            except IntegrityError as e:
-                raise _RevisionConflictError(
-                    f"예산 ID {target_budget_id}의 버전 {landed_version}이 이미 존재합니다."
-                ) from e
-
-            resolve_notifications(s, budget_revision_request_id=revision_id)
-            create_notification(s, NotificationKind.REVISION_APPROVED, budget_revision_request_id=revision_id)
-
-        try:
-            await _run_short_db(db, _settle)
         except _RevisionConflictError as e:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
-        except LookupError as e:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
-        except ValueError as e:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-        except SQLAlchemyError as e:
-            logger.exception("증액 승인 확정 반영 중 데이터베이스 오류: %s", e)
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="데이터베이스 처리 중 오류가 발생했습니다. 다시 요청하면 결과를 확인합니다.",
-            )
-
-        db.expire_all()
-        updated = db.query(BudgetRevisionRequest).filter(BudgetRevisionRequest.id == revision_id).first()
-        return updated
-
-    if outcome.status == BudgetRelayStatus.NO_RESPONSE:
-        logger.warning("증액 릴레이 응답 미확인 (id=%s, tx=%s): %s", revision_id, outcome.tx_hash, outcome.detail)
-        if prev_tx_hash is not None and "아직 블록에 없다" in outcome.detail:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="이미 진행 중인 증액 트랜잭션이 아직 블록에 반영되지 않았습니다.",
+                detail=str(e),
             )
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="블록체인 네트워크 응답을 확인하지 못했습니다. 잠시 후 다시 시도하면 이전 트랜잭션 결과를 확인합니다.",
-        )
-
-    if outcome.status == BudgetRelayStatus.NOT_SENT:
-        logger.error("증액 릴레이 미전송 (id=%s): %s", revision_id, outcome.detail)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="블록체인 릴레이어를 사용할 수 없습니다. 설정을 확인한 뒤 다시 시도해 주세요.",
-        )
-
-    # REJECTED 처리
-    reason = outcome.reason or "Unknown"
-    logger.info("증액 릴레이 거부 (id=%s, reason=%s): %s", revision_id, reason, outcome.detail)
-
-    if reason in (BudgetRevertReason.SIGNATURE_EXPIRED.value, BudgetRevertReason.VERSION_MISMATCH.value):
-        def _rollback_for_resign(s: Session) -> None:
-            rev = s.get(BudgetRevisionRequest, revision_id)
-            if rev is None:
-                raise LookupError(f"증액 요청 ID {revision_id}를 찾을 수 없습니다.")
-            if rev.status == "APPROVED":
-                raise _RevisionConflictError("이미 승인 완료된 증액 요청입니다.")
-            if rev.status != "PRESIDENT_SIGNED" or rev.tx_increase is not None:
-                raise _RevisionConflictError("다른 승인 요청이 처리 중이거나 상태가 변경되었습니다.")
-
-            rev.status = "PENDING"
-            rev.president_signed_by = None
-            rev.president_signature = None
-            rev.president_signed_at = None
-            rev.signature_deadline = None
-            rev.signed_version = None
-            resolve_notifications(s, budget_revision_request_id=revision_id)
-            create_notification(s, NotificationKind.REVISION_REQUESTED, budget_revision_request_id=revision_id)
-
-        try:
-            await _run_short_db(db, _rollback_for_resign)
-        except _RevisionConflictError as e:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
-        except LookupError as e:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+        except _BudgetExpiredError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(e),
+            )
         except SQLAlchemyError as e:
-            logger.exception("증액 재서명 롤백 중 데이터베이스 오류: %s", e)
+            logger.exception("증액 선점 중 데이터베이스 오류: %s", e)
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="데이터베이스 처리 중 오류가 발생했습니다.",
             )
 
+        # 선점 해제 규칙: failed_tx_hash 가 칸의 값과 같으면 처리자(resolved_by)와 함께 비운다 (CHAIN_CLIENT.md §9)
+        if outcome.failed_tx_hash is not None:
+            failed_hash = outcome.failed_tx_hash
+
+            def _release(s: Session) -> None:
+                s.execute(
+                    update(BudgetRevisionRequest)
+                    .where(
+                        BudgetRevisionRequest.id == revision_id,
+                        BudgetRevisionRequest.tx_increase == failed_hash,
+                    )
+                    .values(tx_increase=None, resolved_by=None)
+                    .execution_options(synchronize_session=False)
+                )
+
+            try:
+                await _run_short_db(db, _release)
+            except SQLAlchemyError as e:
+                logger.exception("증액 선점 해제 중 데이터베이스 오류: %s", e)
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="데이터베이스 처리 중 오류가 발생했습니다.",
+                )
+
+        if outcome.status == BudgetRelayStatus.INCREASED:
+            if outcome.tx_hash is None or outcome.version is None:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="온체인 증액 결과 정보가 불완전합니다.",
+                )
+            landed_hash = outcome.tx_hash
+            landed_version = outcome.version
+
+            def _settle(s: Session) -> int:
+                rev = s.get(BudgetRevisionRequest, revision_id)
+                if rev is None:
+                    raise LookupError(f"증액 요청 ID {revision_id}를 찾을 수 없습니다.")
+                if rev.status == "APPROVED":
+                    if rev.tx_increase == landed_hash and rev.resolved_by == current_user.id:
+                        return rev.resolved_by
+                    raise _RevisionConflictError("이미 다른 트랜잭션으로 승인 완료된 요청입니다.")
+
+                approver_id = rev.resolved_by if rev.resolved_by is not None else current_user.id
+
+                rows = s.execute(
+                    update(BudgetRevisionRequest)
+                    .where(
+                        BudgetRevisionRequest.id == revision_id,
+                        BudgetRevisionRequest.status == "PRESIDENT_SIGNED",
+                        BudgetRevisionRequest.tx_increase == landed_hash,
+                    )
+                    .values(
+                        status="APPROVED",
+                        tx_increase=landed_hash,
+                        resolved_by=approver_id,
+                        resolved_at=datetime.now(timezone.utc),
+                    )
+                    .execution_options(synchronize_session=False)
+                ).rowcount
+                if rows != 1:
+                    raise _RevisionConflictError("이미 다른 승인 요청이 처리 중이거나 상태가 변경되었습니다.")
+
+                latest_bv = (
+                    s.query(BudgetVersion)
+                    .filter(BudgetVersion.budget_id == target_budget_id)
+                    .order_by(BudgetVersion.version.desc())
+                    .first()
+                )
+                if latest_bv is None:
+                    raise ValueError("대상 예산의 기존 버전을 찾을 수 없습니다.")
+
+                new_planned = latest_bv.planned_amount + requested_amount
+                new_budget_version = BudgetVersion(
+                    budget_id=target_budget_id,
+                    version=landed_version,
+                    planned_amount=new_planned,
+                    revision_request_id=revision_id,
+                    revision_reason=req_reason,
+                    approved_by=approver_id,
+                    tx_hash=landed_hash,
+                )
+                s.add(new_budget_version)
+                try:
+                    s.flush()
+                except IntegrityError as e:
+                    raise _RevisionConflictError(
+                        f"예산 ID {target_budget_id}의 버전 {landed_version}이 이미 존재합니다."
+                    ) from e
+
+                resolve_notifications(s, budget_revision_request_id=revision_id)
+                create_notification(s, NotificationKind.REVISION_APPROVED, budget_revision_request_id=revision_id)
+                return approver_id
+
+            try:
+                settled_approver_id = await _run_short_db(db, _settle)
+            except _RevisionConflictError as e:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+            except LookupError as e:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+            except ValueError as e:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+            except SQLAlchemyError as e:
+                logger.exception("증액 승인 확정 반영 중 데이터베이스 오류: %s", e)
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="데이터베이스 처리 중 오류가 발생했습니다. 다시 요청하면 결과를 확인합니다.",
+                )
+
+            if settled_approver_id != current_user.id:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="다른 감사의 승인 트랜잭션이 이미 온체인에 반영되어 완료되었습니다.",
+                )
+
+            db.expire_all()
+            updated = db.query(BudgetRevisionRequest).filter(BudgetRevisionRequest.id == revision_id).first()
+            return updated
+
+        if outcome.status == BudgetRelayStatus.NO_RESPONSE:
+            logger.warning("증액 릴레이 응답 미확인 (id=%s, tx=%s): %s", revision_id, outcome.tx_hash, outcome.detail)
+            if prev_tx_hash is not None and claimed_by is not None and claimed_by != current_user.id:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="다른 감사가 승인 처리 중인 요청입니다.",
+                )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="블록체인 네트워크 응답을 확인하지 못했습니다. 잠시 후 다시 시도하면 이전 트랜잭션 결과를 확인합니다.",
+            )
+
+        if outcome.status == BudgetRelayStatus.NOT_SENT:
+            logger.error("증액 릴레이 미전송 (id=%s): %s", revision_id, outcome.detail)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="블록체인 릴레이어를 사용할 수 없습니다. 설정을 확인한 뒤 다시 시도해 주세요.",
+            )
+
+        # REJECTED 처리
+        reason = outcome.reason or "Unknown"
+        logger.info("증액 릴레이 거부 (id=%s, reason=%s): %s", revision_id, reason, outcome.detail)
+
+        if reason in (BudgetRevertReason.SIGNATURE_EXPIRED.value, BudgetRevertReason.VERSION_MISMATCH.value):
+            def _rollback_for_resign(s: Session) -> None:
+                rev = s.get(BudgetRevisionRequest, revision_id)
+                if rev is None:
+                    raise LookupError(f"증액 요청 ID {revision_id}를 찾을 수 없습니다.")
+                if rev.status == "APPROVED":
+                    raise _RevisionConflictError("이미 승인 완료된 증액 요청입니다.")
+                if rev.status != "PRESIDENT_SIGNED" or rev.tx_increase is not None:
+                    raise _RevisionConflictError("다른 승인 요청이 처리 중이거나 상태가 변경되었습니다.")
+
+                rev.status = "PENDING"
+                rev.president_signed_by = None
+                rev.president_signature = None
+                rev.president_signed_at = None
+                rev.signature_deadline = None
+                rev.signed_version = None
+                rev.resolved_by = None
+                resolve_notifications(s, budget_revision_request_id=revision_id)
+                create_notification(s, NotificationKind.REVISION_REQUESTED, budget_revision_request_id=revision_id)
+
+            try:
+                await _run_short_db(db, _rollback_for_resign)
+            except _RevisionConflictError as e:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+            except LookupError as e:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+            except SQLAlchemyError as e:
+                logger.exception("증액 재서명 롤백 중 데이터베이스 오류: %s", e)
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="데이터베이스 처리 중 오류가 발생했습니다.",
+                )
+
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"온체인 증액이 거부되어({reason}) PENDING 상태로 되돌아갔습니다. 회장의 재서명이 필요합니다.",
+            )
+
+        if reason == BudgetRevertReason.BUDGET_EXPIRED.value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="집행 마감일이 경과한 예산은 증액할 수 없습니다. (BudgetExpired)",
+            )
+
+        if reason in (MALFORMED_SIGNATURE, REASON_HASH_MISMATCH):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"증액 서명 또는 사유 해시가 유효하지 않습니다 ({reason}).",
+            )
+
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"온체인 증액이 거부되어({reason}) PENDING 상태로 되돌아갔습니다. 회장의 재서명이 필요합니다.",
+            detail=f"온체인 예산 증액이 거부되었습니다 ({reason}).",
         )
-
-    if reason == BudgetRevertReason.BUDGET_EXPIRED.value:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="집행 마감일이 경과한 예산은 증액할 수 없습니다. (BudgetExpired)",
-        )
-
-    if reason in (MALFORMED_SIGNATURE, REASON_HASH_MISMATCH):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"증액 서명 또는 사유 해시가 유효하지 않습니다 ({reason}).",
-        )
-
-    raise HTTPException(
-        status_code=status.HTTP_400_BAD_REQUEST,
-        detail=f"온체인 예산 증액이 거부되었습니다 ({reason}).",
-    )
+    finally:
+        _in_flight_revisions.discard(revision_id)
 
 
 @router.get(
