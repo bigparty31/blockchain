@@ -1115,6 +1115,60 @@ def test_auditor_approve_retry_succeeds_even_after_budget_expired(auth_header, m
         assert v2.approved_by == 3
 
 
+def test_auditor_approve_retry_after_failed_tx_and_chain_budget_expired_releases_claim(auth_header, monkeypatch):
+    """앞선 tx_increase가 실패(ChainRevert)하고 재시도 시점에 체인에서 BudgetExpired로 거부되면 선점(tx_increase, resolved_by)이 해제되어 반려가 가능하다."""
+    rev_id = _create_pending_revision(auth_header, amount=200000)
+    client.post(
+        f"/budget-revisions/{rev_id}/sign",
+        json={
+            "president_signature": fake_signature(PRESIDENT_WALLET),
+            "signature_deadline": int(time.time()) + 86400,
+            "signed_version": 1,
+        },
+        headers=auth_header(Role.PRESIDENT),
+    )
+
+    prev_failed_hash = "0x" + "ee" * 32
+    with _test_session_factory() as db:
+        rev = db.query(DBBudgetRevisionRequest).filter_by(id=rev_id).first()
+        rev.tx_increase = prev_failed_hash
+        rev.resolved_by = 3
+        b = db.query(DBBudget).filter_by(id=1).first()
+        b.expires_at = datetime.fromtimestamp(int(time.time()) - 10, tz=timezone.utc)
+        db.commit()
+
+    from app.chain.models import ChainRevert
+
+    async def revert_prev_tx(tx_hash: str, budget_id: int):
+        raise ChainRevert(BudgetRevertReason.BUDGET_EXPIRED, "이전 트랜잭션 실패")
+
+    monkeypatch.setattr(_test_chain, "budget_tx_result", revert_prev_tx)
+    _test_chain.fail_next("increase_budget", BudgetRevertReason.BUDGET_EXPIRED)
+
+    res = client.post(
+        f"/budget-revisions/{rev_id}/approve",
+        json={"auditor_signature": fake_signature(AUDITOR_WALLET)},
+        headers=auth_header(Role.AUDITOR),
+    )
+    assert res.status_code == 400
+    assert "BudgetExpired" in res.json()["detail"]
+
+    with _test_session_factory() as db:
+        rev = db.query(DBBudgetRevisionRequest).filter_by(id=rev_id).first()
+        assert rev.status == "PRESIDENT_SIGNED"
+        assert rev.tx_increase is None
+        assert rev.resolved_by is None
+
+    # 선점이 해제되었으므로 이제 반려(reject)도 409가 아니라 200으로 정상 처리됨
+    rej_res = client.post(
+        f"/budget-revisions/{rev_id}/reject",
+        json={"reject_reason": "예산 마감일 경과로 인한 증액 반려"},
+        headers=auth_header(Role.AUDITOR),
+    )
+    assert rej_res.status_code == 200
+    assert rej_res.json()["status"] == "REJECTED"
+
+
 def test_auditor_approve_retry_by_another_auditor_returns_409_and_keeps_original_approver(auth_header, monkeypatch):
     """감사 A(id=3)의 전송 응답이 끊긴 뒤 감사 B(id=5)가 재시도하면 409를 반환하고, DB의 resolved_by와 approved_by에는 A(id=3)가 기록된다."""
     rev_id = _create_pending_revision(auth_header, amount=300000)

@@ -66,10 +66,6 @@ class _RevisionResignRequiredError(Exception):
     """승인 도중 SignatureExpired / VersionMismatch 로 PENDING 롤백된 경우 발생하는 400 예외"""
 
 
-class _BudgetExpiredError(Exception):
-    """앞선 트랜잭션이 실패(ChainRevert)한 뒤 재전송 시점에 예산 마감일이 경과한 경우 발생하는 400 예외"""
-
-
 def _is_unpooled_memory_sqlite(bind) -> bool:
     url = bind.url
     return (
@@ -700,20 +696,6 @@ async def approve_budget_revision(
         checked_hash = check_tx_hash(tx_hash)
 
         def _claim(s: Session) -> None:
-            if prev_tx_hash is not None and _is_budget_expired(target_budget):
-                s.execute(
-                    update(BudgetRevisionRequest)
-                    .where(
-                        BudgetRevisionRequest.id == revision_id,
-                        BudgetRevisionRequest.tx_increase == prev_tx_hash,
-                    )
-                    .values(tx_increase=None, resolved_by=None)
-                    .execution_options(synchronize_session=False)
-                )
-                raise _BudgetExpiredError(
-                    f"집행 마감일({target_budget.expires_at})이 경과한 예산은 증액할 수 없습니다."
-                )
-
             tx_cond = (
                 BudgetRevisionRequest.tx_increase.is_(None)
                 if prev_tx_hash is None
@@ -749,11 +731,6 @@ async def approve_budget_revision(
         except _RevisionConflictError as e:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail=str(e),
-            )
-        except _BudgetExpiredError as e:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
                 detail=str(e),
             )
         except SQLAlchemyError as e:
