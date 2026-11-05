@@ -578,7 +578,7 @@ async def get_budgets(
             continue
 
         planned_amount = int(chain_budget.issued)
-        remaining_amount = max(0, int(chain_budget.issued) - int(chain_budget.spent))
+        remaining_amount = max(0, int(chain_budget.remaining))
         version = int(chain_budget.version)
 
         matched_ver = next((v for v in b.versions if v.version == version), None)

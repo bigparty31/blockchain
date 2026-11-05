@@ -537,9 +537,39 @@ def test_get_budgets_reflects_chain_remaining(auth_header):
         )
         assert res.json()["status"] == "ISSUED"
 
-    # 체인의 행사비(id=1) spent가 30,000원, 사업비(id=2) spent가 35,000원인 상태 모사
+    # 행사비(id=1): 체인 spent 30,000원 직접 모사
     _test_chain._budgets[1] = _test_chain._budgets[1].model_copy(update={"spent": 30_000})
-    _test_chain._budgets[2] = _test_chain._budgets[2].model_copy(update={"spent": 35_000})
+
+    # 사업비(id=2): 실제 지출 등록 -> 제출 -> 확정(confirm) 흐름으로 FakeChainClient가 spent 35,000원을 반영하는지 검증
+    res_entry_draft = client.post(
+        "/entries",
+        json={
+            "term_id": 1,
+            "kind": "EXPENSE",
+            "amount": 35_000,
+            "counterparty": "한결문구",
+            "purpose": "명찰 구매",
+            "budget_id": 2,
+            "occurred_at": 1788793200,
+        },
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_entry_draft.status_code == 201
+    entry_id = res_entry_draft.json()["id"]
+
+    res_entry_submit = client.post(
+        f"/entries/{entry_id}/submit",
+        json={"deadline": now + 600, "signature": fake_signature(TREASURER_WALLET)},
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_entry_submit.status_code == 200
+
+    res_entry_confirm = client.post(
+        f"/entries/{entry_id}/confirm",
+        json={"deadline": now + 600, "signature": fake_signature(AUDITOR_WALLET)},
+        headers=auth_header(Role.AUDITOR),
+    )
+    assert res_entry_confirm.status_code == 200
 
     res = client.get("/budgets")
     assert res.status_code == 200
