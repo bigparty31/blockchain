@@ -35,6 +35,7 @@ class CorrectionReason(str, Enum):
     RECEIPT_RECHECK = "RECEIPT_RECHECK"
     REFUND = "REFUND"
     RECLASSIFY = "RECLASSIFY"
+    OTHER = "OTHER"
 
 
 class BlockReason(str, Enum):
