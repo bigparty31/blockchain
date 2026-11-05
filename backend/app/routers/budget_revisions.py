@@ -1,0 +1,205 @@
+import logging
+from datetime import datetime, timezone
+from typing import List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+from app.auth import User, get_current_user, require_roles
+from app.database import get_db
+from app.models import Budget, BudgetRevisionRequest, Entry, Term, User as DBUser
+from app.schemas.auth import Role
+from app.schemas.budget_revision import (
+    BudgetRevisionRequestCreate,
+    BudgetRevisionResponse,
+)
+from app.utils.hashing import canonical_text
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/budget-revisions", tags=["BudgetRevisions"])
+
+
+@router.post(
+    "",
+    response_model=BudgetRevisionResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="예산 증액 요청 등록 (총무 1단계)",
+)
+@router.post(
+    "/",
+    response_model=BudgetRevisionResponse,
+    status_code=status.HTTP_201_CREATED,
+    include_in_schema=False,
+)
+def create_budget_revision(
+    payload: BudgetRevisionRequestCreate,
+    current_user: User = Depends(require_roles(Role.TREASURER)),
+    db: Session = Depends(get_db),
+):
+    """PRD v0.13 §4.1: 총무가 예산 증액을 요청하는 1단계 API입니다.
+    - 증액 요청액(requested_amount)은 증액분(> 0)이어야 합니다.
+    - 한도 초과 등으로 차단(BLOCKED)된 지출이 있는 경우 blocked_entry_id를 연계합니다 (마감 경과 예산은 증액 불가).
+    - 사유는 canonical_text로 정규화되어 저장됩니다.
+    - 등록 시 status는 'PENDING'으로 설정됩니다.
+    """
+    if payload.requested_amount <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="증액 요청액은 0원보다 커야 합니다.",
+        )
+
+    # 1. 학기 존재 여부 검증
+    term = db.query(Term).filter(Term.id == payload.term_id).first()
+    if not term:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"학기 ID {payload.term_id}를 찾을 수 없습니다.",
+        )
+
+    # 2. 예산 매핑 검증 (PRD §4.1: 증액은 기존 예산에 대해서만 가능하므로 없으면 404)
+    target_budget = None
+    if payload.budget_id is not None:
+        target_budget = db.query(Budget).filter(Budget.id == payload.budget_id).first()
+        if not target_budget:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"예산 ID {payload.budget_id}를 찾을 수 없습니다.",
+            )
+        if target_budget.term_id != payload.term_id or target_budget.category != payload.category:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="지정된 예산의 학기 또는 카테고리가 일치하지 않습니다.",
+            )
+    else:
+        # term_id와 category로 기존 예산 식별
+        target_budget = (
+            db.query(Budget)
+            .filter(Budget.term_id == payload.term_id, Budget.category == payload.category)
+            .first()
+        )
+        if not target_budget:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"해당 학기({payload.term_id}) 및 카테고리('{payload.category}')에 해당하는 기존 예산이 존재하지 않습니다.",
+            )
+
+    # 마감일(expires_at) 만료 검사 (PRD §4.1, IBudgetToken.sol: 마감 지난 예산은 BudgetExpired로 거부되므로 사전 차단)
+    now = datetime.now(timezone.utc)
+    if target_budget.expires_at is not None:
+        expires_at = target_budget.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at < now:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"집행 마감일({target_budget.expires_at})이 경과한 예산은 증액할 수 없습니다.",
+            )
+
+    target_budget_id = target_budget.id
+
+    # 3. 차단 지출(blocked_entry_id) 검증 (지정된 경우)
+    if payload.blocked_entry_id is not None:
+        entry = db.query(Entry).filter(Entry.id == payload.blocked_entry_id).first()
+        if not entry:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"차단 지출 ID {payload.blocked_entry_id}를 찾을 수 없습니다.",
+            )
+        if entry.term_id != payload.term_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="차단 지출의 학기와 증액 요청 학기가 일치하지 않습니다.",
+            )
+        if entry.kind != "EXPENSE":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="차단 지출 연동은 지출(EXPENSE) 내역만 가능합니다.",
+            )
+        if entry.status not in ("BLOCKED", "PENDING"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"지출 상태가 {entry.status}입니다. 차단 지출 연동은 BLOCKED 또는 PENDING 지출만 가능합니다.",
+            )
+        if entry.budget_id is not None and entry.budget_id != target_budget_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="차단 지출의 예산과 증액 요청 대상 예산이 일치하지 않습니다.",
+            )
+
+    # 4. 증액 요청 엔티티 생성 (PENDING, 사유 정규화)
+    clean_reason = canonical_text(payload.reason)
+    revision_req = BudgetRevisionRequest(
+        term_id=payload.term_id,
+        category=payload.category,
+        budget_id=target_budget_id,
+        blocked_entry_id=payload.blocked_entry_id,
+        requested_amount=payload.requested_amount,
+        reason=clean_reason,
+        requested_by=current_user.id,
+        status="PENDING",
+    )
+    db.add(revision_req)
+    db.flush()
+
+    # 5. D4 합의: 알림 생성 (알림 모듈 준비 시 safe-call)
+    try:
+        from app.services.notifications import NotificationKind, create_notification
+        create_notification(db, NotificationKind.REVISION_REQUESTED, budget_revision_request_id=revision_req.id)
+    except Exception:
+        pass
+
+    db.commit()
+    db.refresh(revision_req)
+
+    return revision_req
+
+
+@router.get(
+    "",
+    response_model=List[BudgetRevisionResponse],
+    summary="예산 증액 요청 목록 조회",
+)
+@router.get(
+    "/",
+    response_model=List[BudgetRevisionResponse],
+    include_in_schema=False,
+)
+def list_budget_revisions(
+    term_id: Optional[int] = None,
+    status_filter: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """예산 증액 요청 목록을 조회합니다."""
+    query = db.query(BudgetRevisionRequest)
+    if term_id is not None:
+        query = query.filter(BudgetRevisionRequest.term_id == term_id)
+    if status_filter is not None:
+        query = query.filter(BudgetRevisionRequest.status == status_filter)
+
+    return query.order_by(BudgetRevisionRequest.id.desc()).all()
+
+
+@router.get(
+    "/{id}",
+    response_model=BudgetRevisionResponse,
+    summary="예산 증액 요청 단건 상세 조회",
+)
+def get_budget_revision(
+    id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """예산 증액 요청의 상세 정보를 조회합니다."""
+    revision_req = (
+        db.query(BudgetRevisionRequest)
+        .filter(BudgetRevisionRequest.id == id)
+        .first()
+    )
+    if not revision_req:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"증액 요청 ID {id}를 찾을 수 없습니다.",
+        )
+    return revision_req
