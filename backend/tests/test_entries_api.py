@@ -1137,6 +1137,26 @@ def test_get_entry_by_id_not_found():
     assert res.status_code == 404
     assert "찾을 수 없습니다" in res.json()["detail"]
 
+
+def test_get_entry_by_id_draft_returns_404(auth_header):
+    """POST /entries로 생성된 미제출 초안(status=None)을 단건 조회할 때 404 Not Found 반환 검증 (PRD §4.3)"""
+    draft_body = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 15000,
+        "counterparty": "비공개초안문구",
+        "purpose": "초안 단건 조회 차단 검증",
+        "budget_id": 2,
+        "occurred_at": 1788793200,
+    }
+    res_draft = client.post("/entries", json=draft_body, headers=auth_header(Role.TREASURER))
+    assert res_draft.status_code == 201
+    draft_id = res_draft.json()["id"]
+
+    res_get = client.get(f"/entries/{draft_id}")
+    assert res_get.status_code == 404
+    assert "찾을 수 없습니다" in res_get.json()["detail"]
+
 # ---------------------------------------------------------------- 문자열 길이 제한 (DB VARCHAR 정합성)
 
 

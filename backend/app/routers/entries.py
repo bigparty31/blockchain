@@ -153,7 +153,7 @@ async def get_entries(db: Session = Depends(get_db)):
 async def get_entry_by_id(id: int, db: Session = Depends(get_db)):
     """내역 ID로 특정 수입/지출 내역의 상세 정보를 조회합니다."""
     try:
-        entry = db.query(DBEntry).filter(DBEntry.id == id).first()
+        entry = db.query(DBEntry).filter(DBEntry.id == id, DBEntry.status.isnot(None)).first()
     except SQLAlchemyError as e:
         logger.exception("수입·지출 내역 단건 조회 중 데이터베이스 오류: %s", e)
         raise HTTPException(
