@@ -48,6 +48,7 @@ class EntryResponse(BaseModel):
 
     id: int = Field(..., description="내역 고유 ID")
     term_id: int = Field(..., description="학기 ID")
+    term_code: Optional[int] = Field(None, description="온체인 학기 코드 (YYYYS 형식, 예: 20262)")
     kind: EntryKind = Field(..., description="수입/지출 구분 (INCOME | EXPENSE)")
     amount: int = Field(..., description="금액 (원 단위, int256 호환 정수)")
     counterparty: str = Field(..., description="거래처 또는 납부자")
@@ -143,4 +144,3 @@ class EntryRejectResponse(BaseModel):
     id: int = Field(..., description="Entry ID")
     status: EntryStatus = Field(EntryStatus.REJECTED, description="장부 상태 (REJECTED)")
     message: str = Field("온체인에 성공적으로 반려(REJECTED) 기록되었습니다.")
-

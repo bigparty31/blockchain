@@ -103,6 +103,7 @@ def _to_schema(entry: DBEntry) -> EntryResponse:
     return EntryResponse(
         id=entry.id,
         term_id=entry.term_id,
+        term_code=entry.term.term_code if getattr(entry, "term", None) else None,
         kind=EntryKind(entry.kind),
         amount=entry.amount,
         counterparty=entry.counterparty,
@@ -146,6 +147,27 @@ async def get_entries(db: Session = Depends(get_db)):
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="데이터베이스 처리 중 오류가 발생했습니다.",
         )
+
+
+@router.get("/{id}", response_model=EntryResponse, summary="수입·지출 내역 단건 상세 조회")
+async def get_entry_by_id(id: int, db: Session = Depends(get_db)):
+    """내역 ID로 특정 수입/지출 내역의 상세 정보를 조회합니다."""
+    try:
+        entry = db.query(DBEntry).filter(DBEntry.id == id, DBEntry.status.isnot(None)).first()
+    except SQLAlchemyError as e:
+        logger.exception("수입·지출 내역 단건 조회 중 데이터베이스 오류: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 처리 중 오류가 발생했습니다.",
+        )
+
+    if not entry:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"ID {id}에 해당하는 내역을 찾을 수 없습니다.",
+        )
+
+    return _to_schema(entry)
 
 
 @router.post(
