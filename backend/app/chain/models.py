@@ -6,7 +6,7 @@ docs/CONTRACTS.md 이고, enum 의 온체인 숫자 순서는 docs/enums.md 표 
 """
 import re
 from enum import Enum
-from typing import Optional
+from typing import Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -168,6 +168,50 @@ class RejectDecision(_Frozen):
         return _bytes32(v)
 
 
+# BudgetToken 의 서명 대상 (IBudgetToken). 도메인 name 은 "BudgetToken" 이라 원장 서명과 섞이지 않는다.
+# reclaim(A14, P2)은 아직 넣지 않았다.
+
+
+class IssueRequest(_Frozen):
+    """회장 기기가 서명한 예산 발행 요청."""
+
+    budget_id: int = Field(..., ge=1, le=UINT64_MAX, description="DB Budget.id 와 같다. 0 은 없음으로 예약 (컨트랙트 ReservedId)")
+    term: int = Field(..., description="학기 코드 YYYYS. DB 의 Term.id 가 아니다")
+    category: str = Field(..., description="keccak256(utf8(항목명)) (docs/CONTRACTS.md). 0 이면 CategoryRequired")
+    amount: int = Field(..., ge=1, le=MAX_AMOUNT, description="원 단위. 0 이면 ZeroAmount, 상한을 넘으면 AmountOutOfRange")
+    expires_at: int = Field(..., ge=0, le=UINT64_MAX, description="집행 마감 (Unix 초). 지났으면 BudgetExpired")
+    deadline: int = Field(..., ge=0, le=UINT256_MAX, description="서명 유효 시한 (Unix 초)")
+
+    @field_validator("term")
+    @classmethod
+    def _term(cls, v: int) -> int:
+        return _term(v)
+
+    @field_validator("category")
+    @classmethod
+    def _category(cls, v: str) -> str:
+        if _bytes32(v) == ZERO_BYTES32:
+            raise ValueError("category 가 0 이다 (컨트랙트 CategoryRequired)")
+        return v
+
+
+class IncreaseRequest(_Frozen):
+    """회장(요청)과 감사(승인)가 **같은 값에** 서명한 증액 요청 (PRD §4.1)."""
+
+    budget_id: int = Field(..., ge=1, le=UINT64_MAX)
+    amount: int = Field(..., ge=1, le=MAX_AMOUNT, description="증액분이다. 변경 후 총액이 아니다 (PRD §4.1)")
+    reason_hash: str = Field(..., description="개정 사유 해시. 0 이면 ReasonRequired")
+    version: int = Field(..., ge=1, le=UINT256_MAX, description="증액 **전** 현재 version. 다르면 VersionMismatch")
+    deadline: int = Field(..., ge=0, le=UINT256_MAX)
+
+    @field_validator("reason_hash")
+    @classmethod
+    def _reason_hash(cls, v: str) -> str:
+        if _bytes32(v) == ZERO_BYTES32:
+            raise ValueError("reason_hash 가 0 이다 (컨트랙트 ReasonRequired)")
+        return v
+
+
 # ---------------------------------------------------------------- 결과
 
 
@@ -195,6 +239,27 @@ class ChainEntry(_Frozen):
     approver: str = Field(..., description="확정·반려 서명자 주소. 미처리면 address(0). 형식은 registrant 와 같다")
 
 
+class BudgetTxResult(_Frozen):
+    """발행·증액 트랜잭션이 블록에 들어간 뒤의 결과. revert 는 ChainRevert 로 올라간다."""
+
+    tx_hash: str
+    budget_id: int
+    version: int = Field(..., description="이 트랜잭션 뒤의 version. 발행은 1, 증액은 올라간 값")
+
+
+class ChainBudget(_Frozen):
+    """getBudget(id) 결과."""
+
+    id: int
+    term: int
+    category: str
+    issued: int = Field(..., description="현재 한도 (원). 증액으로 오른다")
+    spent: int
+    expires_at: int
+    version: int
+    reclaim_count: int
+
+
 # ---------------------------------------------------------------- 에러
 
 
@@ -204,8 +269,8 @@ class RevertReason(str, Enum):
     범위는 원장을 부를 때 날 수 있는 에러다 (ChainClient 가 원장만 부른다). 원장 ABI 의 에러에 더해, 확정 안에서
     원장이 부르는 BudgetToken.spend·refund 가 내는 에러도 넣는다 — InsufficientBudget·BudgetExpired 는 원장 ABI 에도
     같은 시그니처로 있고, BudgetNotFound·RefundExceedsSpent·ZeroAmount() 는 BudgetToken ABI 에만 있다 (app/chain/revert.py).
-    BudgetToken·RoleManager 를 직접 부르게 되면 TermRequired·ReservedId 처럼 이름이 같은 에러가 있으니
-    이름만이 아니라 어느 컨트랙트에서 났는지까지 보고 분류한다. 순서는 IAccountingLedger 의 검사 순서다.
+    BudgetToken 을 직접 부르는 발행·증액의 에러는 BudgetRevertReason 이다 — TermRequired·ReservedId 처럼 이름이 같은 에러가 있어
+    어느 컨트랙트에서 났는지까지 보고 분류한다. 순서는 IAccountingLedger 의 검사 순서다.
     """
 
     # 서명·시한
@@ -251,6 +316,32 @@ class RevertReason(str, Enum):
     UNKNOWN = "Unknown"
 
 
+class BudgetRevertReason(str, Enum):
+    """BudgetToken 을 직접 부를 때(issue·increase) 나는 에러. 값은 Solidity 에러 이름이다.
+
+    RevertReason 과 따로 둔다. TermRequired 처럼 이름이 같아도 컨트랙트가 다르면 뜻과 시그니처가 다르고,
+    원장 호출에서는 이 에러들이 날 수 없다 — 원장 해석기에 섞으면 잘못 분류한다 (app/chain/revert.py).
+    해석할 수 없는 revert 는 여기서도 RevertReason.UNKNOWN 이다.
+    """
+
+    SIGNATURE_EXPIRED = "SignatureExpired"  # 증액이면 PRESIDENT_SIGNED → PENDING 으로 되돌리고 재서명 (PRD §4.1)
+    INVALID_SIGNATURE = "InvalidSignature"
+    NOT_PRESIDENT = "NotPresident"  # 발행·증액 요청 서명자가 회장이 아님. 앱이 다른 값에 서명해도 이것
+    NOT_AUDITOR = "NotAuditor"  # 증액 승인 서명자가 감사가 아님. 앱이 다른 값에 서명해도 이것
+    RESERVED_ID = "ReservedId"
+    FIELD_OUT_OF_RANGE = "FieldOutOfRange"
+    BUDGET_ALREADY_EXISTS = "BudgetAlreadyExists"  # 같은 budgetId 가 이미 있다. 내용이 같은지는 get_budget 으로 본다
+    BUDGET_ALREADY_ISSUED = "BudgetAlreadyIssued"  # 같은 (term, category) 가 다른 budgetId 로 이미 있다
+    TERM_REQUIRED = "TermRequired"
+    CATEGORY_REQUIRED = "CategoryRequired"
+    ZERO_AMOUNT = "ZeroAmount"
+    AMOUNT_OUT_OF_RANGE = "AmountOutOfRange"  # 증액은 증액 후 총액이 상한을 넘을 때도 난다
+    BUDGET_EXPIRED = "BudgetExpired"
+    BUDGET_NOT_FOUND = "BudgetNotFound"
+    VERSION_MISMATCH = "VersionMismatch"  # 서명한 version 이 지금 version 과 다르다 (다른 증액이 먼저 들어감·서명 재사용)
+    REASON_REQUIRED = "ReasonRequired"
+
+
 class ChainError(Exception):
     """체인 호출 실패의 공통 부모."""
 
@@ -258,7 +349,7 @@ class ChainError(Exception):
 class ChainRevert(ChainError):
     """트랜잭션이 revert 됐다. 온체인 상태는 바뀌지 않는다."""
 
-    def __init__(self, reason: RevertReason, detail: str = ""):
+    def __init__(self, reason: Union[RevertReason, BudgetRevertReason], detail: str = ""):
         self.reason = reason
         self.detail = detail
         super().__init__(f"{reason.value}: {detail}" if detail else reason.value)
