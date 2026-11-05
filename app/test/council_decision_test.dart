@@ -17,7 +17,7 @@ import 'package:student_council_app/services/entry_decision_service.dart';
 import 'support/session.dart';
 import 'support/signing.dart';
 
-/// 승인 화면 — 서버의 대기 건을 읽고, 반려를 서명해 `POST /entries/{id}/reject` 로 보낸다.
+/// 승인 화면 — 서버의 대기 건을 읽고, 승인·반려를 서명해 `POST /entries/{id}/confirm`·`/reject` 로 보낸다.
 void main() {
   final domainJson = loadEip712Vectors()['domain'] as Map<String, dynamic>;
 
@@ -28,7 +28,8 @@ void main() {
       );
 
   /// 서버 `EntryResponse` 모양. meta_hash 는 등록 내용으로 계산해 넣는다.
-  Map<String, dynamic> entry(int id, {required int createdBy, required String purpose, String status = 'PENDING', String? rejectReason}) {
+  Map<String, dynamic> entry(int id,
+      {required int createdBy, required String purpose, String status = 'PENDING', String? rejectReason, String? ocrStatus}) {
     const amount = 35000, occurredAt = 1790694000, counterparty = '한결문구';
     return {
       'id': id,
@@ -42,7 +43,7 @@ void main() {
       'occurred_at': occurredAt,
       'receipt_hash': null,
       'meta_hash': Hashing.metaHash(amount: amount, counterparty: counterparty, purpose: purpose, occurredAt: occurredAt),
-      'ocr_status': null,
+      'ocr_status': ocrStatus,
       'category_warning': false,
       'status': status,
       'created_by': createdBy,
@@ -51,6 +52,10 @@ void main() {
   }
 
   late List<http.Request> posts;
+  late List<http.Request> confirms;
+  late http.Response Function() onConfirm;
+  late bool confirmed;
+  String? ocr7;
   late int entryReads;
   late http.Response Function() onEntries;
   late http.Response Function() onReject;
@@ -61,14 +66,19 @@ void main() {
     ApiService.useDemoData = false;
     await useAuditorDeviceKey();
     posts = [];
+    confirms = [];
     entryReads = 0;
     rejected = false;
+    confirmed = false;
+    ocr7 = null;
     onEntries = () => json([
-          entry(7, createdBy: 2, purpose: '신입생 환영회 명찰',
-              status: rejected ? 'REJECTED' : 'PENDING', rejectReason: rejected ? '금액이 영수증과 달라요' : null),
+          entry(7, createdBy: 2, purpose: '신입생 환영회 명찰', ocrStatus: ocr7,
+              status: rejected ? 'REJECTED' : confirmed ? 'CONFIRMED' : 'PENDING',
+              rejectReason: rejected ? '금액이 영수증과 달라요' : null),
           entry(8, createdBy: 3, purpose: '감사 본인이 등록한 건'),
         ]);
     onReject = () => json({'id': 7, 'status': 'REJECTED', 'message': '반려됨'});
+    onConfirm = () => json({'id': 7, 'status': 'CONFIRMED', 'tx_confirm': '0x${'cd' * 32}', 'message': '확정됨'});
     final server = MockClient((req) async {
       switch ('${req.method} ${req.url.path}') {
         case 'GET /entries':
@@ -86,6 +96,11 @@ void main() {
           posts.add(req);
           final res = onReject();
           if (res.statusCode == 200) rejected = true;
+          return res;
+        case 'POST /entries/7/confirm':
+          confirms.add(req);
+          final res = onConfirm();
+          if (res.statusCode == 200) confirmed = true;
           return res;
       }
       return http.Response('{}', 404);
@@ -208,18 +223,79 @@ void main() {
     await waitUntil(tester, () => shows(find.text('신입생 환영회 명찰')));
   });
 
-  testWidgets('서버 건의 승인 버튼은 아직 연결 전이라 가짜로 확정하지 않는다', (tester) async {
+  /// 눌리는 「승인 서명」 버튼 — 본인 등록 건(#8)의 회색 버튼은 InkWell 이 없다.
+  Finder approveButton() => find.ancestor(of: find.text('승인 서명'), matching: find.byType(InkWell));
+
+  testWidgets('승인하면 생체인증 다이얼로그를 거쳐 서명해 보내고, 다시 읽은 목록에서 승인 완료 탭으로 옮겨 간다', (tester) async {
     await pump(tester);
     await waitUntil(tester, () => shows(find.text('신입생 환영회 명찰')));
 
-    // 본인 등록 건(#8)의 회색 「승인 서명」은 누를 수 없는 Container 라 InkWell 이 있는 쪽만 고른다
-    await tester.tap(find.ancestor(of: find.text('승인 서명'), matching: find.byType(InkWell)));
-    await waitUntil(tester, () => shows(find.textContaining('승인 서명은 아직 서버에 연결되지 않았어요')));
+    await tester.tap(approveButton());
+    await tester.pumpAndSettle();
+    expect(find.text('집행 최종 승인'), findsOneWidget);
+    expect(find.text('김총무'), findsNothing); // 목업 등록자 이름을 서버 건에 붙이지 않는다
+    await tester.tap(find.text('생체인증 승인'));
+    await waitUntil(tester, () => shows(find.text('[신입생 환영회 명찰] 승인 완료!')));
 
-    expect(find.text('집행 최종 승인'), findsNothing); // 목업 생체인증 다이얼로그
+    expect(confirms, hasLength(1));
+    expect((jsonDecode(confirms.single.body) as Map).containsKey('warning_reason'), isFalse);
     expect(posts, isEmpty);
+
     await tester.tap(find.text('승인 완료'));
     await tester.pumpAndSettle();
-    expect(find.text('신입생 환영회 명찰'), findsNothing);
+    expect(find.text('신입생 환영회 명찰'), findsOneWidget);
+  });
+
+  testWidgets('경고 건은 경고 무시 사유를 받아 함께 보낸다', (tester) async {
+    ocr7 = 'MISMATCH';
+    await pump(tester);
+    await waitUntil(tester, () => shows(find.text('신입생 환영회 명찰')));
+
+    await tester.tap(approveButton());
+    await tester.pumpAndSettle();
+    expect(find.text('경고 무시 승인 사유'), findsOneWidget);
+    await tester.enterText(find.byType(TextFormField), '현장 영수증 재확인함');
+    await tester.tap(find.text('다음'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('생체인증 승인'));
+    await waitUntil(tester, () => confirms.isNotEmpty && shows(find.text('[신입생 환영회 명찰] 승인 완료!')));
+
+    expect((jsonDecode(confirms.single.body) as Map)['warning_reason'], '현장 영수증 재확인함');
+  });
+
+  testWidgets('승인이 거부되면(400) 서버 설명을 보여 주고, 반려로 넘겨 서명해 보낼 수 있다', (tester) async {
+    onConfirm = () => json({'detail': '온체인 승인이 거부되었습니다 (InsufficientBudget).'}, 400);
+    await pump(tester);
+    await waitUntil(tester, () => shows(find.text('신입생 환영회 명찰')));
+
+    await tester.tap(approveButton());
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('생체인증 승인'));
+    await waitUntil(tester, () => shows(find.text('승인에 실패했어요')));
+    expect(find.textContaining('InsufficientBudget'), findsOneWidget);
+    expect(find.text('[신입생 환영회 명찰] 승인 완료!'), findsNothing);
+
+    await tester.tap(find.text('반려로 처리'));
+    await tester.pumpAndSettle();
+    expect(find.text('반려 사유'), findsOneWidget);
+    await tester.tap(find.text('반려하기')); // 미리 채운 사유 그대로
+    await waitUntil(tester, () => shows(find.text('[신입생 환영회 명찰] 반려 처리되었습니다.')));
+    expect(posts, hasLength(1));
+    expect((jsonDecode(posts.single.body) as Map)['reject_reason'], isNotEmpty);
+  });
+
+  testWidgets('승인이 409 면 알리고 목록을 다시 읽는다', (tester) async {
+    onConfirm = () => json({'detail': '반려 처리 중인 내역은 확정할 수 없습니다.'}, 409);
+    await pump(tester);
+    await waitUntil(tester, () => shows(find.text('신입생 환영회 명찰')));
+    final readsBefore = entryReads;
+
+    await tester.tap(approveButton());
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('생체인증 승인'));
+    await waitUntil(tester, () => shows(find.textContaining('다른 임원이 이 건을 먼저 처리하고 있어요')));
+
+    expect(entryReads, greaterThan(readsBefore));
+    expect(find.text('승인에 실패했어요'), findsNothing);
   });
 }

@@ -17,7 +17,7 @@ import 'package:student_council_app/services/entry_decision_service.dart';
 import 'support/session.dart';
 import 'support/signing.dart';
 
-/// 반려 — 기기 서명(EIP-712 RejectDecision) → `POST /entries/{id}/reject`.
+/// 반려·승인 — 기기 서명(EIP-712 RejectDecision·ConfirmApproval) → `POST /entries/{id}/reject`·`/confirm`.
 void main() {
   final vectors = loadEip712Vectors();
   final domainJson = vectors['domain'] as Map<String, dynamic>;
@@ -29,7 +29,14 @@ void main() {
   const treasurer = treasurerAddress; // 등록자
 
   /// 등록 내용에서 meta_hash 를 계산해 넣은 대기 건 (총무 user 2 가 등록).
-  EntryModel pending({int id = 7, int? termCode = 20262, String? metaHash, int createdBy = 2}) {
+  EntryModel pending({
+    int id = 7,
+    int? termCode = 20262,
+    String? metaHash,
+    int createdBy = 2,
+    bool categoryWarning = false,
+    OcrStatus? ocrStatus = OcrStatus.MATCH,
+  }) {
     const amount = 35000, occurredAt = 1790694000;
     const counterparty = '한결문구', purpose = '신입생 환영회 명찰';
     final receiptHash = '0x${'ab' * 32}';
@@ -52,6 +59,8 @@ void main() {
             occurredAt: occurredAt,
             receiptHash: receiptHash,
           ),
+      ocrStatus: ocrStatus,
+      categoryWarning: categoryWarning,
       status: EntryStatus.PENDING,
       createdBy: createdBy,
     );
@@ -66,6 +75,8 @@ void main() {
   late List<http.Request> posts;
   late Map<String, int> wallets;
   late http.Response Function(http.Request) onReject;
+  late http.Response Function(http.Request) onConfirm;
+  late List<http.Request> confirms;
   late FakeAuthenticator auth;
   final now = DateTime.utc(2026, 11, 6, 9);
 
@@ -79,6 +90,8 @@ void main() {
     posts = [];
     wallets = {treasurer: 2, auditor: 3};
     onReject = (_) => json({'id': 7, 'status': 'REJECTED', 'message': '반려됨'});
+    confirms = [];
+    onConfirm = (_) => json({'id': 7, 'status': 'CONFIRMED', 'tx_confirm': '0x${'cd' * 32}', 'message': '확정됨'});
     final server = MockClient((req) async {
       if (req.method == 'GET' && req.url.path == '/chain/domains') {
         return json({'domains': {LedgerTypes.domainName: domainJson}});
@@ -87,6 +100,10 @@ void main() {
       if (req.method == 'POST' && req.url.path == '/entries/7/reject') {
         posts.add(req);
         return onReject(req);
+      }
+      if (req.method == 'POST' && req.url.path == '/entries/7/confirm') {
+        confirms.add(req);
+        return onConfirm(req);
       }
       return http.Response('{}', 404);
     });
@@ -245,6 +262,128 @@ void main() {
         throwsA(isA<EntryDecisionException>().having((e) => e.failure, 'failure', EntryDecisionFailure.unknownOutcome)),
       );
       expect(posts, hasLength(1));
+    });
+  });
+
+  group('승인', () {
+    /// 벡터의 등록값 — hash 는 sha256("vector:expense") 라 등록 내용에서 계산한 값이 아니다.
+    EntryModel vectorEntry({bool categoryWarning = false}) {
+      final record = vector('record_expense')['message'] as Map<String, dynamic>;
+      return EntryModel(
+        id: 2,
+        termId: 1,
+        termCode: record['term'] as int,
+        kind: EntryKind.EXPENSE,
+        amount: record['amount'] as int,
+        counterparty: '',
+        purpose: '',
+        budgetId: record['budgetId'] as int,
+        occurredAt: record['occurredAt'] as int,
+        metaHash: record['hash'] as String,
+        categoryWarning: categoryWarning,
+        status: EntryStatus.PENDING,
+        createdBy: 2,
+      );
+    }
+
+    test('승인 메시지는 컨트랙트 벡터(confirm_expense)와 같은 서명이 된다', () async {
+      final message = EntryDecisionService.confirmMessage(
+        entry: vectorEntry(),
+        registrant: treasurer,
+        deadline: 1790700000,
+      );
+      final sig = await SigningService(authenticator: auth).sign(domain, message, reason: '승인 서명');
+      expect(sig, vector('confirm_expense')['signature']);
+    });
+
+    test('경고 무시 승인은 벡터(confirm_with_warning)와 같은 서명이 된다', () async {
+      final message = EntryDecisionService.confirmMessage(
+        entry: vectorEntry(categoryWarning: true),
+        registrant: treasurer,
+        warningReason: 'vector:warning-reason',
+        deadline: 1790700000,
+      );
+      final sig = await SigningService(authenticator: auth).sign(domain, message, reason: '승인 서명');
+      expect(sig, vector('confirm_with_warning')['signature']);
+    });
+
+    /// 서버(confirm_entry)와 같은 방법으로 ConfirmApproval 을 만들어 서명자를 복구한다.
+    String signerOf(http.Request req, EntryModel entry, {String? warningReason}) {
+      final body = jsonDecode(req.body) as Map<String, dynamic>;
+      final serverSide = LedgerTypes.confirmApproval(
+        id: 7,
+        hash: entry.metaHash,
+        entryCommit: LedgerTypes.entryCommit(
+          hash: entry.metaHash,
+          amount: 35000,
+          kind: EntryKind.EXPENSE,
+          term: 20262,
+          occurredAt: 1790694000,
+          budgetId: 1,
+          correctsId: 0,
+          registrant: treasurer,
+        ),
+        hadWarning: warningReason != null,
+        warningReasonHash: warningReason == null ? '0x${'00' * 32}' : Hashing.textHash(warningReason),
+        deadline: body['deadline'] as int,
+      );
+      return SigningService.recoverSigner(Eip712.digest(domain, serverSide), body['signature'] as String);
+    }
+
+    test('경고 없는 건은 사유 없이 서명해 보낸다', () async {
+      final entry = pending();
+      await service().confirm(entry);
+
+      final body = jsonDecode(confirms.single.body) as Map<String, dynamic>;
+      expect(body.containsKey('warning_reason'), isFalse); // 경고가 아닌데 보내면 서버가 400
+      expect(body['deadline'], now.millisecondsSinceEpoch ~/ 1000 + 600);
+      expect(confirms.single.headers['Authorization'], 'Bearer token-3');
+      expect(signerOf(confirms.single, entry), auditor);
+    });
+
+    test('경고 건은 정본화한 사유를 보내고 그 해시에 서명한다', () async {
+      final entry = pending(ocrStatus: OcrStatus.DUPLICATE);
+      await service().confirm(entry, warningReason: '  같은 영수증이지만 분할 결제라 승인\r\n');
+
+      final body = jsonDecode(confirms.single.body) as Map<String, dynamic>;
+      expect(body['warning_reason'], '같은 영수증이지만 분할 결제라 승인');
+      expect(signerOf(confirms.single, entry, warningReason: '같은 영수증이지만 분할 결제라 승인'), auditor);
+    });
+
+    test('NO_NUMBER·OCR 없음은 경고가 아니다 — 사유를 보내지 않는다', () async {
+      await service().confirm(pending(ocrStatus: OcrStatus.NO_NUMBER));
+      await service().confirm(pending(ocrStatus: null));
+      for (final req in confirms) {
+        expect((jsonDecode(req.body) as Map).containsKey('warning_reason'), isFalse);
+      }
+    });
+
+    test('경고 건인데 사유가 비면 서명하지 않는다', () async {
+      await expectLater(
+        service().confirm(pending(categoryWarning: true), warningReason: '  \n'),
+        throwsA(isA<EntryDecisionException>().having((e) => e.failure, 'failure', EntryDecisionFailure.invalidReason)),
+      );
+      expect(confirms, isEmpty);
+      expect(auth.calls, 0);
+    });
+
+    test('화면 값으로 다시 계산한 해시가 다르면 승인 서명도 하지 않는다', () async {
+      await expectLater(
+        service().confirm(pending(metaHash: '0x${'00' * 32}')),
+        throwsA(isA<EntryDecisionException>().having((e) => e.failure, 'failure', EntryDecisionFailure.mismatch)),
+      );
+      expect(confirms, isEmpty);
+      expect(auth.calls, 0);
+    });
+
+    test('체인이 확정을 거부하면(400) 서버 설명을 보여 준다', () async {
+      onConfirm = (_) => json({'detail': '온체인 승인이 거부되었습니다 (InsufficientBudget).'}, 400);
+      await expectLater(
+        service().confirm(pending()),
+        throwsA(isA<EntryDecisionException>()
+            .having((e) => e.failure, 'failure', EntryDecisionFailure.refused)
+            .having((e) => e.message, 'message', contains('InsufficientBudget'))),
+      );
     });
   });
 }

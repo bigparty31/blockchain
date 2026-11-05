@@ -41,7 +41,8 @@ const _budgetFailReasons = {
   'BudgetExpired': '예산 집행 기간이 지났어요',
 };
 
-/// **목업** 승인 대상 목록. 서버가 붙으면 `GET /entries` 의 `PENDING` 항목으로 바꾼다.
+/// **목업** 승인 대상 목록 — 시연용 더미가 켜진 개발 빌드(`DEV_TOOLS`)와 위젯 테스트에서만 쓴다.
+/// 일반 빌드는 서버(`GET /entries`)를 읽는다 ([approvalItemFromEntry]).
 List<Map<String, dynamic>> buildApprovalMockItems() => [
     {
       'id': 2,
@@ -368,12 +369,6 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
 
   /// 승인 진입점. 경고가 있으면 사유를 먼저 받는다 (빈 값은 서버가 400).
   Future<void> _onApprove(Map<String, dynamic> item) async {
-    // 서버 건은 아래 목업 승인(로컬에서 CONFIRMED 로 바꿈)을 타면 체인에 없는 확정이 화면에 생긴다.
-    // 승인 서명(ConfirmApproval)을 붙이기 전까지는 막는다.
-    if (item['entry'] is EntryModel) {
-      _snack('승인 서명은 아직 서버에 연결되지 않았어요. 다음 업데이트에서 연결돼요.', AppTheme.pending);
-      return;
-    }
     String? warningReason;
     if (_hasWarning(item)) {
       warningReason = await showReasonDialog(
@@ -441,7 +436,12 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
                     _DetailRow(icon: Icons.monetization_on_rounded, label: '금액', value: '${item['amount']}원 (${item['category']})'),
                     // 서명 대상 — 승인자가 무엇에 서명하는지 보고 서명한다 (entryCommit: 종류·날짜·예산·등록자)
                     _DetailRow(icon: Icons.event_rounded, label: '사용일', value: '${item['date']}'.split(' ').first),
-                    const _DetailRow(icon: Icons.person_rounded, label: '등록자', value: '김총무'),
+                    // 서버 건은 이름이 응답에 없어 user id 로 적는다 (목업 건만 이름)
+                    _DetailRow(
+                      icon: Icons.person_rounded,
+                      label: '등록자',
+                      value: item['entry'] is EntryModel ? '사용자 #${item['createdBy']}' : '김총무',
+                    ),
                   ],
                 ),
               ),
@@ -486,7 +486,12 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
                     child: GradientButton(
                       onPressed: () {
                         Navigator.pop(ctx);
-                        // 목업: 서버가 붙으면 여기서 서명을 제출하고 응답의 status / fail_reason 을 본다.
+                        final entry = item['entry'];
+                        if (entry is EntryModel) {
+                          _confirmOnServer(item, entry, warningReason);
+                          return;
+                        }
+                        // 목업 건 — 서버 없이 화면에서만 바꾼다. 실패 경로는 mockFailReason 으로 흉내 낸다.
                         final failReason = item['mockFailReason'] as String?;
                         if (failReason != null) {
                           _showApprovalFailure(item, failReason);
@@ -527,8 +532,12 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
 
   /// 확정 실패 안내. 항목은 `PENDING` 그대로다 (컨트랙트: 확정 실패 시 전체 revert).
   /// 예산 문제(`InsufficientBudget`·`BudgetExpired`)면 반려 흐름으로 넘긴다.
-  Future<void> _showApprovalFailure(Map<String, dynamic> item, String failReason) async {
-    final budgetReason = _budgetFailReasons[failReason];
+  ///
+  /// 서버 건은 실패 코드(`fail_reason`)가 아직 응답에 없어 [serverMessage](서버 설명)를 그대로 보여 주고,
+  /// 반려로 넘길지는 사람이 설명을 읽고 정한다 — 앱이 문구를 해석해 분기하지 않는다.
+  Future<void> _showApprovalFailure(Map<String, dynamic> item, String? failReason, {String? serverMessage}) async {
+    final budgetReason = failReason == null ? null : _budgetFailReasons[failReason];
+    final offerReject = budgetReason != null || serverMessage != null;
     final goReject = await showDialog<bool>(
       context: context,
       builder: (ctx) => Dialog(
@@ -562,7 +571,7 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
               _DetailRow(
                 icon: Icons.report_gmailerrorred_rounded,
                 label: '사유',
-                value: budgetReason ?? '체인이 확정을 거부했어요 ($failReason)',
+                value: serverMessage ?? budgetReason ?? '체인이 확정을 거부했어요 ($failReason)',
               ),
               const SizedBox(height: 10),
               Container(
@@ -572,11 +581,14 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
                   borderRadius: BorderRadius.circular(12),
                 ),
                 child: Text(
-                  budgetReason != null
-                      ? '이 항목은 아직 승인 대기(PENDING) 상태예요. 등록할 때는 잔량이 있었지만 '
-                          '다른 건이 먼저 확정되면서 예산이 부족해졌을 수 있어요. '
-                          '확정할 수 없으므로 반려로 처리해 주세요.'
-                      : '이 항목은 아직 승인 대기(PENDING) 상태예요. 잠시 뒤 다시 서명해 주세요.',
+                  serverMessage != null
+                      ? '이 항목은 아직 승인 대기(PENDING) 상태예요. 위 사유가 예산 부족·집행 기간 지남처럼 '
+                          '확정할 수 없는 이유라면 반려로 처리해 주세요.'
+                      : budgetReason != null
+                          ? '이 항목은 아직 승인 대기(PENDING) 상태예요. 등록할 때는 잔량이 있었지만 '
+                              '다른 건이 먼저 확정되면서 예산이 부족해졌을 수 있어요. '
+                              '확정할 수 없으므로 반려로 처리해 주세요.'
+                          : '이 항목은 아직 승인 대기(PENDING) 상태예요. 잠시 뒤 다시 서명해 주세요.',
                   style: const TextStyle(fontSize: 12, height: 1.5, color: AppTheme.textMain),
                 ),
               ),
@@ -594,7 +606,7 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
                       child: const Text('나중에', style: TextStyle(color: AppTheme.textSub)),
                     ),
                   ),
-                  if (budgetReason != null) ...[
+                  if (offerReject) ...[
                     const SizedBox(width: 12),
                     Expanded(
                       flex: 2,
@@ -613,7 +625,10 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
       ),
     );
     if (goReject == true && mounted) {
-      await _onReject(item, initialReason: '${budgetReason ?? failReason}. 확정할 수 없어 반려합니다.');
+      await _onReject(
+        item,
+        initialReason: budgetReason != null ? '$budgetReason. 확정할 수 없어 반려합니다.' : '승인이 거부되어 확정할 수 없어 반려합니다.',
+      );
     }
   }
 
@@ -648,28 +663,63 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
     );
   }
 
-  /// 서버 건 반려 — 기기 서명 → `POST /entries/{id}/reject`. 보내는 동안 다른 조작을 막는다.
-  ///
-  /// 성공이든 실패든 끝나면 목록을 다시 읽는다. 실패 이유는 상태 코드로만 나뉘고(서버 문구로
-  /// 분기하지 않는다), 409·결과 모름이면 다른 임원의 처리나 앞선 시도가 반영됐을 수 있어서다.
-  Future<void> _rejectOnServer(Map<String, dynamic> item, EntryModel entry, String reason) async {
+  /// 서명을 보내는 동안 막음 다이얼로그를 띄우고 [send] 를 돌린다. 실패 이유를, 성공이면 null 을 돌려준다.
+  Future<EntryDecisionException?> _sendWithBlocking(String label, Future<void> Function() send) async {
     final navigator = Navigator.of(context, rootNavigator: true);
     final sending = DialogRoute<void>(
       context: context,
       themes: InheritedTheme.capture(from: context, to: navigator.context),
       barrierDismissible: false,
-      builder: (_) => const PopScope(canPop: false, child: _Sending(label: '반려 서명을 보내는 중이에요…')),
+      builder: (_) => PopScope(canPop: false, child: _Sending(label: label)),
     );
     navigator.push(sending);
     EntryDecisionException? failed;
     try {
-      await _decisions.reject(entry, reason);
+      await send();
     } on EntryDecisionException catch (e) {
       failed = e;
     }
     // pop() 이 아니라 이 다이얼로그만 지운다. 401 이면 로그인 화면으로 가면서 쌓인 화면이 다 지워져
     // 다이얼로그도 이미 없다 — 그때 pop() 하면 방금 연 로그인 화면이 닫혀 빈 화면이 된다.
     if (sending.isActive) navigator.removeRoute(sending);
+    return failed;
+  }
+
+  /// 서버 건 승인 — 기기 서명 → `POST /entries/{id}/confirm`.
+  ///
+  /// 체인·서버가 거부하면(400) 항목은 `PENDING` 그대로라 실패 안내에서 반려로 넘길 수 있다.
+  /// 그 밖의 실패는 알리고 목록을 다시 읽는다 — 409·결과 모름이면 다른 임원의 처리가 반영됐을 수 있다.
+  Future<void> _confirmOnServer(Map<String, dynamic> item, EntryModel entry, String? warningReason) async {
+    final failed = await _sendWithBlocking(
+      '승인 서명을 보내는 중이에요…',
+      () => _decisions.confirm(entry, warningReason: warningReason),
+    );
+    if (!mounted) return;
+
+    if (failed != null) {
+      if (failed.failure == EntryDecisionFailure.refused) {
+        await _showApprovalFailure(item, null, serverMessage: failed.message);
+      } else {
+        _snack(failed.message, AppTheme.expense);
+      }
+      // 401 이면 세션이 비워져 로그인 화면으로 간다 — 다시 읽을 것이 없다
+      if (mounted && failed.failure != EntryDecisionFailure.unauthorized) _load();
+      return;
+    }
+    setState(() {
+      item['status'] = EntryStatus.CONFIRMED;
+      if (warningReason != null) item['warningAckReason'] = Hashing.canonicalText(warningReason);
+    });
+    _snack('[${item['title']}] 승인 완료!', AppTheme.success);
+    _load();
+  }
+
+  /// 서버 건 반려 — 기기 서명 → `POST /entries/{id}/reject`.
+  ///
+  /// 성공이든 실패든 끝나면 목록을 다시 읽는다. 실패 이유는 상태 코드로만 나뉘고(서버 문구로
+  /// 분기하지 않는다), 409·결과 모름이면 다른 임원의 처리나 앞선 시도가 반영됐을 수 있어서다.
+  Future<void> _rejectOnServer(Map<String, dynamic> item, EntryModel entry, String reason) async {
+    final failed = await _sendWithBlocking('반려 서명을 보내는 중이에요…', () => _decisions.reject(entry, reason));
     if (!mounted) return;
 
     if (failed != null) {

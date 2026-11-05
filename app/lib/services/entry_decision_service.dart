@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import '../core/api_config.dart';
+import '../core/enums.dart';
 import '../core/hashing.dart';
 import '../core/signing/eip712.dart';
 import '../core/signing/ledger_types.dart';
@@ -11,7 +12,7 @@ import '../models/entry_model.dart';
 import 'auth_service.dart';
 import 'chain_domain_service.dart';
 
-/// 반려를 끝내지 못한 이유. 화면은 [EntryDecisionException.message] 를 그대로 띄우고,
+/// 승인·반려를 끝내지 못한 이유. 화면은 [EntryDecisionException.message] 를 그대로 띄우고,
 /// 이 값으로 다음 동작(목록 새로 읽기·로그인 화면)을 고른다. **서버 문구로 분기하지 않는다.**
 enum EntryDecisionFailure {
   /// 정본화한 사유가 비었다 (서버도 400).
@@ -54,8 +55,8 @@ class EntryDecisionException implements Exception {
   String toString() => 'EntryDecisionException(${failure.name}): $message';
 }
 
-/// 감사·회장의 반려 — 기기 키로 EIP-712 `RejectDecision` 에 서명해 `POST /entries/{id}/reject` 로 보낸다.
-/// 체인 제출은 서버 릴레이어가 한다 (`relay_reject`).
+/// 감사·회장의 승인·반려 — 기기 키로 EIP-712 `ConfirmApproval`·`RejectDecision` 에 서명해
+/// `POST /entries/{id}/confirm`·`/reject` 로 보낸다. 체인 제출은 서버 릴레이어가 한다 (`relay_confirm`·`relay_reject`).
 ///
 /// **서명하는 값은 화면이 보여 준 값이다** (보드 ①). 화면 값으로 `meta_hash` 를 다시 계산해 서버 값과
 /// 다르면 서명하지 않는다 — 서버 값을 그대로 서명하면 서버가 화면과 다른 내용에 서명을 받아 갈 수 있다.
@@ -88,23 +89,66 @@ class EntryDecisionService {
     required String registrant,
     required String reason,
     required int deadline,
+  }) =>
+      LedgerTypes.rejectDecision(
+        id: entry.id,
+        entryCommit: _entryCommit(entry, registrant),
+        reasonHash: Hashing.textHash(Hashing.canonicalText(reason)),
+        deadline: deadline,
+      );
+
+  /// 경고 항목인가 — 카테고리 경고이거나 OCR 이 `MISMATCH`·`DUPLICATE`·`UNREADABLE` 이면 경고다.
+  /// 서버 `confirm_entry` 의 `had_warning` 판정과 같다. `MATCH`·`NO_NUMBER`·OCR 없음(null)은 정상이다.
+  static bool hadWarning(EntryModel entry) =>
+      entry.categoryWarning ||
+      entry.ocrStatus == OcrStatus.MISMATCH ||
+      entry.ocrStatus == OcrStatus.DUPLICATE ||
+      entry.ocrStatus == OcrStatus.UNREADABLE;
+
+  static const _zeroHash = '0x0000000000000000000000000000000000000000000000000000000000000000';
+
+  /// 서버(`confirm_entry`)가 다시 만드는 것과 같은 `ConfirmApproval`.
+  ///
+  /// 경고 항목이면 [warningReason] 을 정본화(§3)해 해시하고, 아니면 `bytes32(0)` 이다 (빈 문자열을 해시하지 않는다).
+  static Eip712Message confirmMessage({
+    required EntryModel entry,
+    required String registrant,
+    String? warningReason,
+    required int deadline,
   }) {
-    final term = entry.termCode;
-    if (term == null) throw ArgumentError('termCode 가 없으면 entryCommit 을 만들 수 없다');
-    return LedgerTypes.rejectDecision(
+    final warned = hadWarning(entry);
+    return LedgerTypes.confirmApproval(
       id: entry.id,
-      entryCommit: LedgerTypes.entryCommit(
-        hash: entry.metaHash,
-        amount: entry.amount,
-        kind: entry.kind,
-        term: term,
-        occurredAt: entry.occurredAt,
-        budgetId: entry.budgetId ?? 0,
-        correctsId: entry.correctsEntryId ?? 0,
-        registrant: registrant,
-      ),
-      reasonHash: Hashing.textHash(Hashing.canonicalText(reason)),
+      hash: entry.metaHash,
+      entryCommit: _entryCommit(entry, registrant),
+      hadWarning: warned,
+      warningReasonHash: warned ? Hashing.textHash(Hashing.canonicalText(warningReason ?? '')) : _zeroHash,
       deadline: deadline,
+    );
+  }
+
+  /// [entry] 를 확정한다. 경고 항목이면 [warningReason] 이 필수다. 실패하면 [EntryDecisionException] 을 던진다.
+  ///
+  /// 경고가 아닌 건에는 사유를 보내지 않는다 — 서버가 400 으로 거부한다.
+  Future<void> confirm(EntryModel entry, {String? warningReason}) async {
+    final warned = hadWarning(entry);
+    final canon = warned ? Hashing.canonicalText(warningReason ?? '') : null;
+    if (warned && canon!.isEmpty) {
+      throw const EntryDecisionException(EntryDecisionFailure.invalidReason, '경고 무시 사유를 입력해 주세요.');
+    }
+    final ready = await _prepare(entry);
+    final message = confirmMessage(
+      entry: entry,
+      registrant: ready.registrant,
+      warningReason: canon,
+      deadline: ready.deadline,
+    );
+    final signature = await _sign(ready.domain, message, '승인 서명');
+
+    await _post(
+      '${ApiConfig.entries}/${entry.id}/confirm',
+      {'signature': signature, 'deadline': ready.deadline, if (canon != null) 'warning_reason': canon},
+      what: '승인',
     );
   }
 
@@ -114,6 +158,20 @@ class EntryDecisionService {
     if (canon.isEmpty) {
       throw const EntryDecisionException(EntryDecisionFailure.invalidReason, '반려 사유를 입력해 주세요.');
     }
+    final ready = await _prepare(entry);
+    final message = rejectMessage(entry: entry, registrant: ready.registrant, reason: canon, deadline: ready.deadline);
+    final signature = await _sign(ready.domain, message, '반려 서명');
+
+    await _post(
+      '${ApiConfig.entries}/${entry.id}/reject',
+      {'signature': signature, 'deadline': ready.deadline, 'reject_reason': canon},
+      what: '반려',
+    );
+  }
+
+  /// 서명 직전까지의 공통 준비 — 화면 값 검산, 학기 코드, 등록자 주소, 서명 도메인, 시한.
+  /// 여기서 막히면 본인 확인을 묻지 않는다.
+  Future<({String registrant, Eip712Domain domain, int deadline})> _prepare(EntryModel entry) async {
     _checkShownValues(entry);
     if (entry.termCode == null) {
       throw const EntryDecisionException(
@@ -123,15 +181,22 @@ class EntryDecisionService {
     }
     final registrant = await _registrantOf(entry.createdBy);
     final domain = await _ledgerDomain();
-
     final deadline = _now().millisecondsSinceEpoch ~/ 1000 + signatureTtl.inSeconds;
-    final message = rejectMessage(entry: entry, registrant: registrant, reason: canon, deadline: deadline);
-    final signature = await _sign(domain, message, '반려 서명');
+    return (registrant: registrant, domain: domain, deadline: deadline);
+  }
 
-    await _post(
-      '${ApiConfig.entries}/${entry.id}/reject',
-      {'signature': signature, 'deadline': deadline, 'reject_reason': canon},
-      what: '반려',
+  static String _entryCommit(EntryModel entry, String registrant) {
+    final term = entry.termCode;
+    if (term == null) throw ArgumentError('termCode 가 없으면 entryCommit 을 만들 수 없다');
+    return LedgerTypes.entryCommit(
+      hash: entry.metaHash,
+      amount: entry.amount,
+      kind: entry.kind,
+      term: term,
+      occurredAt: entry.occurredAt,
+      budgetId: entry.budgetId ?? 0,
+      correctsId: entry.correctsEntryId ?? 0,
+      registrant: registrant,
     );
   }
 
@@ -236,7 +301,7 @@ class EntryDecisionService {
       case 422:
         throw EntryDecisionException(
           EntryDecisionFailure.refused,
-          detail == null ? '$what이 거부되었어요.' : '$what이 거부되었어요: $detail',
+          detail == null ? '$what 요청이 거부되었어요.' : '$what 요청이 거부되었어요: $detail',
         );
       default:
         throw EntryDecisionException(
