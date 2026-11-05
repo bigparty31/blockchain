@@ -23,7 +23,7 @@ class BudgetRevisionRejectRequest(BaseModel):
 
 
 class BudgetRevisionApproveRequest(BaseModel):
-    auditor_signature: Optional[str] = Field(None, max_length=132, description="감사의 EIP-712 서명값 (0x...)")
+    auditor_signature: str = Field(..., min_length=1, max_length=132, description="감사의 EIP-712 IncreaseRequest 서명값 (0x...)")
 
 
 class BudgetRevisionResponse(BaseModel):
