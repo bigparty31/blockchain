@@ -1,7 +1,12 @@
 import 'package:flutter/material.dart';
 import '../../core/enums.dart';
 import '../../core/app_theme.dart';
+import '../../core/format.dart';
+import '../../core/hashing.dart';
+import '../../models/entry_model.dart';
+import '../../services/api_service.dart';
 import '../../services/auth_service.dart';
+import '../../services/entry_decision_service.dart';
 import 'reason_dialog.dart';
 
 /// OCR 이 경고인가 — `MISMATCH`·`DUPLICATE`·`UNREADABLE` 만 경고다 (PRD §6).
@@ -126,6 +131,34 @@ List<Map<String, dynamic>> buildApprovalMockItems() => [
     },
     ];
 
+/// 서버 내역(`GET /entries`) 한 건을 승인 카드 재료로 바꾼다. 원본은 `'entry'` 에 그대로 둔다 —
+/// 반려 서명은 이 원본 값으로 만든다 ([EntryDecisionService.reject]).
+///
+/// [categories] 는 예산 id → 이름 (`GET /budgets`). 못 읽었으면 `예산 #id` 로 적는다.
+Map<String, dynamic> approvalItemFromEntry(EntryModel e, {Map<int, String> categories = const {}}) => {
+      'id': e.id,
+      'createdBy': e.createdBy,
+      'title': e.purpose,
+      'merchant': e.counterparty,
+      'amount': e.amount,
+      'category': e.kind == EntryKind.INCOME
+          ? '수입'
+          : e.budgetId == null
+              ? '예산 미배정'
+              : categories[e.budgetId] ?? '예산 #${e.budgetId}',
+      'date': Fmt.date(e.occurredAt),
+      'status': e.status,
+      'ocrStatus': e.ocrStatus,
+      'categoryWarning': e.categoryWarning,
+      'receiptInfo': e.receiptHash == null ? '영수증 없음' : '영수증 첨부 (${Fmt.shortHash(e.receiptHash!)})',
+      if (e.rejectReason != null) 'rejectReason': e.rejectReason,
+      if (e.warningAckReason != null) 'warningAckReason': e.warningAckReason,
+      'entry': e,
+    };
+
+/// 승인 화면에 보이는 상태 (탭 셋). `BLOCKED` 는 승인 대상이 아니다.
+const _shownStatuses = {EntryStatus.PENDING, EntryStatus.CONFIRMED, EntryStatus.REJECTED};
+
 /// 로그인한 사람이 이 건의 등록자인가. 등록자는 자기 건을 승인·반려할 수 없다 —
 /// 컨트랙트가 `SelfApproval` 로 되돌리지만 화면이 먼저 막는다 (스토리보드 12-E).
 bool isOwnEntry(Map<String, dynamic> item, int? currentUserId) =>
@@ -145,10 +178,14 @@ class ApprovalListScreen extends StatefulWidget {
   final UserRole? role;
   final int? currentUserId;
 
-  /// 목록 재료. 주지 않으면 목업 목록을 쓴다 (테스트·화면 캡처용).
+  /// 목록 재료 (테스트·화면 캡처용). 주지 않으면 서버(`GET /entries`)에서 읽는다 —
+  /// 시연용 더미가 켜진 개발 빌드([ApiService.useDemoData])에서만 목업 목록을 쓴다 (PRD v0.14 §7.3).
   final List<Map<String, dynamic>>? items;
 
-  const ApprovalListScreen({super.key, this.role, this.currentUserId, this.items});
+  /// 반려 서명·전송. 테스트에서 가짜 본인 확인을 넣는다.
+  final EntryDecisionService? decisions;
+
+  const ApprovalListScreen({super.key, this.role, this.currentUserId, this.items, this.decisions});
 
   /// 화면에 적용되는 역할. 로그인했으면 세션 역할이고, 인자는 세션이 없을 때만 쓴다.
   UserRole? get effectiveRole => AuthService().session?.role ?? role;
@@ -166,12 +203,72 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
     with SingleTickerProviderStateMixin {
   late TabController _tabController;
 
-  late final List<Map<String, dynamic>> _items = widget.items ?? buildApprovalMockItems();
+  /// 서버에서 읽는가 — 목록 재료를 받지 않았고 시연용 더미도 꺼져 있을 때.
+  late final bool _fromServer = widget.items == null && !ApiService.useDemoData;
+
+  late List<Map<String, dynamic>> _items = widget.items ?? (_fromServer ? [] : buildApprovalMockItems());
+
+  late final EntryDecisionService _decisions = widget.decisions ?? EntryDecisionService();
+
+  /// 서버 목록을 읽는 중인가 / 마지막 읽기가 실패한 이유.
+  late bool _loading = _fromServer;
+  String? _loadError;
+
+  /// 겹친 읽기 중 마지막 응답만 반영한다 (홈의 승인 대기 건수와 같은 방식).
+  int _loadSeq = 0;
 
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 3, vsync: this);
+    if (_fromServer && widget.allowed) _load(initial: true);
+  }
+
+  /// 서버에서 목록을 다시 읽는다. 실패하면 목록을 비우지 않고 실패를 적는다 — 보이는 상태가
+  /// 최신이 아닐 수 있다는 것을 화면이 알린다. 목업으로 메우지 않는다.
+  Future<void> _load({bool initial = false}) async {
+    final seq = ++_loadSeq;
+    if (!initial) {
+      setState(() {
+        _loading = true;
+        _loadError = null;
+      });
+    }
+    // 예산 이름은 없어도 목록은 보여 줄 수 있다 — 못 읽으면 `예산 #id` 로 적는다.
+    final categories = ApiService()
+        .fetchBudgets()
+        .then((budgets) => {for (final b in budgets) b.id: b.category})
+        .catchError((Object _) => <int, String>{});
+    try {
+      final entries = await ApiService().fetchEntries();
+      final names = await categories;
+      if (!mounted || seq != _loadSeq) return;
+      setState(() {
+        _items = [
+          for (final e in entries)
+            if (_shownStatuses.contains(e.status)) approvalItemFromEntry(e, categories: names),
+        ];
+        _loading = false;
+      });
+    } on ApiUnavailable catch (e) {
+      if (!mounted || seq != _loadSeq) return;
+      setState(() {
+        _loading = false;
+        _loadError = e.message;
+      });
+    }
+  }
+
+  void _snack(String text, Color color) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(text),
+        backgroundColor: color,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        margin: const EdgeInsets.all(16),
+      ),
+    );
   }
 
   @override
@@ -241,7 +338,8 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
               _DetailRow(
                 icon: Icons.document_scanner_rounded,
                 label: 'OCR 결과',
-                value: (item['ocrStatus'] as OcrStatus).label,
+                // 영수증 없는 수입은 OCR 을 돌리지 않아 null 이다
+                value: (item['ocrStatus'] as OcrStatus?)?.label ?? '판독 안 함',
               ),
               _DetailRow(
                 icon: Icons.storefront_rounded,
@@ -270,6 +368,12 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
 
   /// 승인 진입점. 경고가 있으면 사유를 먼저 받는다 (빈 값은 서버가 400).
   Future<void> _onApprove(Map<String, dynamic> item) async {
+    // 서버 건은 아래 목업 승인(로컬에서 CONFIRMED 로 바꿈)을 타면 체인에 없는 확정이 화면에 생긴다.
+    // 승인 서명(ConfirmApproval)을 붙이기 전까지는 막는다.
+    if (item['entry'] is EntryModel) {
+      _snack('승인 서명은 아직 서버에 연결되지 않았어요. 다음 업데이트에서 연결돼요.', AppTheme.pending);
+      return;
+    }
     String? warningReason;
     if (_hasWarning(item)) {
       warningReason = await showReasonDialog(
@@ -523,6 +627,12 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
       initialText: initialReason,
     );
     if (reason == null || !mounted) return;
+    final entry = item['entry'];
+    if (entry is EntryModel) {
+      await _rejectOnServer(item, entry, reason);
+      return;
+    }
+    // 목업 건 — 서버 없이 화면에서만 바꾼다
     setState(() {
       item['status'] = EntryStatus.REJECTED;
       item['rejectReason'] = reason;
@@ -536,6 +646,44 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
         margin: const EdgeInsets.all(16),
       ),
     );
+  }
+
+  /// 서버 건 반려 — 기기 서명 → `POST /entries/{id}/reject`. 보내는 동안 다른 조작을 막는다.
+  ///
+  /// 성공이든 실패든 끝나면 목록을 다시 읽는다. 실패 이유는 상태 코드로만 나뉘고(서버 문구로
+  /// 분기하지 않는다), 409·결과 모름이면 다른 임원의 처리나 앞선 시도가 반영됐을 수 있어서다.
+  Future<void> _rejectOnServer(Map<String, dynamic> item, EntryModel entry, String reason) async {
+    final navigator = Navigator.of(context, rootNavigator: true);
+    final sending = DialogRoute<void>(
+      context: context,
+      themes: InheritedTheme.capture(from: context, to: navigator.context),
+      barrierDismissible: false,
+      builder: (_) => const PopScope(canPop: false, child: _Sending(label: '반려 서명을 보내는 중이에요…')),
+    );
+    navigator.push(sending);
+    EntryDecisionException? failed;
+    try {
+      await _decisions.reject(entry, reason);
+    } on EntryDecisionException catch (e) {
+      failed = e;
+    }
+    // pop() 이 아니라 이 다이얼로그만 지운다. 401 이면 로그인 화면으로 가면서 쌓인 화면이 다 지워져
+    // 다이얼로그도 이미 없다 — 그때 pop() 하면 방금 연 로그인 화면이 닫혀 빈 화면이 된다.
+    if (sending.isActive) navigator.removeRoute(sending);
+    if (!mounted) return;
+
+    if (failed != null) {
+      _snack(failed.message, AppTheme.expense);
+      // 401 이면 세션이 비워져 로그인 화면으로 간다 — 다시 읽을 것이 없다
+      if (failed.failure != EntryDecisionFailure.unauthorized) _load();
+      return;
+    }
+    setState(() {
+      item['status'] = EntryStatus.REJECTED;
+      item['rejectReason'] = Hashing.canonicalText(reason);
+    });
+    _snack('[${item['title']}] 반려 처리되었습니다.', AppTheme.expense);
+    _load();
   }
 
   @override
@@ -569,6 +717,14 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
         foregroundColor: Colors.white,
         elevation: 0,
         centerTitle: true,
+        actions: [
+          if (_fromServer)
+            IconButton(
+              tooltip: '새로고침',
+              onPressed: _loading ? null : _load,
+              icon: const Icon(Icons.refresh_rounded),
+            ),
+        ],
         bottom: TabBar(
           controller: _tabController,
           isScrollable: true,
@@ -603,14 +759,51 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
           ],
         ),
       ),
-      body: TabBarView(
-        controller: _tabController,
-        children: [
-          _buildListByStatus(EntryStatus.PENDING),
-          _buildListByStatus(EntryStatus.CONFIRMED),
-          _buildListByStatus(EntryStatus.REJECTED),
-        ],
-      ),
+      body: _buildBody(),
+    );
+  }
+
+  Widget _buildBody() {
+    if (_items.isEmpty && _loadError != null) {
+      return _LoadFailed(message: _loadError!, onRetry: _load);
+    }
+    if (_items.isEmpty && _loading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    final tabs = TabBarView(
+      controller: _tabController,
+      children: [
+        _buildListByStatus(EntryStatus.PENDING),
+        _buildListByStatus(EntryStatus.CONFIRMED),
+        _buildListByStatus(EntryStatus.REJECTED),
+      ],
+    );
+    if (_loadError == null) return tabs;
+    // 목록은 있는데 새로 읽지 못했다 — 보이는 상태가 최신이 아닐 수 있다
+    return Column(
+      children: [
+        Material(
+          color: const Color(0xFFFFF3E0),
+          child: InkWell(
+            onTap: _load,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              child: Row(
+                children: [
+                  const Icon(Icons.sync_problem_rounded, size: 16, color: Colors.orange),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text('$_loadError 보이는 상태가 최신이 아닐 수 있어요. 눌러서 다시 읽기',
+                      style: const TextStyle(fontSize: 11, height: 1.3, color: Color(0xFF7C4700)),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+        Expanded(child: tabs),
+      ],
     );
   }
 
@@ -699,6 +892,62 @@ class _NoAccess extends StatelessWidget {
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 서버 목록을 처음부터 읽지 못했을 때. 목업으로 메우지 않는다 (PRD v0.14 §7.3).
+class _LoadFailed extends StatelessWidget {
+  final String message;
+  final VoidCallback onRetry;
+  const _LoadFailed({required this.message, required this.onRetry});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.cloud_off_rounded, size: 40, color: AppTheme.textSub),
+            const SizedBox(height: 12),
+            Text(message,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 14, height: 1.4, color: AppTheme.textMain),
+            ),
+            const SizedBox(height: 16),
+            OutlinedButton.icon(
+              onPressed: onRetry,
+              icon: const Icon(Icons.refresh_rounded, size: 16),
+              label: const Text('다시 시도'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 서명을 보내는 동안 띄우는 막음 다이얼로그.
+class _Sending extends StatelessWidget {
+  final String label;
+  const _Sending({required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Row(
+          children: [
+            const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2.5)),
+            const SizedBox(width: 16),
+            Expanded(child: Text(label, style: const TextStyle(fontSize: 14, color: AppTheme.textMain))),
+          ],
         ),
       ),
     );

@@ -8,6 +8,7 @@ import 'package:student_council_app/core/enums.dart';
 import 'package:student_council_app/screens/council/approval_list_screen.dart';
 import 'package:student_council_app/screens/council/correction_approval_screen.dart';
 import 'package:student_council_app/screens/council/income_create_screen.dart';
+import 'package:student_council_app/services/api_service.dart';
 import 'package:student_council_app/services/auth_service.dart';
 
 /// 승인 화면의 역할 가드와 본인 등록 건 차단, 수입 영수증 첨부(선택).
@@ -15,6 +16,8 @@ void main() {
   setUp(() {
     AuthService.store = MemoryTokenStore();
     AuthService().resetAttempts();
+    // 목업 목록으로 가드를 본다. 승인 화면은 더미가 꺼져 있으면 서버에서 읽는다 — 그 경로는 council_reject_test.dart
+    ApiService.useDemoData = true;
   });
 
   tearDown(() async {
