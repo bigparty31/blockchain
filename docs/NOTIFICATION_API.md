@@ -88,12 +88,12 @@
 
 | `kind` | 이벤트 | 받는 사람 | 연결 | 재알림 |
 |---|---|---|---|---|
-| `ENTRY_REGISTERED` | 지출·수입·정정 등록 | 감사 전원, 회장 | `entry_id` | O |
+| `ENTRY_REGISTERED` | 지출·수입·정정 등록. 결과가 `PENDING`일 때만 | 감사 전원, 회장 | `entry_id` | O |
 | `ENTRY_EDIT_REQUESTED` | T4 수정 요청 (§4.3) | 감사 전원, 회장 | `entry_id` | O |
 | `ENTRY_CONFIRMED` | 확정 | 총무 | `entry_id` | |
 | `ENTRY_REJECTED` | 반려 | 총무 | `entry_id` | |
 | `ENTRY_CONFIRM_FAILED` | 확정 실패 (아래 「확정 실패의 기준」) | 총무 | `entry_id` | |
-| `ENTRY_BLOCKED` | `BLOCKED` | 총무, 회장 | `entry_id` | |
+| `ENTRY_BLOCKED` | 등록 결과가 `BLOCKED` | 총무, 회장 | `entry_id` | |
 | `REVISION_REQUESTED` | 증액 요청, 시한 만료 후 재서명 요청 (§4.1) | 회장 | `budget_revision_request_id` | O |
 | `REVISION_PRESIDENT_SIGNED` | 회장 서명 완료 | 감사 | `budget_revision_request_id` | O |
 | `REVISION_APPROVED` | 증액 승인 | 총무, 회장 | `budget_revision_request_id` | |
@@ -101,7 +101,10 @@
 | `ROLE_CHANGE_REQUESTED` | 롤 변경 서명 요청 (시연할 때만) | 상대 서명자 | 없음 | |
 | `PRESIDENT_RECOVERY_PROPOSED` | 회장 복구 제안 (시연할 때만) | 회장, 감사 | 없음 | |
 | `RECLASSIFY_PAIR_UNCONFIRMED` | 재분류 짝 미확정 | 해당 처리자 | `entry_id` | |
-| `SIGNATURE_DEADLINE_NEAR` | 서명 시한 임박 | 해당 처리자 | `budget_revision_request_id` | O |
+| `SIGNATURE_DEADLINE_NEAR` | 서명 시한 임박 | 감사 전원 | `budget_revision_request_id` | O |
+
+- **`BLOCKED`로 등록되면 `ENTRY_BLOCKED`만 보낸다.** `BLOCKED`는 확정·반려할 수 없어, `ENTRY_REGISTERED`를 함께 보내면 처리할 수 없는 건의 재알림이 닫히지 않는다.
+- **`SIGNATURE_DEADLINE_NEAR`는 감사 전원이 받는다.** 시한이 있는 것은 회장이 서명하고 감사 승인을 기다리는 증액이다. §4.8의 「해당 처리자」를 이렇게 읽었고, `user_ids`는 넘기지 않는다.
 
 ## 서버 함수 (김경윤 호출용)
 
@@ -129,7 +132,7 @@ def resolve_notifications(
 ```
 
 - **상태 변경과 같은 세션으로 부르고, 호출한 쪽이 함께 commit 한다** (§4.8). 롤백되면 알림도 남지 않는다
-- 받는 사람은 `kind`에 따라 함수가 정한다. `user_ids`는 「해당 처리자」처럼 표만으로 정해지지 않는 종류에만 넘긴다
+- 받는 사람은 `kind`에 따라 함수가 정한다. `user_ids`는 `ROLE_CHANGE_REQUESTED`, `RECLASSIFY_PAIR_UNCONFIRMED`처럼 표만으로 정해지지 않는 종류에만 넘긴다
 - `resolve_notifications`는 「재알림」이 O인 종류(`ENTRY_REGISTERED`, `ENTRY_EDIT_REQUESTED`, `REVISION_REQUESTED`, `REVISION_PRESIDENT_SIGNED`, `SIGNATURE_DEADLINE_NEAR`)만 닫는다. 총무가 받을 `ENTRY_CONFIRMED`·`ENTRY_REJECTED` 같은 결과 통보는 닫지 않는다
 - **한 처리에서 둘 다 부르면 `resolve_notifications`를 먼저 부른다.** 증액은 다음 단계 알림도 재알림 대상이라, 순서가 바뀌면 방금 만든 `REVISION_PRESIDENT_SIGNED`까지 닫힌다
 - 문구(`body`)는 인자로 받지 않는다. 서버가 `kind`로 만든다
@@ -138,7 +141,7 @@ def resolve_notifications(
 
 | 이벤트 | 어디서 | 담당 |
 |---|---|---|
-| 등록, `BLOCKED`, 확정, 반려 | `chain_tx.py`의 상태 반영 단계 (`settle`). `_update`가 1행일 때만 | 손종인 |
+| 등록, `BLOCKED`, 확정, 반려 | `chain_tx.py`의 상태 반영 단계 (`settle`). `_update`가 1행일 때만. 등록은 결과 status에 따라 `ENTRY_REGISTERED`와 `ENTRY_BLOCKED` 중 하나만 | 손종인 |
 | 확정 실패 | `relay_confirm`의 `ChainRevert` 처리. 상태 반영이 없어 자체 세션으로 commit | 손종인 |
 | T4 수정 요청 | 수정 요청 라우터 | 김경윤 |
 | 증액 요청, 회장 서명 완료, 증액 승인·반려 | 예산 라우터 | 김경윤 |
@@ -172,5 +175,6 @@ def resolve_notifications(
 | 장석연 | §4.8 표에 「T4 수정 요청 → 감사 전원, 회장」 행 추가 (리뷰에서 추가하기로 함, PRD 반영 대기) |
 | 장석연 | §4.8의 「감사」가 감사 전원인가. 맞으면 위 표대로 72시간 규칙은 대상이 없어 구현하지 않는다 |
 | 장석연 | §8 `Notification`에 `notified_at`을 더해도 되는가 (재알림 정렬 기준) |
+| 장석연 | §4.8의 서명 시한 임박 「해당 처리자」를 감사 전원으로 읽어도 되는가 |
 | 김경윤 | 위 「호출 위치」와 「닫는 위치」의 담당을 확인한다. `chain_tx.py`에서 기록하는 것은 장석연이 동의했다 |
 | 이승호 | 경로와 응답 형태로 화면을 만들 수 있는가. 폴링은 화면 동기화(§4.9)와 같은 15초를 제안한다 |
