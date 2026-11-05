@@ -52,6 +52,11 @@ class _CouncilHomeScreenState extends State<CouncilHomeScreen> with WidgetsBindi
   /// 홈이 열려 있는 동안 15초마다 다시 읽는다 (PRD v0.14 §4.8 · §4.9).
   Timer? _poll;
 
+  /// 읽기가 겹치면 **마지막에 보낸 것**만 반영한다. 15초 폴링·새로고침·앱 복귀·화면 복귀가
+  /// 겹치면 먼저 보낸 요청이 늦게 도착해 새 숫자를 옛 숫자로 덮을 수 있다.
+  int _pendingSeq = 0;
+  int _unreadSeq = 0;
+
   @override
   void initState() {
     super.initState();
@@ -78,9 +83,16 @@ class _CouncilHomeScreenState extends State<CouncilHomeScreen> with WidgetsBindi
   Future<void> _refreshAll({bool silent = false}) => Future.wait([_load(silent: silent), _loadUnread()]);
 
   Future<void> _load({bool silent = false}) async {
+    // 총무 홈에는 승인 대기 배너가 없다. 안 보여 줄 숫자를 세려고 15초마다
+    // 내역 전체(GET /entries)를 받지 않는다. 새로고침이 「읽는 중」에 묶이지 않게 끈다.
+    if (!_isApprover) {
+      if (_loading && mounted) setState(() => _loading = false);
+      return;
+    }
+    final seq = ++_pendingSeq;
     if (!silent && mounted) setState(() => _loading = true);
     final count = await ApiService().fetchPendingCount();
-    if (!mounted) return;
+    if (!mounted || seq != _pendingSeq) return; // 더 나중에 보낸 읽기가 있다
     setState(() {
       _pendingCount = count;
       _loading = false;
@@ -88,8 +100,9 @@ class _CouncilHomeScreenState extends State<CouncilHomeScreen> with WidgetsBindi
   }
 
   Future<void> _loadUnread() async {
+    final seq = ++_unreadSeq;
     final count = await NotificationService.unreadCount();
-    if (mounted) setState(() => _unread = count);
+    if (mounted && seq == _unreadSeq) setState(() => _unread = count);
   }
 
   /// 다른 화면에 갔다 돌아오면 다시 읽는다 — 승인하고 왔는데 숫자가 그대로면

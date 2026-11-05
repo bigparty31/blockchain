@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -9,6 +10,7 @@ import 'package:student_council_app/screens/council/council_home_screen.dart';
 import 'package:student_council_app/screens/council/inquiry_response_screen.dart';
 import 'package:student_council_app/screens/president/budget_plan_screen.dart';
 import 'package:student_council_app/services/api_service.dart';
+import 'package:student_council_app/services/notification_service.dart';
 
 /// 역할별 홈(스토리보드 0). 로그인은 `login_screen_test.dart` 가 본다.
 ///
@@ -18,19 +20,22 @@ void main() {
   // 목업 화면 테스트 — 서버 없이 시연용 더미로 돈다. 실패 표시는 api_unavailable_test.dart 가 본다 (PRD v0.14 §7.3).
   setUp(() => ApiService.useDemoData = true);
 
+  /// 승인 대기 [pending] 건이 담긴 `GET /entries` 응답.
+  http.Response entriesReply(int pending) => http.Response(
+        jsonEncode([
+          for (var i = 0; i < pending; i++)
+            {
+              'id': i + 1, 'term_id': 1, 'kind': 'EXPENSE', 'amount': 1000, 'counterparty': '가게',
+              'purpose': '구매', 'occurred_at': 1788793200, 'meta_hash': '0x00', 'status': 'PENDING', 'created_by': 2,
+            }
+        ]),
+        200,
+        headers: {'content-type': 'application/json; charset=utf-8'},
+      );
+
   /// 승인 대기 [pending] 건이 있는 `GET /entries` 서버.
   void serveEntries(int pending) {
-    ApiService.client = MockClient((_) async => http.Response(
-          jsonEncode([
-            for (var i = 0; i < pending; i++)
-              {
-                'id': i + 1, 'term_id': 1, 'kind': 'EXPENSE', 'amount': 1000, 'counterparty': '가게',
-                'purpose': '구매', 'occurred_at': 1788793200, 'meta_hash': '0x00', 'status': 'PENDING', 'created_by': 2,
-              }
-          ]),
-          200,
-          headers: {'content-type': 'application/json; charset=utf-8'},
-        ));
+    ApiService.client = MockClient((_) async => entriesReply(pending));
   }
 
   tearDown(() => ApiService.client = http.Client());
@@ -54,6 +59,71 @@ void main() {
       expect(find.text('승인 대기'), findsNothing);
       expect(find.text('이의 답변'), findsNothing);
       expect(find.textContaining('미답변 이의'), findsNothing);
+    });
+
+    testWidgets('총무 홈은 보여 주지 않는 승인 대기 건수를 읽지 않는다 — 15초마다 내역 전체를 받지 않게', (tester) async {
+      var entryRequests = 0;
+      ApiService.client = MockClient((req) async {
+        if (req.url.path != '/entries') return http.Response('{}', 503);
+        entryRequests++;
+        return http.Response('[]', 200, headers: {'content-type': 'application/json; charset=utf-8'});
+      });
+      await pump(tester, const CouncilHomeScreen(role: UserRole.TREASURER));
+      expect(entryRequests, 1, reason: '내 등록 현황만 내역을 읽는다');
+
+      final refresh = find.byKey(const Key('council_refresh'));
+      expect(tester.widget<IconButton>(refresh).onPressed, isNotNull, reason: '새로고침이 「읽는 중」에 묶이지 않는다');
+
+      await tester.pump(const Duration(seconds: 16)); // 15초 폴링 한 번
+      await tester.tap(refresh);
+      await tester.pumpAndSettle();
+      expect(entryRequests, 1);
+    });
+
+    testWidgets('읽기가 겹치면 마지막에 보낸 것만 반영한다 — 늦게 온 옛 응답이 새 숫자를 덮지 않게', (tester) async {
+      final entries = <Completer<http.Response>>[];
+      final unread = <Completer<http.Response>>[];
+      ApiService.client = MockClient((req) {
+        if (req.url.path != '/entries') return Future.value(http.Response('{}', 503));
+        return (entries..add(Completer())).last.future;
+      });
+      NotificationService.client = MockClient((_) => (unread..add(Completer())).last.future);
+      addTearDown(() => NotificationService.client = http.Client());
+      http.Response unreadReply(int n) =>
+          http.Response(jsonEncode({'count': n}), 200, headers: {'content-type': 'application/json'});
+      Finder badgeText(String n) =>
+          find.descendant(of: find.byKey(const Key('notification_unread_badge')), matching: find.text(n));
+
+      tester.view.physicalSize = const Size(411, 2400);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(const MaterialApp(home: CouncilHomeScreen(role: UserRole.AUDITOR)));
+      await tester.pump();
+      entries[0].complete(entriesReply(1));
+      unread[0].complete(unreadReply(1));
+      await tester.pumpAndSettle();
+      expect(find.text('대기 1건'), findsOneWidget);
+
+      // 15초 폴링(B)이 나간 직후 새로고침(C)을 누른다 — 두 읽기가 겹친다.
+      await tester.pump(NotificationService.pollInterval);
+      await tester.tap(find.byKey(const Key('council_refresh')));
+      await tester.pump();
+      expect(entries, hasLength(3));
+      expect(unread, hasLength(3));
+
+      // 나중에 보낸 C 가 먼저 오고, 먼저 보낸 B 가 늦게 온다.
+      entries[2].complete(entriesReply(2));
+      unread[2].complete(unreadReply(2));
+      await tester.pumpAndSettle();
+      expect(find.text('대기 2건'), findsOneWidget);
+      entries[1].complete(entriesReply(5));
+      unread[1].complete(unreadReply(5));
+      await tester.pumpAndSettle();
+
+      expect(find.text('대기 2건'), findsOneWidget);
+      expect(find.text('대기 5건'), findsNothing);
+      expect(badgeText('2'), findsOneWidget);
+      expect(badgeText('5'), findsNothing);
     });
 
     testWidgets('총무 홈은 내 등록 건을 상태별로 센다', (tester) async {
