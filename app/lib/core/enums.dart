@@ -70,7 +70,7 @@ enum EntryStatus {
 enum CorrectionReason {
   INPUT_ERROR('INPUT_ERROR', '입력 오류'),
   RECEIPT_RECHECK('RECEIPT_RECHECK', '영수증 재확인'),
-  REFUND('REFUND', '반환'),
+  REFUND('REFUND', '환불'),
   RECLASSIFY('RECLASSIFY', '재분류');
 
   final String code;

@@ -33,7 +33,7 @@
 | --- | --- |
 | `INPUT_ERROR` | 입력 오류 |
 | `RECEIPT_RECHECK` | 영수증 재확인 |
-| `REFUND` | 반환 |
+| `REFUND` | 환불 |
 | `RECLASSIFY` | 재분류 |
 
 ## ocr_status
