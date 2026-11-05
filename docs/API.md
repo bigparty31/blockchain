@@ -317,6 +317,38 @@
 }
 ```
 
+### 4. 반려 (`POST /entries/{id}/reject`)
+- **설명**: 감사·회장이 기기 서명(`RejectDecision`)과 사유를 제출해 `PENDING` 항목을 `REJECTED`로 끝냅니다. 확정과 같은 `tx_confirm` 칸을 선점하므로 한 항목에 확정과 반려가 함께 나가지 않습니다.
+- **처리 중 응답 값**: 체인에서 끝나기 전에는 목록·단건 응답의 `rejected_by`·`reject_reason`이 `null`입니다. 확정도 같아서 `approved_by`·`warning_ack_reason`은 `CONFIRMED`일 때만 값이 있습니다. `tx_confirm`은 처리 중에도 채워집니다.
+
+**Request**
+```json
+{
+  "deadline": 1790700000,
+  "signature": "0x6f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a1b",
+  "reject_reason": "영수증 식별 불가"
+}
+```
+
+**Response (`200 OK`)**
+```json
+{
+  "id": 2,
+  "status": "REJECTED",
+  "message": "온체인에 성공적으로 반려(REJECTED) 기록되었습니다."
+}
+```
+
+| 코드 | 경우 |
+| --- | --- |
+| `400` | `PENDING`이 아님, 사유 없음, 서명 형식 오류, 서명자 불일치, 체인이 거부함 |
+| `403` | 감사·회장이 아님, 본인이 등록한 항목 |
+| `404` | 없는 항목 |
+| `409` | 확정이 처리 중, 다른 요청이 먼저 처리함 또는 처리 중. 잠시 뒤 다시 조회합니다 |
+| `503` | 노드·DB 오류. 트랜잭션이 들어갔는지 모르면 같은 요청을 다시 보내 결과를 확인합니다 |
+
+확정(`POST /entries/{id}/confirm`)도 반려가 처리 중이면 같은 방식으로 `409`입니다.
+
 ---
 
 ## 검증
