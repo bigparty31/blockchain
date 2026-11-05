@@ -11,6 +11,7 @@ from app.database import get_db
 from app.models import Entry as DBEntry
 from app.ocr import OcrClient, OcrUnavailable, ParsedReceipt, get_ocr_client, judge, parse_clova_response
 from app.schemas.auth import Role
+from app.schemas.entry import OCRStatus
 from app.schemas.ocr import OcrRequest, OcrResult
 
 logger = logging.getLogger(__name__)
@@ -55,14 +56,17 @@ async def read_receipt(
         parsed = ParsedReceipt(readable=False, notes=[str(e)])
 
     duplicate_of = None
-    if parsed.approval_no and parsed.paid_at:
+    # 못 읽은 영수증은 중복 검사에서 뺀다 (PRD §6 UNREADABLE). 금액이 없거나 흐린 글자로 읽은 값으로 기존 건을 지목하지 않는다
+    readable = parsed.readable and parsed.amount is not None and not parsed.low_confidence
+    if readable and parsed.approval_no and parsed.paid_at:
         try:
             existing = (
                 db.query(DBEntry.id)
                 .filter(
                     DBEntry.ocr_approval_no == parsed.approval_no,
                     DBEntry.ocr_paid_at == parsed.paid_at,
-                    DBEntry.amount == body.amount,
+                    # 같은 영수증을 금액만 바꿔 다시 올려도 잡는다 — 판독 금액으로도 비교해야 DUPLICATE > MISMATCH 가 성립
+                    DBEntry.amount.in_({body.amount, parsed.amount}),
                     DBEntry.status.in_(DUPLICATE_TARGET_STATUSES),
                 )
                 .order_by(DBEntry.id)
@@ -76,11 +80,13 @@ async def read_receipt(
             )
         duplicate_of = existing.id if existing else None
 
+    ocr_status = judge(parsed, body.amount, duplicate_of)
     return OcrResult(
-        ocr_status=judge(parsed, body.amount, duplicate_of),
+        ocr_status=ocr_status,
         ocr_amount=parsed.amount,
         input_amount=body.amount,
-        duplicate_of=duplicate_of,
+        # 기존 건 링크는 DUPLICATE 판정일 때만 내려준다 (다른 상태에 링크가 붙으면 앱이 중복으로 오해한다)
+        duplicate_of=duplicate_of if ocr_status == OCRStatus.DUPLICATE else None,
         ocr_approval_no=parsed.approval_no,
         ocr_paid_at=parsed.paid_at,
     )

@@ -1,11 +1,13 @@
 """POST /ocr/receipt 테스트. CLOVA 대신 가짜 클라이언트가 저장된 CU 영수증 응답을 돌려준다."""
 import asyncio
 import base64
+import copy
 import json
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from aiohttp import web
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -120,6 +122,27 @@ def test_rejected_blocked_draft_are_not_duplicates(auth_header, status):
     assert data["duplicate_of"] is None
 
 
+def test_duplicate_even_when_input_amount_differs(auth_header):
+    # 4,600원 영수증을 9,999원으로 다시 올려도 기존 건을 찾는다 — DUPLICATE 가 MISMATCH 보다 먼저 (PR #36 리뷰)
+    _add_entry(7, "CONFIRMED", amount=4600)
+    data = _post(auth_header, amount=9999).json()
+    assert data["ocr_status"] == "DUPLICATE"
+    assert data["duplicate_of"] == 7
+
+
+def test_unreadable_does_not_link_duplicate(auth_header):
+    # 흐린 글자로 읽은 영수증은 중복 검사에서 빠진다 — 기존 건 링크도 내려가지 않는다 (PR #36 리뷰)
+    blurry = copy.deepcopy(CU)
+    for f in blurry["images"][0]["fields"]:
+        if f["inferText"] == "4,600":
+            f["inferConfidence"] = 0.5
+    _use_ocr(FakeOcr(blurry))
+    _add_entry(7, "CONFIRMED")
+    data = _post(auth_header).json()
+    assert data["ocr_status"] == "UNREADABLE"
+    assert data["duplicate_of"] is None
+
+
 def test_same_approval_no_other_amount_is_not_duplicate(auth_header):
     _add_entry(7, "CONFIRMED", amount=9900)
     assert _post(auth_header).json()["ocr_status"] == "MATCH"
@@ -177,3 +200,34 @@ def test_build_request_matches_clova_v2():
 def test_client_without_keys_raises():
     with pytest.raises(OcrUnavailable):
         asyncio.run(ClovaOcrClient(None, None).recognize(b"x", "jpg"))
+
+
+@pytest.mark.parametrize(
+    "status, body",
+    [
+        (200, "{not json"),  # 200 인데 JSON 이 깨짐 → ValueError (PR #36 리뷰)
+        (500, "error"),
+    ],
+)
+def test_client_bad_response_raises_unavailable(status, body):
+    """로컬에 잠깐 띄운 가짜 CLOVA 서버로 실제 HTTP 경로를 돌린다."""
+
+    async def run():
+        async def handler(request):
+            assert request.headers["X-OCR-SECRET"] == "test-secret"
+            return web.Response(status=status, text=body, content_type="application/json")
+
+        server = web.Application()
+        server.router.add_post("/ocr", handler)
+        runner = web.AppRunner(server)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        try:
+            await ClovaOcrClient(f"http://127.0.0.1:{port}/ocr", "test-secret").recognize(b"x", "jpg")
+        finally:
+            await runner.cleanup()
+
+    with pytest.raises(OcrUnavailable):
+        asyncio.run(run())

@@ -64,6 +64,8 @@ class ClovaOcrClient:
                     return await res.json()
         except (aiohttp.ClientError, OSError) as e:  # aiohttp 타임아웃은 OSError 계열 (app/chain/web3_client.py 와 같음)
             raise OcrUnavailable(f"CLOVA 연결 실패: {e!r}") from e
+        except ValueError as e:  # 200 인데 본문이 JSON 이 아님 (json.JSONDecodeError 는 ValueError 하위)
+            raise OcrUnavailable(f"CLOVA 응답 해석 실패: {e!r}") from e
 
 
 def get_ocr_client() -> OcrClient:
