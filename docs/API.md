@@ -154,15 +154,15 @@
 예산 증액은 **총무 요청(1단계) → 회장 EIP-712 서명(2단계) → 감사 EIP-712 서명 및 온체인 릴레이(3단계)** 순서로 진행됩니다 (`PENDING` → `PRESIDENT_SIGNED` → `APPROVED` / `REJECTED`).
 
 #### 앱 서명 대상: EIP-712 `IncreaseRequest` (`BudgetToken` 도메인)
-회장과 감사는 **동일한 `IncreaseRequest` 구조체 값**에 각각 EIP-712 서명합니다 (`docs/EIP712.md` 참조).
+회장과 감사는 **동일한 `IncreaseRequest` 구조체 값**에 각각 EIP-712 서명합니다 (`docs/CONTRACTS.md` 참조).
 
 | Solidity 필드 | 타입 | 백엔드 매핑 (`IncreaseRequest`) | 설명 |
 | --- | --- | --- | --- |
 | `budgetId` | `uint256` | `budget_id` | 증액 대상 온체인 예산 ID (`> 0`) |
 | `amount` | `uint256` | `requested_amount` | **증액분** 원 단위 양의 정수 (`> 0`, 변경 후 총액이 아님) |
 | `reasonHash` | `bytes32` | `text_hash(reason)` | 정규화된 증액 사유(`reason`) 원문의 UTF-8 SHA-256 해시 (`0x` + 64자 hex) |
-| `version` | `uint32` | `signed_version` | **회장 서명 당시의 현재 온체인 예산 버전** (`>= 1`). 감사 승인 시에도 회장이 서명했던 `signed_version`을 그대로 사용 |
-| `deadline` | `uint64` | `signature_deadline` | 회장이 지정한 서명 만료 시한 (Unix 초). 감사 승인 시에도 저장된 `signature_deadline`을 그대로 사용 |
+| `version` | `uint256` | `signed_version` | **회장 서명 당시의 현재 온체인 예산 버전** (`>= 1`). 감사 승인 시에도 회장이 서명했던 `signed_version`을 그대로 사용 |
+| `deadline` | `uint256` | `signature_deadline` | 회장이 지정한 서명 만료 시한 (Unix 초). 감사 승인 시에도 저장된 `signature_deadline`을 그대로 사용 |
 
 ---
 
