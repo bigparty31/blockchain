@@ -1,6 +1,6 @@
 # 공용 개발 스택
 
-통합 시험과 발표에 쓰는 서버다. `db`·`chain`·`api` 세 컨테이너를 VM 한 대에 띄운다. 개인 개발은 지금처럼 `CHAIN_FAKE=1` 로 한다.
+통합 시험에 쓰는 서버다. `db`·`chain`·`api` 세 컨테이너를 VM 한 대에 띄운다. 발표는 Amoy 배포를 따로 쓰고, 개인 개발은 지금처럼 `CHAIN_FAKE=1` 로 한다.
 
 ## 접속
 
@@ -19,16 +19,23 @@ bash scripts/dev-stack-reset.sh
 
 체인과 DB 를 지운 뒤 배포, 마이그레이션, 시드, 체인 예산 발행까지 진행한다. `.env` 가 없으면 비밀값과 Tailscale 주소를 넣어 새로 만든다.
 
+기본 초기화는 행사비·사업비·운영비를 체인에 발행한다. 한 학기·한 항목에 예산은 하나라서 이 세 항목을 예산 편성 화면에서 다시 발행하면 `ALREADY_ISSUED` 로 끝난다. 편성 화면을 시험할 때는 체인 발행을 건너뛴다.
+
+```bash
+bash scripts/dev-stack-reset.sh --no-budgets
+```
+
 **VM 을 재시작했거나 `chain` 컨테이너가 다시 시작되면 이 스크립트를 실행해야 한다.** 체인은 메모리에만 저장되어 지워지지만 DB 는 남아 서로 어긋난다.
 
 ## 코드만 반영하기
 
-데이터를 유지한 채 API 코드만 바꿀 때 실행한다. 마이그레이션이 포함된 변경이면 `alembic upgrade head` 도 실행한다.
+데이터를 유지한 채 API 코드만 바꿀 때 실행한다. `--no-deps` 를 빼면 `chain` 까지 다시 만들어져 체인만 지워지고 DB 는 남을 수 있다. 새 코드가 먼저 뜨지 않도록 마이그레이션을 API 재시작보다 먼저 실행한다.
 
 ```bash
 git pull
-docker compose up -d --build api
-docker compose exec api alembic upgrade head
+docker compose build api
+docker compose run --rm --no-deps api alembic upgrade head
+docker compose up -d --no-deps api
 ```
 
 ## 상태 확인
