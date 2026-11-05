@@ -43,6 +43,7 @@
 | `reject_entry(decision, signature, before_broadcast=None)` | `rejectEntry` | `REJECTED` |
 | `get_entry(entry_id)` | `getEntry` | 없으면 `None` |
 | `tx_result(tx_hash, entry_id)` | 부르지 않음 (receipt) | 그 트랜잭션이 남긴 결과. 아직 블록에 없으면 `None` (§3) |
+| `entry_tx_detail(tx_hash, entry_id)` | 부르지 않음 (receipt) | 그 트랜잭션의 status·블록 번호·사유 해시. 아직 블록에 없으면 `None`. 예외는 `tx_result`와 같다 |
 | `signer_of(payload, signature)` | 부르지 않음 | 서명자 주소 (§4). 동기 메서드 |
 
 `getEntry`는 없는 id에도 0으로 채운 구조체(`registrant == 0`)를 돌려주고, status 0은 `PENDING`이다. 그대로 옮기면 없는 항목이 `PENDING`으로 보이므로 실제 구현은 `exists(id)`를 먼저 확인해 없으면 `None`을 돌려준다. (`statusOf`는 없는 id면 `EntryNotFound`로 revert한다.) 반환 튜플 순서는 저장 배치를 따르므로 **위치가 아니라 필드 이름으로 읽는다** (HASHING §2).
@@ -231,6 +232,8 @@ chain.unavailable_next("confirm_entry", landed=True)                # 체인엔 
 
 ## 8. 클라이언트 받기 — provider
 
+**`RELAYER_PRIVATE_KEY`가 없으면 읽기 전용이다.** 키를 두지 않는 서버(PRD §9.1)도 `get_entry`, `get_budget`, `tx_result`, `entry_tx_detail`, `signer_of`를 쓴다. 쓰기 메서드는 보내지 않고 `ChainSetupError`(503)이며, 릴레이어 롤·잔액 점검은 하지 않는다. 값이 있는데 형식이 틀리면 지금처럼 503이다.
+
 API에서는 구현을 직접 만들지 않고 의존성으로 받는다. Fake와 실제 구현이 환경변수로 갈린다. **둘 중 하나를 명시해야 서버가 뜬다** (PR #20 2차 리뷰).
 
 ```python
@@ -273,6 +276,8 @@ cd backend && .venv/bin/python -m scripts.relayer_smoke
 - 총무·감사 키로 서명하는 "앱 역할"이라 서버 코드 밖(`backend/scripts/`)에 있고 로컬 체인(31337)에서만 돈다. 로컬 계정 배치와 앱 서명은 `backend/scripts/local_chain.py`가 정본이다
 
 ## 9. 예산 발행·증액
+
+**잔량은 `ChainBudget.remaining`이다.** `BudgetToken.remaining`과 같은 식(`issued - spent`)이고, `get_budget` 한 번으로 읽어 값들이 같은 블록의 것이다. `remaining()`을 따로 부르면 없는 예산도 0으로 보여, `None`과 구분되지 않는다. 시험이 두 값이 같은지 실제 노드에서 대조한다.
 
 코드 `backend/app/services/budget_relay.py`, 서명 대상 `IssueRequest`·`IncreaseRequest`. 경계는 김경윤과 합의한 대로다.
 
