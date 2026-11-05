@@ -698,7 +698,7 @@ async def create_budget_draft(
             category=budget.category,
             category_hash=cat_hash,
             planned_amount=req.planned_amount,
-            expires_at=req.expires_at,
+            expires_at=_to_unix_seconds(budget.expires_at) if budget.expires_at is not None else req.expires_at,
             version=1,
             status="DRAFT",
             issue_status=None,

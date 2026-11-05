@@ -199,10 +199,11 @@
 | 코드 | 경우 (`POST /budgets`, `POST /budgets/{id}/submit`) |
 | --- | --- |
 | `201` / `200` | `POST /budgets` 초안 발급(`201`, `status: "DRAFT"` 또는 `"ALREADY_ISSUED"`), `POST /budgets/{id}/submit` 체인 처리 결과(`200`, `status: "ISSUED" \| "ALREADY_ISSUED" \| "REJECTED" \| "NO_RESPONSE"`) |
-| `400` | 승인되지 않은 항목 또는 지출(`EXPENSE` 8종)이 아닌 수입 항목, `expires_at` 범위 초과, 서명 형식 오류(`MalformedSignature`), 서명자 지갑 불일치 |
+| `400` | 승인되지 않은 항목 또는 지출(`EXPENSE` 8종)이 아닌 수입 항목, 서명 형식 오류(`MalformedSignature`), 서명자 지갑 불일치 |
 | `403` | 회장(`PRESIDENT`)이 아님 |
 | `404` | 존재하지 않는 학기(`term_id`) 또는 예산(`id`) |
 | `409` | 다른 발행 요청이 이미 `tx_issue`를 선점해 처리 중이거나, 온체인에 동일 학기·항목 예산이 DB와 다른 ID(`existing.id != id`)로 이미 발행된 경우 |
+| `422` | 요청 본문 유효성 검증 실패 (카테고리 50자 초과, `planned_amount` 0 이하, `expires_at` 범위 초과/음수) |
 | `503` | 릴레이어 전송 불가(`NOT_SENT`, `ChainSetupError`) 또는 DB 오류 |
 
 ---

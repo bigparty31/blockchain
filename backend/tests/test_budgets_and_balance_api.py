@@ -365,6 +365,55 @@ def test_submit_wrong_signer_or_malformed_signature_returns_400(auth_header):
         assert db.query(DBBudgetVersion).count() == 0
 
 
+def test_post_budgets_in_flight_preserves_stored_expires_at(auth_header):
+    """처리 중인 건(tx_issue 존재)에 대해 POST /budgets를 다른 expires_at으로 재요청해도
+    201 DRAFT로 응답하며 저장된 expires_at이 변경되지 않고 응답도 저장된 expires_at으로 나온다."""
+    now = int(time.time())
+    original_expires_at = now + 86400
+    res_draft = client.post(
+        "/budgets",
+        json={
+            "term_id": 1,
+            "category": "홍보비",
+            "planned_amount": 1_000_000,
+            "expires_at": original_expires_at,
+        },
+        headers=auth_header(Role.PRESIDENT),
+    )
+    assert res_draft.status_code == 201
+    budget_id = res_draft.json()["id"]
+
+    # 임의로 tx_issue를 채워 '처리 중' 상태를 흉내냄
+    with _test_session_factory() as db:
+        row = db.query(DBBudget).filter(DBBudget.id == budget_id).first()
+        row.tx_issue = "0x" + "a" * 64
+        db.commit()
+
+    # 다른 만료일로 POST /budgets 재요청
+    new_expires_at = now + 999999
+    res_retry = client.post(
+        "/budgets",
+        json={
+            "term_id": 1,
+            "category": "홍보비",
+            "planned_amount": 1_000_000,
+            "expires_at": new_expires_at,
+        },
+        headers=auth_header(Role.PRESIDENT),
+    )
+    assert res_retry.status_code == 201
+    data = res_retry.json()
+    assert data["status"] == "DRAFT"
+    # 응답의 expires_at은 요청 값이 아니라 저장된 original_expires_at이어야 함
+    assert data["expires_at"] == original_expires_at
+
+    # DB에 저장된 값도 그대로 original_expires_at 유지
+    with _test_session_factory() as db:
+        row = db.query(DBBudget).filter(DBBudget.id == budget_id).first()
+        dt = row.expires_at if row.expires_at.tzinfo is not None else row.expires_at.replace(tzinfo=timezone.utc)
+        assert int(dt.timestamp()) == original_expires_at
+
+
 def test_already_issued_preserves_existing_tx_and_chain_values(auth_header):
     now = int(time.time())
     expires_at = now + 86400
