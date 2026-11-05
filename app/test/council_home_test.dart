@@ -126,6 +126,18 @@ void main() {
       expect(badgeText('5'), findsNothing);
     });
 
+    testWidgets('장부 잔액은 서버 값을 쓴다 — 고정 숫자를 두지 않는다', (tester) async {
+      ApiService.client = MockClient((req) async => req.url.path == '/balance'
+          ? http.Response(jsonEncode({'balance': 1234000, 'income': 2000000, 'expense': 766000}), 200,
+              headers: {'content-type': 'application/json; charset=utf-8'})
+          : http.Response('{}', 503));
+      await pump(tester, const CouncilHomeScreen(role: UserRole.TREASURER));
+      expect(find.text('₩ 1,234,000'), findsOneWidget);
+      expect(find.text('₩ 2,000,000'), findsOneWidget);
+      expect(find.text('₩ 766,000'), findsOneWidget);
+      expect(find.text('₩ 4,965,000'), findsNothing);
+    });
+
     testWidgets('총무 홈은 내 등록 건을 상태별로 센다', (tester) async {
       await pump(tester, const CouncilHomeScreen(role: UserRole.TREASURER));
       // 서버가 없으면 예시 3건(확정 2 · 대기 1)으로 센다

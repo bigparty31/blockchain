@@ -122,11 +122,12 @@ class CorrectionApprovalScreen extends StatefulWidget {
   final int? currentUserId;
   final List<CorrectionItem>? items;
 
-  /// [role]·[currentUserId] 를 주지 않으면 로그인 세션([AuthService.session]) 값을 쓴다.
+  /// **로그인했으면 세션([AuthService.session])의 역할·id 만 믿는다** — [role]·[currentUserId] 인자로
+  /// 다른 역할을 주장할 수 없다. 인자는 로그인 없이 화면을 그리는 위젯 테스트용이다.
   const CorrectionApprovalScreen({super.key, this.role, this.currentUserId, this.items});
 
-  UserRole? get effectiveRole => role ?? AuthService().session?.role;
-  int? get effectiveUserId => currentUserId ?? AuthService().session?.userId;
+  UserRole? get effectiveRole => AuthService().session?.role ?? role;
+  int? get effectiveUserId => AuthService().session?.userId ?? currentUserId;
 
   bool get allowed => effectiveRole == UserRole.AUDITOR || effectiveRole == UserRole.PRESIDENT;
 

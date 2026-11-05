@@ -139,7 +139,8 @@ int approvalMockPendingCount() =>
 /// 3. 승인 대기 목록 화면 (감사 / 회장)
 ///
 /// 감사·회장만 열 수 있다. 로그인하지 않았거나 총무·학생이면 [_NoAccess] 를 보여 준다 (홈에서 메뉴를 숨기는 것과 별개로,
-/// 경로로 직접 들어와도 막는다). [role]·[currentUserId] 를 주지 않으면 로그인 세션([AuthService.session]) 값을 쓴다.
+/// 경로로 직접 들어와도 막는다). **로그인했으면 세션([AuthService.session])의 역할·id 만 믿는다** — [role]·[currentUserId]
+/// 인자로 다른 역할을 주장할 수 없다. 인자는 로그인 없이 화면을 그리는 위젯 테스트용이다.
 class ApprovalListScreen extends StatefulWidget {
   final UserRole? role;
   final int? currentUserId;
@@ -149,11 +150,11 @@ class ApprovalListScreen extends StatefulWidget {
 
   const ApprovalListScreen({super.key, this.role, this.currentUserId, this.items});
 
-  /// 화면에 적용되는 역할. 인자가 없으면 로그인한 사람의 역할이다.
-  UserRole? get effectiveRole => role ?? AuthService().session?.role;
+  /// 화면에 적용되는 역할. 로그인했으면 세션 역할이고, 인자는 세션이 없을 때만 쓴다.
+  UserRole? get effectiveRole => AuthService().session?.role ?? role;
 
-  /// 화면에 적용되는 사용자 id. 본인 등록 건 판정에 쓴다.
-  int? get effectiveUserId => currentUserId ?? AuthService().session?.userId;
+  /// 화면에 적용되는 사용자 id. 본인 등록 건 판정에 쓴다. 역할과 같은 규칙이다.
+  int? get effectiveUserId => AuthService().session?.userId ?? currentUserId;
 
   bool get allowed => effectiveRole == UserRole.AUDITOR || effectiveRole == UserRole.PRESIDENT;
 

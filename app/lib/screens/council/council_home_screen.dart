@@ -4,8 +4,11 @@ import 'package:flutter/material.dart';
 import '../../core/enums.dart';
 import '../../core/app_theme.dart';
 import '../../core/dev_flags.dart';
+import '../../core/format.dart';
 import '../../core/logout_action.dart';
+import '../../models/balance_model.dart';
 import '../../services/api_service.dart';
+import '../../services/auth_service.dart';
 import '../../services/notification_service.dart';
 import 'notification_inbox_screen.dart';
 import 'expense_create_screen.dart';
@@ -40,7 +43,14 @@ class CouncilHomeScreen extends StatefulWidget {
 /// 0건이어도 몇 건이 있다고 말한다. 서버 건수를 읽고, 화면에서 돌아올 때와
 /// 새로고침을 누를 때 다시 읽는다.
 class _CouncilHomeScreenState extends State<CouncilHomeScreen> with WidgetsBindingObserver {
-  UserRole get role => widget.role;
+  /// 화면에 적용되는 역할. **로그인했으면 세션 역할만 믿는다** — 인자로 다른 역할을 주장해
+  /// 메뉴를 바꿀 수 없다. 인자는 로그인 없이 화면을 그리는 위젯 테스트용이다.
+  UserRole get role => AuthService().session?.role ?? widget.role;
+
+  /// 장부 잔액. **고정 숫자를 두지 않는다** — 서버에서 읽고, 못 읽으면 [_balanceError] 를 적는다
+  /// (PRD v0.14 §7.3). 둘 다 null 이면 「확인 중」이다.
+  BalanceModel? _balance;
+  String? _balanceError;
 
   /// 승인 대기 건수. **null 은 0 이 아니라 「모름」이다** ([ApiService.fetchPendingCount]).
   int? _pendingCount;
@@ -56,6 +66,7 @@ class _CouncilHomeScreenState extends State<CouncilHomeScreen> with WidgetsBindi
   /// 겹치면 먼저 보낸 요청이 늦게 도착해 새 숫자를 옛 숫자로 덮을 수 있다.
   int _pendingSeq = 0;
   int _unreadSeq = 0;
+  int _balanceSeq = 0;
 
   @override
   void initState() {
@@ -80,7 +91,25 @@ class _CouncilHomeScreenState extends State<CouncilHomeScreen> with WidgetsBindi
 
   /// 승인 대기 건수와 안 읽은 알림 수를 함께 다시 읽는다.
   /// [silent] 면 배지를 「확인 중」으로 바꾸지 않는다 — 15초마다 배지가 깜빡이지 않게.
-  Future<void> _refreshAll({bool silent = false}) => Future.wait([_load(silent: silent), _loadUnread()]);
+  Future<void> _refreshAll({bool silent = false}) =>
+      Future.wait([_load(silent: silent), _loadUnread(), _loadBalance()]);
+
+  Future<void> _loadBalance() async {
+    final seq = ++_balanceSeq;
+    BalanceModel? balance;
+    String? error;
+    try {
+      balance = await ApiService().fetchBalance();
+    } on ApiUnavailable catch (e) {
+      // 못 읽었으면 지난 숫자도 지운다 — 언제 값인지 모르는 잔액을 지금 잔액처럼 두지 않는다.
+      error = e.message;
+    }
+    if (!mounted || seq != _balanceSeq) return; // 더 나중에 보낸 읽기가 있다
+    setState(() {
+      _balance = balance;
+      _balanceError = error;
+    });
+  }
 
   Future<void> _load({bool silent = false}) async {
     // 총무 홈에는 승인 대기 배너가 없다. 안 보여 줄 숫자를 세려고 15초마다
@@ -234,7 +263,7 @@ class _CouncilHomeScreenState extends State<CouncilHomeScreen> with WidgetsBindi
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   // 1. 장부 잔액 카드
-                  _BalanceCard(),
+                  _BalanceCard(balance: _balance, error: _balanceError),
                   const SizedBox(height: 16),
 
                   // 2. 역할별 핵심 업무 최상단 강조 영역
@@ -859,9 +888,15 @@ class _TreasurerQuickActions extends StatelessWidget {
   }
 }
 
+/// 장부 잔액 카드. 서버 값([balance])만 보여 준다 — 못 읽었으면 [error] 를 적고 숫자를 비운다.
 class _BalanceCard extends StatelessWidget {
+  final BalanceModel? balance;
+  final String? error;
+  const _BalanceCard({required this.balance, required this.error});
+
   @override
   Widget build(BuildContext context) {
+    final b = balance;
     return Container(
       padding: const EdgeInsets.all(22),
       decoration: AppTheme.gradientDecoration(AppTheme.primaryGradient),
@@ -872,22 +907,30 @@ class _BalanceCard extends StatelessWidget {
             style: TextStyle(color: Colors.white70, fontSize: 13),
           ),
           const SizedBox(height: 8),
-          const Text('₩ 4,965,000',
-            style: TextStyle(
+          Text(b == null ? (error == null ? '확인 중' : '-') : Fmt.won(b.balance),
+            key: Key(b != null ? 'balance_amount' : (error == null ? 'balance_loading' : 'balance_unknown')),
+            style: const TextStyle(
               color: Colors.white,
               fontSize: 32,
               fontWeight: FontWeight.bold,
               letterSpacing: -1,
             ),
           ),
+          if (error != null) ...[
+            const SizedBox(height: 6),
+            Text(error!,
+              key: const Key('balance_failed'),
+              style: const TextStyle(color: Colors.white, fontSize: 12, height: 1.4),
+            ),
+          ],
           const SizedBox(height: 16),
           Container(height: 1, color: Colors.white.withOpacity(0.2)),
           const SizedBox(height: 14),
           Row(
             children: [
-              Expanded(child: _BalanceItem(label: '총 수입', value: '₩ 5,000,000', isIncome: true)),
+              Expanded(child: _BalanceItem(label: '총 수입', value: b == null ? '-' : Fmt.won(b.income), isIncome: true)),
               Container(width: 1, height: 36, color: Colors.white.withOpacity(0.2)),
-              Expanded(child: _BalanceItem(label: '총 지출', value: '₩ 35,000', isIncome: false)),
+              Expanded(child: _BalanceItem(label: '총 지출', value: b == null ? '-' : Fmt.won(b.expense), isIncome: false)),
             ],
           ),
         ],

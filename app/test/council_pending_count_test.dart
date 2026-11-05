@@ -155,8 +155,8 @@ void main() {
     testWidgets('새로고침을 누르면 다시 읽는다', (tester) async {
       var calls = 0;
       // 승인이 하나 처리돼 2건 → 1건이 된 상황.
-      ApiService.client = MockClient((_) async {
-        calls++;
+      ApiService.client = MockClient((req) async {
+        if (req.url.path == '/entries') calls++; // 홈은 장부 잔액(/balance)도 같은 클라이언트로 읽는다
         final statuses = calls == 1 ? ['PENDING', 'PENDING'] : ['PENDING', 'CONFIRMED'];
         return jsonResponse(entriesJson(statuses));
       });

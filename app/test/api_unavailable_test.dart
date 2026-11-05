@@ -118,7 +118,9 @@ void main() {
     testWidgets('화면은 403 이유를 그대로 적는다', (tester) async {
       ApiService.client = MockClient((_) async => http.Response('{}', 403));
       await pump(tester, const CouncilHomeScreen(role: UserRole.TREASURER));
-      expect(find.text('이 작업을 할 권한이 없어요.'), findsOneWidget);
+      // 내 등록 현황과 장부 잔액 둘 다 403 이다 — 둘 다 「권한 없음」으로 적는다.
+      expect(find.text('이 작업을 할 권한이 없어요.'), findsNWidgets(2));
+      expect(tester.widget<Text>(find.byKey(const Key('balance_failed'))).data, '이 작업을 할 권한이 없어요.');
     });
   });
 
@@ -128,6 +130,12 @@ void main() {
       expect(find.byKey(const Key('my_entry_status_failed')), findsOneWidget);
       expect(find.text('대기 -'), findsOneWidget);
       expect(find.text('대기 0'), findsNothing);
+    });
+
+    testWidgets('총무·감사 홈 — 장부 잔액을 지어내지 않고 못 읽었다고 적는다', (tester) async {
+      await pump(tester, const CouncilHomeScreen(role: UserRole.AUDITOR));
+      expect(find.byKey(const Key('balance_failed')), findsOneWidget);
+      expect(find.text('₩ 4,965,000'), findsNothing);
     });
 
     testWidgets('지출 등록 — 예산 잔량을 못 읽었다고 적는다', (tester) async {

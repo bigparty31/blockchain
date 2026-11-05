@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:student_council_app/core/enums.dart';
 import 'package:student_council_app/screens/council/approval_list_screen.dart';
+import 'package:student_council_app/screens/council/correction_approval_screen.dart';
 import 'package:student_council_app/screens/council/income_create_screen.dart';
 import 'package:student_council_app/services/auth_service.dart';
 
@@ -73,6 +74,15 @@ void main() {
       await loginAs(UserRole.AUDITOR, 5);
       await pump(tester, const ApprovalListScreen());
       expect(find.text('승인 서명'), findsWidgets);
+    });
+
+    testWidgets('로그인했으면 인자로 받은 역할보다 세션 역할을 믿는다 — 인자로 권한을 주장할 수 없다', (tester) async {
+      await loginAs(UserRole.TREASURER, 2);
+      await pump(tester, const ApprovalListScreen(role: UserRole.AUDITOR));
+      expect(find.text('이 작업을 할 권한이 없습니다.'), findsOneWidget);
+
+      await pump(tester, const CorrectionApprovalScreen(role: UserRole.PRESIDENT));
+      expect(find.text('이 작업을 할 권한이 없습니다.'), findsOneWidget);
     });
 
     testWidgets('인자를 주지 않으면 로그인한 사람의 id 로 본인 등록 건을 막는다', (tester) async {
