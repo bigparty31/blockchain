@@ -16,6 +16,9 @@ from app.schemas.budget import (
 from app.schemas.term import TermResponse
 from app.schemas.budget_revision import (
     BudgetRevisionRequestCreate,
+    BudgetRevisionSignRequest,
+    BudgetRevisionRejectRequest,
+    BudgetRevisionApproveRequest,
     BudgetRevisionResponse,
 )
 
@@ -33,5 +36,8 @@ __all__ = [
     "BudgetIssueResponse",
     "TermResponse",
     "BudgetRevisionRequestCreate",
+    "BudgetRevisionSignRequest",
+    "BudgetRevisionRejectRequest",
+    "BudgetRevisionApproveRequest",
     "BudgetRevisionResponse",
 ]

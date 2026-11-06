@@ -75,7 +75,6 @@
 | `OPEN` | 미답변 |
 | `ANSWERED` | 답변 완료 |
 
-
 ## burn_reason
 
 `memberships.burn_reason`. SBT 소각/환불 회수 사유.
@@ -84,3 +83,24 @@
 | --- | --- |
 | `REFUND` | 학생회비 환불 |
 | `WITHDRAWAL` | 자퇴/제적 등 학적 변동 |
+
+## notification kind
+
+서버 알림의 종류. 온체인 값이 아니다. 받는 사람은 PRD §4.8 표를 따른다. 증액 쪽은 `REVISION_*`, T4 수정 요청은 `ENTRY_EDIT_REQUESTED`다 — 「개정」은 예산 용어다.
+
+| 값 | 설명 |
+| --- | --- |
+| `ENTRY_REGISTERED` | 지출·수입·정정 등록 |
+| `ENTRY_EDIT_REQUESTED` | T4 수정 요청 |
+| `ENTRY_CONFIRMED` | 확정 |
+| `ENTRY_REJECTED` | 반려 |
+| `ENTRY_CONFIRM_FAILED` | 확정 실패 |
+| `ENTRY_BLOCKED` | 차단 |
+| `REVISION_REQUESTED` | 증액 요청, 시한 만료 후 재서명 요청 |
+| `REVISION_PRESIDENT_SIGNED` | 회장 서명 완료 |
+| `REVISION_APPROVED` | 증액 승인 |
+| `REVISION_REJECTED` | 증액 반려 |
+| `ROLE_CHANGE_REQUESTED` | 롤 변경 서명 요청 |
+| `PRESIDENT_RECOVERY_PROPOSED` | 회장 복구 제안 |
+| `RECLASSIFY_PAIR_UNCONFIRMED` | 재분류 짝 미확정 |
+| `SIGNATURE_DEADLINE_NEAR` | 서명 시한 임박 |

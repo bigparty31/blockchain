@@ -208,6 +208,167 @@
 
 ---
 
+### 3. 예산 증액 워크플로우 (`/budget-revisions`)
+예산 증액은 **총무 요청(1단계) → 회장 EIP-712 서명(2단계) → 감사 EIP-712 서명 및 온체인 릴레이(3단계)** 순서로 진행됩니다 (`PENDING` → `PRESIDENT_SIGNED` → `APPROVED` / `REJECTED`).
+
+#### 앱 서명 대상: EIP-712 `IncreaseRequest` (`BudgetToken` 도메인)
+회장과 감사는 **동일한 `IncreaseRequest` 구조체 값**에 각각 EIP-712 서명합니다 (`docs/CONTRACTS.md` 참조).
+
+| Solidity 필드 | 타입 | 백엔드 매핑 (`IncreaseRequest`) | 설명 |
+| --- | --- | --- | --- |
+| `budgetId` | `uint256` | `budget_id` | 증액 대상 온체인 예산 ID (`> 0`) |
+| `amount` | `uint256` | `requested_amount` | **증액분** 원 단위 양의 정수 (`> 0`, 변경 후 총액이 아님) |
+| `reasonHash` | `bytes32` | `text_hash(reason)` | 정규화된 증액 사유(`reason`) 원문의 UTF-8 SHA-256 해시 (`0x` + 64자 hex) |
+| `version` | `uint256` | `signed_version` | **회장 서명 당시의 현재 온체인 예산 버전** (`>= 1`). 감사 승인 시에도 회장이 서명했던 `signed_version`을 그대로 사용 |
+| `deadline` | `uint256` | `signature_deadline` | 회장이 지정한 서명 만료 시한 (Unix 초). 감사 승인 시에도 저장된 `signature_deadline`을 그대로 사용 |
+
+---
+
+#### 3.1 [1단계] 예산 증액 요청 등록 (`POST /budget-revisions`)
+- **설명**: 총무가 기존 온체인 발행 예산에 대해 증액을 요청합니다 (`TREASURER` 전용).
+- **사전 검증**: 대상 예산이 온체인에 발행되어 있고(`BudgetVersion` 및 `getBudget` 존재) 마감일(`expires_at`)이 지나지 않았는지 확인합니다. 온체인 미발행 초안·시드 예산이나 마감 경과 예산은 1단계에서 `400 Bad Request`로 차단됩니다.
+
+**Request**
+```json
+{
+  "term_id": 1,
+  "category": "운영비",
+  "requested_amount": 500000,
+  "reason": "신학기 비품 구매로 인한 운영비 부족",
+  "budget_id": 1,
+  "blocked_entry_id": 10
+}
+```
+- `budget_id` 생략 시 `term_id` + `category`로 대상 예산을 자동 매핑합니다.
+- `blocked_entry_id`(선택)는 같은 학기·예산의 `EXPENSE`이면서 `BLOCKED` 또는 `PENDING` 상태인 지출만 연동할 수 있습니다.
+
+**Response (`201 Created`)**
+```json
+{
+  "id": 2,
+  "term_id": 1,
+  "category": "운영비",
+  "budget_id": 1,
+  "blocked_entry_id": 10,
+  "requested_amount": 500000,
+  "reason": "신학기 비품 구매로 인한 운영비 부족",
+  "requested_by": 2,
+  "requested_at": "2026-09-05T09:00:00Z",
+  "status": "PENDING",
+  "president_signed_by": null,
+  "president_signature": null,
+  "president_signed_at": null,
+  "signature_deadline": null,
+  "signed_version": null,
+  "tx_increase": null,
+  "resolved_by": null,
+  "resolved_at": null,
+  "reject_reason": null,
+  "created_at": "2026-09-05T09:00:00Z"
+}
+```
+
+| 코드 | 경우 (`POST /budget-revisions`) |
+| --- | --- |
+| `201` | 증액 요청 생성 완료 (`status: "PENDING"`) |
+| `400` | `requested_amount <= 0`, 사유 공백·제어문자 포함, 온체인 미발행(초안·시드) 예산, 마감일(`expires_at`) 경과 예산, `blocked_entry_id` 조건 불일치 |
+| `403` | 총무(`TREASURER`)가 아님 |
+| `404` | 학기(`term_id`), 대상 예산, 또는 `blocked_entry_id`를 찾을 수 없음 |
+| `503` | 온체인 예산 조회(`get_budget`) 중 블록체인 통신 오류 |
+
+---
+
+#### 3.2 [2단계] 회장 EIP-712 서명 제출 (`POST /budget-revisions/{id}/sign`)
+- **설명**: 회장이 `PENDING` 상태의 증액 요청에 대해 EIP-712 `IncreaseRequest` 서명값을 제출합니다 (`PRESIDENT` 전용, 요청 총무와 동일인 불가).
+- **검증**: `signed_version`이 현재 예산 최신 버전과 일치하는지, `signature_deadline`이 현재 시각 이후인지, 복원된 서명자(`signer_of`)가 회장 본인의 `wallet_address`와 일치하는지 확인한 뒤 `PRESIDENT_SIGNED`로 전이합니다.
+
+**Request**
+```json
+{
+  "president_signature": "0x...",
+  "signature_deadline": 1793548800,
+  "signed_version": 1
+}
+```
+
+**Response (`200 OK`)**
+- `BudgetRevisionResponse` 반환 (`status: "PRESIDENT_SIGNED"`, `president_signed_by`, `president_signature`, `president_signed_at`, `signature_deadline`, `signed_version` 채워짐)
+
+| 코드 | 경우 (`POST /budget-revisions/{id}/sign`) |
+| --- | --- |
+| `200` | 회장 서명 저장 및 `PRESIDENT_SIGNED` 전이 완료 |
+| `400` | `PENDING` 상태가 아님, 마감일(`expires_at`) 경과 예산, 온체인 미발행 예산, `signature_deadline` 과거 시각, `signed_version` 불일치, 서명 형식 오류 또는 회장 지갑 주소 불일치, 요청 총무 본인 서명 시도 |
+| `403` | 회장(`PRESIDENT`)이 아님 |
+| `404` | 증액 요청(`id`) 또는 대상 예산을 찾을 수 없음 |
+| `503` | 온체인 예산 조회 중 블록체인 통신 오류 |
+
+---
+
+#### 3.3 [3단계] 감사 최종 승인 및 온체인 증액 릴레이 (`POST /budget-revisions/{id}/approve`)
+- **설명**: 감사가 `PRESIDENT_SIGNED` 상태의 요청에 대해 동일한 `IncreaseRequest`(`version = signed_version`, `deadline = signature_deadline`, `reasonHash = text_hash(reason)`)에 서명한 `auditor_signature`를 제출하면, 서버가 `BudgetToken.increase`를 릴레이하고 온체인 반영이 확인된 뒤에만 새 `BudgetVersion`을 생성하고 `APPROVED`로 확정합니다 (`AUDITOR` 전용, 요청 총무·서명 회장과 동일인 불가).
+- **재시도 및 동시성 보장**:
+  - 브로드캐스트 직전 `tx_increase`와 처리 감사(`resolved_by`)를 함께 조건부 선점합니다.
+  - 응답 유실(`503`) 후 재시도할 때는 `tx_increase`가 있으면 예산 마감일 사전 검사를 건너뛰고 앞선 트랜잭션 결과를 먼저 확인하여 복구합니다.
+  - 다른 감사가 진행 중이거나 이미 온체인에 반영된 건을 재시도하면 `409 Conflict`를 반환하며, 승인자(`resolved_by`, `BudgetVersion.approved_by`)는 실제 서명한 원래 감사로 보존됩니다.
+  - `SignatureExpired` 또는 `VersionMismatch` 발생 시 회장 서명 필드를 초기화하고 `PENDING` 상태로 되돌린 뒤 `400 Bad Request`(재서명 안내)를 반환합니다.
+
+**Request**
+```json
+{
+  "auditor_signature": "0x..."
+}
+```
+
+**Response (`200 OK`)**
+- `BudgetRevisionResponse` 반환 (`status: "APPROVED"`, `tx_increase`, `resolved_by`, `resolved_at` 채워짐, 새 `BudgetVersion` 생성됨)
+
+| 코드 | 경우 (`POST /budget-revisions/{id}/approve`) |
+| --- | --- |
+| `200` | 온체인 증액(`INCREASED`) 확인 및 `APPROVED` 확정 완료 |
+| `400` | `PRESIDENT_SIGNED` 상태가 아님, 서명 시한 만료/`SignatureExpired`/`VersionMismatch`(`PENDING`으로 자동 롤백 후 재서명 안내), 예산 마감일 경과(`BudgetExpired`, 롤백 없음), 서명 형식 오류 또는 감사 지갑 불일치, 요청자·회장 서명자와 동일인 |
+| `403` | 감사(`AUDITOR`)가 아님 |
+| `404` | 증액 요청(`id`) 또는 대상 예산을 찾을 수 없음 |
+| `409` | 동시에 다른 승인 요청이 처리 중이거나, 다른 감사가 선점·승인한 요청에 대한 재시도 |
+| `503` | 블록체인 응답 미확인(`NO_RESPONSE`, `tx_increase` 선점 유지 — 재시도 시 앞선 결과 확인) 또는 릴레이어 미전송(`NOT_SENT`, 선점 해제) / DB 오류 |
+
+---
+
+#### 3.4 예산 증액 반려 (`POST /budget-revisions/{id}/reject`)
+- **설명**: 회장 또는 감사가 `PENDING` 또는 `PRESIDENT_SIGNED` 상태의 증액 요청을 반려합니다 (`PRESIDENT`, `AUDITOR` 전용, 요청 총무 본인 불가).
+
+**Request**
+```json
+{
+  "reject_reason": "기타 예비비 항목으로 대체 집행 가능하여 반려함"
+}
+```
+
+**Response (`200 OK`)**
+- `BudgetRevisionResponse` 반환 (`status: "REJECTED"`, `resolved_by`, `resolved_at`, `reject_reason` 채워짐)
+
+| 코드 | 경우 (`POST /budget-revisions/{id}/reject`) |
+| --- | --- |
+| `200` | 반려(`REJECTED`) 처리 완료 |
+| `400` | 반려 사유 공백·제어문자 포함, 이미 `APPROVED`/`REJECTED` 완료된 요청, 요청 총무 본인 반려 시도 |
+| `403` | 회장(`PRESIDENT`) 또는 감사(`AUDITOR`)가 아님 |
+| `404` | 증액 요청(`id`)을 찾을 수 없음 |
+| `409` | 온체인 증액 릴레이(`tx_increase`)가 진행 중인 요청 |
+
+---
+
+#### 3.5 예산 증액 요청 목록 및 단건 조회 (`GET /budget-revisions`, `GET /budget-revisions/{id}`)
+- **설명**: 학생회 임원(`TREASURER`, `PRESIDENT`, `AUDITOR`)이 예산 증액 요청 목록 또는 단건 상세를 조회합니다.
+- **쿼리 파라미터 (`GET /budget-revisions`)**: `term_id`(선택), `status_filter`(선택: `PENDING`, `PRESIDENT_SIGNED`, `APPROVED`, `REJECTED`)
+- **시한 만료 자동 정리**: 조회 시 `PRESIDENT_SIGNED` 상태이면서 `tx_increase`가 없고 `signature_deadline`이 경과한 건은 자동으로 `PENDING` 상태로 되돌린 뒤 결과를 반환합니다.
+
+| 코드 | 경우 (`GET /budget-revisions`, `GET /budget-revisions/{id}`) |
+| --- | --- |
+| `200` | 목록(`List[BudgetRevisionResponse]`) 또는 단건(`BudgetRevisionResponse`) 반환 |
+| `403` | 학생회 임원(`TREASURER`, `PRESIDENT`, `AUDITOR`)이 아님 |
+| `404` | 단건 조회 시 존재하지 않는 증액 요청(`id`) |
+
+---
+
 ## 회계 기록
 
 ### 1. 수입·지출 목록 조회 (`GET /entries`)
