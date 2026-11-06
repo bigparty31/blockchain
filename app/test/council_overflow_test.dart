@@ -195,7 +195,7 @@ void main() {
       });
 
       testWidgets('정정 접수 결과 다이얼로그 · $label', (tester) async {
-        await pump(tester, const CorrectionScreen());
+        await pump(tester, CorrectionScreen(registrar: FakeRegistrar()));
         await tester.enterText(find.widgetWithText(TextFormField, '정정 대상 내역 ID (Entry ID) *'), '1');
         await tester.tap(find.text('내역 조회'));
         await waitFor(tester, find.textContaining('현재 금액 ₩'));

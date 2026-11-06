@@ -4,12 +4,14 @@ import '../../core/app_theme.dart';
 import '../../core/format.dart';
 import '../../core/hashing.dart';
 import '../../models/budget_model.dart';
+import '../../models/entry_model.dart';
 import '../../services/api_service.dart';
 import '../../services/entry_registration_service.dart';
 import 'budget_revision_screen.dart';
 import 'input_rules.dart';
 import 'receipt_picker.dart';
 import 'registration_result.dart';
+import 'resubmit.dart';
 
 /// [이승호 담당: app/lib/screens/council/]
 /// 1. 지출 등록 화면
@@ -20,7 +22,10 @@ class ExpenseCreateScreen extends StatefulWidget {
   /// 영수증 원본 바이트를 고른다. 주지 않으면 카메라·갤러리 ([pickReceiptBytes]).
   final ReceiptPicker? pickReceipt;
 
-  const ExpenseCreateScreen({super.key, this.registrar, this.pickReceipt});
+  /// 반려·차단된 지출을 고쳐 새로 등록할 때 그 건 ([canResubmit]). 이전 값으로 채워 연다 (PRD §4.3 T4 3단계).
+  final EntryModel? resubmitOf;
+
+  const ExpenseCreateScreen({super.key, this.registrar, this.pickReceipt, this.resubmitOf});
 
   @override
   State<ExpenseCreateScreen> createState() => _ExpenseCreateScreenState();
@@ -34,7 +39,7 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
   final _memoController = TextEditingController();
 
   String _selectedBudgetCategory = '행사비';
-  DateTime _selectedDate = DateTime.now();
+  DateTime _selectedDate = kstToday();
   bool _submitting = false;
 
   /// 영수증 원본 바이트의 SHA-256. 지출은 제출에 필수다 (초안은 없어도 저장된다).
@@ -59,10 +64,40 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
   /// 예산 항목별 잔량 (`GET /budgets`). 고르기 전에 남은 예산을 보여 준다 (스토리보드 7 ③).
   Map<String, int> _remaining = const {};
 
+  /// 마지막 제출이 차단(`BLOCKED`)된 건의 번호 — 예산 개정 요청의 근거로 붙인다 (`blocked_entry_id`).
+  int? _blockedId;
+
+  /// 다시 등록할 때 이전 영수증을 쓰지 못한 이유.
+  String? _receiptNote;
+
   @override
   void initState() {
     super.initState();
+    final source = widget.resubmitOf;
+    if (source != null) _prefill(source);
     _loadBudgets();
+  }
+
+  /// 이전 건의 값으로 채운다. 예산은 목록을 읽은 뒤 id 로 항목을 고른다. 메모는 장부에 없어서 비워 둔다.
+  void _prefill(EntryModel e) {
+    _titleController.text = e.purpose;
+    _merchantController.text = e.counterparty;
+    _amountController.text = '${e.amount}';
+    _selectedDate = pickerDateOf(e.occurredAt);
+    if (e.status == EntryStatus.BLOCKED) _blockedId = e.id;
+    if (e.receiptHash == null) return;
+    restoreReceipt(_registrar, e).then((restored) {
+      if (!mounted || _receiptHash != null) return; // 그새 다른 사진을 골랐으면 그대로 둔다
+      setState(() {
+        if (restored == null) {
+          _receiptNote = '이전 영수증을 불러오지 못했어요. 영수증을 다시 첨부해 주세요.';
+          return;
+        }
+        _receiptBytes = restored.$1;
+        _receiptHash = restored.$2.hash;
+        _upload = restored.$2;
+      });
+    });
   }
 
   /// 예산 잔량을 못 읽은 이유. 잔량 없이 항목만 보이고, 이유를 적는다.
@@ -76,6 +111,11 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
         _budgetsError = null;
         _budgets = budgets;
         _remaining = {for (final b in budgets) b.category: b.remainingAmount};
+        // 다시 등록이면 이전 건의 예산 항목을 고른다
+        final budgetId = widget.resubmitOf?.budgetId;
+        for (final b in budgets) {
+          if (b.id == budgetId && _budgetCategories.contains(b.category)) _selectedBudgetCategory = b.category;
+        }
       });
     } on ApiUnavailable catch (e) {
       if (mounted) setState(() => _budgetsError = e.message);
@@ -120,6 +160,7 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
       _receiptBytes = bytes;
       _receiptHash = Hashing.fileHash(bytes);
       _upload = null;
+      _receiptNote = null;
     });
   }
 
@@ -221,6 +262,7 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
       result = outcome.status == EntryStatus.BLOCKED
           ? RegistrationResult.blocked(outcome.blockReason!)
           : const RegistrationResult.pending();
+      _blockedId = outcome.status == EntryStatus.BLOCKED ? id : null;
       _draftId = null; // 체인에 올라갔다 — 다음 제출은 새 초안이다
       _savedDraft = null;
     } on EntryDecisionException catch (e) {
@@ -260,6 +302,7 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
           initialCategory: _selectedBudgetCategory,
           basisTitle: _titleController.text,
           basisAmount: int.tryParse(_amountController.text),
+          blockedEntryId: _blockedId,
         ),
       ),
     );
@@ -284,6 +327,7 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              if (widget.resubmitOf != null) ResubmitBanner(source: widget.resubmitOf!, receiptNote: _receiptNote),
               // 영수증 첨부 영역
               GestureDetector(
                 onTap: _attachReceipt,
