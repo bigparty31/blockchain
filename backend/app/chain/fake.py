@@ -81,6 +81,8 @@ class FakeChainClient:
         # 정정 가능 항목(원본·재분류 양수 정정)의 순금액. 원장의 netAmountOf 와 같은 규칙으로 갱신한다
         self._net: dict[int, int] = {}
         self._budgets: dict[int, ChainBudget] = {}
+        self._memberships: dict[tuple[str, int], int] = {}  # (주소 소문자, 학기 코드) → 유효한 tokenId
+        self._membership_count = 0
         self._tx_count = 0
         # tx hash 에 섞는 인스턴스별 값. 서버를 다시 켜 새 가짜가 생겨도 DB 에 남은 옛 hash 와 겹치지 않는다 (tx_result)
         self._tx_salt = secrets.token_hex(8)
@@ -211,6 +213,27 @@ class FakeChainClient:
             if (budget.term, budget.category) == (term, category):
                 return budget.id
         return 0
+
+    # ------------------------------------------------------------ 회원권 (MembershipSBT)
+    # 발행·소각 릴레이는 아직 없어서, 테스트가 grant_membership·burn_membership 으로 체인 상태를 만든다
+
+    def grant_membership(self, account: str, term: int) -> int:
+        """(account, term) 에 회원권을 발행한 것으로 둔다. 이미 유효하면 그 tokenId 를 돌려준다 (컨트랙트의 건너뛰기와 같다)."""
+        key = (check_address(account).lower(), term)
+        if key not in self._memberships:
+            self._membership_count += 1
+            self._memberships[key] = self._membership_count
+        return self._memberships[key]
+
+    def burn_membership(self, account: str, term: int) -> None:
+        """(account, term) 의 회원권을 소각한 것으로 둔다. 소각하면 tokenOf 가 0 이 된다."""
+        self._memberships.pop((check_address(account).lower(), term), None)
+
+    async def has_valid_membership(self, account: str, term: int) -> bool:
+        return (check_address(account).lower(), term) in self._memberships
+
+    async def membership_token_of(self, account: str, term: int) -> int:
+        return self._memberships.get((check_address(account).lower(), term), 0)
 
     # ------------------------------------------------------------ 컨트랙트 흉내
 

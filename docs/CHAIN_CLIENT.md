@@ -348,3 +348,18 @@ outcome = await relay_increase(chain, request, reason, president_sig, auditor_si
 **revert 사유는 `BudgetRevertReason`이다.** `RevertReason`과 따로 둔다. `TermRequired`처럼 이름이 같아도 컨트랙트가 다르고, 원장 호출에서는 이 에러들이 나지 않는다. 연결할 때 전부 BudgetToken ABI에 있는지 확인한다. 해석할 수 없는 revert는 여기서도 `RevertReason.UNKNOWN`이다.
 
 **`FakeChainClient`** — `IBudgetToken`의 검사 순서대로 흉내 낸다. 회장 여부는 `fail_next("issue_budget", BudgetRevertReason.NOT_PRESIDENT)`로만 나고, 증액의 두 서명자가 같으면 `NOT_AUDITOR`다. 발행한 예산은 원장의 예산 판정과 이어져 있지 않다 — 원장 쪽은 여전히 `block_next`·`fail_next`로 지정한다. 대기열과 실패로 끝난 트랜잭션은 만들지 못해, 그 경로는 `tests/test_budget_relay.py`의 실제 체인 시험이 본다.
+
+## 10. 회원권 조회 (MembershipSBT)
+
+| 메서드 | 컨트랙트 | 돌려주는 값 |
+| --- | --- | --- |
+| `has_valid_membership(account, term)` | `hasValidMembership` | 그 학기의 소각되지 않은 회원권이 있으면 `True` |
+| `membership_token_of(account, term)` | `tokenOf` | 유효한 tokenId. 없거나 소각됐으면 `0` |
+
+`term`은 학기 코드 `YYYYS`다. `account`는 학생 지갑 주소로, `app/services/student_wallet.py`가 `wallet_index`에서 파생한다 (니모닉은 `STUDENT_WALLET_MNEMONIC`).
+
+**`MembershipSBT`는 배포 기록에 있을 때만 쓴다.** 아직 배포 전이면 연결은 그대로 되고, 회원권 조회만 `ChainSetupError`다. 노드에 닿지 못하면 `ChainUnavailable`이다. 어느 쪽도 미보유가 아니다.
+
+**확인은 `app/services/membership.py`의 `check_membership(db, chain, user_id, term_id)`로 한다.** `GET /memberships/me`와 행사 입장 판정이 같은 함수를 쓴다 (PRD §10). 확인하지 못하면 `MembershipUnavailable`을 던지고, 부른 쪽은 미보유와 다르게 다룬다 — 조회 API는 503, 입장 판정은 `UNVERIFIABLE`. 보유의 기준은 체인이다. DB `Membership` 행은 화면의 발급 정보에만 쓴다.
+
+**`FakeChainClient`** — 발행 릴레이가 아직 없어서 `grant_membership(account, term)`·`burn_membership(account, term)`으로 체인 상태를 만든다. 이미 유효하면 같은 tokenId를 돌려주고(컨트랙트의 건너뛰기), 소각 뒤 재발행은 새 tokenId다.
