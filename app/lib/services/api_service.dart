@@ -126,6 +126,21 @@ class ApiService {
     ];
   }
 
+  /// GET /budget-revisions?status_filter=PENDING — 회장 서명을 기다리는 예산 증액 요청 건수 (학생회 임원 전용).
+  ///
+  /// **시연용 더미가 없다.** 못 읽거나 모르면 null 이다 — 0 건으로 내리지도, 있는 것처럼 꾸미지도 않는다.
+  /// 401 이면 [_get] 이 이미 로그인 화면으로 보냈다. 한 건이 이상해도 건수 전체를 잃지 않게 목록 길이만 센다.
+  Future<int?> fetchRevisionSignWaitingCount() async {
+    try {
+      final response = await _get('${ApiConfig.baseUrl}/budget-revisions?status_filter=PENDING', '증액 요청 건수');
+      if (response.statusCode != 200) return null;
+      final data = jsonDecode(utf8.decode(response.bodyBytes));
+      return data is List ? data.length : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// 3. GET /entries (수입·지출 내역 목록 조회)
   Future<List<EntryModel>> fetchEntries() async {
     try {
