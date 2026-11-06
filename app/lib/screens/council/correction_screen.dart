@@ -147,7 +147,17 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
       _looking = false;
       _target = error == null ? found : null;
       _targetError = error;
+      // 조회 전에 고른 새 예산이 이 내역의 원래 예산이면 후보에서 빠진다. 선택을 남겨 두면
+      // 드롭다운 값이 후보에 없어 화면이 깨지고(디버그 assertion), 같은 예산으로 옮기는 재분류가 된다.
+      if (_target != null && _newBudgetId == _target!.original.budgetId) _newBudgetId = null;
     });
+  }
+
+  /// 재분류의 새 예산 검사 — 제출 때 다시 본다. 고르지 않았거나 원래 예산과 같으면 안 된다.
+  String? _newBudgetError() {
+    if (_newBudgetId == null) return '옮겨 갈 예산 항목을 골라 주세요';
+    if (_newBudgetId == _target?.original.budgetId) return '원래 예산과 다른 항목을 골라 주세요';
+    return null;
   }
 
   @override
@@ -494,7 +504,8 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
                       .map((b) => DropdownMenuItem(value: b.id, child: Text('${b.category} · 잔량 ${Fmt.won(b.remainingAmount)}', overflow: TextOverflow.ellipsis)))
                       .toList(),
                   onChanged: (v) => setState(() => _newBudgetId = v),
-                  validator: (v) => v == null ? '옮겨 갈 예산 항목을 골라 주세요' : null,
+                  // 필드가 들고 있는 값(v)이 아니라 화면 상태로 본다 — 조회가 선택을 비웠을 수 있다
+                  validator: (_) => _newBudgetError(),
                 ),
                 if (_budgetsError != null)
                   Padding(
