@@ -56,6 +56,8 @@ void main() {
   late http.Response Function() onConfirm;
   late bool confirmed;
   String? ocr7;
+  /// 단건 재조회만 다른 상태를 돌려준다 — 목록을 읽은 뒤 다른 임원이 먼저 처리한 경우.
+  String? singleStatus7;
   late int entryReads;
   late http.Response Function() onEntries;
   late http.Response Function() onReject;
@@ -71,6 +73,7 @@ void main() {
     rejected = false;
     confirmed = false;
     ocr7 = null;
+    singleStatus7 = null;
     onEntries = () => json([
           entry(7, createdBy: 2, purpose: '신입생 환영회 명찰', ocrStatus: ocr7,
               status: rejected ? 'REJECTED' : confirmed ? 'CONFIRMED' : 'PENDING',
@@ -80,6 +83,17 @@ void main() {
     onReject = () => json({'id': 7, 'status': 'REJECTED', 'message': '반려됨'});
     onConfirm = () => json({'id': 7, 'status': 'CONFIRMED', 'tx_confirm': '0x${'cd' * 32}', 'message': '확정됨'});
     final server = MockClient((req) async {
+      // 서명 직전 재조회 — 지금 목록에서 그 건을 찾아 돌려준다
+      final single = RegExp(r'^/entries/(\d+)$').firstMatch(req.url.path);
+      if (req.method == 'GET' && single != null) {
+        final list = onEntries();
+        if (list.statusCode != 200) return list;
+        final id = int.parse(single.group(1)!);
+        for (final e in (jsonDecode(list.body) as List).cast<Map<String, dynamic>>()) {
+          if (e['id'] == id) return json(id == 7 && singleStatus7 != null ? {...e, 'status': singleStatus7} : e);
+        }
+        return json({'detail': 'not found'}, 404);
+      }
       switch ('${req.method} ${req.url.path}') {
         case 'GET /entries':
           entryReads++;
@@ -297,5 +311,39 @@ void main() {
 
     expect(entryReads, greaterThan(readsBefore));
     expect(find.text('승인에 실패했어요'), findsNothing);
+  });
+
+  testWidgets('승인 화면은 15초마다 목록을 다시 읽는다', (tester) async {
+    await pump(tester);
+    await waitUntil(tester, () => shows(find.text('신입생 환영회 명찰')));
+    final before = entryReads;
+
+    await tester.pump(const Duration(seconds: 16));
+    await waitUntil(tester, () => entryReads > before);
+  });
+
+  testWidgets('앱으로 돌아오면 목록을 다시 읽는다', (tester) async {
+    await pump(tester);
+    await waitUntil(tester, () => shows(find.text('신입생 환영회 명찰')));
+    final before = entryReads;
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await waitUntil(tester, () => entryReads > before);
+  });
+
+  testWidgets('서명 직전에 다시 읽었더니 다른 임원이 먼저 확정했으면 서명하지 않고 알린 뒤 목록을 다시 읽는다', (tester) async {
+    singleStatus7 = 'CONFIRMED';
+    await pump(tester);
+    await waitUntil(tester, () => shows(find.text('신입생 환영회 명찰')));
+    final before = entryReads;
+
+    await tester.tap(approveButton());
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('생체인증 승인'));
+    await waitUntil(tester, () => shows(find.textContaining('이 건은 이미')));
+
+    expect(confirms, isEmpty);
+    expect(entryReads, greaterThan(before));
   });
 }

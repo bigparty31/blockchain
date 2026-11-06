@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import '../../core/enums.dart';
 import '../../core/app_theme.dart';
@@ -7,6 +9,7 @@ import '../../models/entry_model.dart';
 import '../../services/api_service.dart';
 import '../../services/auth_service.dart';
 import '../../services/entry_decision_service.dart';
+import '../../services/notification_service.dart';
 import 'reason_dialog.dart';
 
 /// OCR 이 경고인가 — `MISMATCH`·`DUPLICATE`·`UNREADABLE` 만 경고다 (PRD §6).
@@ -201,8 +204,11 @@ class ApprovalListScreen extends StatefulWidget {
 }
 
 class _ApprovalListScreenState extends State<ApprovalListScreen>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   late TabController _tabController;
+
+  /// 서버 목록은 열려 있는 동안 15초마다 다시 읽는다 (보드 ② — 다른 임원의 처리가 화면에 늦게 보이지 않게).
+  Timer? _poll;
 
   /// 서버에서 읽는가 — 목록 재료를 받지 않았고 시연용 더미도 꺼져 있을 때.
   late final bool _fromServer = widget.items == null && !ApiService.useDemoData;
@@ -222,14 +228,25 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
   void initState() {
     super.initState();
     _tabController = TabController(length: 3, vsync: this);
-    if (_fromServer && widget.allowed) _load(initial: true);
+    if (_fromServer && widget.allowed) {
+      _load(initial: true);
+      _poll = Timer.periodic(NotificationService.pollInterval, (_) => _load(silent: true));
+      WidgetsBinding.instance.addObserver(this);
+    }
+  }
+
+  /// 앱으로 돌아오면 다시 읽는다 — 백그라운드에 있던 동안의 처리는 화면에 없다.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && _fromServer) _load(silent: true);
   }
 
   /// 서버에서 목록을 다시 읽는다. 실패하면 목록을 비우지 않고 실패를 적는다 — 보이는 상태가
   /// 최신이 아닐 수 있다는 것을 화면이 알린다. 목업으로 메우지 않는다.
-  Future<void> _load({bool initial = false}) async {
+  /// [silent] 면 「읽는 중」으로 바꾸지 않는다 — 15초마다 새로고침 버튼이 깜빡이지 않게.
+  Future<void> _load({bool initial = false, bool silent = false}) async {
     final seq = ++_loadSeq;
-    if (!initial) {
+    if (!initial && !silent) {
       setState(() {
         _loading = true;
         _loadError = null;
@@ -250,6 +267,7 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
             if (_shownStatuses.contains(e.status)) approvalItemFromEntry(e, categories: names),
         ];
         _loading = false;
+        _loadError = null;
       });
     } on ApiUnavailable catch (e) {
       if (!mounted || seq != _loadSeq) return;
@@ -274,6 +292,8 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
 
   @override
   void dispose() {
+    _poll?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
     _tabController.dispose();
     super.dispose();
   }

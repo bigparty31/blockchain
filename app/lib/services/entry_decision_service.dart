@@ -21,8 +21,11 @@ enum EntryDecisionFailure {
   /// 화면 값으로 다시 계산한 `meta_hash` 가 서버가 준 값과 다르다 — 서명하지 않는다.
   mismatch,
 
-  /// 서명에 필요한 값(학기 코드·등록자 주소·서명 도메인)을 받지 못했다.
+  /// 서명에 필요한 값(최신 상태·학기 코드·등록자 주소·서명 도메인)을 받지 못했다.
   notReady,
+
+  /// 서명 직전에 다시 읽었더니 이미 처리됐거나 등록 내용이 화면과 달라졌다 (보드 ②).
+  changed,
 
   /// 키가 없거나 본인 확인을 취소·실패했다.
   signing,
@@ -169,7 +172,7 @@ class EntryDecisionService {
     );
   }
 
-  /// 서명 직전까지의 공통 준비 — 화면 값 검산, 학기 코드, 등록자 주소, 서명 도메인, 시한.
+  /// 서명 직전까지의 공통 준비 — 화면 값 검산, 학기 코드, 최신 상태 재조회, 등록자 주소, 서명 도메인, 시한.
   /// 여기서 막히면 본인 확인을 묻지 않는다.
   Future<({String registrant, Eip712Domain domain, int deadline})> _prepare(EntryModel entry) async {
     _checkShownValues(entry);
@@ -179,6 +182,7 @@ class EntryDecisionService {
         '학기 코드를 받지 못해 서명할 수 없어요. 목록을 새로 고쳐 주세요.',
       );
     }
+    await _checkStillSame(entry);
     final registrant = await _registrantOf(entry.createdBy);
     final domain = await _ledgerDomain();
     final deadline = _now().millisecondsSinceEpoch ~/ 1000 + signatureTtl.inSeconds;
@@ -215,6 +219,66 @@ class EntryDecisionService {
         '화면의 등록 내용이 기록된 해시와 맞지 않아 서명하지 않았어요. 목록을 새로 고쳐 다시 확인해 주세요.',
       );
     }
+  }
+
+  /// 서명 직전 재조회 (보드 ②) — `GET /entries/{id}` 로 지금 값을 다시 읽어, 아직 `PENDING` 이고
+  /// 서명에 들어가는 값이 화면에 보인 것과 같을 때만 넘어간다.
+  ///
+  /// 목록은 15초마다 읽으니 그 사이 다른 임원이 먼저 확정·반려했거나 정정·수정 요청으로 값이 바뀌었을 수 있다.
+  /// 그대로 서명하면 서버가 400·409 로 돌려보내는데, 그때는 이미 지문을 댄 뒤다 — 묻기 전에 멈춘다.
+  Future<void> _checkStillSame(EntryModel shown) async {
+    const unreadable = EntryDecisionException(
+      EntryDecisionFailure.notReady,
+      '이 건의 최신 상태를 확인하지 못해 서명하지 않았어요. 잠시 후 다시 시도해 주세요.',
+    );
+    final EntryModel fresh;
+    try {
+      final res = await client
+          .get(Uri.parse('${ApiConfig.entries}/${shown.id}'), headers: AuthService().authHeaders)
+          .timeout(_readTimeout);
+      if (res.statusCode == 401) {
+        await AuthService().reportUnauthorized();
+        throw const EntryDecisionException(EntryDecisionFailure.unauthorized, '로그인이 끝났어요. 다시 로그인해 주세요.');
+      }
+      if (res.statusCode == 404) {
+        throw const EntryDecisionException(EntryDecisionFailure.notFound, '이 내역을 찾지 못했어요. 목록을 새로 고쳐 주세요.');
+      }
+      if (res.statusCode != 200) throw unreadable;
+      fresh = EntryModel.fromJson(jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>);
+    } on EntryDecisionException {
+      rethrow;
+    } catch (_) {
+      throw unreadable;
+    }
+    if (fresh.status != EntryStatus.PENDING) {
+      throw EntryDecisionException(
+        EntryDecisionFailure.changed,
+        '이 건은 이미 「${fresh.status.label}」 상태예요. 목록을 새로 고쳐 확인해 주세요.',
+      );
+    }
+    if (!_sameSignedValues(shown, fresh)) {
+      throw const EntryDecisionException(
+        EntryDecisionFailure.changed,
+        '이 건의 등록 내용이 화면과 달라졌어요. 목록을 새로 고쳐 다시 확인한 뒤 서명해 주세요.',
+      );
+    }
+  }
+
+  /// 서명(`entryCommit`·`meta_hash`·`hadWarning`)에 들어가거나 화면이 보여 준 값이 같은가.
+  static bool _sameSignedValues(EntryModel a, EntryModel b) {
+    bool sameHash(String? x, String? y) => x == null || y == null ? x == y : Hashing.hashEquals(x, y);
+    return sameHash(a.metaHash, b.metaHash) &&
+        a.amount == b.amount &&
+        a.kind == b.kind &&
+        a.termCode == b.termCode &&
+        a.occurredAt == b.occurredAt &&
+        a.budgetId == b.budgetId &&
+        a.correctsEntryId == b.correctsEntryId &&
+        a.createdBy == b.createdBy &&
+        a.counterparty == b.counterparty &&
+        a.purpose == b.purpose &&
+        sameHash(a.receiptHash, b.receiptHash) &&
+        hadWarning(a) == hadWarning(b);
   }
 
   /// 등록자(user id)의 지갑 주소 — `GET /users/wallets`(주소 → user id)를 뒤집어 찾는다.

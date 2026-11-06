@@ -78,6 +78,21 @@ void main() {
   late http.Response Function(http.Request) onConfirm;
   late List<http.Request> confirms;
   late FakeAuthenticator auth;
+
+  /// 서명 직전 재조회(GET /entries/7)가 돌려줄 건. [use] 로 화면에 보인 건과 같게 맞춘다.
+  late EntryModel serverEntry;
+  Map<String, dynamic>? freshOverride;
+  int freshStatus = 200;
+  EntryModel use(EntryModel e) => serverEntry = e;
+
+  /// 서버 `EntryResponse` 모양.
+  Map<String, dynamic> responseOf(EntryModel e) => {
+        'id': e.id, 'term_id': e.termId, 'term_code': e.termCode, 'kind': e.kind.code, 'amount': e.amount,
+        'counterparty': e.counterparty, 'purpose': e.purpose, 'budget_id': e.budgetId, 'occurred_at': e.occurredAt,
+        'receipt_hash': e.receiptHash, 'meta_hash': e.metaHash, 'ocr_status': e.ocrStatus?.code,
+        'category_warning': e.categoryWarning, 'status': e.status.code, 'created_by': e.createdBy,
+        'corrects_entry_id': e.correctsEntryId,
+      };
   final now = DateTime.utc(2026, 11, 6, 9);
 
   EntryDecisionService service() =>
@@ -88,6 +103,9 @@ void main() {
     await useAuditorDeviceKey();
     auth = FakeAuthenticator();
     posts = [];
+    serverEntry = pending();
+    freshOverride = null;
+    freshStatus = 200;
     wallets = {treasurer: 2, auditor: 3};
     onReject = (_) => json({'id': 7, 'status': 'REJECTED', 'message': '반려됨'});
     confirms = [];
@@ -97,6 +115,9 @@ void main() {
         return json({'domains': {LedgerTypes.domainName: domainJson}});
       }
       if (req.method == 'GET' && req.url.path == '/users/wallets') return json(wallets);
+      if (req.method == 'GET' && req.url.path == '/entries/7') {
+        return freshStatus == 200 ? json(freshOverride ?? responseOf(serverEntry)) : json({'detail': 'x'}, freshStatus);
+      }
       if (req.method == 'POST' && req.url.path == '/entries/7/reject') {
         posts.add(req);
         return onReject(req);
@@ -342,7 +363,7 @@ void main() {
     });
 
     test('경고 건은 정본화한 사유를 보내고 그 해시에 서명한다', () async {
-      final entry = pending(ocrStatus: OcrStatus.DUPLICATE);
+      final entry = use(pending(ocrStatus: OcrStatus.DUPLICATE));
       await service().confirm(entry, warningReason: '  같은 영수증이지만 분할 결제라 승인\r\n');
 
       final body = jsonDecode(confirms.single.body) as Map<String, dynamic>;
@@ -351,8 +372,8 @@ void main() {
     });
 
     test('NO_NUMBER·OCR 없음은 경고가 아니다 — 사유를 보내지 않는다', () async {
-      await service().confirm(pending(ocrStatus: OcrStatus.NO_NUMBER));
-      await service().confirm(pending(ocrStatus: null));
+      await service().confirm(use(pending(ocrStatus: OcrStatus.NO_NUMBER)));
+      await service().confirm(use(pending(ocrStatus: null)));
       for (final req in confirms) {
         expect((jsonDecode(req.body) as Map).containsKey('warning_reason'), isFalse);
       }
@@ -384,6 +405,38 @@ void main() {
             .having((e) => e.failure, 'failure', EntryDecisionFailure.refused)
             .having((e) => e.message, 'message', contains('InsufficientBudget'))),
       );
+    });
+  });
+
+  group('서명 직전 재조회 (보드 ②) — 화면과 서버의 지금 값이 다르면 본인 확인도 묻지 않고 멈춘다', () {
+    Future<void> expectStops(Future<void> Function() run, EntryDecisionFailure failure) async {
+      await expectLater(
+        run(),
+        throwsA(isA<EntryDecisionException>().having((e) => e.failure, 'failure', failure)),
+      );
+      expect(posts, isEmpty);
+      expect(confirms, isEmpty);
+      expect(auth.calls, 0);
+    }
+
+    test('다른 임원이 먼저 확정했으면', () async {
+      freshOverride = {...responseOf(pending()), 'status': 'CONFIRMED'};
+      await expectStops(() => service().confirm(pending()), EntryDecisionFailure.changed);
+    });
+
+    test('등록 내용(금액)이 화면과 달라졌으면', () async {
+      freshOverride = {...responseOf(pending()), 'amount': 36000};
+      await expectStops(() => service().reject(pending(), '사유'), EntryDecisionFailure.changed);
+    });
+
+    test('경고 여부가 달라졌으면 — 서버가 다른 hadWarning 으로 커밋을 만든다', () async {
+      freshOverride = {...responseOf(pending()), 'category_warning': true};
+      await expectStops(() => service().confirm(pending()), EntryDecisionFailure.changed);
+    });
+
+    test('다시 읽지 못하면', () async {
+      freshStatus = 503;
+      await expectStops(() => service().confirm(pending()), EntryDecisionFailure.notReady);
     });
   });
 }
