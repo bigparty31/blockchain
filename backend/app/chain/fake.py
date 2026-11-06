@@ -5,6 +5,10 @@
 지출의 예산 id 0). 서명자 검증·권한·예산(잔량·마감·학기)처럼 실제 체인 상태가 필요한 결과는 fail_next / block_next 로,
 연결 실패는 unavailable_next 로 지정한다.
 
+예산 발행·증액도 IBudgetToken 의 검사 순서대로 흉내 낸다. 발행한 예산은 등록·확정의 예산 판정과 이어져 있지 않다 —
+원장 쪽은 여전히 block_next·fail_next 로 지정한다. 회장 서명 여부는 fail_next(NOT_PRESIDENT)로만 나고, 증액에서 두 서명자가
+같으면 NOT_AUDITOR 다 (한 주소 한 롤이라 회장은 감사가 아니다).
+
 서명자 주소는 서명의 앞 20바이트다. 테스트에서는 fake_signature(address) 로 서명을 만든다.
 같은 주소로 만든 서명은 문자열이 매번 달라도 같은 사람이라, 그 서명들로 등록과 확정을 하면 SELF_APPROVAL 이 난다.
 실제 체인은 승인 권한(감사·회장)을 먼저 보므로, 지금 총무인 사람이 자기 건을 승인하면 NOT_APPROVER 가 먼저 난다.
@@ -28,10 +32,15 @@ from app.chain.models import (
     ZERO_ADDRESS,
     ZERO_BYTES32,
     BlockReason,
+    BudgetRevertReason,
+    BudgetTxResult,
+    ChainBudget,
     ChainEntry,
     ChainRevert,
     ChainUnavailable,
     ConfirmApproval,
+    IncreaseRequest,
+    IssueRequest,
     RecordRequest,
     RejectDecision,
     RevertReason,
@@ -41,10 +50,13 @@ from app.chain.models import (
 )
 from app.schemas.entry import EntryKind, EntryStatus
 
-WRITE_METHODS = ("record_pending", "confirm_entry", "reject_entry")
+WRITE_METHODS = ("record_pending", "confirm_entry", "reject_entry", "issue_budget", "increase_budget")
+
+_BUDGET_METHODS = ("issue_budget", "increase_budget")
+UINT32_MAX = 2**32 - 1  # Budget.term 의 저장 폭
 
 # 검사를 통과한 쓰기의 (항목 id, 결과, 상태 변경). 상태는 before_broadcast 가 끝난 뒤에 바꾼다
-Prepared = Tuple[int, TxResult, Callable[[], None]]
+Prepared = Tuple[int, Union[TxResult, BudgetTxResult], Callable[[], None]]
 
 
 def fake_signature(address: str) -> str:
@@ -67,11 +79,12 @@ class FakeChainClient:
         self._entries: dict[int, ChainEntry] = {}
         # 정정 가능 항목(원본·재분류 양수 정정)의 순금액. 원장의 netAmountOf 와 같은 규칙으로 갱신한다
         self._net: dict[int, int] = {}
+        self._budgets: dict[int, ChainBudget] = {}
         self._tx_count = 0
         # tx hash 에 섞는 인스턴스별 값. 서버를 다시 켜 새 가짜가 생겨도 DB 에 남은 옛 hash 와 겹치지 않는다 (tx_result)
         self._tx_salt = secrets.token_hex(8)
         self._landed: dict[str, tuple[int, TxResult]] = {}  # 블록에 들어간 트랜잭션 hash → (id, 결과). tx_result 가 읽는다
-        self._fail: dict[str, RevertReason] = {}
+        self._fail: dict[str, Union[RevertReason, BudgetRevertReason]] = {}
         self._unavailable: dict[str, tuple[bool, bool]] = {}  # method → (sent, landed)
         self._send_lock: Optional[asyncio.Lock] = None
         self._lock_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -80,7 +93,7 @@ class FakeChainClient:
 
     # ------------------------------------------------------------ 시나리오 지정
 
-    def fail_next(self, method: str, reason: RevertReason) -> None:
+    def fail_next(self, method: str, reason: Union[RevertReason, BudgetRevertReason]) -> None:
         """다음 한 번의 method 호출을 reason 으로 revert 시킨다. 상태는 바뀌지 않는다."""
         _check_method(method)
         self._fail[method] = reason
@@ -108,7 +121,9 @@ class FakeChainClient:
 
     # ------------------------------------------------------------ ChainClient
 
-    def signer_of(self, payload: Union[RecordRequest, ConfirmApproval, RejectDecision], signature: str) -> str:
+    def signer_of(
+        self, payload: Union[RecordRequest, ConfirmApproval, RejectDecision, IssueRequest, IncreaseRequest], signature: str
+    ) -> str:
         """fake_signature 가 담은 주소. payload 는 보지 않는다 — 가짜 서명은 값에 묶여 있지 않다."""
         return _signer(check_signature(signature))
 
@@ -142,9 +157,43 @@ class FakeChainClient:
         if landed is None:
             return None
         landed_id, result = landed
-        if landed_id != entry_id:
+        if landed_id != entry_id or not isinstance(result, TxResult):
             raise ChainUnavailable(f"결과 이벤트를 찾지 못했다 — 이 트랜잭션은 id={landed_id} 의 것이다 (tx={tx_hash})")
         return result
+
+    async def issue_budget(
+        self, request: IssueRequest, signature: str, before_broadcast: Optional[BeforeBroadcast] = None
+    ) -> BudgetTxResult:
+        check_signature(signature)
+        return await self._send("issue_budget", lambda tx: self._issue(request, tx), before_broadcast)
+
+    async def increase_budget(
+        self,
+        request: IncreaseRequest,
+        requester_signature: str,
+        approver_signature: str,
+        before_broadcast: Optional[BeforeBroadcast] = None,
+    ) -> BudgetTxResult:
+        requester, approver = check_signature(requester_signature), check_signature(approver_signature)
+        return await self._send("increase_budget", lambda tx: self._increase(request, requester, approver, tx), before_broadcast)
+
+    async def budget_tx_result(self, tx_hash: str, budget_id: int) -> Optional[BudgetTxResult]:
+        landed = self._landed.get(check_tx_hash(tx_hash))
+        if landed is None:
+            return None
+        landed_id, result = landed
+        if landed_id != budget_id or not isinstance(result, BudgetTxResult):
+            raise ChainUnavailable(f"결과 이벤트를 찾지 못했다 — 이 트랜잭션은 id={landed_id} 의 것이다 (tx={tx_hash})")
+        return result
+
+    async def get_budget(self, budget_id: int) -> Optional[ChainBudget]:
+        return self._budgets.get(budget_id)
+
+    async def budget_id_of(self, term: int, category: str) -> int:
+        for budget in self._budgets.values():
+            if (budget.term, budget.category) == (term, category):
+                return budget.id
+        return 0
 
     # ------------------------------------------------------------ 컨트랙트 흉내
 
@@ -257,11 +306,80 @@ class FakeChainClient:
 
         return entry.id, TxResult(tx_hash=tx_hash, status=EntryStatus.REJECTED), commit
 
+    def _issue(self, r: IssueRequest, tx_hash: str) -> Prepared:
+        # BudgetToken.issue 의 검사 순서. NotPresident 는 롤을 알아야 해서 fail_next 로만 난다
+        self._precheck("issue_budget", r.deadline)
+        now = int(self._clock())
+        if r.budget_id == 0:
+            raise ChainRevert(BudgetRevertReason.RESERVED_ID, f"budgetId={r.budget_id}")
+        if r.budget_id > UINT64_MAX:
+            raise ChainRevert(BudgetRevertReason.FIELD_OUT_OF_RANGE, f"budgetId={r.budget_id}")
+        if r.budget_id in self._budgets:
+            raise ChainRevert(BudgetRevertReason.BUDGET_ALREADY_EXISTS, f"budgetId={r.budget_id}")
+        if r.term == 0:
+            raise ChainRevert(BudgetRevertReason.TERM_REQUIRED)
+        if r.term > UINT32_MAX:
+            raise ChainRevert(BudgetRevertReason.FIELD_OUT_OF_RANGE, f"term={r.term}")
+        if r.category == ZERO_BYTES32:
+            raise ChainRevert(BudgetRevertReason.CATEGORY_REQUIRED)
+        if r.amount == 0:
+            raise ChainRevert(BudgetRevertReason.ZERO_AMOUNT)
+        if r.amount > MAX_AMOUNT:
+            raise ChainRevert(BudgetRevertReason.AMOUNT_OUT_OF_RANGE, f"amount={r.amount}")
+        if r.expires_at > UINT64_MAX:
+            raise ChainRevert(BudgetRevertReason.FIELD_OUT_OF_RANGE, f"expiresAt={r.expires_at}")
+        if r.expires_at <= now:
+            raise ChainRevert(BudgetRevertReason.BUDGET_EXPIRED, f"budgetId={r.budget_id} expiresAt={r.expires_at}")
+        for existing in self._budgets.values():
+            if (existing.term, existing.category) == (r.term, r.category):
+                raise ChainRevert(BudgetRevertReason.BUDGET_ALREADY_ISSUED, f"existingBudgetId={existing.id}")
+        budget = ChainBudget(
+            id=r.budget_id,
+            term=r.term,
+            category=r.category,
+            issued=r.amount,
+            spent=0,
+            expires_at=r.expires_at,
+            version=1,
+            reclaim_count=0,
+        )
+
+        def commit() -> None:
+            self._budgets[r.budget_id] = budget
+
+        return r.budget_id, BudgetTxResult(tx_hash=tx_hash, budget_id=r.budget_id, version=1), commit
+
+    def _increase(self, r: IncreaseRequest, requester: str, approver: str, tx_hash: str) -> Prepared:
+        # BudgetToken.increase 의 검사 순서
+        self._precheck("increase_budget", r.deadline)
+        if _signer(requester) == _signer(approver):
+            raise ChainRevert(BudgetRevertReason.NOT_AUDITOR, f"signer={_signer(approver)}")
+        budget = self._budgets.get(r.budget_id)
+        if budget is None:
+            raise ChainRevert(BudgetRevertReason.BUDGET_NOT_FOUND, f"budgetId={r.budget_id}")
+        if r.version != budget.version:
+            raise ChainRevert(BudgetRevertReason.VERSION_MISMATCH, f"expected={budget.version} actual={r.version}")
+        if int(self._clock()) > budget.expires_at:
+            raise ChainRevert(BudgetRevertReason.BUDGET_EXPIRED, f"budgetId={r.budget_id} expiresAt={budget.expires_at}")
+        if r.reason_hash == ZERO_BYTES32:
+            raise ChainRevert(BudgetRevertReason.REASON_REQUIRED)
+        if r.amount == 0:
+            raise ChainRevert(BudgetRevertReason.ZERO_AMOUNT)
+        issued = budget.issued + r.amount
+        if r.amount > MAX_AMOUNT or issued > MAX_AMOUNT:
+            raise ChainRevert(BudgetRevertReason.AMOUNT_OUT_OF_RANGE, f"amount={max(r.amount, issued)}")
+        version = budget.version + 1
+
+        def commit() -> None:
+            self._budgets[r.budget_id] = budget.model_copy(update={"issued": issued, "version": version})
+
+        return r.budget_id, BudgetTxResult(tx_hash=tx_hash, budget_id=r.budget_id, version=version), commit
+
     # ------------------------------------------------------------ 내부
 
     async def _send(
         self, method: str, prepare: Callable[[str], Prepared], before_broadcast: Optional[BeforeBroadcast]
-    ) -> TxResult:
+    ) -> Union[TxResult, BudgetTxResult]:
         """검사 → before_broadcast → 상태 변경. 실제 구현의 시뮬레이션 → 콜백 → 전송 순서와 같다.
 
         실제 구현은 릴레이어 lock 안에서 시뮬레이션부터 receipt 까지 하므로, 같은 id 를 동시에 보내면 두 번째는
@@ -282,7 +400,7 @@ class FakeChainClient:
 
     async def _send_locked(
         self, method: str, prepare: Callable[[str], Prepared], before_broadcast: Optional[BeforeBroadcast]
-    ) -> TxResult:
+    ) -> Union[TxResult, BudgetTxResult]:
         scenario = self._unavailable.get(method)
         if scenario is not None and not scenario[0]:
             del self._unavailable[method]
@@ -300,7 +418,7 @@ class FakeChainClient:
         self._land(tx_hash, entry_id, result, commit)
         return result
 
-    def _land(self, tx_hash: str, entry_id: int, result: TxResult, commit: Callable[[], None]) -> None:
+    def _land(self, tx_hash: str, entry_id: int, result: Union[TxResult, BudgetTxResult], commit: Callable[[], None]) -> None:
         """블록에 들어갔다 — 상태를 바꾸고 결과를 hash 로 남긴다 (tx_result)."""
         commit()
         self._landed[tx_hash] = (entry_id, result)
@@ -318,7 +436,8 @@ class FakeChainClient:
             raise ChainRevert(forced, "fail_next 로 지정")
         # 컨트랙트는 초 단위 정수 block.timestamp > deadline 로 본다. 소수점 시각과 비교하면 같은 초가 만료로 잡힌다
         if deadline < int(self._clock()):
-            raise ChainRevert(RevertReason.SIGNATURE_EXPIRED, f"deadline={deadline}")
+            expired = BudgetRevertReason if method in _BUDGET_METHODS else RevertReason
+            raise ChainRevert(expired.SIGNATURE_EXPIRED, f"deadline={deadline}")
 
     def _pending_entry(self, entry_id: int) -> ChainEntry:
         entry = self._entries.get(entry_id)

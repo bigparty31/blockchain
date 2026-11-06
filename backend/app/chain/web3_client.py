@@ -35,12 +35,16 @@ from app.chain.models import (
     KIND_ORDER,
     STATUS_ORDER,
     ZERO_ADDRESS,
+    BudgetTxResult,
+    ChainBudget,
     ChainEntry,
     ChainError,
     ChainRevert,
     ChainSetupError,
     ChainUnavailable,
     ConfirmApproval,
+    IncreaseRequest,
+    IssueRequest,
     RecordRequest,
     RejectDecision,
     RevertReason,
@@ -48,7 +52,7 @@ from app.chain.models import (
     check_tx_hash,
 )
 from app.schemas.entry import EntryStatus
-from app.chain.revert import RevertDecoder, rpc_error_of
+from app.chain.revert import RevertDecoder, budget_revert_decoder, rpc_error_of
 
 LEDGER = "AccountingLedger"
 ROLE_MANAGER = "RoleManager"
@@ -102,6 +106,11 @@ def _relayer_account(private_key: str) -> LocalAccount:
     except ValueError:
         # 0 이나 곡선 위수 이상은 형식이 맞아도 개인키가 아니다. 원래 예외는 메시지에 키 길이 등을 담으니 잇지 않는다
         raise ChainSetupError("RELAYER_PRIVATE_KEY 가 유효한 개인키 범위(1 이상, 곡선 위수 미만)가 아니다") from None
+
+
+def _signature_bytes(signature: str) -> bytes:
+    """앱이 준 서명을 컨트랙트가 받는 모양의 바이트로. 형식이 틀리면 ValueError (app/chain/eip712.py)."""
+    return bytes.fromhex(eip712.normalize_signature(signature)[2:])
 
 
 def _setup_error(e: Exception) -> ChainSetupError:
@@ -198,6 +207,26 @@ def _entry_fields(ledger_abi: list) -> list:
     raise DeploymentError("원장 ABI 에 getEntry 가 없습니다. contracts 에서 다시 배포해 ABI 를 갱신하세요")
 
 
+# get_budget 이 읽는 getBudget 구조체 필드. _ENTRY_FIELDS 와 같은 이유로 연결할 때 막는다
+_BUDGET_FIELDS = {"category", "issued", "spent", "term", "expiresAt", "version", "reclaimCount"}
+
+
+def _budget_fields(budget_token_abi: list) -> list:
+    """getBudget 반환 튜플의 필드 이름(순서대로). 위치가 아니라 이름으로 읽는다."""
+    for item in budget_token_abi:
+        if item.get("type") == "function" and item.get("name") == "getBudget":
+            outputs = item.get("outputs") or [{}]
+            names = [c.get("name") for c in outputs[0].get("components") or []]
+            missing = sorted(_BUDGET_FIELDS - set(names))
+            if missing:
+                raise DeploymentError(
+                    f"BudgetToken ABI 의 getBudget 에 백엔드가 읽는 필드가 없습니다: {', '.join(missing)}. "
+                    "컨트랙트의 Budget 구조체가 바뀌었으면 backend/app/chain/web3_client.py 도 맞추세요"
+                )
+            return names
+    raise DeploymentError("BudgetToken ABI 에 getBudget 이 없습니다. contracts 에서 다시 배포해 ABI 를 갱신하세요")
+
+
 def _stamp(path: Path) -> Optional[tuple]:
     try:
         stat = path.stat()
@@ -213,7 +242,7 @@ async def _attempt(make):
 
 
 class Web3ChainClient:
-    """AccountingLedger 릴레이어. 만들 때는 connect() 를 쓴다."""
+    """AccountingLedger·BudgetToken 릴레이어. 만들 때는 connect() 를 쓴다."""
 
     def __init__(
         self, w3: AsyncWeb3, account: LocalAccount, deployment: Deployment, contracts: dict, deployment_file: Path
@@ -228,7 +257,9 @@ class Web3ChainClient:
         self._budget_token = contracts.get(BUDGET_TOKEN)
         # 확정 안에서 원장이 부르는 BudgetToken 의 에러도 원장 호출의 revert 로 올라온다 (app/chain/revert.py)
         self._reverts = RevertDecoder(self._ledger.abi, self._budget_token.abi if self._budget_token is not None else None)
+        self._budget_reverts = budget_revert_decoder(self._budget_token.abi) if self._budget_token is not None else None
         self._entry_fields = _entry_fields(self._ledger.abi)
+        self._budget_fields = _budget_fields(self._budget_token.abi) if self._budget_token is not None else None
         self._stamps = self._file_stamps()
         self._code_checked_at = time.monotonic()
         self._closed = False
@@ -354,6 +385,12 @@ class Web3ChainClient:
                 f"원장·BudgetToken ABI 에 백엔드가 아는 에러가 없다: {', '.join(r.value for r in missing)}. "
                 "컨트랙트의 에러 이름·시그니처가 바뀌었으면 backend/app/chain/models.py 의 RevertReason 도 맞춘다"
             )
+        missing = self._budget_reverts.missing_reasons() if self._budget_reverts is not None else []
+        if missing:
+            raise ChainSetupError(
+                f"BudgetToken ABI 에 백엔드가 아는 에러가 없다: {', '.join(r.value for r in missing)}. "
+                "컨트랙트의 에러 이름·시그니처가 바뀌었으면 backend/app/chain/models.py 의 BudgetRevertReason 도 맞춘다"
+            )
 
         d = self._deployment
         eth = self._w3.eth
@@ -400,8 +437,11 @@ class Web3ChainClient:
 
     # ------------------------------------------------------------ ChainClient
 
-    def signer_of(self, payload: Union[RecordRequest, ConfirmApproval, RejectDecision], signature: str) -> str:
-        return eip712.recover_signer(eip712.typed_data_for(payload, self._deployment.eip712[LEDGER]), signature)
+    def signer_of(
+        self, payload: Union[RecordRequest, ConfirmApproval, RejectDecision, IssueRequest, IncreaseRequest], signature: str
+    ) -> str:
+        contract = BUDGET_TOKEN if isinstance(payload, eip712.BUDGET_PAYLOADS) else LEDGER
+        return eip712.recover_signer(eip712.typed_data_for(payload, self._deployment.eip712[contract]), signature)
 
     async def get_entry(self, entry_id: int) -> Optional[ChainEntry]:
         self._ensure_open()
@@ -459,7 +499,14 @@ class Web3ChainClient:
     async def reject_entry(
         self, decision: RejectDecision, signature: str, before_broadcast: Optional[BeforeBroadcast] = None
     ) -> TxResult:
-        raise NotImplementedError("반려 릴레이는 이번 범위가 아니다")
+        # entryCommit·사유 해시는 앱이 서명한 값 그대로 보낸다. 사유 없음·등록 값과 다름은 시뮬레이션에서 걸린다 (가스 0)
+        return await self._relay_signed(
+            self._ledger.functions.rejectEntry,
+            decision,
+            signature,
+            before_broadcast,
+            ((self._ledger.events.EntryRejected, EntryStatus.REJECTED),),
+        )
 
     async def tx_result(self, tx_hash: str, entry_id: int) -> Optional[TxResult]:
         self._ensure_open()
@@ -486,23 +533,105 @@ class Web3ChainClient:
             raise ChainUnavailable(f"결과 이벤트를 찾지 못했다 (tx={tx_hash})")
         return result
 
+    # ------------------------------------------------------------ 예산 (BudgetToken)
+
+    async def get_budget(self, budget_id: int) -> Optional[ChainBudget]:
+        self._ensure_open()
+        if not 0 <= budget_id < 2**256:
+            return None
+        try:
+            raw = await self._budget_token.functions.getBudget(budget_id).call()
+        except Exception as e:
+            self._raise_call_failure(e, self._budget_reverts)
+        fields = dict(zip(self._budget_fields, raw))
+        # getBudget 은 없는 id 에도 0 으로 채운 구조체를 준다. 컨트랙트의 exists() 와 같은 기준으로 가른다
+        if fields["version"] == 0:
+            return None
+        return ChainBudget(
+            id=budget_id,
+            term=fields["term"],
+            category="0x" + bytes(fields["category"]).hex(),
+            issued=fields["issued"],
+            spent=fields["spent"],
+            expires_at=fields["expiresAt"],
+            version=fields["version"],
+            reclaim_count=fields["reclaimCount"],
+        )
+
+    async def budget_id_of(self, term: int, category: str) -> int:
+        self._ensure_open()
+        try:
+            return await self._budget_token.functions.budgetIdOf(term, category).call()
+        except Exception as e:
+            self._raise_call_failure(e, self._budget_reverts)
+
+    async def issue_budget(
+        self, request: IssueRequest, signature: str, before_broadcast: Optional[BeforeBroadcast] = None
+    ) -> BudgetTxResult:
+        self._ensure_open()
+        message = eip712.typed_data_for(request, self._deployment.eip712[BUDGET_TOKEN])["message"]
+        call = self._budget_token.functions.issue(message, _signature_bytes(signature))
+        tx_hash, receipt = await self._relay(call, before_broadcast, self._budget_reverts)
+        return self._budget_result(tx_hash, receipt, request.budget_id)
+
+    async def increase_budget(
+        self,
+        request: IncreaseRequest,
+        requester_signature: str,
+        approver_signature: str,
+        before_broadcast: Optional[BeforeBroadcast] = None,
+    ) -> BudgetTxResult:
+        self._ensure_open()
+        message = eip712.typed_data_for(request, self._deployment.eip712[BUDGET_TOKEN])["message"]
+        call = self._budget_token.functions.increase(
+            message, _signature_bytes(requester_signature), _signature_bytes(approver_signature)
+        )
+        tx_hash, receipt = await self._relay(call, before_broadcast, self._budget_reverts)
+        return self._budget_result(tx_hash, receipt, request.budget_id)
+
+    async def budget_tx_result(self, tx_hash: str, budget_id: int) -> Optional[BudgetTxResult]:
+        self._ensure_open()
+        tx_hash = check_tx_hash(tx_hash)
+        try:
+            receipt = await self._w3.eth.get_transaction_receipt(tx_hash)
+        except TransactionNotFound:
+            return None  # 아직 블록에 없다. 들어가지 않았다고 단정하지 않는다
+        except (*UNREACHABLE, Web3Exception) as e:
+            raise ChainUnavailable(f"receipt 를 읽지 못했다 ({type(e).__name__}, tx={tx_hash})") from e
+        if receipt["status"] != 1:
+            raise ChainRevert(RevertReason.UNKNOWN, f"트랜잭션이 실패로 끝났다 (tx={tx_hash})")
+        return self._budget_result(tx_hash, receipt, budget_id)
+
+    def _budget_result(self, tx_hash: str, receipt: dict, budget_id: int) -> BudgetTxResult:
+        """receipt 에서 이 예산의 결과 이벤트를 찾는다. 예산 상태로 대신 판정하지 않는다 — version 은 다른 증액으로도 오른다."""
+        events = self._budget_token.events
+        for event, version_of in ((events.BudgetIssued, lambda _: 1), (events.BudgetIncreased, lambda log: log["args"]["version"])):
+            for log in event().process_receipt(receipt, errors=DISCARD):
+                if log["address"] == self._budget_token.address and log["args"]["budgetId"] == budget_id:
+                    return BudgetTxResult(tx_hash=tx_hash, budget_id=budget_id, version=version_of(log))
+        raise ChainUnavailable(f"결과 이벤트를 찾지 못했다 (tx={tx_hash})")
+
     # ------------------------------------------------------------ 전송
 
     async def _relay_signed(
         self, function, payload, signature: str, before_broadcast: Optional[BeforeBroadcast], outcomes: tuple
     ) -> TxResult:
-        """서명된 구조체를 원장 함수로 릴레이하고 결과 이벤트로 판정한다 (등록·확정 공용).
+        """서명된 구조체를 원장 함수로 릴레이하고 결과 이벤트로 판정한다 (등록·확정·반려 공용).
 
         구조체는 서명 대상과 같은 typed data 의 message 로 만든다 — 필드 순서·인코딩의 정본이 한 곳이다.
         """
         self._ensure_open()
         message = eip712.typed_data_for(payload, self._deployment.eip712[LEDGER])["message"]
-        call = function(message, bytes.fromhex(eip712.normalize_signature(signature)[2:]))
+        call = function(message, _signature_bytes(signature))
         tx_hash, receipt = await self._relay(call, before_broadcast)
         return await self._event_result(tx_hash, receipt, payload.id, outcomes)
 
-    async def _relay(self, call, before_broadcast: Optional[BeforeBroadcast]) -> tuple:
+    async def _relay(
+        self, call, before_broadcast: Optional[BeforeBroadcast], reverts: Optional[RevertDecoder] = None
+    ) -> tuple:
         """시뮬레이션 → 로컬 서명 → before_broadcast → 전송 → receipt. (tx hash, 성공한 receipt) 를 돌려준다.
+
+        reverts 는 부르는 컨트랙트의 해석기다. 없으면 원장 해석기를 쓴다.
 
         lock 은 시뮬레이션부터 receipt 까지 잡는다. Hardhat 은 바로 채굴해 대기가 짧고, nonce 순서가 꼬일 여지가 없다.
         시뮬레이션은 다음 블록(pending) 기준이다 — 최신 블록 기준이면 블록이 한동안 없을 때 시각이 낡아, 만료된 서명이
@@ -510,18 +639,21 @@ class Web3ChainClient:
         """
         eth = self._w3.eth
         sender = {"from": self.relayer_address}
+        reverts = reverts or self._reverts
         _refuse_reentry(self.relayer_address)
         async with self._send_lock:
             _send_owners[self.relayer_address] = asyncio.current_task()
             try:
-                tx_hash, receipt = await self._send_locked(call, before_broadcast, eth, sender)
+                tx_hash, receipt = await self._send_locked(call, before_broadcast, eth, sender, reverts)
             finally:
                 del _send_owners[self.relayer_address]
         if receipt["status"] != 1:
-            raise await self._replay_failure(call, tx_hash, receipt)
+            raise await self._replay_failure(call, tx_hash, receipt, reverts)
         return tx_hash, receipt
 
-    async def _send_locked(self, call, before_broadcast: Optional[BeforeBroadcast], eth, sender: dict) -> tuple:
+    async def _send_locked(
+        self, call, before_broadcast: Optional[BeforeBroadcast], eth, sender: dict, reverts: RevertDecoder
+    ) -> tuple:
         """_relay 의 lock 안쪽. (tx hash, receipt) — receipt 가 실패(status 0)일 수도 있다."""
         self._ensure_open()  # lock 을 기다리는 동안 교체됐을 수 있다
         gas, nonce, priority_fee, block = await asyncio.gather(
@@ -534,7 +666,7 @@ class Web3ChainClient:
         # revert 할 요청은 시뮬레이션에서 가스 없이 걸린다 (만료·권한·중복 등). 판정은 시뮬레이션이 먼저다
         for result in (gas, nonce, priority_fee, block):
             if isinstance(result, BaseException):
-                self._raise_call_failure(result)
+                self._raise_call_failure(result, reverts)
         # web3 의 기본 계산과 같은 식(기본 수수료 2배 + 우선 수수료). pending 블록을 주지 않는 노드나
         # EIP-1559 가 아닌 노드면 web3 가 채우게 둔다
         fees = (
@@ -547,7 +679,7 @@ class Web3ChainClient:
                 {**sender, **fees, "nonce": nonce, "gas": int(gas * GAS_MARGIN), "chainId": self._deployment.chain_id}
             )
         except Exception as e:
-            self._raise_call_failure(e)
+            self._raise_call_failure(e, reverts)
         signed = self._account.sign_transaction(tx)
         tx_hash = "0x" + bytes(signed.hash).hex()
         if before_broadcast is not None:
@@ -556,7 +688,7 @@ class Web3ChainClient:
             await eth.send_raw_transaction(signed.raw_transaction)
         except (*UNREACHABLE, Web3Exception) as e:
             # 예상하지 못한 예외(코드 결함)는 잡지 않는다 — "들어갔는지 모름" 으로 가리지 않는다
-            failure = _send_failure(e, self._reverts)
+            failure = _send_failure(e, reverts)
             if failure is not None:
                 raise failure from e
         try:
@@ -565,24 +697,24 @@ class Web3ChainClient:
             raise ChainUnavailable(f"receipt 를 받지 못했다 ({type(e).__name__}, tx={tx_hash})") from e
         return tx_hash, receipt
 
-    def _raise_call_failure(self, e: BaseException) -> NoReturn:
+    def _raise_call_failure(self, e: BaseException, reverts: Optional[RevertDecoder] = None) -> NoReturn:
         """읽기·시뮬레이션 호출의 실패를 올린다. revert 면 ChainRevert, 노드에 닿지 못했으면 ChainUnavailable.
 
         예상하지 못한 예외(코드 결함)는 바꾸지 않고 그대로 올린다 — 원인 체인을 자기 자신으로 만들지 않는다.
         """
-        revert = self._reverts.from_web3_error(e)
+        revert = (reverts or self._reverts).from_web3_error(e)
         if revert is not None:
             raise revert from e
         if isinstance(e, (*UNREACHABLE, Web3Exception)):
             raise ChainUnavailable(f"노드 호출이 실패했다 ({type(e).__name__})") from e
         raise e
 
-    async def _replay_failure(self, call, tx_hash: str, receipt: dict) -> ChainRevert:
+    async def _replay_failure(self, call, tx_hash: str, receipt: dict, reverts: Optional[RevertDecoder] = None) -> ChainRevert:
         """receipt 가 실패(status 0)면 그 블록 직전 상태로 다시 호출해 revert 사유를 얻는다 (Hardhat 외 노드)."""
         try:
             await call.call({"from": self.relayer_address}, block_identifier=receipt["blockNumber"] - 1)
         except Exception as e:
-            revert = self._reverts.from_web3_error(e)
+            revert = (reverts or self._reverts).from_web3_error(e)
             if revert is not None:
                 return revert
         return ChainRevert(RevertReason.UNKNOWN, f"트랜잭션이 실패했지만 사유를 재현하지 못했다 (tx={tx_hash})")
@@ -599,7 +731,7 @@ class Web3ChainClient:
     async def _event_result(self, tx_hash: str, receipt: dict, entry_id: int, outcomes: tuple) -> TxResult:
         """방금 보낸 트랜잭션의 결과. 이벤트가 없으면 체인 상태로 판정한다 — 방금 보낸 것이라 그 상태가 이 트랜잭션의 결과다.
 
-        등록은 EntryBlocked → BLOCKED(사유 포함), EntryPending → PENDING. 확정은 EntryConfirmed → CONFIRMED.
+        등록은 EntryBlocked → BLOCKED(사유 포함), EntryPending → PENDING. 확정은 EntryConfirmed → CONFIRMED. 반려는 EntryRejected → REJECTED.
         """
         result = self._find_event(tx_hash, receipt, entry_id, outcomes)
         if result is not None:
