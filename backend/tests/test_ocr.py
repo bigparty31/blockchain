@@ -71,6 +71,38 @@ def test_payment_amount_beats_total():
     assert parsed.amount == 8000
 
 
+def test_amount_attached_to_label_beats_later_total():
+    # "결제금액:8,000원" 한 덩어리 뒤에 같은 줄 "합계 10,000" — 8,000 이어야 한다 (PR #36 리뷰)
+    parsed = parse_clova_response(_response(_field("결제금액:8,000원", 200, 100), _field("합계", 360, 100), _field("10,000", 460, 100)))
+    assert parsed.amount == 8000
+
+
+def test_amount_stops_at_next_label_on_same_line():
+    parsed = parse_clova_response(_response(_field("결제금액", 200, 100), _field("8,000", 300, 100), _field("합계", 360, 100), _field("10,000", 460, 100)))
+    assert parsed.amount == 8000
+
+
+def test_amount_with_won_suffix_is_not_a_label():
+    parsed = parse_clova_response(_response(_field("결제금액", 200, 100), _field("4,600원", 460, 100)))
+    assert parsed.amount == 4600
+
+
+def test_approval_no_does_not_take_digits_from_next_field():
+    # "승인번호:" 뒤가 "거래일자:2026-09-18" 이면 20260918 을 승인번호로 쓰지 않는다 → 판독 불가 (PR #36 리뷰)
+    parsed = parse_clova_response(_response(
+        _field("승인번호:", 200, 100), _field("거래일자:2026-09-18", 300, 100),
+        _field("결제금액", 200, 140), _field("4,600", 460, 140),
+    ))
+    assert parsed.approval_label_found and parsed.approval_no is None
+    assert judge(parsed, 4600) == OCRStatus.UNREADABLE
+
+
+def test_approval_no_with_non_digits_is_unreadable():
+    parsed = parse_clova_response(_response(_field("승인번호", 200, 100), _field("3900-7O18", 300, 100), _field("결제금액", 200, 140), _field("4,600", 460, 140)))
+    assert parsed.approval_no is None
+    assert judge(parsed, 4600) == OCRStatus.UNREADABLE
+
+
 def test_approval_no_attached_to_label():
     parsed = parse_clova_response(_response(_field("승인번호:31008018", 200, 100), _field("7,600원", 460, 140)))
     assert parsed.approval_no == "31008018"

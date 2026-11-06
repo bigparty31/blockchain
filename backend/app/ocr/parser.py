@@ -101,21 +101,47 @@ def _to_amount(text: str) -> Optional[int]:
     return int(s.replace(",", "").replace("원", ""))
 
 
+def _after_label(text: str) -> str:
+    """라벨과 값이 한 덩어리일 때("결제금액:8,000원", "승인번호:39007018") 마지막 한글 라벨 글자 뒤의 값 부분.
+    값 끝의 "원"은 금액 단위라 라벨로 보지 않는다."""
+    body = text[:-1] if text.endswith("원") else text
+    m = re.search(r"[가-힣][^가-힣]*$", body)
+    return (text[m.start() + 1:] if m else text).strip(" :：")
+
+
+def _is_other_label(t: Token) -> bool:
+    """값 자리에서 만난 다른 라벨("합계", "거래일자:2026-09-18"). 여기서 값 찾기를 멈춘다. "4,600원"은 라벨이 아니다."""
+    return bool(_hangul_only(t.text)) and _to_amount(t.text) is None
+
+
 def _extract_amount(lines: List[List[Token]], result: ParsedReceipt) -> None:
     for label in AMOUNT_LABELS:
         for line in lines:
             idx = _find_label(line, label)
             if idx is None:
                 continue
-            # 라벨 오른쪽에서 금액 모양인 것 중 가장 오른쪽 (영수증은 금액이 오른쪽 끝에 정렬됨)
-            for t in reversed(line[idx + 1:]):
-                value = _to_amount(t.text)
-                if value is not None:
-                    result.amount = value
-                    if t.confidence < MIN_CONFIDENCE:
-                        result.low_confidence = True
-                    result.notes.append(f"금액: '{label}' 줄에서 {value}")
-                    return
+            # 라벨 덩어리 안에 금액이 붙어 있으면 그것이 값이다 ("결제금액:8,000원")
+            value = _to_amount(_after_label(line[idx].text))
+            token = line[idx]
+            if value is None:
+                # 아니면 라벨 오른쪽에서 다음 라벨 전까지, 금액 모양 중 가장 오른쪽 (영수증은 금액이 오른쪽 끝에 정렬됨).
+                # 같은 줄 뒤의 "합계 10,000" 을 결제금액으로 잡지 않으려고 다른 라벨에서 멈춘다
+                span = []
+                for t in line[idx + 1:]:
+                    if _is_other_label(t):
+                        break
+                    span.append(t)
+                for t in reversed(span):
+                    value = _to_amount(t.text)
+                    if value is not None:
+                        token = t
+                        break
+            if value is not None:
+                result.amount = value
+                if token.confidence < MIN_CONFIDENCE:
+                    result.low_confidence = True
+                result.notes.append(f"금액: '{label}' 줄에서 {value}")
+                return
 
 
 def _extract_approval_no(lines: List[List[Token]], result: ParsedReceipt) -> None:
@@ -125,20 +151,23 @@ def _extract_approval_no(lines: List[List[Token]], result: ParsedReceipt) -> Non
             if idx is None:
                 continue
             result.approval_label_found = True
-            # 라벨 바로 오른쪽 글자 (가장 가까운 것). 라벨과 값이 한 덩어리("승인번호:39007018")인 경우도 처리
-            candidates = [line[idx]] + line[idx + 1:]
-            for t in candidates:
-                digits = re.sub(r"\D", "", t.text)
-                if not digits:
+            # 라벨 덩어리에 붙은 값("승인번호:39007018")부터, 그다음 라벨 오른쪽 글자를 본다.
+            # 다른 라벨("거래일자:2026-09-18")을 만나면 멈춘다 — 숫자만 뽑아 20260918 을 승인번호로 쓰지 않는다
+            candidates = [(line[idx], _after_label(line[idx].text))] + [(t, t.text.strip()) for t in line[idx + 1:]]
+            for i, (t, text) in enumerate(candidates):
+                if i > 0 and _is_other_label(t):
+                    break
+                if not text:
                     continue
                 lo, hi = APPROVAL_NO_DIGITS
-                if lo <= len(digits) <= hi:
-                    result.approval_no = digits
+                # 값 전체가 숫자여야 한다. 일부만 숫자인 값은 자릿수 이상과 같이 판독 불가로 본다
+                if re.fullmatch(rf"\d{{{lo},{hi}}}", text):
+                    result.approval_no = text
                     if t.confidence < MIN_CONFIDENCE:
                         result.low_confidence = True
-                    result.notes.append(f"승인번호: {digits}")
+                    result.notes.append(f"승인번호: {text}")
                 else:
-                    result.notes.append(f"승인번호 자릿수 이상: '{t.text}'")
+                    result.notes.append(f"승인번호 형식 이상: '{t.text}'")
                 return
             result.notes.append("승인번호 라벨은 있으나 값 없음")
             return
