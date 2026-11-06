@@ -232,12 +232,14 @@ class EntryDecisionService {
       '이 건의 최신 상태를 확인하지 못해 서명하지 않았어요. 잠시 후 다시 시도해 주세요.',
     );
     final EntryModel fresh;
+    // 보내기 직전의 토큰을 잡아 둔다 — 늦게 온 401 이 그 사이 다시 로그인해 만든 새 세션을 지우지 않게
+    final auth = AuthService().authSnapshot;
     try {
       final res = await client
-          .get(Uri.parse('${ApiConfig.entries}/${shown.id}'), headers: AuthService().authHeaders)
+          .get(Uri.parse('${ApiConfig.entries}/${shown.id}'), headers: auth.headers)
           .timeout(_readTimeout);
       if (res.statusCode == 401) {
-        await AuthService().reportUnauthorized();
+        await AuthService().reportUnauthorized(token: auth.token);
         throw const EntryDecisionException(EntryDecisionFailure.unauthorized, '로그인이 끝났어요. 다시 로그인해 주세요.');
       }
       if (res.statusCode == 404) {
@@ -329,11 +331,13 @@ class EntryDecisionService {
   /// 서명을 보낸다. 상태 코드로만 나누고, 400·403 은 서버 설명을 그대로 붙여 보여 준다.
   static Future<void> _post(String url, Map<String, Object> body, {required String what}) async {
     final http.Response res;
+    // 보내기 직전의 토큰을 잡아 둔다 — 늦게 온 401 이 그 사이 다시 로그인해 만든 새 세션을 지우지 않게
+    final auth = AuthService().authSnapshot;
     try {
       res = await client
           .post(
             Uri.parse(url),
-            headers: {...AuthService().authHeaders, 'Content-Type': 'application/json'},
+            headers: {...auth.headers, 'Content-Type': 'application/json'},
             body: jsonEncode(body),
           )
           .timeout(postTimeout);
@@ -350,7 +354,7 @@ class EntryDecisionService {
       case 201:
         return;
       case 401:
-        await AuthService().reportUnauthorized();
+        await AuthService().reportUnauthorized(token: auth.token);
         throw const EntryDecisionException(EntryDecisionFailure.unauthorized, '로그인이 끝났어요. 다시 로그인해 주세요.');
       case 403:
         throw EntryDecisionException(EntryDecisionFailure.forbidden, detail ?? '이 작업을 할 권한이 없어요.');
