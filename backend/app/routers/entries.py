@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timezone
 import inspect
 import logging
 import re
@@ -31,6 +32,7 @@ from app.services.chain_tx import (
     relay_record,
     relay_reject,
 )
+from app.services.notifications import NotificationKind, create_notification
 from app.database import get_db
 from app.models import Budget as DBBudget, Entry as DBEntry, Term as DBTerm, User as DBUser
 from app.routers.receipts import receipt_file_exists
@@ -147,6 +149,11 @@ def _to_schema(
         block_number=block_number,
         corrects_entry_id=entry.corrects_entry_id,
         correction_reason=entry.correction_reason,
+        revision_requested_at=(
+            int(entry.revision_requested_at.timestamp())
+            if isinstance(getattr(entry, "revision_requested_at", None), datetime)
+            else (int(entry.revision_requested_at) if getattr(entry, "revision_requested_at", None) is not None else None)
+        ),
     )
 
 
@@ -211,6 +218,28 @@ async def get_entries(
         for e in db_entries
     ]
     return results
+
+
+@router.get("/drafts", response_model=List[EntryResponse], summary="본인 작성 미제출 초안 목록 조회 (T5)")
+async def get_my_drafts(
+    user: User = Depends(treasurer_only),
+    db: Session = Depends(get_db),
+):
+    """총무 본인이 작성하였으나 아직 블록체인 기기 서명을 제출하지 않은 초안(status IS NULL) 목록을 조회합니다."""
+    try:
+        drafts = (
+            db.query(DBEntry)
+            .filter(DBEntry.created_by == user.id, DBEntry.status.is_(None))
+            .order_by(DBEntry.occurred_at.desc(), DBEntry.id.desc())
+            .all()
+        )
+    except SQLAlchemyError as e:
+        logger.exception("초안 목록 조회 중 데이터베이스 오류: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 처리 중 오류가 발생했습니다.",
+        )
+    return [_to_schema(e) for e in drafts]
 
 
 @router.get("/{id}", response_model=EntryResponse, summary="수입·지출 내역 단건 상세 조회")
@@ -673,6 +702,80 @@ async def submit_entry(
         block_reason=b_reason,
         message=msg,
     )
+
+
+@router.post(
+    "/{id}/request-revision",
+    response_model=EntryResponse,
+    summary="수입·지출 내역 수정 요청 (T4)",
+)
+async def request_entry_revision(
+    id: int,
+    user: User = Depends(treasurer_only),
+    db: Session = Depends(get_db),
+):
+    """총무 본인이 등록한 승인 대기(PENDING) 내역에 대해 수정 요청을 등록합니다 (PRD §4.3).
+    - 총무 본인 건만 가능 (타 사용자 403)
+    - PENDING 상태만 가능 (그 외 400)
+    - 확정 선점 중(tx_confirm 존재)이면 409 차단 (확정되면 정정으로 가야 함)
+    - 이미 요청된 건은 200 반환 (Idempotent)
+    - 요청 시 revision_requested_at 기록 및 감사·회장 대상 알림 생성
+    """
+    try:
+        entry = db.query(DBEntry).filter(DBEntry.id == id).first()
+    except SQLAlchemyError as e:
+        logger.exception("수정 요청 중 항목(%d) 조회 오류: %s", id, e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 처리 중 오류가 발생했습니다.",
+        )
+
+    if not entry:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"항목(id={id})을 찾을 수 없습니다.",
+        )
+
+    # 1. 작성자 본인 확인 (다른 총무/사용자 403 차단)
+    if entry.created_by != user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="본인이 등록한 내역만 수정 요청할 수 있습니다.",
+        )
+
+    # 2. PENDING 상태 확인
+    if entry.status != EntryStatus.PENDING.value and entry.status != EntryStatus.PENDING:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"승인 대기(PENDING) 상태의 내역만 수정 요청할 수 있습니다 (현재: {entry.status or 'DRAFT'}).",
+        )
+
+    # 3. 확정 선점 여부 확인 (tx_confirm 존재 시 409)
+    if entry.tx_confirm:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="확정 처리 중인 내역은 수정 요청할 수 없습니다.",
+        )
+
+    # 4. 이미 수정 요청된 경우 200 멱등 반환
+    if entry.revision_requested_at is not None:
+        return _to_schema(entry)
+
+    # 5. revision_requested_at 기록 및 감사·회장 대상 알림 생성
+    try:
+        entry.revision_requested_at = datetime.now(timezone.utc)
+        create_notification(db, NotificationKind.ENTRY_EDIT_REQUESTED, entry_id=entry.id)
+        db.commit()
+        db.refresh(entry)
+    except SQLAlchemyError as e:
+        db.rollback()
+        logger.exception("수정 요청 저장 중 데이터베이스 오류: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 처리 중 오류가 발생했습니다.",
+        )
+
+    return _to_schema(entry)
 
 
 @router.post(

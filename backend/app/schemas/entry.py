@@ -77,6 +77,7 @@ class EntryResponse(BaseModel):
     block_number: Optional[int] = Field(None, description="확정/반려 트랜잭션 블록 번호")
     corrects_entry_id: Optional[int] = Field(None, description="정정 대상 원본 Entry ID")
     correction_reason: Optional[CorrectionReason] = Field(None, description="정정 사유 유형")
+    revision_requested_at: Optional[int] = Field(None, description="수정 요청 일시 (Unix 초 단위)")
 
 
 class EntryCreate(BaseModel):
