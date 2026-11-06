@@ -321,7 +321,7 @@ void main() {
 
   group('정정 승인', () {
     CorrectionApprovalScreen screen({UserRole role = UserRole.AUDITOR, int uid = 4}) =>
-        CorrectionApprovalScreen(role: role, currentUserId: uid);
+        CorrectionApprovalScreen(role: role, currentUserId: uid, items: buildCorrectionMockItems());
 
     testWidgets('총무는 들어올 수 없다', (tester) async {
       await pump(tester, screen(role: UserRole.TREASURER, uid: 2));
@@ -354,15 +354,14 @@ void main() {
       expect(find.textContaining('정정 승인 완료!'), findsOneWidget);
     });
 
-    testWidgets('증액 정정이 잔량을 넘으면 승인해도 대기로 남는다', (tester) async {
+    testWidgets('증액 정정이 잔량을 넘으면 서명을 받기 전에 확정할 수 없다고 알린다', (tester) async {
       await pump(tester, screen());
       expect(find.textContaining('승인해도 대기로 남아요'), findsOneWidget);
       await tester.scrollUntilVisible(find.text('승인').at(3), 300, scrollable: find.byType(Scrollable).first);
       await tester.tap(find.text('승인').at(3));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('생체인증 승인'));
-      await tester.pumpAndSettle();
       expect(find.text('확정할 수 없어요'), findsOneWidget);
+      expect(find.text('생체인증 승인'), findsNothing, reason: '곧 실패할 건에 지문을 대게 하지 않는다');
     });
 
     testWidgets('재분류는 짝이 확정될 때까지 「재분류 진행 중」이다', (tester) async {
@@ -398,7 +397,7 @@ void main() {
         for (final home in <Widget>[
           const BudgetRevisionScreen(initialCategory: '행사비', basisTitle: '행사 무대 장비 대여', basisAmount: 2600000),
           MyEntriesScreen(items: buildMyEntryMockItems()),
-          CorrectionApprovalScreen(role: UserRole.AUDITOR, currentUserId: 4),
+          CorrectionApprovalScreen(role: UserRole.AUDITOR, currentUserId: 4, items: buildCorrectionMockItems()),
         ]) {
           tester.view.physicalSize = const Size(360, 1400);
           tester.view.devicePixelRatio = 1.0;

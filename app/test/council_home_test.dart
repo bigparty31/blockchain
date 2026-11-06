@@ -7,6 +7,7 @@ import 'package:student_council_app/screens/council/my_entries_screen.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:student_council_app/core/enums.dart';
+import 'package:student_council_app/screens/council/correction_approval_screen.dart';
 import 'package:student_council_app/screens/council/council_home_screen.dart';
 import 'package:student_council_app/screens/council/inquiry_response_screen.dart';
 import 'package:student_council_app/screens/president/budget_plan_screen.dart';
@@ -258,7 +259,9 @@ void main() {
       await tester.ensureVisible(find.text('정정 승인'));
       await tester.tap(find.text('정정 승인'));
       await tester.pumpAndSettle();
-      expect(find.text('원본'), findsWidgets);
+      // 서버 목록을 읽는 화면 — 시연용 더미에는 정정 건이 없어 「정정 건이 없어요」가 보인다
+      expect(find.byType(CorrectionApprovalScreen), findsOneWidget);
+      expect(find.text('정정 건이 없어요'), findsOneWidget);
     });
 
     testWidgets('아직 만들지 않은 화면은 「준비 중」으로 안내한다', (tester) async {
