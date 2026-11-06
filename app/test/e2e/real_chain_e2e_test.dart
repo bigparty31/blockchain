@@ -228,4 +228,23 @@ void main() {
       expect((await readEntry(second)).ocrStatus, OcrStatus.DUPLICATE, reason: '승인자 화면에 경고로 보인다');
     }, skip: !_e2e);
   });
+
+  test('확정 시점에 예산이 모자라면 400 + fail_reason=InsufficientBudget 으로 돌아온다 (#65) — 새로 띄운 스택 기준', () async {
+    // 운영비(#3, 1,000,000원)에 70만 원 두 건 — 등록 때는 각각 잔량 안이라 PENDING, 첫 건 확정 뒤 둘째는 잔량 부족
+    final (a, oa) = await register(kind: EntryKind.EXPENSE, amount: 700000, budgetId: 3);
+    if (oa.status == EntryStatus.BLOCKED) return markTestSkipped('운영비 예산이 이미 소모됐다 — 스택을 초기화하고 돌린다');
+    final (b, ob) = await register(kind: EntryKind.EXPENSE, amount: 700000, budgetId: 3);
+    expect(ob.status, EntryStatus.PENDING);
+
+    await loginAs('20240003', auditorKey);
+    await decisions.confirm(await readEntry(a));
+    await expectLater(
+      decisions.confirm(await readEntry(b)),
+      throwsA(isA<EntryDecisionException>()
+          .having((e) => e.failure, 'failure', EntryDecisionFailure.refused)
+          .having((e) => e.failReason, 'failReason', 'InsufficientBudget')),
+    );
+    expect((await readEntry(b)).status, EntryStatus.PENDING, reason: '확정 실패는 revert — 반려로 넘길 수 있다');
+  }, skip: !_e2e);
 }
+
