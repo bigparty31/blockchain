@@ -248,6 +248,41 @@ def test_post_budgets_term_not_found_returns_404(auth_header):
     assert res.status_code == 404
 
 
+def test_post_budgets_chain_error_returns_503_and_preserves_db(auth_header, monkeypatch):
+    """POST /budgets에서 체인 조회 실패 시 201 DRAFT로 오판해 DB를 덮어쓰지 않고 503을 반환한다."""
+    now = int(time.time())
+    original_expires = now + 86400
+    with _test_session_factory() as db:
+        seed_database(db)
+        seed_budget = db.query(DBBudget).filter(DBBudget.id == 1).first()
+        seed_budget.expires_at = datetime.fromtimestamp(original_expires, tz=timezone.utc)
+        db.commit()
+
+    async def broken_get_budget(budget_id):
+        raise ChainUnavailable("체인 RPC 노드 연결 단절")
+
+    monkeypatch.setattr(_test_chain, "get_budget", broken_get_budget)
+
+    new_expires = now + 999999
+    res = client.post(
+        "/budgets",
+        json={
+            "term_id": 1,
+            "category": "행사비",
+            "planned_amount": 1_000_000,
+            "expires_at": new_expires,
+        },
+        headers=auth_header(Role.PRESIDENT),
+    )
+    assert res.status_code == 503
+    assert "블록체인 네트워크와 통신할 수 없습니다." in res.json()["detail"]
+
+    with _test_session_factory() as db:
+        seed_budget = db.query(DBBudget).filter(DBBudget.id == 1).first()
+        dt = seed_budget.expires_at if seed_budget.expires_at.tzinfo is not None else seed_budget.expires_at.replace(tzinfo=timezone.utc)
+        assert int(dt.timestamp()) == original_expires
+
+
 def test_post_budgets_two_step_draft_and_submit_success(auth_header):
     now = int(time.time())
     expires_at = now + 86400

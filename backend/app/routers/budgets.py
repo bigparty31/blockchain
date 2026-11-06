@@ -6,7 +6,7 @@ from typing import Callable, List, Optional, TypeVar
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import or_, update
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.auth.deps import require_roles
 from app.auth.users import User
@@ -118,6 +118,7 @@ def _cleanup_unissued_seed_versions(s: Session, budget_id: int) -> None:
         .filter(
             DBBudgetVersion.budget_id == budget_id,
             DBBudgetVersion.version > 1,
+            DBBudgetVersion.tx_hash.is_(None),
         )
         .all()
     )
@@ -402,16 +403,17 @@ async def _execute_budget_issue(
                     .first()
                 )
                 if v1 is None:
-                    v1 = DBBudgetVersion(
-                        budget_id=row.id,
-                        version=1,
-                        planned_amount=actual_amount,
-                        revision_reason=None,
-                        approved_by=user.id,
-                        revision_request_id=None,
-                        tx_hash=row.tx_issue,
-                    )
-                    s.add(v1)
+                    if actual_version == 1:
+                        v1 = DBBudgetVersion(
+                            budget_id=row.id,
+                            version=1,
+                            planned_amount=actual_amount,
+                            revision_reason=None,
+                            approved_by=user.id,
+                            revision_request_id=None,
+                            tx_hash=row.tx_issue,
+                        )
+                        s.add(v1)
                 else:
                     if actual_version == 1:
                         v1.planned_amount = actual_amount
@@ -550,7 +552,7 @@ async def get_budgets(
     DB의 해당 버전 개정 사유(revision_reason)를 결합해 반환합니다.
     """
     try:
-        query = db.query(DBBudget)
+        query = db.query(DBBudget).options(selectinload(DBBudget.versions))
         if term_id is not None:
             query = query.filter(DBBudget.term_id == term_id)
         db_budgets = query.order_by(DBBudget.id.asc()).all()
@@ -653,11 +655,14 @@ async def create_budget_draft(
             .first()
         )
         if budget is not None:
-            chain_budget = None
             try:
                 chain_budget = await chain.get_budget(budget.id)
-            except ChainError:
-                chain_budget = None
+            except ChainError as e:
+                logger.exception("체인 예산 조회 실패 (budget_id=%s): %s", budget.id, e)
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="블록체인 네트워크와 통신할 수 없습니다.",
+                )
 
             if chain_budget is not None:
                 return BudgetIssueResponse(
