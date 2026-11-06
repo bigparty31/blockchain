@@ -32,9 +32,6 @@ List<Map<String, dynamic>> buildInquiryMockItems() => [
     },
     ];
 
-/// 홈 화면에 쓰는 미답변 건수.
-int inquiryMockUnansweredCount() => buildInquiryMockItems().where((e) => e['isAnswered'] != true).length;
-
 /// 제기일부터 오늘까지 지난 날 수. 답하지 않은 사실이 남는 것이 압력이다 (PRD §4.5).
 int inquiryElapsedDays(String raisedDate, {DateTime? now}) {
   final d = DateTime.tryParse(raisedDate);
