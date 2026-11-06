@@ -181,24 +181,32 @@ async def get_entries(
             detail="데이터베이스 처리 중 오류가 발생했습니다.",
         )
 
-    chain_entries = []
-    try:
-        chain = await _get_chain_client_safe(request)
-        if chain is not None:
-            chain_entries = await asyncio.gather(
-                *(chain.get_entry(e.id) for e in db_entries),
-                return_exceptions=True,
-            )
-        else:
-            chain_entries = [None] * len(db_entries)
-    except Exception:
-        chain_entries = [None] * len(db_entries)
+    # RPC 호출 부하 및 앱 타임아웃(3초) 방지:
+    # 목록 조회에서는 승인 대기 중인 PENDING 건만 최대 1.5초 이내로 온체인 조회를 시도하고,
+    # 노드 응답 지연/오류 시 즉시 DB 등록자 지갑 주소로 대체 반환합니다.
+    # 앱은 서명 직전에 단건 상세 조회(GET /entries/{id})로 최신 온체인 등록자를 최종 확인합니다.
+    pending_entries = [e for e in db_entries if e.status == EntryStatus.PENDING.value]
+    chain_registrants: dict[int, str] = {}
 
-    results = []
-    for idx, e in enumerate(db_entries):
-        c_entry = chain_entries[idx] if idx < len(chain_entries) and not isinstance(chain_entries[idx], Exception) else None
-        c_reg = c_entry.registrant if c_entry else None
-        results.append(_to_schema(e, chain_registrant=c_reg))
+    if pending_entries:
+        try:
+            chain = await _get_chain_client_safe(request)
+            if chain is not None:
+                async def _fetch_pending():
+                    tasks = [chain.get_entry(e.id) for e in pending_entries]
+                    return await asyncio.gather(*tasks, return_exceptions=True)
+
+                fetched = await asyncio.wait_for(_fetch_pending(), timeout=1.5)
+                for e, res in zip(pending_entries, fetched):
+                    if not isinstance(res, Exception) and res and res.registrant:
+                        chain_registrants[e.id] = res.registrant
+        except Exception:
+            pass
+
+    results = [
+        _to_schema(e, chain_registrant=chain_registrants.get(e.id))
+        for e in db_entries
+    ]
     return results
 
 
@@ -229,14 +237,18 @@ async def get_entry_by_id(
     try:
         chain = await _get_chain_client_safe(request)
         if chain is not None:
-            chain_entry = await chain.get_entry(id)
-            if chain_entry and chain_entry.registrant:
-                chain_registrant = chain_entry.registrant
-            tx_hash = entry.tx_confirm or entry.tx_pending
-            if tx_hash:
-                tx_detail = await chain.entry_tx_detail(tx_hash, id)
-                if tx_detail:
-                    block_num = tx_detail.block_number
+            async def _fetch_entry_chain_detail():
+                nonlocal chain_registrant, block_num
+                chain_entry = await chain.get_entry(id)
+                if chain_entry and chain_entry.registrant:
+                    chain_registrant = chain_entry.registrant
+                tx_hash = entry.tx_confirm or entry.tx_pending
+                if tx_hash:
+                    tx_detail = await chain.entry_tx_detail(tx_hash, id)
+                    if tx_detail:
+                        block_num = tx_detail.block_number
+
+            await asyncio.wait_for(_fetch_entry_chain_detail(), timeout=2.0)
     except Exception:
         pass
 
