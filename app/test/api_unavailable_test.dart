@@ -13,6 +13,8 @@ import 'package:student_council_app/screens/council/registration_result.dart';
 import 'package:student_council_app/services/api_service.dart';
 import 'package:student_council_app/services/auth_service.dart';
 
+import 'support/session.dart';
+
 /// **조회가 실패하면 실패로 보여 준다. 더미 값으로 덮지 않는다** (PRD v0.14 §7.3).
 ///
 /// 덮으면 서버가 죽어도 더미 건이 화면에 보이고, 임원이 그 건에 서명하게 된다.
@@ -116,6 +118,7 @@ void main() {
     });
 
     testWidgets('화면은 403 이유를 그대로 적는다', (tester) async {
+      await signInAs(UserRole.TREASURER, userId: 2); // 내 등록 건은 로그인한 총무의 건만 센다
       ApiService.client = MockClient((_) async => http.Response('{}', 403));
       await pump(tester, const CouncilHomeScreen(role: UserRole.TREASURER));
       // 내 등록 현황과 장부 잔액 둘 다 403 이다 — 둘 다 「권한 없음」으로 적는다.
@@ -126,6 +129,8 @@ void main() {
 
   group('화면', () {
     testWidgets('총무 홈 — 내 등록 건을 0 건으로 적지 않고 못 읽었다고 적는다', (tester) async {
+      await signInAs(UserRole.TREASURER, userId: 2); // 로그인 정보가 없어서가 아니라 서버를 못 읽어서 실패하게
+      addTearDown(signOutForTest);
       await pump(tester, const CouncilHomeScreen(role: UserRole.TREASURER));
       expect(find.byKey(const Key('my_entry_status_failed')), findsOneWidget);
       expect(find.text('대기 -'), findsOneWidget);

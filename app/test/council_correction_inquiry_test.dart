@@ -187,6 +187,28 @@ void main() {
       expect(find.text('정정 등록 완료!'), findsNothing, reason: '1건짜리 정정으로 올라가면 안 된다');
     });
 
+    testWidgets('조회 전에 고른 새 예산이 조회한 내역의 원래 예산이면 선택을 비운다 — 화면이 깨지지 않고 제출도 막힌다',
+        (tester) async {
+      await pumpScreen(tester);
+      await chooseReclassify(tester); // 대상 조회 전이라 모든 예산이 후보다
+      await tester.ensureVisible(find.byType(DropdownButtonFormField<int>));
+      await tester.tap(find.byType(DropdownButtonFormField<int>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.textContaining('사업비 · 잔량').last);
+      await tester.pumpAndSettle();
+
+      await lookup(tester, '1'); // #1 의 원래 예산이 사업비 — 후보에서 빠진다
+      expect(tester.takeException(), isNull, reason: '후보에 없는 값을 드롭다운에 두면 디버그 빌드가 assertion 으로 깨진다');
+      expect(find.textContaining('① 새 예산 +₩ 35,000 (먼저)'), findsOneWidget, reason: '선택이 비워졌다');
+
+      await tester.enterText(detailField(), '예산 항목을 잘못 골랐어요');
+      await tester.ensureVisible(find.text('정정 제출하기'));
+      await tester.tap(find.text('정정 제출하기'));
+      await tester.pumpAndSettle();
+      expect(find.text('옮겨 갈 예산 항목을 골라 주세요'), findsOneWidget);
+      expect(find.text('재분류 정정 2건 등록 완료!'), findsNothing);
+    });
+
     testWidgets('확정되지 않은 내역·없는 내역은 정정 대상이 될 수 없다', (tester) async {
       await pumpScreen(tester);
 

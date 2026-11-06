@@ -12,6 +12,8 @@ import 'package:student_council_app/screens/president/budget_plan_screen.dart';
 import 'package:student_council_app/services/api_service.dart';
 import 'package:student_council_app/services/notification_service.dart';
 
+import 'support/session.dart';
+
 /// 역할별 홈(스토리보드 0). 로그인은 `login_screen_test.dart` 가 본다.
 ///
 /// 기록을 만드는 사람과 확정하는 사람을 화면에서 가른다 — 총무 홈에는 승인·이의 답변이 없고,
@@ -62,6 +64,8 @@ void main() {
     });
 
     testWidgets('총무 홈은 보여 주지 않는 승인 대기 건수를 읽지 않는다 — 15초마다 내역 전체를 받지 않게', (tester) async {
+      await signInAs(UserRole.TREASURER, userId: 2);
+      addTearDown(signOutForTest);
       var entryRequests = 0;
       ApiService.client = MockClient((req) async {
         if (req.url.path != '/entries') return http.Response('{}', 503);
@@ -75,9 +79,12 @@ void main() {
       expect(tester.widget<IconButton>(refresh).onPressed, isNotNull, reason: '새로고침이 「읽는 중」에 묶이지 않는다');
 
       await tester.pump(const Duration(seconds: 16)); // 15초 폴링 한 번
+      await tester.pumpAndSettle();
+      expect(entryRequests, 1, reason: '15초 폴링은 내역을 읽지 않는다');
+
       await tester.tap(refresh);
       await tester.pumpAndSettle();
-      expect(entryRequests, 1);
+      expect(entryRequests, 2, reason: '새로고침은 내 등록 현황을 다시 읽는다 — 승인 대기 건수는 여전히 읽지 않는다');
     });
 
     testWidgets('읽기가 겹치면 마지막에 보낸 것만 반영한다 — 늦게 온 옛 응답이 새 숫자를 덮지 않게', (tester) async {
@@ -138,9 +145,53 @@ void main() {
       expect(find.text('₩ 4,965,000'), findsNothing);
     });
 
-    testWidgets('총무 홈은 내 등록 건을 상태별로 센다', (tester) async {
+    testWidgets('내 등록 건은 로그인한 총무가 등록한 건만 센다 — GET /entries 는 전체 내역이다', (tester) async {
+      await signInAs(UserRole.TREASURER, userId: 2);
+      addTearDown(signOutForTest);
+      Map<String, Object?> e(int id, int createdBy, String status) => {
+            'id': id, 'term_id': 1, 'kind': 'EXPENSE', 'amount': 1000, 'counterparty': '가게', 'purpose': '구매',
+            'occurred_at': 1788793200, 'meta_hash': '0x00', 'status': status, 'created_by': createdBy,
+          };
+      ApiService.client = MockClient((req) async => req.url.path == '/entries'
+          ? http.Response(
+              jsonEncode([
+                e(1, 2, 'PENDING'), e(2, 2, 'REJECTED'), // 내 건
+                e(3, 5, 'PENDING'), e(4, 5, 'PENDING'), e(5, 5, 'BLOCKED'), // 다른 총무의 건
+              ]),
+              200,
+              headers: {'content-type': 'application/json; charset=utf-8'})
+          : http.Response('{}', 503));
       await pump(tester, const CouncilHomeScreen(role: UserRole.TREASURER));
-      // 서버가 없으면 예시 3건(확정 2 · 대기 1)으로 센다
+
+      expect(find.text('대기 1'), findsOneWidget);
+      expect(find.text('반려 1'), findsOneWidget);
+      expect(find.text('차단 0'), findsOneWidget);
+    });
+
+    testWidgets('내 등록 건은 새로고침 때 다시 읽는다 — 첫 조회가 실패해도 서버가 돌아오면 회복한다', (tester) async {
+      ApiService.useDemoData = false;
+      await signInAs(UserRole.TREASURER, userId: 2);
+      addTearDown(signOutForTest);
+      var up = false;
+      ApiService.client = MockClient((req) async => up && req.url.path == '/entries'
+          ? entriesReply(1)
+          : http.Response('{}', 503));
+      await pump(tester, const CouncilHomeScreen(role: UserRole.TREASURER));
+      expect(find.byKey(const Key('my_entry_status_failed')), findsOneWidget);
+      expect(find.text('대기 -'), findsOneWidget);
+
+      up = true;
+      await tester.tap(find.byKey(const Key('council_refresh')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('my_entry_status_failed')), findsNothing);
+      expect(find.text('대기 1'), findsOneWidget);
+    });
+
+    testWidgets('총무 홈은 내 등록 건을 상태별로 센다', (tester) async {
+      await signInAs(UserRole.TREASURER, userId: 2);
+      addTearDown(signOutForTest);
+      await pump(tester, const CouncilHomeScreen(role: UserRole.TREASURER));
+      // 서버가 없으면 예시 3건(모두 user 2 등록, 확정 2 · 대기 1)으로 센다
       expect(find.text('대기 1'), findsOneWidget);
       expect(find.text('반려 0'), findsOneWidget);
       expect(find.text('차단 0'), findsOneWidget);

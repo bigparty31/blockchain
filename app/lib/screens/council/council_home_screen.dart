@@ -67,13 +67,20 @@ class _CouncilHomeScreenState extends State<CouncilHomeScreen> with WidgetsBindi
   int _pendingSeq = 0;
   int _unreadSeq = 0;
   int _balanceSeq = 0;
+  int _mineSeq = 0;
+
+  /// 총무의 「내 등록 건」 상태별 건수. null 은 「모름」이다 — 못 읽은 것을 0 건으로 내리지 않는다.
+  ({int pending, int rejected, int blocked})? _mine;
+  String? _mineError;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _refreshAll();
-    _poll = Timer.periodic(NotificationService.pollInterval, (_) => _refreshAll(silent: true));
+    // 15초 폴링은 내 등록 건을 읽지 않는다 — 배지 숫자 때문에 내역 전체(GET /entries)를 15초마다 받지 않게.
+    // 내 등록 건은 처음·새로고침·화면 복귀·앱 복귀 때 읽는다.
+    _poll = Timer.periodic(NotificationService.pollInterval, (_) => _refreshAll(silent: true, mine: false));
   }
 
   @override
@@ -86,13 +93,44 @@ class _CouncilHomeScreenState extends State<CouncilHomeScreen> with WidgetsBindi
   /// 앱으로 돌아오면 다시 읽는다.
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) _refreshAll(silent: true);
+    if (state == AppLifecycleState.resumed) _refreshAll(silent: true); // 앱 복귀는 내 등록 건도 다시 읽는다
   }
 
-  /// 승인 대기 건수와 안 읽은 알림 수를 함께 다시 읽는다.
+  /// 승인 대기 건수·안 읽은 알림 수·잔액, 그리고 [mine] 이면 총무의 내 등록 건을 함께 다시 읽는다.
   /// [silent] 면 배지를 「확인 중」으로 바꾸지 않는다 — 15초마다 배지가 깜빡이지 않게.
-  Future<void> _refreshAll({bool silent = false}) =>
-      Future.wait([_load(silent: silent), _loadUnread(), _loadBalance()]);
+  Future<void> _refreshAll({bool silent = false, bool mine = true}) =>
+      Future.wait([_load(silent: silent), _loadUnread(), _loadBalance(), if (mine) _loadMine()]);
+
+  /// 총무 홈의 「내 등록 건」 — **로그인한 총무가 등록한 건만** 센다. `GET /entries` 는 전체 내역이라
+  /// 거르지 않으면 다른 등록자의 대기·반려·차단 건까지 내 건으로 보인다.
+  Future<void> _loadMine() async {
+    if (_isApprover) return; // 감사·회장 홈에는 이 카드가 없다
+    final seq = ++_mineSeq;
+    final me = AuthService().session?.userId;
+    ({int pending, int rejected, int blocked})? counts;
+    String? error;
+    if (me == null) {
+      error = '로그인 정보를 확인할 수 없어 내 등록 건을 셀 수 없어요.';
+    } else {
+      try {
+        final mine = (await ApiService().fetchEntries()).where((e) => e.createdBy == me).toList();
+        int count(EntryStatus st) => mine.where((e) => e.status == st).length;
+        counts = (
+          pending: count(EntryStatus.PENDING),
+          rejected: count(EntryStatus.REJECTED),
+          blocked: count(EntryStatus.BLOCKED),
+        );
+      } on ApiUnavailable catch (e) {
+        // 못 읽었으면 지난 숫자도 지운다 — 잔액과 같은 판단
+        error = e.message;
+      }
+    }
+    if (!mounted || seq != _mineSeq) return; // 더 나중에 보낸 읽기가 있다
+    setState(() {
+      _mine = counts;
+      _mineError = error;
+    });
+  }
 
   Future<void> _loadBalance() async {
     final seq = ++_balanceSeq;
@@ -294,7 +332,7 @@ class _CouncilHomeScreenState extends State<CouncilHomeScreen> with WidgetsBindi
                     // 총무: 지출 & 수입 등록, 내 등록 건 상태
                     _TreasurerQuickActions(context: context),
                     const SizedBox(height: 12),
-                    const _MyEntryStatus(),
+                    _MyEntryStatus(counts: _mine, error: _mineError),
                     const SizedBox(height: 20),
                   ],
 
@@ -714,40 +752,15 @@ class _SignRequestBanner extends StatelessWidget {
 }
 
 // ── 총무: 내 등록 건 상태 (대기 · 반려 · 차단) ─────────────────────
-class _MyEntryStatus extends StatefulWidget {
-  const _MyEntryStatus();
-
-  @override
-  State<_MyEntryStatus> createState() => _MyEntryStatusState();
-}
-
-class _MyEntryStatusState extends State<_MyEntryStatus> {
-  int? _pending, _rejected, _blocked;
+/// 읽기는 홈이 한다 ([_CouncilHomeScreenState._loadMine]) — 새로고침·화면 복귀와 같은 흐름에 묶이게.
+class _MyEntryStatus extends StatelessWidget {
+  /// 상태별 건수. null 이면 「모름」이라 「-」로 둔다.
+  final ({int pending, int rejected, int blocked})? counts;
 
   /// 내역을 못 읽은 이유. 건수를 「-」로 두고 이유를 적는다 — 0 건으로 내리지 않는다.
-  String? _error;
+  final String? error;
 
-  @override
-  void initState() {
-    super.initState();
-    _load();
-  }
-
-  Future<void> _load() async {
-    try {
-      final entries = await ApiService().fetchEntries();
-      if (!mounted) return;
-      int count(EntryStatus st) => entries.where((e) => e.status == st).length;
-      setState(() {
-        _error = null;
-        _pending = count(EntryStatus.PENDING);
-        _rejected = count(EntryStatus.REJECTED);
-        _blocked = count(EntryStatus.BLOCKED);
-      });
-    } on ApiUnavailable catch (e) {
-      if (mounted) setState(() => _error = e.message);
-    }
-  }
+  const _MyEntryStatus({required this.counts, required this.error});
 
   @override
   Widget build(BuildContext context) {
@@ -770,11 +783,11 @@ class _MyEntryStatusState extends State<_MyEntryStatus> {
         runSpacing: 8,
         children: [
           const Text('내 등록 건', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: AppTheme.textMain)),
-          chip('대기', _pending, AppTheme.pending),
-          chip('반려', _rejected, AppTheme.expense),
-          chip('차단', _blocked, AppTheme.textSub),
-          if (_error != null)
-            Text(_error!,
+          chip('대기', counts?.pending, AppTheme.pending),
+          chip('반려', counts?.rejected, AppTheme.expense),
+          chip('차단', counts?.blocked, AppTheme.textSub),
+          if (error != null)
+            Text(error!,
                 key: const Key('my_entry_status_failed'),
                 style: const TextStyle(fontSize: 12, color: AppTheme.expense)),
         ],
