@@ -33,9 +33,11 @@
 | --- | --- |
 | `INPUT_ERROR` | 입력 오류 |
 | `RECEIPT_RECHECK` | 영수증 재확인 |
-| `REFUND` | 환불 |
+| `REFUND` | 반환 |
 | `RECLASSIFY` | 재분류 |
-| `OTHER` | 기타 정정 사유 (상세 사유 purpose 입력 필수) |
+| `OTHER` | 기타 |
+
+`OTHER`는 상세 사유를 `purpose`에 입력한다.
 
 ## budget revision status
 
