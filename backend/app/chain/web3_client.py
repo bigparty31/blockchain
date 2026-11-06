@@ -38,6 +38,7 @@ from app.chain.models import (
     BudgetTxResult,
     ChainBudget,
     ChainEntry,
+    EntryTxDetail,
     ChainError,
     ChainRevert,
     ChainSetupError,
@@ -242,10 +243,10 @@ async def _attempt(make):
 
 
 class Web3ChainClient:
-    """AccountingLedger·BudgetToken 릴레이어. 만들 때는 connect() 를 쓴다."""
+    """AccountingLedger·BudgetToken 릴레이어. 만들 때는 connect() 를 쓴다. 키 없이 만들면 조회만 한다 (CHAIN_CLIENT §8)."""
 
     def __init__(
-        self, w3: AsyncWeb3, account: LocalAccount, deployment: Deployment, contracts: dict, deployment_file: Path
+        self, w3: AsyncWeb3, account: Optional[LocalAccount], deployment: Deployment, contracts: dict, deployment_file: Path
     ):
         self._w3 = w3
         self._account = account
@@ -266,15 +267,17 @@ class Web3ChainClient:
 
     @classmethod
     async def connect(
-        cls, rpc_url: str, private_key: str, deployment_file: Optional[Path] = None
+        cls, rpc_url: str, private_key: Optional[str], deployment_file: Optional[Path] = None
     ) -> "Web3ChainClient":
         """노드에 연결하고 시작 점검을 통과한 클라이언트를 돌려준다.
+
+        private_key 가 None 이면 읽기 전용이다. 조회는 되고 쓰기는 보내지 않고 ChainSetupError 다. 릴레이어 점검도 하지 않는다.
 
         Raises:
             ChainSetupError: 키, 노드 연결, 체인·배포 기록 불일치, 릴레이어 롤·잔액 문제.
                              배포 기록·ABI 파일 문제는 하위 클래스 DeploymentError.
         """
-        account = _relayer_account(private_key)
+        account = None if private_key is None else _relayer_account(private_key)
         path = deployment_file or deployment_path()
         deployment = load_deployment(path)
         abis = {name: load_abi(deployment.contracts[name], path) for name in CONTRACTS}
@@ -361,8 +364,8 @@ class Web3ChainClient:
             raise ChainSetupError("체인 클라이언트가 교체됐다. 요청을 다시 보낸다")
 
     @property
-    def relayer_address(self) -> str:
-        return self._account.address
+    def relayer_address(self) -> Optional[str]:
+        return None if self._account is None else self._account.address
 
     def __repr__(self) -> str:
         return f"Web3ChainClient(relayer={self.relayer_address}, chain_id={self._deployment.chain_id})"
@@ -404,9 +407,10 @@ class Web3ChainClient:
             **{("code", name): (lambda c=contracts[name]: eth.get_code(c.address)) for name in CONTRACTS},
             **{("separator", name): (lambda c=contracts[name]: c.functions.DOMAIN_SEPARATOR().call()) for name in CONTRACTS},
             **{link: (lambda owner=link[0], fn=link[1]: getattr(contracts[owner].functions, fn)().call()) for link in _LINKS},
-            "relayer_role": lambda: contracts[ROLE_MANAGER].functions.roleOf(self.relayer_address).call(),
-            "balance": lambda: eth.get_balance(self.relayer_address),
         }
+        if self._account is not None:
+            calls["relayer_role"] = lambda: contracts[ROLE_MANAGER].functions.roleOf(self.relayer_address).call()
+            calls["balance"] = lambda: eth.get_balance(self.relayer_address)
         results = dict(zip(calls, await asyncio.gather(*(_attempt(make) for make in calls.values()), return_exceptions=True)))
 
         for name in CONTRACTS:
@@ -427,6 +431,8 @@ class Web3ChainClient:
         problem = _link_problem(d, {link: results[link] for link in _LINKS})
         if problem:
             raise ChainSetupError(problem)
+        if self._account is None:
+            return
         if bytes(results["relayer_role"]) != _NO_ROLE:
             raise ChainSetupError(
                 f"릴레이어 키({self.relayer_address})가 임원 롤을 가진 주소다. 서버는 임원 키를 갖지 않는다 (PRD §9.2) — "
@@ -511,6 +517,39 @@ class Web3ChainClient:
     async def tx_result(self, tx_hash: str, entry_id: int) -> Optional[TxResult]:
         self._ensure_open()
         tx_hash = check_tx_hash(tx_hash)
+        receipt = await self._landed_receipt(tx_hash)
+        if receipt is None:
+            return None
+        # 체인 상태로 대신 판정하지 않는다 — 이 트랜잭션이 아닌 나중 트랜잭션의 결과(예: 등록 뒤 확정)를 읽게 된다
+        result = self._find_event(tx_hash, receipt, entry_id, self._all_outcomes())
+        if result is None:
+            raise ChainUnavailable(f"결과 이벤트를 찾지 못했다 (tx={tx_hash})")
+        return result
+
+    async def entry_tx_detail(self, tx_hash: str, entry_id: int) -> Optional[EntryTxDetail]:
+        self._ensure_open()
+        tx_hash = check_tx_hash(tx_hash)
+        receipt = await self._landed_receipt(tx_hash)
+        if receipt is None:
+            return None
+        found = self._find_log(receipt, entry_id, self._all_outcomes())
+        if found is None:
+            raise ChainUnavailable(f"결과 이벤트를 찾지 못했다 (tx={tx_hash})")
+        log, status = found
+        args = log["args"]
+        had_warning = status is EntryStatus.CONFIRMED and args["hadWarning"]
+        reason = args["reasonHash"] if status is EntryStatus.REJECTED else args["warningReasonHash"] if had_warning else None
+        return EntryTxDetail(
+            tx_hash=tx_hash,
+            status=status,
+            block_number=receipt["blockNumber"],
+            block_reason=BLOCK_REASON_ORDER[args["reason"]] if status is EntryStatus.BLOCKED else None,
+            reason_hash=None if reason is None else "0x" + bytes(reason).hex(),
+            had_warning=had_warning,
+        )
+
+    async def _landed_receipt(self, tx_hash: str) -> Optional[dict]:
+        """성공한 트랜잭션의 receipt. 아직 블록에 없으면 None, 실패로 끝났으면 ChainRevert."""
         try:
             receipt = await self._w3.eth.get_transaction_receipt(tx_hash)
         except TransactionNotFound:
@@ -520,18 +559,16 @@ class Web3ChainClient:
         if receipt["status"] != 1:
             # 사유를 재현하려면 원래 호출이 있어야 한다. 서비스에는 "실패로 끝났다(체인에 남은 것 없음)" 면 충분하다
             raise ChainRevert(RevertReason.UNKNOWN, f"트랜잭션이 실패로 끝났다 (tx={tx_hash})")
+        return receipt
+
+    def _all_outcomes(self) -> tuple:
         events = self._ledger.events
-        outcomes = (
+        return (
             (events.EntryBlocked, EntryStatus.BLOCKED),
             (events.EntryPending, EntryStatus.PENDING),
             (events.EntryConfirmed, EntryStatus.CONFIRMED),
             (events.EntryRejected, EntryStatus.REJECTED),
         )
-        # 체인 상태로 대신 판정하지 않는다 — 이 트랜잭션이 아닌 나중 트랜잭션의 결과(예: 등록 뒤 확정)를 읽게 된다
-        result = self._find_event(tx_hash, receipt, entry_id, outcomes)
-        if result is None:
-            raise ChainUnavailable(f"결과 이벤트를 찾지 못했다 (tx={tx_hash})")
-        return result
 
     # ------------------------------------------------------------ 예산 (BudgetToken)
 
@@ -637,6 +674,8 @@ class Web3ChainClient:
         시뮬레이션은 다음 블록(pending) 기준이다 — 최신 블록 기준이면 블록이 한동안 없을 때 시각이 낡아, 만료된 서명이
         시뮬레이션을 통과하고 채굴에서 revert 한다 (nonce 를 쓰고 콜백도 불린 뒤). 서로 기다릴 필요 없는 조회는 함께 보낸다.
         """
+        if self._account is None:
+            raise ChainSetupError("읽기 전용 클라이언트라 트랜잭션을 보낼 수 없다. 쓰기 서버에는 RELAYER_PRIVATE_KEY 를 설정한다")
         eth = self._w3.eth
         sender = {"from": self.relayer_address}
         reverts = reverts or self._reverts
@@ -721,11 +760,18 @@ class Web3ChainClient:
 
     def _find_event(self, tx_hash: str, receipt: dict, entry_id: int, outcomes: tuple) -> Optional[TxResult]:
         """receipt 에서 이 원장·이 id 의 결과 이벤트를 찾는다. outcomes 는 (이벤트, status) 를 볼 순서대로. 없으면 None."""
+        found = self._find_log(receipt, entry_id, outcomes)
+        if found is None:
+            return None
+        log, status = found
+        reason = BLOCK_REASON_ORDER[log["args"]["reason"]] if status is EntryStatus.BLOCKED else None
+        return TxResult(tx_hash=tx_hash, status=status, block_reason=reason)
+
+    def _find_log(self, receipt: dict, entry_id: int, outcomes: tuple) -> Optional[tuple]:
         for event, status in outcomes:
             for log in event().process_receipt(receipt, errors=DISCARD):
                 if log["address"] == self._ledger.address and log["args"]["id"] == entry_id:
-                    reason = BLOCK_REASON_ORDER[log["args"]["reason"]] if status is EntryStatus.BLOCKED else None
-                    return TxResult(tx_hash=tx_hash, status=status, block_reason=reason)
+                    return log, status
         return None
 
     async def _event_result(self, tx_hash: str, receipt: dict, entry_id: int, outcomes: tuple) -> TxResult:
