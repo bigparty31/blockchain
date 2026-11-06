@@ -77,6 +77,32 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
     });
 
     if (_auth.lockRemaining != null) _startLockTicker();
+
+    // 기기에 토큰이 남은 사실을 **여기서도 알린다.**
+    //
+    // 세션 만료는 `main.dart` 가 로그인 화면으로 밀어내면서 스낵바로 말해 주지만,
+    // **앱을 켤 때의 복원 실패는 그 경로를 지나지 않는다** — `SessionGate` 가
+    // 조용히 로그인 화면을 세울 뿐이다. 그쪽에서 토큰 삭제까지 실패하면
+    // ([AuthService.restore] 의 `_Unauthorized` 분기) 깃발만 서고 아무도 말하지
+    // 않아, 공용 기기에 남의 토큰이 남은 것을 사용자가 모른다.
+    //
+    // 프레임이 끝난 뒤에 띄운다 — `initState` 에는 `ScaffoldMessenger` 가 아직 없다.
+    // `consume` 이라 만료 경로에서 두 번 뜨지는 않는다.
+    if (_auth.tokenClearFailed) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_auth.consumeTokenClearFailed()) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              '이 기기에서 이전 로그인 정보를 지우지 못했습니다 — '
+              '공용 기기라면 앱 데이터를 삭제해 주세요.',
+            ),
+            behavior: SnackBarBehavior.floating,
+            duration: Duration(seconds: 6),
+          ),
+        );
+      });
+    }
   }
 
   @override
@@ -119,6 +145,24 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
         _pwController.text,
       );
       if (!mounted) return;
+
+      // **저장이 안 된 로그인은 그렇다고 말한다** ([AuthService.sessionNotPersisted]).
+      // 사용자는 「로그인 상태가 유지된다」고 알고 있어서, 다음에 앱을 켰을 때
+      // 로그인 화면이 뜨면 앱이 멋대로 로그아웃시킨 것으로 보인다. 위험하지는
+      // 않다 — 기기에 남은 토큰이 없다는 뜻이기도 하다.
+      //
+      // 홈으로 넘어간 뒤에도 남는다: `MaterialApp.scaffoldMessengerKey` 가
+      // 앱 전체의 messenger 라 화면 교체에 딸려 사라지지 않는다.
+      if (_auth.sessionNotPersisted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('이 기기에 로그인 상태를 저장하지 못했습니다 — 앱을 다시 켜면 다시 로그인해야 합니다.'),
+            behavior: SnackBarBehavior.floating,
+            duration: Duration(seconds: 6),
+          ),
+        );
+      }
+
       _goHome(session.role);
       return;
     } catch (e) {
@@ -142,6 +186,24 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
     if (failure is LoginLocked) {
       _startLockTicker();
       await _showFailureDialog(locked: true, remaining: failure.remaining);
+      return;
+    }
+
+    // 학번·비밀번호는 맞았는데 **기기 보관소를 믿을 수 없어** 로그인을 확정하지
+    // 않은 경우다 ([SessionStoreUnsafe]). 「연결 실패」로 뭉개면 사용자는 다시
+    // 눌러 보다 끝나고, 왜 안 되는지 알 방법이 없다. 비밀번호도 비우지 않는다 —
+    // 틀린 게 아니다.
+    if (failure is SessionStoreUnsafe) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            '이 기기에 로그인 정보를 저장할 수 없어 로그인을 중단했습니다. '
+            '이전 사용자의 정보가 남아 있어 앱 데이터를 삭제한 뒤 다시 시도해 주세요.',
+          ),
+          behavior: SnackBarBehavior.floating,
+          duration: Duration(seconds: 8),
+        ),
+      );
       return;
     }
 

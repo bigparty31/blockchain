@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -444,6 +445,191 @@ void main() {
         reason: '이전 사용자가 제기한 이의가 다음 사람에게 보인다',
       );
       expect(StudentApiService().usingDemoData, isTrue);
+    });
+  });
+
+  group('토큰 저장 실패는 삼키지 않는다', () {
+    /// 이전 사용자(A)의 토큰이 이미 기기에 남아 있는 상태.
+    MemoryTokenStore withPreviousUser() {
+      final store = MemoryTokenStore('token-of-A', UserRole.STUDENT);
+      AuthService.store = store;
+      return store;
+    }
+
+    test('남의 토큰이 남은 채로는 로그인을 확정하지 않는다', () async {
+      final store = withPreviousUser()
+        ..failOnWrite = true
+        ..failOnClear = true;
+
+      await expectLater(
+        () => loginStudent(),
+        throwsA(isA<SessionStoreUnsafe>()),
+      );
+
+      expect(AuthService().session, isNull, reason: '보관소에 A 의 토큰이 남은 채로 B 의 세션을 열었다');
+      expect(
+        store.value?.token,
+        'token-of-A',
+        reason: '이 상태로 로그인을 확정하면 다음 실행의 restore 가 A 의 세션을 되살린다',
+      );
+    });
+
+    test('지우기까지는 되면 로그인은 되고 보관소는 비어 있다', () async {
+      final store = withPreviousUser()..failOnWrite = true;
+
+      await loginStudent();
+
+      expect(AuthService().session?.token, 'token-abc');
+      expect(store.value, isNull, reason: '남은 A 의 토큰을 지우지 못했다');
+      expect(
+        AuthService().sessionNotPersisted,
+        isTrue,
+        reason: '저장되지 않은 사실을 호출자가 알아야 「다시 켜면 로그인하세요」를 말할 수 있다',
+      );
+    });
+
+    test('보관소가 비어 있었으면 저장 실패만으로 막지 않는다', () async {
+      final store = MemoryTokenStore()..failOnWrite = true;
+      AuthService.store = store;
+
+      await loginStudent();
+
+      expect(AuthService().session?.token, 'token-abc');
+      expect(AuthService().sessionNotPersisted, isTrue);
+    });
+
+    test('무엇이 남았는지 못 읽으면 남았다고 보고 지운다', () async {
+      final store = withPreviousUser()
+        ..failOnWrite = true
+        ..failOnRead = true;
+
+      await loginStudent();
+
+      expect(store.value, isNull, reason: '모를 때 그냥 두면 A 의 토큰이 남는다');
+      expect(AuthService().sessionNotPersisted, isTrue);
+    });
+
+    test('저장이 되면 깃발이 내려간다', () async {
+      final store = withPreviousUser();
+
+      await loginStudent();
+
+      expect(store.value?.token, 'token-abc');
+      expect(store.value?.role, UserRole.STUDENT);
+      expect(AuthService().sessionNotPersisted, isFalse);
+    });
+
+    test('보관소가 고장난 기기에서 로그인을 반복해도 잠기지 않는다', () async {
+      withPreviousUser()
+        ..failOnWrite = true
+        ..failOnClear = true;
+
+      for (var i = 0; i < AuthService.maxAttempts; i++) {
+        await expectLater(() => loginStudent(), throwsA(isA<SessionStoreUnsafe>()));
+      }
+
+      expect(
+        AuthService().lockRemaining,
+        isNull,
+        reason: '비밀번호는 맞았다 — 보관소 고장을 연속 실패로 세면 복구할 방법이 없다',
+      );
+    });
+  });
+
+  group('지난 세션의 응답은 싱글턴에 남지 않는다', () {
+    /// 데모 모드로 들어간 뒤, **응답을 붙잡아 둘 수 있는** 클라이언트로 갈아끼운다.
+    Future<Completer<void>> enterDemoThenGate() async {
+      StudentApiService.client =
+          MockClient((_) async => throw http.ClientException('no server'));
+      await StudentApiService().fetchEntries(); // 데모 모드로 들어간다
+
+      final gate = Completer<void>();
+      StudentApiService.client = MockClient((_) async {
+        await gate.future;
+        throw http.ClientException('no server');
+      });
+      return gate;
+    }
+
+    test('세션 번호는 로그인·로그아웃마다 올라간다', () async {
+      final before = AuthService().sessionGeneration;
+      await loginStudent();
+      final afterLogin = AuthService().sessionGeneration;
+      await AuthService().logout();
+
+      expect(afterLogin, greaterThan(before));
+      expect(AuthService().sessionGeneration, greaterThan(afterLogin),
+          reason: '로그아웃하면 토큰이 null 이라 토큰 비교로는 세션을 구분할 수 없다');
+    });
+
+    test('로그아웃 뒤에 실패한 이의 제기는 목록에 들어가지 않는다', () async {
+      await loginStudent();
+      AuthService().onSessionCleared = () => StudentApiService().resetSessionState();
+      final gate = await enterDemoThenGate();
+
+      // A 가 이의를 보냈고, 응답이 돌아오기 전에 로그아웃했다.
+      final inFlight = StudentApiService().raiseObjection(
+        entryId: 1,
+        content: 'A 가 쓴 이의 내용',
+      );
+      await AuthService().logout();
+      gate.complete();
+
+      await expectLater(inFlight, throwsA(isA<ObjectionFailed>()));
+      expect(
+        await StudentApiService().fetchObjections(),
+        isEmpty,
+        reason: '다음 사람의 조회가 실패하면 A 가 쓴 이의가 자기 것으로 보인다',
+      );
+    });
+
+    test('로그아웃 뒤에 돌아온 목록 응답이 데모 깃발을 끄지 않는다', () async {
+      await loginStudent();
+      AuthService().onSessionCleared = () => StudentApiService().resetSessionState();
+
+      await StudentApiService().fetchEntries(); // 실패 → 데모 모드
+      final gate = Completer<void>();
+      StudentApiService.client = MockClient((_) async {
+        await gate.future;
+        return http.Response('[]', 200,
+            headers: {'content-type': 'application/json; charset=utf-8'});
+      });
+
+      final inFlight = StudentApiService().fetchEntries();
+      await AuthService().logout();
+      gate.complete();
+      await inFlight;
+
+      expect(
+        StudentApiService().usingDemoData,
+        isTrue,
+        reason: 'resetSessionState 가 되돌려 놓은 깃발을 지난 세션의 응답이 다시 껐다',
+      );
+    });
+  });
+
+  group('토큰 삭제 실패 경고는 한 번만 전달된다', () {
+    test('consume 는 읽고 내린다', () async {
+      AuthService().tokenClearFailed = true;
+
+      expect(AuthService().consumeTokenClearFailed(), isTrue);
+      expect(
+        AuthService().consumeTokenClearFailed(),
+        isFalse,
+        reason: 'main.dart 와 로그인 화면이 같은 깃발을 봐서, 안 내리면 경고가 두 번 뜬다',
+      );
+    });
+
+    test('복원이 401 을 받고 토큰을 지우지 못하면 깃발이 선다', () async {
+      AuthService.store = MemoryTokenStore('token-of-A', UserRole.STUDENT)..failOnClear = true;
+      AuthService.client = MockClient((_) async => http.Response('{}', 401));
+
+      expect(await AuthService().restore(), isNull);
+      expect(
+        AuthService().tokenClearFailed,
+        isTrue,
+        reason: '앱 시작 복원은 세션 만료 스낵바를 지나지 않는다 — 깃발이 유일한 전달 수단이다',
+      );
     });
   });
 }

@@ -56,16 +56,21 @@ class _StudentCouncilAppState extends State<StudentCouncilApp> {
     );
     // 기기에서 토큰을 지우지 못했으면 그 사실도 말한다 — 「다시 로그인하세요」만
     // 보여주면 사용자는 기기에 세션이 남은 것을 모른다 ([TokenClearFailed]).
+    //
+    // **읽으면서 깃발을 내린다** ([AuthService.consumeTokenClearFailed]). 로그인
+    // 화면도 같은 깃발을 보는데(앱 시작 복원 실패는 이 경로를 지나지 않아서),
+    // 그냥 읽으면 여기서 알린 경고를 로그인 화면이 한 번 더 띄운다.
+    final clearFailed = AuthService().consumeTokenClearFailed();
     _messengerKey.currentState?.showSnackBar(
       SnackBar(
         content: Text(
-          AuthService().tokenClearFailed
+          clearFailed
               ? '세션이 만료되었습니다. 다만 이 기기에서 로그인 정보를 지우지 못했습니다 — '
                   '공용 기기라면 앱 데이터를 삭제해 주세요.'
               : '세션이 만료되었습니다. 다시 로그인해 주세요.',
         ),
         behavior: SnackBarBehavior.floating,
-        duration: Duration(seconds: AuthService().tokenClearFailed ? 6 : 4),
+        duration: Duration(seconds: clearFailed ? 6 : 4),
       ),
     );
   }

@@ -130,13 +130,22 @@ class StudentApiService {
   /// 이 그것을 `PENDING` 으로 채워 넣어서 그냥 두면 **학생 목록에 「승인대기」로
   /// 섞여 보인다.** 아직 아무 데도 올라가지 않아 검증할 대상조차 없는 건이다.
   Future<List<EntryModel>> fetchEntries() async {
+    // 세션이 바뀐 뒤에 돌아온 응답은 **싱글턴 깃발을 건드리지 않는다**
+    // ([_staleSession]). 목록 자체는 부른 화면에 돌려준다 — 그 화면은 이미
+    // 닫히는 중이고, 돌려주지 않으면 여기서 던질 곳도 없다.
+    final generation = AuthService().sessionGeneration;
     final json = await _getJson(ApiConfig.entries);
+    final stale = _staleSession(generation);
+
     if (json is List) {
-      _usingDemoData = false;
-      return parseEntries(json);
+      final entries = stale ? parseEntriesOnly(json) : parseEntries(json);
+      if (!stale) _usingDemoData = false;
+      return entries;
     }
-    _usingDemoData = true;
-    _skippedEntryCount = 0;
+    if (!stale) {
+      _usingDemoData = true;
+      _skippedEntryCount = 0;
+    }
     return _demoEntries();
   }
 
@@ -153,6 +162,18 @@ class StudentApiService {
   /// `fromJson` 이 아니라 여기서 걸러야 하는 이유는 [EntryModel.fromJson] 이
   /// 실패를 던져서 알리는 계약이기 때문이다. 판단은 호출자 몫이다.
   List<EntryModel> parseEntries(List<dynamic> json) {
+    final (entries, skipped) = _parse(json);
+    _skippedEntryCount = skipped;
+    return entries;
+  }
+
+  /// [parseEntries] 와 같지만 [skippedEntryCount] 를 **갱신하지 않는다.**
+  ///
+  /// 지난 세션의 응답을 변환할 때 쓴다 — 그 건수를 써 두면 다음 사용자의 화면이
+  /// 「n 건을 읽지 못했습니다」를 자기 조회 결과로 읽는다 ([_staleSession]).
+  List<EntryModel> parseEntriesOnly(List<dynamic> json) => _parse(json).$1;
+
+  (List<EntryModel>, int) _parse(List<dynamic> json) {
     final entries = <EntryModel>[];
     var skipped = 0;
     for (final e in json) {
@@ -164,8 +185,7 @@ class StudentApiService {
         skipped++;
       }
     }
-    _skippedEntryCount = skipped;
-    return entries;
+    return (entries, skipped);
   }
 
   /// GET /budgets — 예산 항목별 잔량·집행률·개정 이력 (S6)
@@ -364,6 +384,15 @@ class StudentApiService {
       }
     }
 
+    // **보낸 세션이 아직 그 세션인지 먼저 본다.** 로그아웃·세션 만료가 이
+    // 응답보다 먼저 도착하면 [resetSessionState] 가 목록을 비우고 데모 깃발을
+    // 다시 켜 두는데, 그 상태에서 아래 폴백으로 내려가면 **지난 사용자가 쓴
+    // 이의가 목록에 들어간다.** 다음 사람의 조회가 실패하면(그때 폴백이
+    // `_pendingObjections` 를 돌려준다) 남의 이의 내용이 자기 것으로 보인다.
+    //
+    // 세션이 바뀌었으면 폴백도 성공도 아니다 — 받을 화면 자체가 없다.
+    if (_staleSession(auth.generation)) throw const ObjectionFailed();
+
     if (!_usingDemoData) throw const ObjectionFailed();
 
     // 서버가 없을 때. 만들어서 돌려주기만 하면 화면을 나가는 순간 사라지므로
@@ -480,6 +509,7 @@ class StudentApiService {
   // ── 미확인 항목 뱃지 카운트 (S12) ──────────────────────────
 
   Future<int> lastSeenEntryId() async {
+    await _sessionReset; // 지난 사용자의 기준을 읽지 않는다 ([_sessionReset])
     try {
       final raw = await _storage.read(key: _lastSeenKey);
       return int.tryParse(raw ?? '') ?? 0;
@@ -489,6 +519,7 @@ class StudentApiService {
   }
 
   Future<void> markEntriesSeen(int maxEntryId) async {
+    await _sessionReset; // 지난 사용자의 삭제가 이 값을 지우지 않게 ([_sessionReset])
     try {
       await _storage.write(key: _lastSeenKey, value: maxEntryId.toString());
     } catch (_) {
@@ -535,7 +566,19 @@ class StudentApiService {
   /// 토큰까지 들고 다니는 이유는 [AuthService.authSnapshot] 설명에 있다 —
   /// 401 을 보고할 때 「그 요청이 쓴 토큰」이어야 늦게 온 응답이 새 세션을
   /// 지우지 않는다.
-  ({Map<String, String> headers, String? token}) get _auth => AuthService().authSnapshot;
+  ({Map<String, String> headers, String? token, int generation}) get _auth =>
+      AuthService().authSnapshot;
+
+  /// 이 요청을 보낸 세션이 **이미 다른 세션으로 바뀌었는지**.
+  ///
+  /// 이 클래스는 싱글턴이라 로그아웃·세션 만료를 넘어 살아 있고, 그때
+  /// [resetSessionState] 가 세션에 묶인 상태를 비운다. 그런데 **그 전에 나간
+  /// 요청은 비운 뒤에 돌아온다** — 돌아와서 싱글턴에 뭔가 쓰면 비운 것이
+  /// 되살아나고, 그것을 다음 사용자가 본다.
+  ///
+  /// 토큰 비교로는 모자라다: 로그아웃하면 토큰이 null 이라 비교할 대상이 없다
+  /// ([AuthService.sessionGeneration]).
+  bool _staleSession(int generation) => generation != AuthService().sessionGeneration;
 
   /// 우리 서버가 준 `401` 인가. 남의 서버 401 은 세션과 무관하다.
   ///
@@ -553,10 +596,31 @@ class StudentApiService {
   /// 이전 사용자의 「마지막으로 본 항목」을 기준으로 계산된다. 데모 깃발도
   /// 되돌려 두어야 다음 사용자의 첫 조회가 실패했을 때 예시 데이터를 실제
   /// 원장으로 읽지 않는다.
-  Future<void> resetSessionState() async {
+  /// 진행 중인 [resetSessionState] 의 보관소 삭제. 없으면 null 이다.
+  ///
+  /// `main.dart` 는 `onSessionCleared` 가 `void` 라 **이것을 기다리지 않는다.**
+  /// 메모리 상태는 아래에서 `await` 전에 비우므로 문제가 없지만, 뱃지 기준
+  /// 삭제는 비동기라 **다음 사용자의 읽기·쓰기와 겹칠 수 있다** — 지난 사용자의
+  /// 「마지막으로 본 항목」을 다음 사람이 읽거나, 그 삭제가 다음 사람이 방금 쓴
+  /// 값을 지운다. 여기에 들고 있다가 그 두 곳에서 기다린다.
+  Future<void>? _sessionReset;
+
+  Future<void> resetSessionState() {
+    // **`await` 전에 비운다.** `onSessionCleared` 는 세션이 비워지는 순간
+    // 동기로 불리므로, 여기까지는 다음 사용자의 요청이 끼어들 틈이 없다.
     _pendingObjections.clear();
     _usingDemoData = true;
     _skippedEntryCount = 0;
+    final reset = _clearLastSeen();
+    _sessionReset = reset;
+    reset.whenComplete(() {
+      // 그 사이 또 로그아웃했으면 그쪽 삭제가 진행 중이다 — 그것을 덮지 않는다.
+      if (_sessionReset == reset) _sessionReset = null;
+    });
+    return reset;
+  }
+
+  Future<void> _clearLastSeen() async {
     try {
       await _storage.delete(key: _lastSeenKey);
     } catch (_) {

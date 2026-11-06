@@ -76,6 +76,34 @@ class TokenClearFailed implements Exception {
   String toString() => 'TokenClearFailed';
 }
 
+/// 기기에 토큰을 **쓰지 못했다.**
+///
+/// 이것만으로 로그인을 막지는 않는다 — 세션이 앱 재시작까지만 유지될 뿐이고,
+/// 다시 로그인하면 된다. 그래도 **삼켜서는 안 되는 실패다.** 보관소에 이전
+/// 사용자의 토큰이 남아 있는데 새 토큰이 덮이지 않으면, 로그인은 B 로 했는데
+/// 다음 실행의 [AuthService.restore] 가 **A 의 토큰을 되살린다** — 공용 기기에서
+/// 재시작 한 번으로 남의 계정이 열린다 ([SessionStoreUnsafe]).
+class TokenWriteFailed implements Exception {
+  const TokenWriteFailed();
+  @override
+  String toString() => 'TokenWriteFailed';
+}
+
+/// 서버 인증은 통과했지만 **기기 보관소를 안전한 상태로 만들지 못했다.**
+///
+/// 보관소에 다른 토큰(이전 사용자의 것)이 남아 있고, 새 토큰으로 덮지도
+/// 지우지도 못한 상태다. 이대로 세션을 만들면 화면은 B 로 열리지만 기기에는
+/// A 의 토큰이 남아, 다음 실행이 A 의 세션으로 복원된다. 그래서 **세션을 만들지
+/// 않고 던진다** — 「이전 토큰이 남은 채로 로그인을 확정하지 않는다」.
+///
+/// 앱이 더 해 볼 수 있는 일은 없다(쓰기·삭제·확인을 모두 해 본 뒤다). 화면은
+/// 앱 데이터 삭제를 안내한다.
+class SessionStoreUnsafe implements Exception {
+  const SessionStoreUnsafe();
+  @override
+  String toString() => 'SessionStoreUnsafe';
+}
+
 /// 보관소에 넣는 것 — 토큰과 **그 토큰의 역할**.
 ///
 /// 역할을 함께 저장하는 이유: [AuthService.restore] 는 `GET /auth/me` 를 불러야
@@ -121,6 +149,8 @@ class StoredSession {
 /// 쓰므로 `flutter test` 에서 `MissingPluginException` 이 난다.
 abstract class TokenStore {
   Future<StoredSession?> read();
+
+  /// Throws [TokenWriteFailed] — 쓰지 못하면 **반드시 알린다**.
   Future<void> write(StoredSession session);
 
   /// Throws [TokenClearFailed] — 지우지 못하면 **반드시 알린다**.
@@ -129,12 +159,12 @@ abstract class TokenStore {
 
 /// 기본 구현 — 기기 키스토어.
 ///
-/// 읽기·쓰기 실패는 「토큰 없음」으로 다룬다. 저장이 안 되면 세션이 앱
-/// 재시작까지만 유지될 뿐이고, 읽기가 안 되면 다시 로그인하면 된다. 어느 쪽도
-/// 로그인 자체를 막을 이유는 아니다.
+/// 읽기 실패는 「토큰 없음」으로 다룬다 — 다시 로그인하면 된다.
 ///
-/// **삭제 실패는 다르다.** 그 경우 지워졌다고 믿은 토큰이 기기에 남으므로
-/// [TokenClearFailed] 를 던진다 (그 클래스의 설명 참고).
+/// **쓰기·삭제 실패는 다르다.** 어느 쪽이든 기기에 남은 토큰이 다음 실행에서
+/// 되살아나므로, 호출자가 알아야 판단할 수 있다 ([TokenWriteFailed],
+/// [TokenClearFailed] 의 설명). 두 경우 모두 키스토어가 잠깐 잠겨 있을 수
+/// 있어서 한 번은 다시 해 본다.
 class SecureTokenStore implements TokenStore {
   static const _key = 'auth_access_token';
   final FlutterSecureStorage _storage;
@@ -154,7 +184,13 @@ class SecureTokenStore implements TokenStore {
   Future<void> write(StoredSession session) async {
     try {
       await _storage.write(key: _key, value: session.encode());
-    } catch (_) {}
+    } catch (_) {
+      try {
+        await _storage.write(key: _key, value: session.encode());
+      } catch (_) {
+        throw const TokenWriteFailed();
+      }
+    }
   }
 
   @override
@@ -299,11 +335,26 @@ class MemoryTokenStore implements TokenStore {
   /// 삭제가 실패하는 기기를 흉내 낸다 ([TokenClearFailed] 경로 테스트용).
   bool failOnClear = false;
 
-  @override
-  Future<StoredSession?> read() async => value;
+  /// 저장이 실패하는 기기를 흉내 낸다 ([TokenWriteFailed] 경로 테스트용).
+  ///
+  /// **보관된 값은 그대로 둔다** — 그게 이 실패의 위험한 지점이다: 이전
+  /// 사용자의 토큰이 남은 채 새 토큰이 들어가지 않는다.
+  bool failOnWrite = false;
+
+  /// 읽기가 실패하는 기기를 흉내 낸다 (무엇이 남았는지 모르는 경로 테스트용).
+  bool failOnRead = false;
 
   @override
-  Future<void> write(StoredSession session) async => value = session;
+  Future<StoredSession?> read() async {
+    if (failOnRead) throw Exception('read failed');
+    return value;
+  }
+
+  @override
+  Future<void> write(StoredSession session) async {
+    if (failOnWrite) throw const TokenWriteFailed();
+    value = session;
+  }
 
   @override
   Future<void> clear() async {
@@ -340,6 +391,16 @@ class AuthService {
 
   Session? get session => _session;
   Session? _session;
+
+  /// 세션이 바뀔 때마다 올라가는 번호 — **「그때의 세션」을 가리키는 표**.
+  ///
+  /// 요청을 보내고 응답이 돌아오는 사이에 세션이 바뀔 수 있다. 토큰 비교로는
+  /// 모자란다: 로그아웃하면 토큰이 null 이 되어 **비교할 대상 자체가 사라진다.**
+  /// 번호를 요청과 함께 들고 가면, 늦게 돌아온 응답이 자기 세션의 것인지 말할 수
+  /// 있다 — 아니라면 싱글턴에 아무것도 쓰지 않아야 한다
+  /// ([StudentApiService.raiseObjection] 이 이것을 쓴다).
+  int get sessionGeneration => _sessionGeneration;
+  int _sessionGeneration = 0;
 
   int _failedAttempts = 0;
   DateTime? _lockedUntil;
@@ -381,13 +442,15 @@ class AuthService {
   /// 401 을 받으면 [reportUnauthorized] 에 그 요청이 쓴 토큰을 넘겨야 하는데,
   /// 응답이 돌아온 뒤에 다시 읽으면 그 사이 재로그인으로 **바뀐 새 토큰**을 보게
   /// 되어 비교가 무의미해진다. 요청을 보내기 직전의 값을 그대로 들고 가야 한다.
-  ({Map<String, String> headers, String? token}) get authSnapshot {
+  ({Map<String, String> headers, String? token, int generation}) get authSnapshot {
     final token = _session?.token;
     return (
       headers: token == null
           ? const <String, String>{}
           : <String, String>{'Authorization': 'Bearer $token'},
       token: token,
+      // 토큰만으로는 「로그아웃 뒤」를 구분할 수 없다 ([sessionGeneration]).
+      generation: _sessionGeneration,
     );
   }
 
@@ -463,13 +526,74 @@ class AuthService {
       walletAddress: body['wallet_address'] is String ? body['wallet_address'] as String : null,
     );
 
-    // 역할도 함께 저장한다 — 다음 실행의 [restore] 가 주소를 고를 근거다.
-    await store.write(StoredSession(token, role));
-    _setSession(session);
+    // **자격 증명은 여기서 이미 통과했다.** 아래 보관소 저장이 실패해도 그것은
+    // 비밀번호가 틀렸다는 뜻이 아니므로, 실패 횟수를 먼저 되돌린다 — 안 그러면
+    // 키스토어가 고장난 기기에서 로그인을 다섯 번 시도한 사용자가 잠긴다.
     _failedAttempts = 0;
     _lockedUntil = null;
     await lockStore.clear();
+
+    // 역할도 함께 저장한다 — 다음 실행의 [restore] 가 주소를 고를 근거다.
+    // **저장보다 세션을 먼저 만들지 않는다**: 이전 사용자의 토큰이 남은 채로
+    // 로그인을 확정하면 안 되고, 그 판정을 [_persist] 가 한다
+    // (Throws [SessionStoreUnsafe]).
+    await _persist(StoredSession(token, role));
+    _setSession(session);
     return session;
+  }
+
+  /// 마지막 로그인이 **기기에 저장되지 않았는지**.
+  ///
+  /// 보관소 쓰기가 실패했지만 남은 토큰은 없는 경우다. 위험하지는 않고
+  /// ([restore] 가 되살릴 것이 없다) 세션이 앱 재시작까지만 유지된다. 그래도
+  /// 말해 주어야 한다 — 사용자는 「로그인 상태가 유지된다」고 알고 있다.
+  /// 위험한 쪽(남의 토큰이 남는 경우)은 깃발이 아니라 [SessionStoreUnsafe] 다.
+  bool sessionNotPersisted = false;
+
+  /// 토큰을 보관소에 쓴다. **쓰지 못했으면 남의 토큰을 남겨 두지 않는다.**
+  ///
+  /// 쓰기 실패 자체는 로그인을 막을 이유가 아니다 ([TokenWriteFailed]). 막아야
+  /// 하는 것은 **보관소에 다른 토큰이 남는 것**이다: 다음 실행의 [restore] 가
+  /// 그것으로 복원해 이전 사용자의 세션을 연다. 그래서 쓰기가 실패하면 실제로
+  /// 무엇이 남았는지 확인하고, 남의 것이면 지우고, 지우지도 못하면 던진다.
+  ///
+  /// Throws [SessionStoreUnsafe].
+  Future<void> _persist(StoredSession session) async {
+    try {
+      await store.write(session);
+      sessionNotPersisted = false;
+      return;
+    } on TokenWriteFailed {
+      // 아래에서 처리한다.
+    }
+
+    // **실패로 보고됐어도 값이 들어가 있을 수 있다** (재시도 중 타임아웃 등).
+    // 추측하지 않고 읽어서 확인한다.
+    StoredSession? left;
+    var known = true;
+    try {
+      left = await store.read();
+    } catch (_) {
+      // 무엇이 남았는지 모른다. 모를 때는 **남았다고 보고** 지우는 쪽으로 간다 —
+      // 틀렸으면 재로그인 한 번이고, 반대로 틀리면 남의 세션이 열린다.
+      known = false;
+    }
+
+    if (known && left?.token == session.token) {
+      sessionNotPersisted = false; // 결과적으로 들어가 있다
+      return;
+    }
+    if (known && left == null) {
+      sessionNotPersisted = true; // 남은 것이 없다 — 재시작으로 끊길 뿐이다
+      return;
+    }
+
+    try {
+      await store.clear();
+    } on TokenClearFailed {
+      throw const SessionStoreUnsafe();
+    }
+    sessionNotPersisted = true;
   }
 
   /// 보관된 토큰으로 세션을 되살린다. 앱을 켤 때 부른다.
@@ -491,8 +615,17 @@ class AuthService {
       );
 
       // 서버가 말한 역할이 저장된 것과 다르면(권한 변경·키 회전) 저장값을 고친다.
+      //
+      // **쓰기 실패를 여기서 삼킨다.** 밖으로 나가면 아래 `catch (_)` 가 복원
+      // 자체를 실패로 만들어, 멀쩡한 토큰을 들고도 다시 로그인하게 된다. 고치지
+      // 못하면 다음 실행이 옛 역할로 주소를 골라 401 을 한 번 받을 뿐이고,
+      // 토큰은 **같은 토큰**이라 남의 세션이 남는 문제(`_persist`)와도 무관하다.
       if (me.role != stored.role) {
-        await store.write(StoredSession(stored.token, me.role));
+        try {
+          await store.write(StoredSession(stored.token, me.role));
+        } on TokenWriteFailed {
+          // 다음 실행이 옛 역할로 한 번 더 시도한다.
+        }
       }
 
       _setSession(Session(
@@ -519,12 +652,25 @@ class AuthService {
     }
   }
 
-  /// 마지막 로그아웃·만료 처리에서 기기의 토큰을 **지우지 못했는지**.
+  /// 마지막 로그아웃·만료·복원 처리에서 기기의 토큰을 **지우지 못했는지**.
   ///
-  /// 로그인 화면이 읽어 경고를 띄운다. [logout] 은 던져서 알리지만, 세션 만료
-  /// 경로([reportUnauthorized])는 호출자가 서비스 내부의 `catch` 라 던질 상대가
-  /// 없다 — 그쪽은 이 깃발로 전달한다.
+  /// [logout] 은 던져서 알리지만, 던질 상대가 없는 경로가 둘 있다 — 세션 만료
+  /// ([reportUnauthorized], 호출자가 서비스 내부의 `catch` 다) 와 앱 시작 복원
+  /// ([restore], 401 을 받아 토큰을 지우려다 실패한 경우). 둘 다 이 깃발로
+  /// 전달하고, 읽는 쪽은 [consumeTokenClearFailed] 를 쓴다.
   bool tokenClearFailed = false;
+
+  /// [tokenClearFailed] 를 읽고 **내린다.**
+  ///
+  /// 알릴 자리가 두 곳이라서 그렇다: 세션 만료는 `main.dart` 가 스낵바로
+  /// 알리고(로그인 화면으로 밀어내는 그 순간), 앱 시작 복원 실패는 **그 경로를
+  /// 지나지 않으므로** 로그인 화면이 직접 알린다. 깃발을 그냥 읽으면 만료
+  /// 경로에서 두 곳이 같은 경고를 두 번 띄운다. 먼저 알린 쪽이 가져간다.
+  bool consumeTokenClearFailed() {
+    final failed = tokenClearFailed;
+    tokenClearFailed = false;
+    return failed;
+  }
 
   /// 세션이 비워질 때마다 불린다 (로그아웃·만료 모두).
   ///
@@ -563,6 +709,7 @@ class AuthService {
   void _setSession(Session? session) {
     final had = _session != null;
     _session = session;
+    _sessionGeneration++;
     ApiConfig.activeRole = session?.role;
     if (had && session == null) onSessionCleared?.call();
   }
@@ -585,7 +732,9 @@ class AuthService {
       await logout();
     } on TokenClearFailed {
       // 세션은 비워졌다. 로그인 화면으로 보내는 일이 더 급하므로 여기서 멈추지
-      // 않는다 — 남은 토큰은 [tokenClearFailed] 로 로그인 화면이 알린다.
+      // 않는다 — 남은 토큰은 [tokenClearFailed] 로 전달하고, 아래 [onUnauthorized]
+      // 를 받은 `main.dart` 가 로그인 화면으로 보내면서 스낵바로 알린다
+      // ([consumeTokenClearFailed]).
     }
     onUnauthorized?.call();
   }
