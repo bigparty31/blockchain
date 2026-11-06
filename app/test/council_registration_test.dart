@@ -8,6 +8,7 @@ import 'package:student_council_app/core/enums.dart';
 import 'package:student_council_app/core/hashing.dart';
 import 'package:student_council_app/screens/council/expense_create_screen.dart';
 import 'package:student_council_app/screens/council/income_create_screen.dart';
+import 'package:student_council_app/screens/council/receipt_picker.dart';
 import 'package:student_council_app/services/api_service.dart';
 import 'package:student_council_app/services/entry_registration_service.dart';
 
@@ -70,7 +71,21 @@ void main() {
       expect(draft.amount, 35000);
       expect(draft.canonicalPurpose, '신입생 환영회 명찰');
       expect(draft.receiptHash, Hashing.fileHash(fakeReceiptBytes));
+      expect(registrar.uploads.single, fakeReceiptBytes, reason: '초안보다 먼저 원본을 올린다');
+      expect(draft.receiptPath, FakeRegistrar.pathOf(fakeReceiptBytes), reason: '서버는 파일 없는 해시를 막는다 (#66)');
       expect(find.textContaining('목업'), findsNothing);
+    });
+
+    testWidgets('영수증 업로드가 실패하면 알리고 초안을 만들지 않는다', (tester) async {
+      final registrar = FakeRegistrar()
+        ..failNextUpload = const EntryDecisionException(EntryDecisionFailure.mismatch, '서버에 저장된 영수증이 고른 사진과 달라요.');
+      await pump(tester, ExpenseCreateScreen(registrar: registrar, pickReceipt: fakeReceipt));
+      await tapText(tester, '영수증 촬영 또는 사진 첨부');
+      await fillExpense(tester);
+      await tapText(tester, '제출하기');
+      expect(find.textContaining('서버에 저장된 영수증이 고른 사진과 달라요.'), findsOneWidget);
+      expect(registrar.drafts, isEmpty);
+      expect(registrar.submits, isEmpty);
     });
 
     testWidgets('영수증 없이는 제출하지 않는다 — 초안 저장은 된다', (tester) async {
@@ -100,6 +115,7 @@ void main() {
       await tapText(tester, '제출하기');
       expect(find.text('지출 제출 완료!'), findsOneWidget);
       expect(registrar.drafts, hasLength(1), reason: '초안은 한 번만 만든다');
+      expect(registrar.uploads, hasLength(1), reason: '같은 사진은 다시 올리지 않는다');
       expect(registrar.submits.map((s) => s.$1).toSet(), {100});
     });
 
@@ -122,6 +138,15 @@ void main() {
       expect(find.textContaining('예산 목록을 불러오지 못해'), findsOneWidget);
       expect(registrar.drafts, isEmpty);
     });
+  });
+
+  test('업로드 파일 이름은 내용의 앞 바이트로 형식을 정한다 — 서버가 확장자로 내려줄 형식을 고른다', () {
+    expect(receiptFilename([0xFF, 0xD8, 0xFF, 0xE0]), 'receipt.jpg');
+    expect(receiptFilename([0x89, 0x50, 0x4E, 0x47, 0x0D]), 'receipt.png');
+    expect(receiptFilename('%PDF-1.7'.codeUnits), 'receipt.pdf');
+    expect(receiptFilename([...'RIFF'.codeUnits, 0, 0, 0, 0, ...'WEBP'.codeUnits]), 'receipt.webp');
+    expect(receiptFilename([0, 0, 0, 0x18, ...'ftypheic'.codeUnits]), 'receipt.heic');
+    expect(receiptFilename([1, 2]), 'receipt.jpg');
   });
 
   group('현재 학기', () {
@@ -171,6 +196,7 @@ void main() {
       await tester.enterText(find.widgetWithText(TextFormField, '입금 금액(원) *'), '500000');
       await tapText(tester, '제출하기');
       expect(registrar.submits.single.$2.receiptHash, Hashing.fileHash(fakeReceiptBytes));
+      expect(registrar.submits.single.$2.receiptPath, FakeRegistrar.pathOf(fakeReceiptBytes));
     });
   });
 }

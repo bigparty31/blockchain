@@ -59,9 +59,20 @@ void main() {
   }
 
   /// 총무가 등록해 체인에 올린다. 이름이 겹치지 않게 시각을 붙인다 (영수증 중복 검사·눈으로 찾기).
-  Future<(int, SubmitOutcome)> register({required EntryKind kind, required int amount, int? budgetId}) async {
+  Future<(int, SubmitOutcome)> register({required EntryKind kind, required int amount, int? budgetId, List<int>? receiptBytes}) async {
     await loginAs('20240002', _treasurerKey);
     final tag = DateTime.now().microsecondsSinceEpoch;
+    final registrar = EntryRegistrationService(signer: SigningService(authenticator: FakeAuthenticator()));
+    // 지출 영수증 — 원본을 먼저 올린다(#66). 업로드 API 가 없는 서버(#66 머지 전)는 404 라 해시만 보낸다
+    final receipt = receiptBytes ?? (kind == EntryKind.EXPENSE ? utf8.encode('receipt $tag') : null);
+    ReceiptUpload? upload;
+    if (receipt != null) {
+      try {
+        upload = await registrar.uploadReceipt(receipt, filename: 'receipt.jpg');
+      } on EntryDecisionException catch (e) {
+        if (e.failure != EntryDecisionFailure.notFound) rethrow;
+      }
+    }
     final draft = EntryDraft(
       kind: kind,
       termId: 1,
@@ -70,9 +81,9 @@ void main() {
       purpose: 'e2e ${kind.code} $tag',
       budgetId: budgetId,
       occurredAt: Hashing.kstMidnightOf(2026, 11, 6),
-      receiptHash: kind == EntryKind.EXPENSE ? Hashing.fileHash(utf8.encode('receipt $tag')) : null,
+      receiptHash: receipt == null ? null : Hashing.fileHash(receipt),
+      receiptPath: upload?.path,
     );
-    final registrar = EntryRegistrationService(signer: SigningService(authenticator: FakeAuthenticator()));
     final id = await registrar.saveDraft(draft);
     return (id, await registrar.submit(id, draft));
   }
@@ -165,4 +176,75 @@ void main() {
     // ignore: avoid_print
     print('동시 승인 결과: $results → approved_by=${finalEntry.approvedBy}');
   }, skip: !_e2e);
+
+  /// 업로드 API(#66)가 있는 서버인가 — 없으면 영수증 시험은 건너뛴다.
+  Future<bool> serverHasReceipts() async {
+    final res = await http.get(Uri.parse('$base/openapi.json'));
+    return res.statusCode == 200 && utf8.decode(res.bodyBytes).contains('"/receipts"');
+  }
+
+  group('영수증 원본 (#66)', () {
+    test('올린 원본을 서버가 바이트 그대로 보관한다 — 내려받은 파일의 해시가 같다', () async {
+      if (!await serverHasReceipts()) return markTestSkipped('서버에 /receipts 가 없다 (#66 전)');
+      await loginAs('20240002', _treasurerKey);
+      final bytes = [0xFF, 0xD8, 0xFF, 0xE0, ...utf8.encode('jpeg-ish ${DateTime.now().microsecondsSinceEpoch}'), 0x00, 0xFF];
+      final registrar = EntryRegistrationService(signer: SigningService(authenticator: FakeAuthenticator()));
+      final up = await registrar.uploadReceipt(bytes, filename: 'receipt.jpg');
+      expect(up.hash, Hashing.fileHash(bytes));
+
+      final res = await http.get(Uri.parse('$base${up.path}'));
+      expect(res.statusCode, 200, reason: res.body);
+      expect(Hashing.fileHash(res.bodyBytes), up.hash, reason: '재인코딩·회전 없이 원본 그대로');
+    }, skip: !_e2e);
+
+    test('업로드 없이 해시만 보내면 서버가 400 으로 막는다 — 그래서 앱은 초안 전에 올린다', () async {
+      if (!await serverHasReceipts()) return markTestSkipped('서버에 /receipts 가 없다 (#66 전)');
+      await loginAs('20240002', _treasurerKey);
+      final registrar = EntryRegistrationService(signer: SigningService(authenticator: FakeAuthenticator()));
+      final orphan = utf8.encode('never uploaded ${DateTime.now().microsecondsSinceEpoch}');
+      await expectLater(
+        registrar.saveDraft(EntryDraft(
+          kind: EntryKind.EXPENSE,
+          termId: 1,
+          amount: 1000,
+          counterparty: 'e2e 해시만',
+          purpose: 'e2e orphan',
+          budgetId: 1,
+          occurredAt: Hashing.kstMidnightOf(2026, 11, 6),
+          receiptHash: Hashing.fileHash(orphan),
+        )),
+        throwsA(isA<EntryDecisionException>().having((e) => e.failure, 'failure', EntryDecisionFailure.refused)),
+      );
+    }, skip: !_e2e);
+
+    test('같은 영수증으로 두 번 등록하면 막지 않고 DUPLICATE 경고로 기록된다', () async {
+      if (!await serverHasReceipts()) return markTestSkipped('서버에 /receipts 가 없다 (#66 전)');
+      final same = utf8.encode('duplicate receipt ${DateTime.now().microsecondsSinceEpoch}');
+      final (first, o1) = await register(kind: EntryKind.EXPENSE, amount: 1000, budgetId: 1, receiptBytes: same);
+      final (second, o2) = await register(kind: EntryKind.EXPENSE, amount: 1000, budgetId: 1, receiptBytes: same);
+      expect(o1.status, EntryStatus.PENDING);
+      expect(o2.status, EntryStatus.PENDING, reason: '409 로 막지 않는다 (#66 B4)');
+      expect((await readEntry(first)).ocrStatus, isNot(OcrStatus.DUPLICATE));
+      expect((await readEntry(second)).ocrStatus, OcrStatus.DUPLICATE, reason: '승인자 화면에 경고로 보인다');
+    }, skip: !_e2e);
+  });
+
+  test('확정 시점에 예산이 모자라면 400 + fail_reason=InsufficientBudget 으로 돌아온다 (#65) — 새로 띄운 스택 기준', () async {
+    // 운영비(#3, 1,000,000원)에 70만 원 두 건 — 등록 때는 각각 잔량 안이라 PENDING, 첫 건 확정 뒤 둘째는 잔량 부족
+    final (a, oa) = await register(kind: EntryKind.EXPENSE, amount: 700000, budgetId: 3);
+    if (oa.status == EntryStatus.BLOCKED) return markTestSkipped('운영비 예산이 이미 소모됐다 — 스택을 초기화하고 돌린다');
+    final (b, ob) = await register(kind: EntryKind.EXPENSE, amount: 700000, budgetId: 3);
+    expect(ob.status, EntryStatus.PENDING);
+
+    await loginAs('20240003', auditorKey);
+    await decisions.confirm(await readEntry(a));
+    await expectLater(
+      decisions.confirm(await readEntry(b)),
+      throwsA(isA<EntryDecisionException>()
+          .having((e) => e.failure, 'failure', EntryDecisionFailure.refused)
+          .having((e) => e.failReason, 'failReason', 'InsufficientBudget')),
+    );
+    expect((await readEntry(b)).status, EntryStatus.PENDING, reason: '확정 실패는 revert — 반려로 넘길 수 있다');
+  }, skip: !_e2e);
 }
+

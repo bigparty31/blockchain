@@ -36,6 +36,10 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
   String? _receiptHash;
   bool get _hasReceipt => _receiptHash != null;
 
+  /// 고른 영수증 원본 바이트와, 서버에 올린 결과. 같은 사진은 한 번만 올린다.
+  List<int>? _receiptBytes;
+  ReceiptUpload? _upload;
+
   bool _submitting = false;
 
   late final EntryRegistrar _registrar = widget.registrar ?? EntryRegistrationService();
@@ -66,12 +70,20 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
   /// 첨부돼 있으면 해제, 아니면 고른다 — 원본 바이트를 그대로 해시한다 (HASHING §4).
   Future<void> _toggleReceipt() async {
     if (_hasReceipt) {
-      setState(() => _receiptHash = null);
+      setState(() {
+        _receiptHash = null;
+        _receiptBytes = null;
+        _upload = null;
+      });
       return;
     }
     final bytes = await (widget.pickReceipt ?? pickReceiptBytes)(context);
     if (bytes == null || !mounted) return;
-    setState(() => _receiptHash = Hashing.fileHash(bytes));
+    setState(() {
+      _receiptBytes = bytes;
+      _receiptHash = Hashing.fileHash(bytes);
+      _upload = null;
+    });
   }
 
   void _snack(String text) {
@@ -128,19 +140,23 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
       _snack(_termError != null ? '$_termError 제출하지 않았어요.' : '학기 정보를 불러오는 중이에요. 잠시 후 다시 시도해 주세요.');
       return;
     }
-    // 출처(납부자)는 거래처, 분류는 수입 사유로 기록한다. 메모는 장부에 올리지 않는다
-    final draft = EntryDraft(
-      kind: EntryKind.INCOME,
-      termId: termId,
-      amount: int.parse(_amountController.text),
-      counterparty: _sourceController.text,
-      purpose: _incomeType,
-      occurredAt: _occurredAt,
-      receiptHash: _receiptHash,
-    );
     setState(() => _submitting = true);
     final RegistrationResult result;
     try {
+      // 영수증을 붙였으면 원본을 먼저 올린다 — 같은 사진은 한 번만 (#66: 파일 없는 해시는 400)
+      final bytes = _receiptBytes;
+      if (bytes != null) _upload ??= await _registrar.uploadReceipt(bytes, filename: receiptFilename(bytes));
+      // 출처(납부자)는 거래처, 분류는 수입 사유로 기록한다. 메모는 장부에 올리지 않는다
+      final draft = EntryDraft(
+        kind: EntryKind.INCOME,
+        termId: termId,
+        amount: int.parse(_amountController.text),
+        counterparty: _sourceController.text,
+        purpose: _incomeType,
+        occurredAt: _occurredAt,
+        receiptHash: _receiptHash,
+        receiptPath: _upload?.path,
+      );
       if (_draftId == null || _savedDraft != draft) {
         _draftId = await _registrar.saveDraft(draft);
         _savedDraft = draft;
