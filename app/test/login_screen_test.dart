@@ -73,10 +73,11 @@ void main() {
     });
   }
 
-  setUp(() {
+  setUp(() async {
     sent = [];
     AuthService.store = MemoryTokenStore();
-    AuthService().resetAttempts();
+    AuthService.lockStore = MemoryLoginLockStore();
+    await AuthService().resetAttempts();
     AuthService().onUnauthorized = null;
   });
 
@@ -257,7 +258,7 @@ void main() {
       expect(sent.length, before, reason: '차단 중인데 로그인 요청이 나갔다');
 
       // 타이머가 돌고 있으므로 테스트를 끝내기 전에 멈춘다
-      AuthService().resetAttempts();
+      await AuthService().resetAttempts();
       await tester.pumpWidget(const SizedBox());
     });
   });
@@ -307,7 +308,7 @@ void main() {
       await tester.tap(find.byKey(const Key('login_submit')));
       await pumpLoginRequest(tester);
 
-      expect(store.value, 'token-abc', reason: '토큰이 기기에 저장되지 않았다');
+      expect(store.value?.token, 'token-abc', reason: '토큰이 기기에 저장되지 않았다');
       final session = AuthService().session;
       expect(session, isNotNull);
       expect(session!.userId, 1, reason: '자기 승인 차단·푸시 토큰 연결에 user id 가 필요하다');
@@ -339,7 +340,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(AuthService().session, isNull);
-      expect(store.value, isNull, reason: 'id 없는 세션의 토큰을 저장하면 안 된다');
+      expect(store.value?.token, isNull, reason: 'id 없는 세션의 토큰을 저장하면 안 된다');
       expect(find.byType(SnackBar), findsOneWidget);
       expect(find.byType(LoginScreen), findsOneWidget, reason: '로그인 화면에 머물러야 한다');
     });
@@ -362,7 +363,7 @@ void main() {
       AuthService.client = server(meStatus: 401);
 
       expect(await AuthService().restore(), isNull);
-      expect(store.value, isNull, reason: '거부된 토큰을 남겨 두면 매번 401 을 맞는다');
+      expect(store.value?.token, isNull, reason: '거부된 토큰을 남겨 두면 매번 401 을 맞는다');
     });
 
     test('서버에 닿지 못하면 토큰을 지우지 않는다', () async {
@@ -371,7 +372,7 @@ void main() {
       AuthService.client = server(offline: true);
 
       expect(await AuthService().restore(), isNull);
-      expect(store.value, 'token-abc',
+      expect(store.value?.token, 'token-abc',
           reason: '유효한 토큰을 와이파이 문제로 버리면 다시 로그인해야 한다');
     });
 
@@ -385,13 +386,23 @@ void main() {
       AuthService().onUnauthorized = () => notified++;
 
       StudentApiService.client = MockClient((_) async => http.Response('{}', 401));
-      await StudentApiService().fetchBalance();
+
+      // **401 은 null 이 아니라 예외다.** null 로 돌려주면 호출자가 그것을
+      // 「못 읽었다」로 읽고 예시 데이터로 폴백해서, 만료된 세션에 데모 장부가
+      // 뜬다 (PRD v0.14 §7.3).
+      await expectLater(
+        StudentApiService().fetchBalance(),
+        throwsA(isA<SessionExpired>()),
+      );
 
       expect(AuthService().session, isNull);
       expect(notified, 1);
 
       // 이미 로그아웃된 뒤 또 401 을 받아도 중복으로 알리지 않는다
-      await StudentApiService().fetchBalance();
+      await expectLater(
+        StudentApiService().fetchBalance(),
+        throwsA(isA<SessionExpired>()),
+      );
       expect(notified, 1);
     });
 
@@ -408,6 +419,86 @@ void main() {
       await StudentApiService().fetchEntries();
 
       expect(headers['Authorization'], 'Bearer token-abc');
+    });
+  });
+
+  group('기기 보관소가 말을 안 들을 때', () {
+    tearDown(() {
+      // 바깥 tearDown 의 `logout()` 보다 **먼저** 되돌린다 — 삭제가 실패하는
+      // 보관소를 그대로 두면 그 logout 이 [TokenClearFailed] 로 터진다.
+      AuthService.store = MemoryTokenStore();
+      AuthService().tokenClearFailed = false;
+      AuthService().sessionNotPersisted = false;
+    });
+
+    testWidgets('복원에서 토큰을 지우지 못했으면 로그인 화면이 알린다', (tester) async {
+      // 앱 시작 복원이 401 을 받고 토큰 삭제까지 실패한 상태 = 깃발만 선 채로
+      // 로그인 화면이 세워진다. `main.dart` 의 세션 만료 스낵바는 이 경로를
+      // 지나지 않으므로, 여기서 말하지 않으면 아무도 말하지 않는다.
+      AuthService.client = server(loginStatus: 401);
+      AuthService().tokenClearFailed = true;
+
+      await pumpLogin(tester);
+      await tester.pump();
+
+      expect(
+        find.textContaining('로그인 정보를 지우지 못했습니다'),
+        findsOneWidget,
+        reason: '공용 기기에 남의 토큰이 남은 것을 사용자가 알 방법이 없다',
+      );
+      expect(
+        AuthService().tokenClearFailed,
+        isFalse,
+        reason: '한 번 알렸으면 내린다 — 다음 화면에서 같은 경고가 또 뜬다',
+      );
+    });
+
+    testWidgets('이미 알린 경고는 다시 띄우지 않는다', (tester) async {
+      AuthService.client = server(loginStatus: 401);
+      AuthService().tokenClearFailed = false; // main.dart 가 이미 가져갔다
+
+      await pumpLogin(tester);
+      await tester.pump();
+
+      expect(find.textContaining('로그인 정보를 지우지 못했습니다'), findsNothing);
+    });
+
+    testWidgets('저장을 못 해 로그인을 중단하면 그 이유를 말한다', (tester) async {
+      // 이전 사용자의 토큰이 남았고, 덮지도 지우지도 못한다 → [SessionStoreUnsafe].
+      AuthService.store = MemoryTokenStore('token-of-A', UserRole.STUDENT)
+        ..failOnWrite = true
+        ..failOnClear = true;
+      AuthService.client = server();
+      stubDestinationScreen();
+
+      await pumpLogin(tester);
+      await enter(tester, '20240001', 'userPassword123!');
+      await tester.tap(find.byKey(const Key('login_submit')));
+      await pumpLoginRequest(tester);
+
+      expect(
+        find.textContaining('앱 데이터를 삭제한 뒤'),
+        findsOneWidget,
+        reason: '「연결 실패」로 뭉개면 왜 안 되는지 알 방법이 없다',
+      );
+      expect(find.byType(LoginScreen), findsOneWidget, reason: '로그인 화면에 머물러야 한다');
+      expect(AuthService().session, isNull);
+    });
+
+    testWidgets('저장만 실패한 로그인은 통과시키되 그 사실을 말한다', (tester) async {
+      // 보관소가 비어 있었으면 남의 토큰이 남을 일이 없다 — 세션이 재시작까지만
+      // 유지될 뿐이므로 막지 않는다. 다만 사용자는 그것을 알아야 한다.
+      AuthService.store = MemoryTokenStore()..failOnWrite = true;
+      AuthService.client = server();
+      stubDestinationScreen();
+
+      await pumpLogin(tester);
+      await enter(tester, '20240001', 'userPassword123!');
+      await tester.tap(find.byKey(const Key('login_submit')));
+      await pumpLoginRequest(tester);
+
+      expect(AuthService().session, isNotNull, reason: '비밀번호는 맞았다');
+      expect(find.textContaining('앱을 다시 켜면 다시 로그인'), findsOneWidget);
     });
   });
 }

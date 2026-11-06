@@ -63,15 +63,17 @@ class ApiService {
 
   static const _timeout = Duration(seconds: 3);
 
-  /// GET + 로그인 토큰 ([AuthService.authHeaders]).
+  /// GET + 로그인 토큰 ([AuthService.authSnapshot]).
   ///
   /// 401·403 은 「서버가 없다」와 다르다 — **더미로 메우지 않고** 바로 던진다.
   /// - 401: 세션이 끝났다. [AuthService.reportUnauthorized] 가 세션을 비우고 로그인 화면으로 보낸다.
+  ///   **보내기 직전의 토큰**을 함께 넘긴다 — 늦게 돌아온 401 이 그 사이 다시 로그인해 만든 새 세션을 지우지 않게.
   /// - 403: 이 역할로는 볼 수 없다. 화면이 「권한이 없어요」를 띄운다.
   static Future<http.Response> _get(String url, String what) async {
-    final res = await client.get(Uri.parse(url), headers: AuthService().authHeaders).timeout(_timeout);
+    final auth = AuthService().authSnapshot; // 응답이 돌아온 뒤가 아니라 보내기 직전에 잡는다
+    final res = await client.get(Uri.parse(url), headers: auth.headers).timeout(_timeout);
     if (res.statusCode == 401) {
-      await AuthService().reportUnauthorized();
+      await AuthService().reportUnauthorized(token: auth.token);
       throw ApiUnauthorized(what);
     }
     if (res.statusCode == 403) throw ApiForbidden(what);

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -107,7 +108,78 @@ void main() {
           reason: '못 읽은 것을 미보유라고 하면 납부한 학생에게 거짓을 말한다');
     });
   });
+
+  group('학생 대시보드 — 통장 스냅샷만 못 읽었을 때 (S11)', () {
+    /// 이 테스트가 잡으려는 결함: 가짜 스냅샷을 없앤 뒤(`fetchLatestSnapshot`
+    /// 이 실모드에서 null) 화면이 그 null 로 **카드를 그냥 숨겼다.** 장부는
+    /// 멀쩡히 보이니, 계좌 대조라는 기능이 애초에 없는 화면과 구분되지 않는다 —
+    /// 미등록 지출을 드러내는 장치가 꺼진 것을 아무도 모른다.
+    ///
+    /// `/snapshots/latest` 는 백엔드에 아직 없어서 실모드에서는 **항상** 이 경로다.
+    setUp(_mockSecureStorage);
+    tearDown(_clearSecureStorageMock);
+
+    testWidgets('숨기지 않고 「계좌 대조를 불러오지 못했습니다」라고 말한다', (tester) async {
+      StudentApiService.client = MockClient((req) async {
+        if (req.url.path.endsWith('/entries')) return http.Response('[]', 200);
+        if (req.url.path.endsWith('/budgets')) return http.Response('[]', 200);
+        return http.Response('{"detail":"not found"}', 404); // /snapshots/latest
+      });
+
+      await _pumpHome(tester);
+
+      expect(find.text('계좌 대조를 불러오지 못했습니다'), findsOneWidget);
+      expect(
+        find.text('장부와 계좌가 일치합니다'),
+        findsNothing,
+        reason: '대조를 못 한 것은 일치와 다르다',
+      );
+      expect(
+        find.text('불러올 수 없습니다'),
+        findsNothing,
+        reason: '스냅샷 하나 때문에 장부 전체를 못 읽었다고 하면 안 된다',
+      );
+    });
+
+    testWidgets('데모 모드에서는 예시 스냅샷이 뜨므로 이 문구를 쓰지 않는다', (tester) async {
+      // 서버에 닿지도 못한 경우 — 데모 배너와 함께 예시 데이터를 쓴다.
+      StudentApiService.client =
+          MockClient((_) async => throw http.ClientException('no server'));
+
+      await _pumpHome(tester);
+
+      expect(find.text('계좌 대조를 불러오지 못했습니다'), findsNothing);
+    });
+  });
 }
+
+/// `flutter_secure_storage` 의 플랫폼 채널을 가짜로 받는다.
+///
+/// 이것이 없으면 대시보드의 조회가 **끝까지 가지 않는다.**
+/// `_load` 의 마지막 단계인 `lastSeenEntryId()` 가 네이티브 쪽을 기다리는데,
+/// 위젯 테스트에는 그쪽이 없어서 Future 가 영영 안 끝나고 화면이 로딩에
+/// 멈춘다 (이 파일 위쪽 테스트의 「범위 한계」 주석이 그 상태다). 성공 경로를
+/// 보려면 채널을 막아야 한다.
+void _mockSecureStorage() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+      .setMockMethodCallHandler(_secureStorageChannel, (call) async {
+    return switch (call.method) {
+      'read' => null,
+      'readAll' => <String, String>{},
+      'containsKey' => false,
+      _ => null, // write · delete · deleteAll
+    };
+  });
+}
+
+void _clearSecureStorageMock() {
+  TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+      .setMockMethodCallHandler(_secureStorageChannel, null);
+}
+
+const _secureStorageChannel =
+    MethodChannel('plugins.it_nomads.com/flutter_secure_storage');
 
 Future<void> _pumpHome(WidgetTester tester) async {
   await tester.pumpWidget(MaterialApp(

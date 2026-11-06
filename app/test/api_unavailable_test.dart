@@ -69,6 +69,7 @@ void main() {
     /// 가짜 서버로 로그인해 토큰을 갖게 한다 (`logout_test.dart` 와 같은 방식).
     Future<void> login() async {
       AuthService.store = MemoryTokenStore();
+      AuthService.lockStore = MemoryLoginLockStore();
       AuthService().resetAttempts();
       http.Response json(Object body) =>
           http.Response(jsonEncode(body), 200, headers: {'content-type': 'application/json; charset=utf-8'});
