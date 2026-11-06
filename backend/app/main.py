@@ -14,6 +14,7 @@ from app.routers.users import router as users_router
 from app.routers.chain import router as chain_router
 from app.routers.terms import router as terms_router
 from app.routers.budget_revisions import router as budget_revisions_router
+from app.routers.settlement import router as settlement_router
 
 
 @asynccontextmanager
@@ -73,6 +74,7 @@ app.include_router(users_router)
 app.include_router(chain_router)
 app.include_router(terms_router)
 app.include_router(budget_revisions_router)
+app.include_router(settlement_router)
 
 
 @app.get("/", tags=["Health"])
