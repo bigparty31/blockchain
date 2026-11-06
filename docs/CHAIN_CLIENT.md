@@ -76,7 +76,7 @@
 | ② 처리 중 | NULL | 있음 | 보냈는데 결과를 모른다. **다시 보내지 않는다** |
 | ③ 체인 기록 | `PENDING`·`BLOCKED` | 있음 | 끝났다 |
 
-확정은 같은 규칙을 `tx_confirm`으로 한다 — `PENDING`이고 `tx_confirm` NULL → `tx_confirm` 있음 → `CONFIRMED`. `approved_by`·`warning_ack_reason`은 선점할 때 함께 적고, 실패해 비울 때 함께 비운다. 반려도 같은 칸을 쓴다 — `PENDING`이고 `tx_confirm` NULL → `tx_confirm` 있음(`rejected_by`·`reject_reason`도 함께) → `REJECTED`. 칸이 하나라 한 항목에 확정과 반려가 같이 나가지 않고, **`approved_by`가 빈 선점은 반려의 것으로, `rejected_by`가 빈 선점은 확정의 것으로 보고 상대 흐름은 읽지도 비우지도 않는다**(409). 경고 사유 원문은 그 SHA256(HASHING §3)이 서명된 `warning_reason_hash`와 같아야 저장한다 — 다르면 학생 검증에서 위조로 보인다(400). 경고 승인이 아니면 사유는 `None`이다.
+확정은 같은 규칙을 `tx_confirm`으로 한다 — `PENDING`이고 `tx_confirm` NULL → `tx_confirm` 있음 → `CONFIRMED`. `approved_by`·`warning_ack_reason`은 선점할 때 함께 적고, 실패해 비울 때 함께 비운다. 반려도 같은 칸을 쓴다 — `PENDING`이고 `tx_confirm` NULL → `tx_confirm` 있음(`rejected_by`·`reject_reason`도 함께) → `REJECTED`. 칸이 하나라 한 항목에 확정과 반려가 같이 나가지 않고, **`approved_by`가 빈 선점은 반려의 것으로, `rejected_by`가 빈 선점은 확정의 것으로 보고 상대 흐름은 읽지도 비우지도 않는다**(409). T4 수정 요청(`revision_requested_at`)이 있으면 확정은 선점하지 않고 409로 끝나며 보내지 않는다. 선점의 조건부 UPDATE에 넣어, 라우터 검사와 수정 요청이 엇갈려도 막는다. 반려는 막지 않는다(수정 요청 → 반려 → 재등록). 이미 선점한 뒤 온 수정 요청은 나간 트랜잭션을 되돌리지 못하므로, 수정 요청 쪽이 `tx_confirm` NULL을 조건으로 저장해야 한다. 경고 사유 원문은 그 SHA256(HASHING §3)이 서명된 `warning_reason_hash`와 같아야 저장한다 — 다르면 학생 검증에서 위조로 보인다(400). 경고 승인이 아니면 사유는 `None`이다.
 
 ```python
 from app.services.chain_tx import EntryConflict, relay_confirm, relay_record, relay_reject
