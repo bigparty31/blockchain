@@ -1597,3 +1597,61 @@ def test_duplicate_receipt_hash_sets_ocr_status_duplicate(auth_header):
         assert row is not None
         assert row.ocr_status == "DUPLICATE"
 
+
+def test_duplicate_receipt_ignores_rejected_and_blocked(auth_header):
+    """반려(REJECTED)되거나 예산초과 차단(BLOCKED)된 항목의 영수증으로 재등록 시 DUPLICATE 경고가 붙지 않음"""
+    # 1. 시드 DB의 e1을 REJECTED 상태로 변경
+    with _test_session_factory() as db:
+        e1 = db.query(DBEntry).filter(DBEntry.id == 1).first()
+        e1.status = "REJECTED"
+        e1.reject_reason = "영수증 식별 불가"
+        e1.rejected_by = 3
+        db.commit()
+
+    # e1과 동일한 영수증 해시로 재등록 시도
+    body = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 20000,
+        "counterparty": "재등록상점",
+        "purpose": "반려 후 재등록",
+        "budget_id": 2,
+        "occurred_at": 1788793200,
+        "receipt_hash": "0xabc1234567890abcdef1234567890abcdef1234567890abcdef1234567890abc",
+        "receipt_path": TEST_RECEIPT_PATH,
+        "ocr_amount": 20000,
+        "ocr_approval_no": "99998888",
+        "ocr_paid_at": 1788825820,
+        "ocr_status": "MATCH",
+    }
+    res = client.post("/entries", json=body, headers=auth_header(Role.TREASURER))
+    assert res.status_code == 201
+    data = res.json()
+
+    with _test_session_factory() as db:
+        row = db.query(DBEntry).filter(DBEntry.id == data["id"]).first()
+        assert row is not None
+        # REJECTED 항목은 제외되었으므로 MATCH 상태 유지 (DUPLICATE 아님)
+        assert row.ocr_status == "MATCH"
+
+
+def test_correction_expense_optional_receipt_hash(auth_header):
+    """지출 정정(corrects_entry_id 있음)의 경우 영수증(receipt_hash) 없이도 201 성공 (docs/HASHING.md 샘플 3)"""
+    body = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": -10000,
+        "counterparty": "환불문구점",
+        "purpose": "물품 반품 환불 정정",
+        "budget_id": 2,
+        "occurred_at": 1788793200,
+        "corrects_entry_id": 1,
+        "correction_reason": "REFUND",
+        "receipt_hash": None,
+        "receipt_path": None,
+    }
+    res = client.post("/entries", json=body, headers=auth_header(Role.TREASURER))
+    assert res.status_code == 201
+    assert "id" in res.json()
+
+

@@ -5,6 +5,7 @@ import re
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -367,7 +368,8 @@ async def create_entry(
         )
 
     # 3.1 영수증 필수 및 해시·파일 검증 (PRD v0.15 §4.3, B2, B3)
-    if entry.kind == EntryKind.EXPENSE:
+    # 신규 일반 지출(정정 건이 아닌 경우)만 receipt_hash 필수 (정정·환불 건은 docs/HASHING.md 샘플 3처럼 영수증 없을 수 있음)
+    if entry.kind == EntryKind.EXPENSE and entry.corrects_entry_id is None:
         if not entry.receipt_hash or not entry.receipt_hash.strip():
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -397,8 +399,11 @@ async def create_entry(
         )
 
     # 5. 영수증 중복 검사 (PRD §6, §8, B4: 409 차단 대신 DUPLICATE 경고로 등록 허용)
+    # 반려(REJECTED)·예산초과차단(BLOCKED)된 건은 장부에 유효하게 안착되지 않았으므로
+    # 동일 영수증 재등록 시 중복 경고 대상에서 제외한다.
     effective_ocr_status = entry.ocr_status
     is_duplicate = False
+    excluded_statuses = ("REJECTED", "BLOCKED")
 
     if entry.ocr_approval_no and entry.ocr_paid_at:
         try:
@@ -408,6 +413,7 @@ async def create_entry(
                     DBEntry.ocr_approval_no == entry.ocr_approval_no,
                     DBEntry.ocr_paid_at == entry.ocr_paid_at,
                     DBEntry.amount == entry.amount,
+                    or_(DBEntry.status.is_(None), ~DBEntry.status.in_(excluded_statuses)),
                 )
                 .first()
             )
@@ -424,7 +430,10 @@ async def create_entry(
         try:
             existing_hash = (
                 db.query(DBEntry)
-                .filter(DBEntry.receipt_hash == entry.receipt_hash)
+                .filter(
+                    DBEntry.receipt_hash == entry.receipt_hash,
+                    or_(DBEntry.status.is_(None), ~DBEntry.status.in_(excluded_statuses)),
+                )
                 .first()
             )
             if existing_hash:
