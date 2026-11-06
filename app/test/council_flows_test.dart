@@ -116,7 +116,7 @@ void main() {
       tester.view.physicalSize = const Size(411, 1200);
       tester.view.devicePixelRatio = 1.0;
       addTearDown(tester.view.reset);
-      await tester.pumpWidget(MaterialApp(home: ApprovalListScreen(role: UserRole.AUDITOR, currentUserId: 5)));
+      await tester.pumpWidget(MaterialApp(home: ApprovalListScreen(role: UserRole.AUDITOR, currentUserId: 5, items: buildApprovalMockItems())));
       await tester.pumpAndSettle();
     }
 

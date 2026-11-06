@@ -44,8 +44,8 @@ const _budgetFailReasons = {
   'BudgetExpired': '예산 집행 기간이 지났어요',
 };
 
-/// **목업** 승인 대상 목록 — 시연용 더미가 켜진 개발 빌드(`DEV_TOOLS`)와 위젯 테스트에서만 쓴다.
-/// 일반 빌드는 서버(`GET /entries`)를 읽는다 ([approvalItemFromEntry]).
+/// **목업** 승인 대상 목록 — 위젯 테스트·화면 캡처에서 [ApprovalListScreen.items] 로 넣는다.
+/// 앱은 빌드와 상관없이 서버(`GET /entries`)를 읽는다 ([approvalItemFromEntry]).
 List<Map<String, dynamic>> buildApprovalMockItems() => [
     {
       'id': 2,
@@ -182,8 +182,7 @@ class ApprovalListScreen extends StatefulWidget {
   final UserRole? role;
   final int? currentUserId;
 
-  /// 목록 재료 (테스트·화면 캡처용). 주지 않으면 서버(`GET /entries`)에서 읽는다 —
-  /// 시연용 더미가 켜진 개발 빌드([ApiService.useDemoData])에서만 목업 목록을 쓴다 (PRD v0.14 §7.3).
+  /// 목록 재료 (위젯 테스트·화면 캡처용 — [buildApprovalMockItems]). 주지 않으면 서버(`GET /entries`)에서 읽는다.
   final List<Map<String, dynamic>>? items;
 
   /// 반려 서명·전송. 테스트에서 가짜 본인 확인을 넣는다.
@@ -210,10 +209,12 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
   /// 서버 목록은 열려 있는 동안 15초마다 다시 읽는다 (보드 ② — 다른 임원의 처리가 화면에 늦게 보이지 않게).
   Timer? _poll;
 
-  /// 서버에서 읽는가 — 목록 재료를 받지 않았고 시연용 더미도 꺼져 있을 때.
-  late final bool _fromServer = widget.items == null && !ApiService.useDemoData;
+  /// 서버에서 읽는가 — 목록 재료를 받지 않았으면 언제나 그렇다. **개발 빌드(DEV_TOOLS)도 서버를 읽는다** —
+  /// Hardhat 키를 넣을 수 있는 빌드가 그것뿐이라, 여기서 목업을 띄우면 통합 시험에서 실서버 승인을 할 수 없다.
+  /// 서버를 못 읽을 때의 시연용 더미는 [ApiService] 가 조회에서만 준다.
+  late final bool _fromServer = widget.items == null;
 
-  late List<Map<String, dynamic>> _items = widget.items ?? (_fromServer ? [] : buildApprovalMockItems());
+  late List<Map<String, dynamic>> _items = widget.items ?? [];
 
   late final EntryDecisionService _decisions = widget.decisions ?? EntryDecisionService();
 

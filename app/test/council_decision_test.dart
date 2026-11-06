@@ -165,6 +165,13 @@ void main() {
     await tester.tap(find.text('반려하기'));
   }
 
+  testWidgets('개발 빌드(DEV_TOOLS — 더미 켜짐)에서도 서버가 있으면 서버 목록을 쓴다 — Hardhat 키 통합 시험은 이 빌드로 한다', (tester) async {
+    ApiService.useDemoData = true;
+    await pump(tester);
+    await waitUntil(tester, () => shows(find.text('신입생 환영회 명찰')));
+    expect(find.text('청년피자 개강총회 다과 주문'), findsNothing); // 목업 목록
+  });
+
   testWidgets('서버의 대기 건을 보여 주고 목업 건은 섞지 않는다', (tester) async {
     await pump(tester);
     await waitUntil(tester, () => shows(find.text('신입생 환영회 명찰')));

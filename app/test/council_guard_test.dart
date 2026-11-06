@@ -16,7 +16,7 @@ void main() {
   setUp(() {
     AuthService.store = MemoryTokenStore();
     AuthService().resetAttempts();
-    // 목업 목록으로 가드를 본다. 승인 화면은 더미가 꺼져 있으면 서버에서 읽는다 — 그 경로는 council_reject_test.dart
+    // 목업 목록(items)으로 가드를 본다. 서버 목록 경로는 council_decision_test.dart
     ApiService.useDemoData = true;
   });
 
@@ -55,7 +55,7 @@ void main() {
   group('승인 화면 역할 가드', () {
     for (final role in [UserRole.TREASURER, UserRole.STUDENT, null]) {
       testWidgets('${role?.code ?? '로그인 안 함'} 는 열 수 없다', (tester) async {
-        await pump(tester, ApprovalListScreen(role: role));
+        await pump(tester, ApprovalListScreen(role: role, items: buildApprovalMockItems()));
         expect(find.text('이 작업을 할 권한이 없습니다.'), findsOneWidget);
         expect(find.text('승인 서명'), findsNothing);
       });
@@ -63,7 +63,7 @@ void main() {
 
     for (final role in [UserRole.AUDITOR, UserRole.PRESIDENT]) {
       testWidgets('${role.code} 는 연다', (tester) async {
-        await pump(tester, ApprovalListScreen(role: role));
+        await pump(tester, ApprovalListScreen(role: role, items: buildApprovalMockItems()));
         expect(find.text('이 작업을 할 권한이 없습니다.'), findsNothing);
         expect(find.text('승인 서명'), findsWidgets);
       });
@@ -71,17 +71,17 @@ void main() {
 
     testWidgets('인자를 주지 않으면 로그인한 세션의 역할을 쓴다', (tester) async {
       await loginAs(UserRole.TREASURER, 2);
-      await pump(tester, const ApprovalListScreen());
+      await pump(tester, ApprovalListScreen(items: buildApprovalMockItems()));
       expect(find.text('이 작업을 할 권한이 없습니다.'), findsOneWidget);
 
       await loginAs(UserRole.AUDITOR, 5);
-      await pump(tester, const ApprovalListScreen());
+      await pump(tester, ApprovalListScreen(items: buildApprovalMockItems()));
       expect(find.text('승인 서명'), findsWidgets);
     });
 
     testWidgets('로그인했으면 인자로 받은 역할보다 세션 역할을 믿는다 — 인자로 권한을 주장할 수 없다', (tester) async {
       await loginAs(UserRole.TREASURER, 2);
-      await pump(tester, const ApprovalListScreen(role: UserRole.AUDITOR));
+      await pump(tester, ApprovalListScreen(role: UserRole.AUDITOR, items: buildApprovalMockItems()));
       expect(find.text('이 작업을 할 권한이 없습니다.'), findsOneWidget);
 
       await pump(tester, const CorrectionApprovalScreen(role: UserRole.PRESIDENT));
@@ -91,7 +91,7 @@ void main() {
     testWidgets('인자를 주지 않으면 로그인한 사람의 id 로 본인 등록 건을 막는다', (tester) async {
       // 목업 #9 「학교 지원금」은 3번 사용자가 등록했다.
       await loginAs(UserRole.AUDITOR, 3);
-      await pump(tester, const ApprovalListScreen());
+      await pump(tester, ApprovalListScreen(items: buildApprovalMockItems()));
       await tester.dragUntilVisible(find.text('등록자와 승인자가 같아 처리할 수 없어요'), find.byType(ListView).first, const Offset(0, -200));
       expect(find.text('등록자와 승인자가 같아 처리할 수 없어요'), findsOneWidget);
     });
@@ -106,7 +106,7 @@ void main() {
     });
 
     testWidgets('내가 등록한 건은 승인·반려 버튼이 회색이고 눌러도 아무 일도 없다', (tester) async {
-      await pump(tester, ApprovalListScreen(role: UserRole.AUDITOR, currentUserId: 3));
+      await pump(tester, ApprovalListScreen(role: UserRole.AUDITOR, currentUserId: 3, items: buildApprovalMockItems()));
       await tester.dragUntilVisible(find.text('등록자와 승인자가 같아 처리할 수 없어요'), find.byType(ListView).first, const Offset(0, -200));
       expect(find.text('등록자와 승인자가 같아 처리할 수 없어요'), findsOneWidget);
       // 마지막 「승인 서명」 글자가 내 건의 회색 칸이다 — 눌러도 서명 다이얼로그가 뜨지 않는다
@@ -116,7 +116,7 @@ void main() {
     });
 
     testWidgets('다른 감사에게는 같은 건이 정상으로 보이고 서명할 수 있다', (tester) async {
-      await pump(tester, ApprovalListScreen(role: UserRole.AUDITOR, currentUserId: 5));
+      await pump(tester, ApprovalListScreen(role: UserRole.AUDITOR, currentUserId: 5, items: buildApprovalMockItems()));
       expect(find.text('등록자와 승인자가 같아 처리할 수 없어요'), findsNothing);
       await tester.dragUntilVisible(find.text('학교 지원금'), find.byType(ListView).first, const Offset(0, -200));
       await tester.tap(find.text('승인 서명').last);
