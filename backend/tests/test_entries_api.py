@@ -1255,6 +1255,31 @@ def test_entry_response_registrant(auth_header):
         assert e["registrant"] is not None
 
 
+def test_get_entries_and_detail_return_200_when_chain_setup_fails(auth_header):
+    """체인 클라이언트 초기화 실패(ChainSetupError 등) 시에도 GET /entries 및 GET /entries/{id}가 200으로 동작하고 DB 등록자 지갑으로 대체된다."""
+    from app.chain import ChainSetupError
+
+    def broken_chain_client():
+        raise ChainSetupError("체인 노드 미기동 또는 연결 실패")
+
+    app.dependency_overrides[get_chain_client] = broken_chain_client
+
+    # 1. 목록 조회: 200 OK 및 DB registrant 대체
+    res_list = client.get("/entries")
+    assert res_list.status_code == 200
+    entries = res_list.json()
+    assert len(entries) > 0
+    assert entries[0]["registrant"].lower() == TREASURER_WALLET.lower()
+    assert entries[0]["block_number"] is None
+
+    # 2. 단건 상세 조회: 200 OK 및 DB registrant 대체
+    res_detail = client.get("/entries/1")
+    assert res_detail.status_code == 200
+    detail = res_detail.json()
+    assert detail["registrant"].lower() == TREASURER_WALLET.lower()
+    assert detail["block_number"] is None
+
+
 def test_get_onchain_entry_endpoint(auth_header):
     """GET /entries/{id}/onchain 엔드포인트 동작 검증"""
     now = int(time.time())

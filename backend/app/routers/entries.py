@@ -1,7 +1,8 @@
 import asyncio
+import inspect
 import logging
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
@@ -146,11 +147,27 @@ def _to_schema(
     )
 
 
+async def _get_chain_client_safe(request: Request) -> Optional[ChainClient]:
+    """보강 단계에서 체인 클라이언트를 안전하게 획득한다.
+
+    노드 미기동·설정 미비(ChainSetupError) 등 클라이언트 초기화 실패 시
+    503을 던지지 않고 None을 반환하여 DB 기본 데이터로 200 응답할 수 있도록 한다.
+    """
+    getter = request.app.dependency_overrides.get(get_chain_client, get_chain_client)
+    try:
+        res = getter()
+        if inspect.isawaitable(res):
+            res = await res
+        return res
+    except Exception:
+        return None
+
+
 @router.get("", response_model=List[EntryResponse], summary="수입·지출 내역 목록 조회")
 @router.get("/", response_model=List[EntryResponse], include_in_schema=False)
 async def get_entries(
+    request: Request,
     db: Session = Depends(get_db),
-    chain: ChainClient = Depends(get_chain_client),
 ):
     """모바일 앱 '내역 목록' 및 '대시보드'에서 호출하는 수입·지출 내역 목록 API입니다.
     체인에 기록된 건(status IS NOT NULL)만 반환하며, 기기 서명 미제출 초안은 제외됩니다.
@@ -166,10 +183,14 @@ async def get_entries(
 
     chain_entries = []
     try:
-        chain_entries = await asyncio.gather(
-            *(chain.get_entry(e.id) for e in db_entries),
-            return_exceptions=True,
-        )
+        chain = await _get_chain_client_safe(request)
+        if chain is not None:
+            chain_entries = await asyncio.gather(
+                *(chain.get_entry(e.id) for e in db_entries),
+                return_exceptions=True,
+            )
+        else:
+            chain_entries = [None] * len(db_entries)
     except Exception:
         chain_entries = [None] * len(db_entries)
 
@@ -184,8 +205,8 @@ async def get_entries(
 @router.get("/{id}", response_model=EntryResponse, summary="수입·지출 내역 단건 상세 조회")
 async def get_entry_by_id(
     id: int,
+    request: Request,
     db: Session = Depends(get_db),
-    chain: ChainClient = Depends(get_chain_client),
 ):
     """내역 ID로 특정 수입/지출 내역의 상세 정보를 조회합니다."""
     try:
@@ -206,14 +227,16 @@ async def get_entry_by_id(
     chain_registrant = None
     block_num = None
     try:
-        chain_entry = await chain.get_entry(id)
-        if chain_entry and chain_entry.registrant:
-            chain_registrant = chain_entry.registrant
-        tx_hash = entry.tx_confirm or entry.tx_pending
-        if tx_hash:
-            tx_detail = await chain.entry_tx_detail(tx_hash, id)
-            if tx_detail:
-                block_num = tx_detail.block_number
+        chain = await _get_chain_client_safe(request)
+        if chain is not None:
+            chain_entry = await chain.get_entry(id)
+            if chain_entry and chain_entry.registrant:
+                chain_registrant = chain_entry.registrant
+            tx_hash = entry.tx_confirm or entry.tx_pending
+            if tx_hash:
+                tx_detail = await chain.entry_tx_detail(tx_hash, id)
+                if tx_detail:
+                    block_num = tx_detail.block_number
     except Exception:
         pass
 

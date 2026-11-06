@@ -158,7 +158,7 @@
 - **설명**: 장부 내역 목록을 최신순으로 조회합니다. (필터 쿼리: `kind`, `status`)
 - **타임스탬프**: `occurred_at`은 사용일 KST 00:00:00 기준 Unix 초(정수)입니다.
 - **등록자 지갑 주소**: `registrant` 필드에 온체인 등록자 지갑 주소(`0x...`)가 실려 내려옵니다. 승인·반려 서명(`entryCommit`) 생성 시 체인의 registrant로 사용됩니다.
-- **블록 번호**: `block_number` 필드에 확정/반려 트랜잭션이 안착된 블록 번호가 실려 내려옵니다 (미기록 시 `null`).
+- **블록 번호**: 목록 조회 시에는 블록체인 RPC 부하 및 호출 비용 절감을 위해 `block_number`가 항상 `null`로 반환됩니다. 확정·반려 트랜잭션의 블록 번호는 단건 상세 조회(`GET /entries/{id}`) 또는 온체인 원장 조회(`GET /entries/{id}/onchain`)에서 확인하실 수 있습니다.
 - **초안(`DRAFT`) 제외 기준**:
   - 온체인 트랜잭션이 아직 발생하지 않은 미완성 초안(`status IS NULL`)은 **학생 앱과 총무 일반 장부 목록에서 모두 제외**됩니다.
   - **학생 앱**: 온체인에 등록 완료된 `CONFIRMED` 및 `PENDING` 건만 조회 가능합니다.
@@ -179,7 +179,7 @@
     "status": "CONFIRMED",
     "receipt_path": "/receipts/sample_01.jpg",
     "registrant": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
-    "block_number": 102
+    "block_number": null
   },
   {
     "id": 2,
@@ -196,6 +196,30 @@
     "block_number": null
   }
 ]
+```
+
+### 1.1 수입·지출 내역 단건 상세 조회 (`GET /entries/{id}`)
+- **설명**: 내역 ID로 특정 수입/지출 내역의 상세 정보를 조회합니다.
+- **등록자 및 블록 번호**:
+  - `registrant`: 온체인 등록자 지갑 주소(`0x...`)가 실려 내려옵니다 (미기록 또는 체인 단절 시 DB 등록자의 지갑 주소로 대체).
+  - `block_number`: 확정/반려 트랜잭션이 안착된 블록 번호가 실려 내려옵니다 (`tx_confirm` 또는 `tx_pending` 기준 receipt 조회, 체인 미안착 시 `null`).
+
+**Response (`200 OK`)**
+```json
+{
+  "id": 1,
+  "term_id": 1,
+  "term_code": 20261,
+  "kind": "EXPENSE",
+  "amount": 35000,
+  "counterparty": "한결문구",
+  "purpose": "신입생 환영회 명찰 및 필기구 구매",
+  "occurred_at": 1788793200,
+  "status": "CONFIRMED",
+  "receipt_path": "/receipts/sample_01.jpg",
+  "registrant": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+  "block_number": 102
+}
 ```
 
 ### 2. 지출 및 수입 신규 등록 흐름 (2단계 등록 프로세스)
