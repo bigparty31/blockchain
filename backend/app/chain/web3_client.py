@@ -58,6 +58,9 @@ LEDGER = "AccountingLedger"
 ROLE_MANAGER = "RoleManager"
 BUDGET_TOKEN = "BudgetToken"
 CONTRACTS = (LEDGER, ROLE_MANAGER, BUDGET_TOKEN)
+# 배포 기록에 있을 때만 쓰는 컨트랙트. 없어도 연결은 되고, 회원권 조회만 ChainSetupError 다 (아직 배포 전일 수 있다)
+MEMBERSHIP_SBT = "MembershipSBT"
+OPTIONAL_CONTRACTS = (MEMBERSHIP_SBT,)
 
 RPC_TIMEOUT_SECONDS = 10
 RECEIPT_TIMEOUT_SECONDS = 30  # 쓰기 메서드가 receipt 를 기다리는 한도. 넘으면 ChainUnavailable
@@ -255,6 +258,7 @@ class Web3ChainClient:
         self._ledger = contracts[LEDGER]
         self._role_manager = contracts.get(ROLE_MANAGER)
         self._budget_token = contracts.get(BUDGET_TOKEN)
+        self._membership_sbt = contracts.get(MEMBERSHIP_SBT)
         # 확정 안에서 원장이 부르는 BudgetToken 의 에러도 원장 호출의 revert 로 올라온다 (app/chain/revert.py)
         self._reverts = RevertDecoder(self._ledger.abi, self._budget_token.abi if self._budget_token is not None else None)
         self._budget_reverts = budget_revert_decoder(self._budget_token.abi) if self._budget_token is not None else None
@@ -278,6 +282,9 @@ class Web3ChainClient:
         path = deployment_file or deployment_path()
         deployment = load_deployment(path)
         abis = {name: load_abi(deployment.contracts[name], path) for name in CONTRACTS}
+        abis.update(
+            {name: load_abi(deployment.contracts[name], path) for name in OPTIONAL_CONTRACTS if name in deployment.contracts}
+        )
         w3 = AsyncWeb3(
             AsyncHTTPProvider(
                 rpc_url,
@@ -317,7 +324,7 @@ class Web3ChainClient:
 
     def _file_stamps(self) -> dict:
         files = [self._deployment_file] + [
-            self._deployment_file.parent / self._deployment.contracts[name].abi for name in CONTRACTS
+            self._deployment_file.parent / self._deployment.contracts[name].abi for name in self._contracts
         ]
         return {f: _stamp(f) for f in files}
 
@@ -337,7 +344,7 @@ class Web3ChainClient:
                 deployment = load_deployment(self._deployment_file)
                 if deployment != self._deployment:
                     return False
-                for name in CONTRACTS:
+                for name in self._contracts:
                     if load_abi(deployment.contracts[name], self._deployment_file) != self._contracts[name].abi:
                         return False
             except DeploymentError:
@@ -564,6 +571,26 @@ class Web3ChainClient:
             return await self._budget_token.functions.budgetIdOf(term, category).call()
         except Exception as e:
             self._raise_call_failure(e, self._budget_reverts)
+
+    async def has_valid_membership(self, account: str, term: int) -> bool:
+        sbt = self._sbt_contract()
+        try:
+            return bool(await sbt.functions.hasValidMembership(AsyncWeb3.to_checksum_address(account), term).call())
+        except Exception as e:
+            self._raise_call_failure(e)
+
+    async def membership_token_of(self, account: str, term: int) -> int:
+        sbt = self._sbt_contract()
+        try:
+            return int(await sbt.functions.tokenOf(AsyncWeb3.to_checksum_address(account), term).call())
+        except Exception as e:
+            self._raise_call_failure(e)
+
+    def _sbt_contract(self):
+        self._ensure_open()
+        if self._membership_sbt is None:
+            raise ChainSetupError("배포 기록에 MembershipSBT 가 없다. 회원권을 조회할 수 없다")
+        return self._membership_sbt
 
     async def issue_budget(
         self, request: IssueRequest, signature: str, before_broadcast: Optional[BeforeBroadcast] = None
