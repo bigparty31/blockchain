@@ -1404,3 +1404,130 @@ def test_reject_budget_revision_fails_when_tx_increase_in_flight(auth_header):
     )
     assert response.status_code == 409
     assert "온체인 증액 릴레이가 진행 중인" in response.json()["detail"]
+
+
+def test_reject_interleaved_with_approval_returns_409(auth_header, monkeypatch):
+    """반려가 행을 읽은 직후 승인이 선점·완료되어도 409를 반환하고 APPROVED를 덮어쓰지 않는다."""
+    with _test_session_factory() as db:
+        rev = DBBudgetRevisionRequest(
+            term_id=1,
+            category="행사비",
+            requested_amount=100_000,
+            reason="경쟁 상태 테스트",
+            requested_by=1,
+            budget_id=1,
+            status="PRESIDENT_SIGNED",
+            president_signed_by=3,
+            president_signature="0x" + "1" * 130,
+            president_signed_at=datetime.now(timezone.utc),
+            signature_deadline=int(time.time()) + 3600,
+            signed_version=1,
+        )
+        db.add(rev)
+        db.commit()
+        rev_id = rev.id
+
+    real_expire = budget_revisions_router.expire_budget_revision_if_needed
+
+    def hook_interleave(revision, db):
+        with _test_session_factory() as s:
+            r = s.get(DBBudgetRevisionRequest, rev_id)
+            r.status = "APPROVED"
+            r.tx_increase = "0x" + "b" * 64
+            r.resolved_by = 2
+            r.resolved_at = datetime.now(timezone.utc)
+            s.commit()
+        return real_expire(revision, db)
+
+    monkeypatch.setattr(budget_revisions_router, "expire_budget_revision_if_needed", hook_interleave)
+
+    res = client.post(
+        f"/budget-revisions/{rev_id}/reject",
+        json={"reject_reason": "뒤늦은 반려 시도"},
+        headers=auth_header(Role.AUDITOR),
+    )
+    assert res.status_code == 409
+
+    with _test_session_factory() as db:
+        rev_after = db.get(DBBudgetRevisionRequest, rev_id)
+        assert rev_after.status == "APPROVED"
+        assert rev_after.tx_increase == "0x" + "b" * 64
+
+
+def test_sign_interleaved_with_reject_returns_409(auth_header, monkeypatch):
+    """회장 서명 검증 직후 다른 세션에서 반려되면 409를 반환하고 REJECTED가 유지된다."""
+    now = int(time.time())
+    with _test_session_factory() as db:
+        rev = DBBudgetRevisionRequest(
+            term_id=1,
+            category="행사비",
+            requested_amount=100_000,
+            reason="서명-반려 경쟁 테스트",
+            requested_by=1,
+            budget_id=1,
+            status="PENDING",
+        )
+        db.add(rev)
+        db.commit()
+        rev_id = rev.id
+
+    real_signer_of = _test_chain.signer_of
+
+    def hook_interleave(req, sig):
+        with _test_session_factory() as s:
+            r = s.get(DBBudgetRevisionRequest, rev_id)
+            r.status = "REJECTED"
+            r.resolved_by = 2
+            r.resolved_at = datetime.now(timezone.utc)
+            r.reject_reason = "서명 직전 반려"
+            s.commit()
+        return real_signer_of(req, sig)
+
+    monkeypatch.setattr(_test_chain, "signer_of", hook_interleave)
+
+    res = client.post(
+        f"/budget-revisions/{rev_id}/sign",
+        json={
+            "signed_version": 1,
+            "signature_deadline": now + 600,
+            "president_signature": fake_signature(PRESIDENT_WALLET),
+        },
+        headers=auth_header(Role.PRESIDENT),
+    )
+    assert res.status_code == 409
+
+    with _test_session_factory() as db:
+        rev_after = db.get(DBBudgetRevisionRequest, rev_id)
+        assert rev_after.status == "REJECTED"
+
+
+def test_sign_compares_signed_version_with_chain_version_not_db_history(auth_header):
+    """DB에 BudgetVersion 이력이 없거나 달라도 온체인 get_budget의 version과 일치하면 서명이 성공한다."""
+    now = int(time.time())
+    with _test_session_factory() as db:
+        db.query(DBBudgetVersion).filter(DBBudgetVersion.budget_id == 1).delete()
+        rev = DBBudgetRevisionRequest(
+            term_id=1,
+            category="행사비",
+            requested_amount=150_000,
+            reason="체인 버전 비교 테스트",
+            requested_by=1,
+            budget_id=1,
+            status="PENDING",
+        )
+        db.add(rev)
+        db.commit()
+        rev_id = rev.id
+
+    res = client.post(
+        f"/budget-revisions/{rev_id}/sign",
+        json={
+            "signed_version": 1,
+            "signature_deadline": now + 600,
+            "president_signature": fake_signature(PRESIDENT_WALLET),
+        },
+        headers=auth_header(Role.PRESIDENT),
+    )
+    assert res.status_code == 200
+    assert res.json()["status"] == "PRESIDENT_SIGNED"
+    assert res.json()["signed_version"] == 1

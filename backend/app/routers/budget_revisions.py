@@ -194,17 +194,30 @@ def expire_budget_revision_if_needed(revision: BudgetRevisionRequest, db: Sessio
             revision.signature_deadline,
             now_ts,
         )
-        revision.status = "PENDING"
-        revision.president_signed_by = None
-        revision.president_signature = None
-        revision.president_signed_at = None
-        revision.signature_deadline = None
-        revision.signed_version = None
-        resolve_notifications(db, budget_revision_request_id=revision.id)
-        create_notification(db, NotificationKind.REVISION_REQUESTED, budget_revision_request_id=revision.id)
-        db.commit()
-        db.refresh(revision)
-        return True
+        stmt = (
+            update(BudgetRevisionRequest)
+            .where(
+                BudgetRevisionRequest.id == revision.id,
+                BudgetRevisionRequest.status == "PRESIDENT_SIGNED",
+                BudgetRevisionRequest.tx_increase.is_(None),
+            )
+            .values(
+                status="PENDING",
+                president_signed_by=None,
+                president_signature=None,
+                president_signed_at=None,
+                signature_deadline=None,
+                signed_version=None,
+            )
+        )
+        result = db.execute(stmt)
+        if result.rowcount == 1:
+            resolve_notifications(db, budget_revision_request_id=revision.id)
+            create_notification(db, NotificationKind.REVISION_REQUESTED, budget_revision_request_id=revision.id)
+            db.commit()
+            db.refresh(revision)
+            return True
+        return False
 
     return False
 
@@ -369,8 +382,7 @@ async def sign_budget_revision(
 
     target_budget = _get_target_budget(revision, db)
     _ensure_budget_not_expired(target_budget)
-    latest_version = _ensure_budget_has_version(target_budget, db)
-    await _ensure_budget_on_chain(target_budget, chain)
+    chain_budget = await _ensure_budget_on_chain(target_budget, chain)
 
     # 시한 만료 Lazy 처리
     expire_budget_revision_if_needed(revision, db)
@@ -402,11 +414,11 @@ async def sign_budget_revision(
             detail="서명 만료 시한은 현재 시각 이후여야 합니다.",
         )
 
-    # 현재 최신 예산 버전 대조
-    if payload.signed_version != latest_version.version:
+    # 현재 온체인 예산 버전 대조 (컨트랙트 IncreaseRequest.version과 일치)
+    if payload.signed_version != chain_budget.version:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"서명 당시 예산 버전({payload.signed_version})이 현재 예산 버전({latest_version.version})과 일치하지 않습니다.",
+            detail=f"서명 당시 예산 버전({payload.signed_version})이 현재 온체인 예산 버전({chain_budget.version})과 일치하지 않습니다.",
         )
 
     # IncreaseRequest 구조체 구성 및 EIP-712 서명자 검증
@@ -438,12 +450,30 @@ async def sign_budget_revision(
             detail="서명자가 회장 본인의 지갑 주소와 일치하지 않습니다.",
         )
 
-    revision.president_signed_by = current_user.id
-    revision.president_signature = payload.president_signature
-    revision.president_signed_at = datetime.now(timezone.utc)
-    revision.signature_deadline = payload.signature_deadline
-    revision.signed_version = payload.signed_version
-    revision.status = "PRESIDENT_SIGNED"
+    stmt = (
+        update(BudgetRevisionRequest)
+        .where(
+            BudgetRevisionRequest.id == id,
+            BudgetRevisionRequest.status == "PENDING",
+        )
+        .values(
+            president_signed_by=current_user.id,
+            president_signature=payload.president_signature,
+            president_signed_at=datetime.now(timezone.utc),
+            signature_deadline=payload.signature_deadline,
+            signed_version=payload.signed_version,
+            status="PRESIDENT_SIGNED",
+        )
+    )
+    result = db.execute(stmt)
+    if result.rowcount != 1:
+        db.rollback()
+        latest = db.query(BudgetRevisionRequest).filter(BudgetRevisionRequest.id == id).first()
+        if not latest:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"증액 요청 ID {id}를 찾을 수 없습니다.")
+        if latest.status == "PRESIDENT_SIGNED":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="이미 회장 서명이 완료된 요청입니다.")
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"현재 상태({latest.status})에서는 서명할 수 없습니다.")
 
     resolve_notifications(db, budget_revision_request_id=revision.id)
     create_notification(db, NotificationKind.REVISION_PRESIDENT_SIGNED, budget_revision_request_id=revision.id)
@@ -510,10 +540,35 @@ def reject_budget_revision(
             detail="온체인 증액 릴레이가 진행 중인 요청은 반려할 수 없습니다.",
         )
 
-    revision.resolved_by = current_user.id
-    revision.resolved_at = datetime.now(timezone.utc)
-    revision.reject_reason = clean_reject_reason
-    revision.status = "REJECTED"
+    stmt = (
+        update(BudgetRevisionRequest)
+        .where(
+            BudgetRevisionRequest.id == id,
+            BudgetRevisionRequest.status.in_(["PENDING", "PRESIDENT_SIGNED"]),
+            BudgetRevisionRequest.tx_increase.is_(None),
+        )
+        .values(
+            resolved_by=current_user.id,
+            resolved_at=datetime.now(timezone.utc),
+            reject_reason=clean_reject_reason,
+            status="REJECTED",
+        )
+    )
+    result = db.execute(stmt)
+    if result.rowcount != 1:
+        db.rollback()
+        latest = db.query(BudgetRevisionRequest).filter(BudgetRevisionRequest.id == id).first()
+        if not latest:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"증액 요청 ID {id}를 찾을 수 없습니다.")
+        if latest.tx_increase:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="온체인 증액 릴레이가 진행 중인 요청은 반려할 수 없습니다.",
+            )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"다른 요청이 먼저 처리되었거나 상태가 변경되었습니다 (현재 상태: {latest.status}).",
+        )
 
     resolve_notifications(db, budget_revision_request_id=revision.id)
     create_notification(db, NotificationKind.REVISION_REJECTED, budget_revision_request_id=revision.id)
@@ -888,16 +943,28 @@ async def approve_budget_revision(
                     raise LookupError(f"증액 요청 ID {revision_id}를 찾을 수 없습니다.")
                 if rev.status == "APPROVED":
                     raise _RevisionConflictError("이미 승인 완료된 증액 요청입니다.")
-                if rev.status != "PRESIDENT_SIGNED" or rev.tx_increase is not None:
+
+                stmt = (
+                    update(BudgetRevisionRequest)
+                    .where(
+                        BudgetRevisionRequest.id == revision_id,
+                        BudgetRevisionRequest.status == "PRESIDENT_SIGNED",
+                        BudgetRevisionRequest.tx_increase.is_(None),
+                    )
+                    .values(
+                        status="PENDING",
+                        president_signed_by=None,
+                        president_signature=None,
+                        president_signed_at=None,
+                        signature_deadline=None,
+                        signed_version=None,
+                        resolved_by=None,
+                    )
+                )
+                res = s.execute(stmt)
+                if res.rowcount != 1:
                     raise _RevisionConflictError("다른 승인 요청이 처리 중이거나 상태가 변경되었습니다.")
 
-                rev.status = "PENDING"
-                rev.president_signed_by = None
-                rev.president_signature = None
-                rev.president_signed_at = None
-                rev.signature_deadline = None
-                rev.signed_version = None
-                rev.resolved_by = None
                 resolve_notifications(s, budget_revision_request_id=revision_id)
                 create_notification(s, NotificationKind.REVISION_REQUESTED, budget_revision_request_id=revision_id)
 
