@@ -9,6 +9,7 @@ from app.schemas.entry import (
 from app.schemas.balance import BalanceResponse
 from app.schemas.budget import BudgetResponse
 from app.schemas.term import TermResponse
+from app.schemas.receipt import ReceiptUploadResponse
 from app.schemas.budget_revision import (
     BudgetRevisionRequestCreate,
     BudgetRevisionSignRequest,
@@ -27,6 +28,7 @@ __all__ = [
     "BalanceResponse",
     "BudgetResponse",
     "TermResponse",
+    "ReceiptUploadResponse",
     "BudgetRevisionRequestCreate",
     "BudgetRevisionSignRequest",
     "BudgetRevisionRejectRequest",
