@@ -84,16 +84,29 @@ Future<Map<String, dynamic>> postSigned(
   required String what,
   required Duration timeout,
   String? conflictMessage,
+}) =>
+    sendAndDecode(
+      () => client
+          .post(
+            Uri.parse(url),
+            headers: {...AuthService().authHeaders, 'Content-Type': 'application/json'},
+            body: jsonEncode(body),
+          )
+          .timeout(timeout),
+      what: what,
+      conflictMessage: conflictMessage,
+    );
+
+/// 요청을 보내고 상태 코드로만 결과를 나눈다 ([postSigned]·영수증 업로드 공통).
+/// 성공(200·201)이면 응답 본문(JSON 객체)을, 아니면 [EntryDecisionException] 을 던진다.
+Future<Map<String, dynamic>> sendAndDecode(
+  Future<http.Response> Function() send, {
+  required String what,
+  String? conflictMessage,
 }) async {
   final http.Response res;
   try {
-    res = await client
-        .post(
-          Uri.parse(url),
-          headers: {...AuthService().authHeaders, 'Content-Type': 'application/json'},
-          body: jsonEncode(body),
-        )
-        .timeout(timeout);
+    res = await send();
   } catch (_) {
     throw EntryDecisionException(
       EntryDecisionFailure.unknownOutcome,

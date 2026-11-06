@@ -41,6 +41,10 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
   String? _receiptHash;
   bool get _hasReceiptImage => _receiptHash != null;
 
+  /// 고른 영수증 원본 바이트와, 서버에 올린 결과. 같은 사진은 한 번만 올린다 — 사진을 바꾸면 비운다.
+  List<int>? _receiptBytes;
+  ReceiptUpload? _upload;
+
   late final EntryRegistrar _registrar = widget.registrar ?? EntryRegistrationService();
 
   /// 저장한 초안 번호와 그때의 입력. 입력이 그대로면 다시 제출할 때 같은 번호를 쓴다 (서명 시한 안 재제출, API §2.3).
@@ -112,7 +116,11 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
   Future<void> _attachReceipt() async {
     final bytes = await (widget.pickReceipt ?? pickReceiptBytes)(context);
     if (bytes == null || !mounted) return;
-    setState(() => _receiptHash = Hashing.fileHash(bytes));
+    setState(() {
+      _receiptBytes = bytes;
+      _receiptHash = Hashing.fileHash(bytes);
+      _upload = null;
+    });
   }
 
   void _snack(String text) {
@@ -129,7 +137,7 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
   }
 
   /// 입력으로 초안을 만든다. 만들 수 없으면 이유를 알리고 null.
-  EntryDraft? _buildDraft({required bool forSubmit}) {
+  EntryDraft? _buildDraft({required bool forSubmit, String? receiptPath}) {
     final budget = _budgetFor(_selectedBudgetCategory);
     if (budget == null) {
       _snack(_budgetsError != null
@@ -150,7 +158,16 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
       budgetId: budget.id,
       occurredAt: _occurredAt,
       receiptHash: _receiptHash,
+      receiptPath: receiptPath,
     );
+  }
+
+  /// 영수증 원본을 아직 안 올렸으면 올리고 서버 경로를 돌려준다 — 초안보다 먼저 (#66: 파일 없는 해시는 400).
+  Future<String?> _ensureUploaded() async {
+    final bytes = _receiptBytes;
+    if (bytes == null) return null;
+    _upload ??= await _registrar.uploadReceipt(bytes, filename: receiptFilename(bytes));
+    return _upload!.path;
   }
 
   /// 같은 입력으로 이미 저장한 초안이 있으면 그 번호를, 없으면 새로 저장한 번호를.
@@ -173,10 +190,10 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
   /// ① 초안 저장 — 서버에만 저장한다. 체인 검사(BLOCKED)도 서명도 하지 않는다.
   Future<void> _saveDraft() async {
     if (_submitting || !_formKey.currentState!.validate()) return;
-    final draft = _buildDraft(forSubmit: false);
-    if (draft == null) return;
+    if (_buildDraft(forSubmit: false) == null) return; // 예산 확인 — 올리기 전에 막는다
     setState(() => _submitting = true);
     try {
+      final draft = _buildDraft(forSubmit: false, receiptPath: await _ensureUploaded())!;
       await _ensureDraft(draft);
     } on EntryDecisionException catch (e) {
       if (!mounted) return;
@@ -193,12 +210,12 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
   /// 실패하면 초안 번호를 들고 있다가 다시 제출할 때 쓴다.
   Future<void> _submitExpense() async {
     if (_submitting || !_formKey.currentState!.validate()) return;
-    final draft = _buildDraft(forSubmit: true);
-    if (draft == null) return;
+    if (_buildDraft(forSubmit: true) == null) return; // 예산·영수증 확인 — 올리기 전에 막는다
     setState(() => _submitting = true);
 
     final RegistrationResult result;
     try {
+      final draft = _buildDraft(forSubmit: true, receiptPath: await _ensureUploaded())!;
       final id = await _ensureDraft(draft);
       final outcome = await _registrar.submit(id, draft);
       result = outcome.status == EntryStatus.BLOCKED

@@ -62,6 +62,17 @@ void main() {
   Future<(int, SubmitOutcome)> register({required EntryKind kind, required int amount, int? budgetId}) async {
     await loginAs('20240002', _treasurerKey);
     final tag = DateTime.now().microsecondsSinceEpoch;
+    final registrar = EntryRegistrationService(signer: SigningService(authenticator: FakeAuthenticator()));
+    // 지출 영수증 — 원본을 먼저 올린다(#66). 업로드 API 가 없는 서버(#66 머지 전)는 404 라 해시만 보낸다
+    final receipt = kind == EntryKind.EXPENSE ? utf8.encode('receipt $tag') : null;
+    ReceiptUpload? upload;
+    if (receipt != null) {
+      try {
+        upload = await registrar.uploadReceipt(receipt, filename: 'receipt.jpg');
+      } on EntryDecisionException catch (e) {
+        if (e.failure != EntryDecisionFailure.notFound) rethrow;
+      }
+    }
     final draft = EntryDraft(
       kind: kind,
       termId: 1,
@@ -70,9 +81,9 @@ void main() {
       purpose: 'e2e ${kind.code} $tag',
       budgetId: budgetId,
       occurredAt: Hashing.kstMidnightOf(2026, 11, 6),
-      receiptHash: kind == EntryKind.EXPENSE ? Hashing.fileHash(utf8.encode('receipt $tag')) : null,
+      receiptHash: receipt == null ? null : Hashing.fileHash(receipt),
+      receiptPath: upload?.path,
     );
-    final registrar = EntryRegistrationService(signer: SigningService(authenticator: FakeAuthenticator()));
     final id = await registrar.saveDraft(draft);
     return (id, await registrar.submit(id, draft));
   }

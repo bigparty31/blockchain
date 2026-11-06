@@ -30,6 +30,8 @@ void main() {
       );
 
   final receiptHash = '0x${'cd' * 32}';
+  final receiptBytes = utf8.encode('receipt original bytes \x00\xff jpeg');
+
   EntryDraft expense({String counterparty = ' 한결문구 ', String purpose = '신입생 환영회 명찰', int? budgetId = 1}) =>
       EntryDraft(
         kind: EntryKind.EXPENSE,
@@ -44,6 +46,8 @@ void main() {
 
   late List<http.Request> drafts;
   late List<http.Request> submits;
+  late List<http.Request> uploads;
+  late http.Response Function(List<int> body) onUpload;
   late http.Response Function() onDraft;
   late http.Response Function() onSubmit;
   late http.Response Function() onTerm;
@@ -64,6 +68,10 @@ void main() {
     onDraft = () => json({'id': 11, 'message': '초안'}, 201);
     onSubmit = () => json({'id': 11, 'status': 'PENDING', 'tx_pending': '0x${'ab' * 32}', 'message': 'ok'});
     onTerm = () => json({'id': 1, 'term_code': 20262, 'name': '2026-2', 'started_at': '2026-09-01T00:00:00', 'ended_at': '2027-02-28T00:00:00'});
+    uploads = [];
+    // 서버(#66 receipts.py)처럼 받은 바이트를 그대로 해시한다 — 여기서는 multipart 본문 안의 파일 바이트를 꺼내지 않고,
+    // 테스트가 보낸 원본을 알고 있으므로 그 해시를 돌려준다
+    onUpload = (_) => json({'receipt_hash': Hashing.fileHash(receiptBytes), 'receipt_path': '/receipts/${Hashing.fileHash(receiptBytes).substring(2)}.jpg', 'filename': 'receipt.jpg', 'size': receiptBytes.length}, 201);
     final server = MockClient((req) async {
       switch ('${req.method} ${req.url.path}') {
         case 'POST /entries':
@@ -72,6 +80,9 @@ void main() {
         case 'POST /entries/11/submit':
           submits.add(req);
           return onSubmit();
+        case 'POST /receipts':
+          uploads.add(req);
+          return onUpload(req.bodyBytes);
         case 'GET /terms/1':
           return onTerm();
         case 'GET /chain/domains':
@@ -194,5 +205,56 @@ void main() {
     final body = jsonDecode(drafts.single.body) as Map<String, dynamic>;
     expect(body.containsKey('budget_id'), isFalse);
     expect(body.containsKey('receipt_hash'), isFalse);
+  });
+
+  group('영수증 원본 업로드 (POST /receipts, #66)', () {
+    test('원본 바이트를 multipart(file)로 그대로 올리고, 서버 해시가 원본과 같으면 경로를 돌려준다', () async {
+      final up = await service().uploadReceipt(receiptBytes, filename: 'receipt.jpg');
+      expect(up.hash, Hashing.fileHash(receiptBytes));
+      expect(up.path, '/receipts/${Hashing.fileHash(receiptBytes).substring(2)}.jpg');
+
+      final req = uploads.single;
+      expect(req.headers['Authorization'], 'Bearer token-2');
+      expect(req.headers['content-type'], startsWith('multipart/form-data'));
+      final body = latin1.decode(req.bodyBytes);
+      expect(body, contains('name="file"; filename="receipt.jpg"'));
+      expect(body, contains(latin1.decode(receiptBytes)), reason: '재인코딩 없이 원본 바이트 그대로');
+    });
+
+    test('서버가 계산한 해시가 원본과 다르면 멈춘다 — 다른 파일이 저장됐다', () async {
+      onUpload = (_) => json({'receipt_hash': '0x${'11' * 32}', 'receipt_path': '/receipts/x.jpg', 'filename': 'r.jpg', 'size': 1}, 201);
+      await expectLater(
+        service().uploadReceipt(receiptBytes, filename: 'receipt.jpg'),
+        throwsA(isA<EntryDecisionException>().having((e) => e.failure, 'failure', EntryDecisionFailure.mismatch)),
+      );
+    });
+
+    test('업로드가 거부되면(400) 서버 설명을 보여 준다', () async {
+      onUpload = (_) => json({'detail': '빈 파일은 업로드할 수 없습니다.'}, 400);
+      await expectLater(
+        service().uploadReceipt(receiptBytes, filename: 'receipt.jpg'),
+        throwsA(isA<EntryDecisionException>()
+            .having((e) => e.failure, 'failure', EntryDecisionFailure.refused)
+            .having((e) => e.message, 'message', contains('빈 파일은 업로드할 수 없습니다.'))),
+      );
+    });
+
+    test('초안에 업로드한 receipt_path 를 함께 보낸다 — 서버는 파일 없는 해시를 400 으로 막는다', () async {
+      final up = await service().uploadReceipt(receiptBytes, filename: 'receipt.jpg');
+      await service().saveDraft(EntryDraft(
+        kind: EntryKind.EXPENSE,
+        termId: 1,
+        amount: 35000,
+        counterparty: '한결문구',
+        purpose: '명찰',
+        budgetId: 1,
+        occurredAt: 1790694000,
+        receiptHash: up.hash,
+        receiptPath: up.path,
+      ));
+      final body = jsonDecode(drafts.single.body) as Map<String, dynamic>;
+      expect(body['receipt_hash'], up.hash);
+      expect(body['receipt_path'], up.path);
+    });
   });
 }
