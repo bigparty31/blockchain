@@ -291,7 +291,7 @@ meta_hash = SHA256( amount ␟ counterparty ␟ purpose ␟ occurred_at ␟ rece
 
 ## EIP-712
 
-서명을 받는 컨트랙트마다 도메인이 따로 있다: `name = 컨트랙트명`, `version = "1"`, `chainId`, `verifyingContract`. 핵심 컨트랙트의 서명 도메인은 AccountingLedger·BudgetToken·RoleManager·MembershipSBT의 4개이며 모두 `DOMAIN_SEPARATOR()`를 노출한다. 별도로 ObjectionRegistry도 답변 서명용 도메인과 `DOMAIN_SEPARATOR()`를 제공하므로 전체 목록은 5개다. 앱은 서명 대상에 맞는 도메인을 골라야 한다.
+서명을 받는 컨트랙트마다 도메인이 따로 있다: `name = 컨트랙트명`, `version = "1"`, `chainId`, `verifyingContract`. 서명 도메인은 AccountingLedger·BudgetToken·RoleManager·MembershipSBT의 4개이며 모두 `DOMAIN_SEPARATOR()`를 노출한다. ObjectionRegistry는 v0.13에서 구현·배포하지 않아 범위 밖이다. 앱은 서명 대상에 맞는 도메인을 골라야 한다.
 
 | 컨트랙트 | struct | typehash 문자열 |
 | --- | --- | --- |
