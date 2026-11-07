@@ -74,14 +74,17 @@ def _budgets(db: Session, term_id: int) -> list[BudgetExecution]:
         .all()
     )
     result = []
-    for budget in db.query(DBBudget).filter(DBBudget.term_id == term_id).order_by(DBBudget.id).all():
+    # 체인에 발행된 예산만 (GET /budgets 와 같은 기준, #67 리뷰). 시드는 미발행 예산에도 버전 행을 만들어서
+    # 버전 유무만으로는 못 거른다. 미발행 예산에는 지출이 확정될 수 없다 (BUDGET_NOT_FOUND → BLOCKED)
+    issued = db.query(DBBudget).filter(DBBudget.term_id == term_id, DBBudget.tx_issue.isnot(None))
+    for budget in issued.order_by(DBBudget.id).all():
         versions = (
             db.query(DBBudgetVersion)
             .filter(DBBudgetVersion.budget_id == budget.id)
             .order_by(DBBudgetVersion.version)
             .all()
         )
-        if not versions:  # 편성액이 없는 예산 행은 집행률을 말할 수 없다 (시드·발행 도중 상태)
+        if not versions:  # 발행 tx 는 나갔는데 아직 확정 전이라 버전이 없는 상태
             continue
         planned = versions[-1].planned_amount
         used = int(spent.get(budget.id, 0))

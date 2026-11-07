@@ -65,9 +65,12 @@ def setup(tmp_path):
                    started_at=datetime(2027, 3, 1, tzinfo=UTC), ended_at=datetime(2027, 6, 20, tzinfo=UTC)),
         ])
         db.add_all([
-            DBBudget(id=1, term_id=1, category="행사비", expires_at=datetime(2026, 12, 31, tzinfo=UTC)),
-            DBBudget(id=2, term_id=1, category="비품비", expires_at=datetime(2026, 12, 31, tzinfo=UTC)),
-            DBBudget(id=3, term_id=1, category="식비", expires_at=datetime(2026, 12, 31, tzinfo=UTC)),
+            DBBudget(id=1, term_id=1, category="행사비", expires_at=datetime(2026, 12, 31, tzinfo=UTC), tx_issue="0x" + "1" * 64),
+            DBBudget(id=2, term_id=1, category="비품비", expires_at=datetime(2026, 12, 31, tzinfo=UTC), tx_issue="0x" + "2" * 64),
+            # 발행 tx 는 나갔지만 아직 버전이 없음
+            DBBudget(id=3, term_id=1, category="식비", expires_at=datetime(2026, 12, 31, tzinfo=UTC), tx_issue="0x" + "3" * 64),
+            # 시드처럼 버전 행은 있지만 체인에 발행되지 않음
+            DBBudget(id=4, term_id=1, category="학생복지비", expires_at=datetime(2026, 12, 31, tzinfo=UTC)),
         ])
         approved = dict(status="APPROVED", requested_by=TREASURER, resolved_by=AUDITOR,
                         resolved_at=datetime(2026, 10, 2, tzinfo=UTC), tx_increase="0x" + "a" * 64)
@@ -82,6 +85,7 @@ def setup(tmp_path):
             DBBudgetVersion(budget_id=1, version=1, planned_amount=2000000),
             DBBudgetVersion(budget_id=1, version=2, planned_amount=2500000, revision_reason="참가 인원 증가", revision_request_id=1),
             DBBudgetVersion(budget_id=2, version=1, planned_amount=500000),
+            DBBudgetVersion(budget_id=4, version=1, planned_amount=800000),
         ])
         db.add_all([
             _entry(1, "INCOME", 5000000, "CONFIRMED"),
@@ -134,7 +138,7 @@ def test_balance_gap_uses_latest_snapshot(auth_header):
 
 def test_budget_execution(auth_header):
     budgets = {b["category"]: b for b in _get(auth_header).json()["budgets"]}
-    assert set(budgets) == {"행사비", "비품비"}  # 버전 없는 식비는 빠진다
+    assert set(budgets) == {"행사비", "비품비"}  # 버전 없는 식비, 체인 미발행 학생복지비는 빠진다
     assert budgets["행사비"] == {
         "budget_id": 1, "category": "행사비", "initial_amount": 2000000, "planned_amount": 2500000, "version": 2,
         "spent": 310000, "remaining": 2190000, "execution_rate": 0.124,
