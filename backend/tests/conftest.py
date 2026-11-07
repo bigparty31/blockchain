@@ -5,12 +5,24 @@ import os
 os.environ["ENV_FILE"] = os.devnull
 # 키가 없으면 app.auth.security 를 import 할 수 없다. 셸에 JWT_SECRET 이 없으면 개발용 키를 쓴다
 os.environ.setdefault("JWT_DEV_SECRET", "1")
+# 앱 시작(lifespan)을 도는 시험이 개발 DB 로 재알림 작업·푸시 전송을 띄우지 않게 한다. 작업은 tests/test_notification_worker.py 가 직접 부른다
+os.environ["NOTIFICATION_WORKER"] = "0"
 
 import pytest  # noqa: E402
 
 from app.auth import users  # noqa: E402
 from app.auth.security import create_access_token
 from app.schemas.auth import Role
+
+
+@pytest.fixture(autouse=True)
+def _empty_push_queue():
+    """알림을 만든 시험이 남긴 푸시를 다음 시험이 받지 않게 비운다 (전송 스레드는 시험에서 띄우지 않는다)."""
+    from app.services import push
+
+    push.clear()
+    yield
+    push.clear()
 
 
 @pytest.fixture

@@ -28,7 +28,7 @@ DB 는 단계(읽기·선점·반영·해제)마다 짧은 세션을 따로 열�
 
 알림 (docs/NOTIFICATION_API.md) — 상태 반영(③)과 같은 세션·같은 commit 으로 기록한다 (PRD §4.8). 반영 UPDATE 가 1행일 때만
 기록하므로 재제출로 같은 결과를 다시 받아도 한 번만 남는다. 등록은 PENDING 이면 ENTRY_REGISTERED, BLOCKED 면 ENTRY_BLOCKED 만,
-확정·반려는 그 항목의 재알림 대상을 먼저 닫고 결과를 알린다. 확정이 InsufficientBudget·BudgetExpired 로 거부되면 상태 전이가
+확정·반려는 그 항목의 재알림 대상을 먼저 닫고 결과를 알린다. 확정은 그 학기 학생에게 토픽 푸시도 보낸다 (commit 뒤). 확정이 InsufficientBudget·BudgetExpired 로 거부되면 상태 전이가
 없으니 자체 세션으로 ENTRY_CONFIRM_FAILED 만 기록한다 (총무가 반려 후 재등록이나 증액으로 조치할 수 있는 실패만).
 ② 가 오래 남는 경우(노드가 트랜잭션을 잃음)의 정리는 이번 범위가 아니다 — receipt 가 없다고 안 들어간다고 단정할 수 없다.
 
@@ -64,7 +64,7 @@ from app.chain.models import (
 )
 from app.models import Entry
 from app.schemas.entry import EntryStatus
-from app.services.notifications import NotificationKind, create_notification, resolve_notifications
+from app.services.notifications import NotificationKind, create_notification, notify_students_confirmed, resolve_notifications
 
 logger = logging.getLogger(__name__)
 
@@ -415,6 +415,8 @@ def _notify_settled(db: Session, step: _Step, entry_id: int, result: TxResult) -
         resolve_notifications(db, entry_id=entry_id)  # 승인 요청·수정 요청을 먼저 닫는다
         kind = NotificationKind.ENTRY_CONFIRMED if step is _CONFIRM else NotificationKind.ENTRY_REJECTED
     create_notification(db, kind, entry_id=entry_id)
+    if step is _CONFIRM:
+        notify_students_confirmed(db, entry_id)  # 학생은 행 없이 토픽 푸시만 (§4.8)
 
 
 def _row(db: Session, step: _Step, entry_id: int) -> _Row:
