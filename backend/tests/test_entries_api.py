@@ -1783,6 +1783,30 @@ def test_request_entry_revision_conflict_when_confirm_in_flight(auth_header):
     assert "확정 처리 중인 내역은 수정 요청할 수 없습니다." in res.json()["detail"]
 
 
+def test_request_entry_revision_race_confirm_wins_returns_409(auth_header):
+    """확정이 먼저 조건부 선점(tx_confirm 기록)했을 때 수정 요청의 조건부 UPDATE가 0행이 되고 재조회 후 409 Conflict 반환 검증"""
+    entry_id = _pending_entry(auth_header)
+
+    # 확정 프로세스가 tx_confirm 선점
+    with _test_session_factory() as db:
+        row = db.query(DBEntry).filter(DBEntry.id == entry_id).first()
+        row.tx_confirm = "0x" + "c" * 64
+        row.approved_by = 3
+        db.commit()
+
+    # 수정 요청 시도: 조건부 UPDATE (revision_requested_at IS NULL AND tx_confirm IS NULL) 0행 매칭
+    # 재조회 시 tx_confirm 존재 확인 -> 409 Conflict 반환
+    res = client.post(f"/entries/{entry_id}/request-revision", headers=auth_header(Role.TREASURER))
+    assert res.status_code == 409
+    assert "확정 처리 중인 내역은 수정 요청할 수 없습니다." in res.json()["detail"]
+
+    # 검증: 확정 선점된 건에 revision_requested_at이 남지 않아야 함 (PR #40 / PRD §4.3 정합성)
+    with _test_session_factory() as db:
+        row = db.query(DBEntry).filter(DBEntry.id == entry_id).first()
+        assert row.revision_requested_at is None
+        assert row.tx_confirm == "0x" + "c" * 64
+
+
 # ---------------------------------------------------------------- 응답 필드 보강 (duplicate_of, block_reason, creator_name)
 
 
