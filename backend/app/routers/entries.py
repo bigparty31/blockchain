@@ -1,6 +1,12 @@
+import asyncio
+from datetime import datetime, timezone
+import inspect
 import logging
+import re
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import JSONResponse
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -26,8 +32,10 @@ from app.services.chain_tx import (
     relay_record,
     relay_reject,
 )
+from app.services.notifications import NotificationKind, create_notification
 from app.database import get_db
 from app.models import Budget as DBBudget, Entry as DBEntry, Term as DBTerm, User as DBUser
+from app.routers.receipts import receipt_file_exists
 from app.schemas.auth import Role
 from app.schemas.entry import (
     BlockReason,
@@ -43,6 +51,7 @@ from app.schemas.entry import (
     EntrySubmitRequest,
     EntrySubmitResponse,
     OCRStatus,
+    OnChainEntryResponse,
 )
 from app.utils.hashing import (
     calculate_meta_hash,
@@ -94,12 +103,96 @@ async def _get_chain_registrant(entry_id: int, chain: ChainClient) -> str:
     return chain_entry.registrant
 
 
-def _to_schema(entry: DBEntry) -> EntryResponse:
+def _find_duplicate_of(entry: DBEntry, db: Optional[Session]) -> Optional[int]:
+    """중복 경고(DUPLICATE) 상태인 내역의 원본 기존 Entry ID를 조회합니다."""
+    if db is None:
+        return None
+    ocr_val = entry.ocr_status.value if hasattr(entry.ocr_status, "value") else entry.ocr_status
+    if ocr_val != OCRStatus.DUPLICATE.value:
+        return None
+
+    excluded = ("REJECTED", "BLOCKED")
+    # 1. receipt_hash 가 있으면 동일 해시의 이전 유효 건 검색
+    if entry.receipt_hash:
+        try:
+            orig = (
+                db.query(DBEntry.id)
+                .filter(
+                    DBEntry.id != entry.id,
+                    DBEntry.receipt_hash == entry.receipt_hash,
+                    or_(DBEntry.status.is_(None), ~DBEntry.status.in_(excluded)),
+                )
+                .order_by(DBEntry.id.asc())
+                .first()
+            )
+            if orig:
+                return orig[0]
+        except SQLAlchemyError:
+            pass
+
+    # 2. ocr_approval_no, ocr_paid_at 이 있으면 동일 승인번호/결제시각의 이전 유효 건 검색
+    if entry.ocr_approval_no and entry.ocr_paid_at:
+        try:
+            orig = (
+                db.query(DBEntry.id)
+                .filter(
+                    DBEntry.id != entry.id,
+                    DBEntry.ocr_approval_no == entry.ocr_approval_no,
+                    DBEntry.ocr_paid_at == entry.ocr_paid_at,
+                    or_(DBEntry.status.is_(None), ~DBEntry.status.in_(excluded)),
+                )
+                .order_by(DBEntry.id.asc())
+                .first()
+            )
+            if orig:
+                return orig[0]
+        except SQLAlchemyError:
+            pass
+
+    return None
+
+
+def _to_schema(
+    entry: DBEntry,
+    chain_registrant: Optional[str] = None,
+    block_number: Optional[int] = None,
+    duplicate_of: Optional[int] = None,
+    db: Optional[Session] = None,
+) -> EntryResponse:
     """DB Entry ORM 모델을 EntryResponse 스키마로 변환"""
     # 선점 때 미리 적은 값이다. 체인에서 끝나기 전에는 내보내지 않는다 (실패하면 비워진다). 앱의 단건 검증은 체인 approver 가
     # 비어 있는데 approved_by 만 있으면 위조로 판정한다 (entry_verifier.dart)
     confirmed = entry.status == EntryStatus.CONFIRMED.value
     rejected = entry.status == EntryStatus.REJECTED.value
+
+    registrant = chain_registrant
+    if not registrant and getattr(entry, "creator", None) and entry.creator.wallet_address:
+        registrant = entry.creator.wallet_address
+
+    creator_name = None
+    if getattr(entry, "creator", None) and entry.creator.name:
+        creator_name = entry.creator.name
+    elif db is not None and getattr(entry, "created_by", None):
+        try:
+            u = db.query(DBUser.name).filter(DBUser.id == entry.created_by).first()
+            if u:
+                creator_name = u[0]
+        except SQLAlchemyError:
+            pass
+
+    # block_reason enum 파싱
+    block_reason_enum = None
+    if getattr(entry, "block_reason", None):
+        try:
+            b_val = entry.block_reason.value if hasattr(entry.block_reason, "value") else str(entry.block_reason)
+            block_reason_enum = BlockReason(b_val)
+        except (ValueError, KeyError):
+            pass
+
+    # duplicate_of 계산
+    if duplicate_of is None and db is not None:
+        duplicate_of = _find_duplicate_of(entry, db)
+
     return EntryResponse(
         id=entry.id,
         term_id=entry.term_id,
@@ -118,29 +211,57 @@ def _to_schema(entry: DBEntry) -> EntryResponse:
         ocr_approval_no=entry.ocr_approval_no,
         ocr_paid_at=entry.ocr_paid_at,
         ocr_status=OCRStatus(entry.ocr_status) if entry.ocr_status else None,
+        duplicate_of=duplicate_of,
         category_warning=entry.category_warning,
         warning_ack_reason=entry.warning_ack_reason if confirmed else None,
         status=EntryStatus(entry.status) if entry.status else None,
+        block_reason=block_reason_enum,
         created_by=entry.created_by,
+        creator_name=creator_name,
         approved_by=entry.approved_by if confirmed else None,
         rejected_by=entry.rejected_by if rejected else None,
         reject_reason=entry.reject_reason if rejected else None,
         tx_pending=entry.tx_pending,
         tx_confirm=entry.tx_confirm,
+        registrant=registrant,
+        block_number=block_number,
         corrects_entry_id=entry.corrects_entry_id,
         correction_reason=entry.correction_reason,
+        revision_requested_at=(
+            int(entry.revision_requested_at.timestamp())
+            if isinstance(getattr(entry, "revision_requested_at", None), datetime)
+            else (int(entry.revision_requested_at) if getattr(entry, "revision_requested_at", None) is not None else None)
+        ),
     )
+
+
+async def _get_chain_client_safe(request: Request) -> Optional[ChainClient]:
+    """보강 단계에서 체인 클라이언트를 안전하게 획득한다.
+
+    노드 미기동·설정 미비(ChainSetupError) 등 클라이언트 초기화 실패 시
+    503을 던지지 않고 None을 반환하여 DB 기본 데이터로 200 응답할 수 있도록 한다.
+    """
+    getter = request.app.dependency_overrides.get(get_chain_client, get_chain_client)
+    try:
+        res = getter()
+        if inspect.isawaitable(res):
+            res = await res
+        return res
+    except Exception:
+        return None
 
 
 @router.get("", response_model=List[EntryResponse], summary="수입·지출 내역 목록 조회")
 @router.get("/", response_model=List[EntryResponse], include_in_schema=False)
-async def get_entries(db: Session = Depends(get_db)):
+async def get_entries(
+    request: Request,
+    db: Session = Depends(get_db),
+):
     """모바일 앱 '내역 목록' 및 '대시보드'에서 호출하는 수입·지출 내역 목록 API입니다.
     체인에 기록된 건(status IS NOT NULL)만 반환하며, 기기 서명 미제출 초안은 제외됩니다.
     """
     try:
         db_entries = db.query(DBEntry).filter(DBEntry.status.isnot(None)).all()
-        return [_to_schema(e) for e in db_entries]
     except SQLAlchemyError as e:
         logger.exception("수입·지출 내역 목록 조회 중 데이터베이스 오류: %s", e)
         raise HTTPException(
@@ -148,9 +269,63 @@ async def get_entries(db: Session = Depends(get_db)):
             detail="데이터베이스 처리 중 오류가 발생했습니다.",
         )
 
+    # RPC 호출 부하 및 앱 타임아웃(3초) 방지:
+    # 목록 조회에서는 승인 대기 중인 PENDING 건만 최대 1.5초 이내로 온체인 조회를 시도하고,
+    # 노드 응답 지연/오류 시 즉시 DB 등록자 지갑 주소로 대체 반환합니다.
+    # 앱은 서명 직전에 단건 상세 조회(GET /entries/{id})로 최신 온체인 등록자를 최종 확인합니다.
+    pending_entries = [e for e in db_entries if e.status == EntryStatus.PENDING.value]
+    chain_registrants: dict[int, str] = {}
+
+    if pending_entries:
+        try:
+            chain = await _get_chain_client_safe(request)
+            if chain is not None:
+                async def _fetch_pending():
+                    tasks = [chain.get_entry(e.id) for e in pending_entries]
+                    return await asyncio.gather(*tasks, return_exceptions=True)
+
+                fetched = await asyncio.wait_for(_fetch_pending(), timeout=1.5)
+                for e, res in zip(pending_entries, fetched):
+                    if not isinstance(res, Exception) and res and res.registrant:
+                        chain_registrants[e.id] = res.registrant
+        except Exception:
+            pass
+
+    results = [
+        _to_schema(e, chain_registrant=chain_registrants.get(e.id), db=db)
+        for e in db_entries
+    ]
+    return results
+
+
+@router.get("/drafts", response_model=List[EntryResponse], summary="본인 작성 미제출 초안 목록 조회 (T5)")
+async def get_my_drafts(
+    user: User = Depends(treasurer_only),
+    db: Session = Depends(get_db),
+):
+    """총무 본인이 작성하였으나 아직 블록체인 기기 서명을 제출하지 않은 초안(status IS NULL) 목록을 조회합니다."""
+    try:
+        drafts = (
+            db.query(DBEntry)
+            .filter(DBEntry.created_by == user.id, DBEntry.status.is_(None))
+            .order_by(DBEntry.occurred_at.desc(), DBEntry.id.desc())
+            .all()
+        )
+    except SQLAlchemyError as e:
+        logger.exception("초안 목록 조회 중 데이터베이스 오류: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 처리 중 오류가 발생했습니다.",
+        )
+    return [_to_schema(e, db=db) for e in drafts]
+
 
 @router.get("/{id}", response_model=EntryResponse, summary="수입·지출 내역 단건 상세 조회")
-async def get_entry_by_id(id: int, db: Session = Depends(get_db)):
+async def get_entry_by_id(
+    id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
     """내역 ID로 특정 수입/지출 내역의 상세 정보를 조회합니다."""
     try:
         entry = db.query(DBEntry).filter(DBEntry.id == id, DBEntry.status.isnot(None)).first()
@@ -167,7 +342,91 @@ async def get_entry_by_id(id: int, db: Session = Depends(get_db)):
             detail=f"ID {id}에 해당하는 내역을 찾을 수 없습니다.",
         )
 
-    return _to_schema(entry)
+    chain_registrant = None
+    block_num = None
+    try:
+        chain = await _get_chain_client_safe(request)
+        if chain is not None:
+            async def _fetch_entry_chain_detail():
+                nonlocal chain_registrant, block_num
+                chain_entry = await chain.get_entry(id)
+                if chain_entry and chain_entry.registrant:
+                    chain_registrant = chain_entry.registrant
+                tx_hash = entry.tx_confirm or entry.tx_pending
+                if tx_hash:
+                    tx_detail = await chain.entry_tx_detail(tx_hash, id)
+                    if tx_detail:
+                        block_num = tx_detail.block_number
+
+            await asyncio.wait_for(_fetch_entry_chain_detail(), timeout=2.0)
+    except Exception:
+        pass
+
+    return _to_schema(entry, chain_registrant=chain_registrant, block_number=block_num, db=db)
+
+
+@router.get("/{id}/onchain", response_model=OnChainEntryResponse, summary="온체인 원장 항목 조회")
+async def get_onchain_entry(
+    id: int,
+    db: Session = Depends(get_db),
+    chain: ChainClient = Depends(get_chain_client),
+):
+    """체인에 기록된 항목(getEntry)과 트랜잭션 기록(entry_tx_detail)을 조회합니다.
+    체인에 없거나 미기록 상태면 404를 반환합니다.
+    """
+    try:
+        chain_entry = await chain.get_entry(id)
+    except (ChainUnavailable, ChainSetupError) as e:
+        logger.exception("온체인 항목(%d) 조회 중 체인 오류: %s", id, e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="블록체인 네트워크와 통신할 수 없습니다.",
+        )
+
+    if not chain_entry:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"체인에서 항목(id={id})을 찾을 수 없습니다.",
+        )
+
+    if (
+        chain_entry.amount == 0
+        and (not chain_entry.hash or chain_entry.hash == "0x" + "00" * 32)
+        and (not chain_entry.registrant or chain_entry.registrant == "0x" + "00" * 20)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"체인에서 항목(id={id})을 찾을 수 없습니다.",
+        )
+
+    tx_detail = None
+    try:
+        entry = db.query(DBEntry).filter(DBEntry.id == id).first()
+        if entry:
+            tx_hash = entry.tx_confirm or entry.tx_pending
+            if tx_hash:
+                tx_detail = await chain.entry_tx_detail(tx_hash, id)
+    except Exception as e:
+        logger.warning("체인 트랜잭션 상세 조회 실패: %s", e)
+
+    return OnChainEntryResponse(
+        id=chain_entry.id,
+        hash=chain_entry.hash,
+        amount=chain_entry.amount,
+        kind=EntryKind(chain_entry.kind.value if hasattr(chain_entry.kind, "value") else chain_entry.kind),
+        status=EntryStatus(chain_entry.status.value if hasattr(chain_entry.status, "value") else chain_entry.status),
+        term=chain_entry.term,
+        occurred_at=chain_entry.occurred_at,
+        budget_id=chain_entry.budget_id,
+        corrects_id=chain_entry.corrects_id,
+        registrant=chain_entry.registrant,
+        approver=chain_entry.approver,
+        had_warning=tx_detail.had_warning if tx_detail else None,
+        reason_hash=tx_detail.reason_hash if tx_detail else None,
+        block_number=tx_detail.block_number if tx_detail else None,
+        block_reason=BlockReason(tx_detail.block_reason.value if hasattr(tx_detail.block_reason, "value") else tx_detail.block_reason) if tx_detail and tx_detail.block_reason else None,
+        tx_hash=tx_detail.tx_hash if tx_detail else None,
+    )
 
 
 @router.post(
@@ -215,6 +474,30 @@ async def create_entry(
             detail="occurred_at은 사용일의 KST 자정(00:00:00 KST) Unix timestamp 초 단위여야 합니다.",
         )
 
+    # 3.1 영수증 필수 및 해시·파일 검증 (PRD v0.15 §4.3, B2, B3)
+    # 신규 일반 지출(정정 건이 아닌 경우)만 receipt_hash 필수 (정정·환불 건은 docs/HASHING.md 샘플 3처럼 영수증 없을 수 있음)
+    if entry.kind == EntryKind.EXPENSE and entry.corrects_entry_id is None:
+        if not entry.receipt_hash or not entry.receipt_hash.strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="지출(EXPENSE) 내역 등록 시 영수증(receipt_hash)은 필수입니다.",
+            )
+
+    if entry.receipt_hash:
+        # B3: 소문자 hex 66자 검증 (대문자, 0x 누락, 길이 불일치 차단)
+        if not re.match(r"^0x[0-9a-f]{64}$", entry.receipt_hash):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="영수증 해시는 0x로 시작하는 64자리 소문자 16진수여야 합니다.",
+            )
+
+        # B2: 파일 없는 해시 400 차단
+        if not receipt_file_exists(entry.receipt_path, entry.receipt_hash):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="업로드되지 않았거나 서버에 존재하지 않는 영수증입니다.",
+            )
+
     # 4. 수입 내역 예산 연결 차단 (DB 제약 ck_entries_income_no_budget 사전 검증)
     if entry.kind == EntryKind.INCOME and entry.budget_id is not None:
         raise HTTPException(
@@ -222,18 +505,27 @@ async def create_entry(
             detail="수입 내역에는 예산을 연결할 수 없습니다.",
         )
 
-    # 5. 영수증 중복 검사 (DB)
+    # 5. 영수증 중복 검사 (PRD §6, §8, B4: 409 차단 대신 DUPLICATE 경고로 등록 허용)
+    # 반려(REJECTED)·예산초과차단(BLOCKED)된 건은 장부에 유효하게 안착되지 않았으므로
+    # 동일 영수증 재등록 시 중복 경고 대상에서 제외한다.
+    effective_ocr_status = entry.ocr_status
+    is_duplicate = False
+    excluded_statuses = ("REJECTED", "BLOCKED")
+
     if entry.ocr_approval_no and entry.ocr_paid_at:
         try:
-            existing_db = (
+            existing_ocr = (
                 db.query(DBEntry)
                 .filter(
                     DBEntry.ocr_approval_no == entry.ocr_approval_no,
                     DBEntry.ocr_paid_at == entry.ocr_paid_at,
                     DBEntry.amount == entry.amount,
+                    or_(DBEntry.status.is_(None), ~DBEntry.status.in_(excluded_statuses)),
                 )
                 .first()
             )
+            if existing_ocr:
+                is_duplicate = True
         except SQLAlchemyError as e:
             logger.exception("영수증 중복 조회 중 데이터베이스 오류: %s", e)
             raise HTTPException(
@@ -241,11 +533,27 @@ async def create_entry(
                 detail="데이터베이스 처리 중 오류가 발생했습니다.",
             )
 
-        if existing_db:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"이미 등록된 영수증입니다 (내역 ID: {existing_db.id}, 승인번호: {entry.ocr_approval_no}).",
+    if not is_duplicate and entry.receipt_hash:
+        try:
+            existing_hash = (
+                db.query(DBEntry)
+                .filter(
+                    DBEntry.receipt_hash == entry.receipt_hash,
+                    or_(DBEntry.status.is_(None), ~DBEntry.status.in_(excluded_statuses)),
+                )
+                .first()
             )
+            if existing_hash:
+                is_duplicate = True
+        except SQLAlchemyError as e:
+            logger.exception("영수증 해시 중복 조회 중 데이터베이스 오류: %s", e)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="데이터베이스 처리 중 오류가 발생했습니다.",
+            )
+
+    if is_duplicate:
+        effective_ocr_status = OCRStatus.DUPLICATE
 
     # 6. meta_hash 계산
     computed_meta_hash = calculate_meta_hash(
@@ -273,7 +581,7 @@ async def create_entry(
             ocr_amount=entry.ocr_amount,
             ocr_approval_no=entry.ocr_approval_no,
             ocr_paid_at=entry.ocr_paid_at,
-            ocr_status=entry.ocr_status.value if entry.ocr_status else None,
+            ocr_status=effective_ocr_status.value if effective_ocr_status else None,
             category_warning=False,
             warning_ack_reason=None,
             status=None,
@@ -437,9 +745,13 @@ async def submit_entry(
     except EntryConflict as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except ChainRevert as e:
-        raise HTTPException(
+        reason_code = e.reason.value if hasattr(e.reason, "value") else str(e.reason)
+        return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"온체인 등록이 거부되었습니다 ({e.reason.value if hasattr(e.reason, 'value') else e.reason}).",
+            content={
+                "detail": f"온체인 등록이 거부되었습니다 ({reason_code}).",
+                "fail_reason": reason_code,
+            },
         )
     except ChainUnavailable:
         raise HTTPException(
@@ -467,6 +779,126 @@ async def submit_entry(
         tx_pending=tx_hash,
         block_reason=b_reason,
         message=msg,
+    )
+
+
+@router.post(
+    "/{id}/request-revision",
+    response_model=EntryResponse,
+    summary="수입·지출 내역 수정 요청 (T4)",
+)
+async def request_entry_revision(
+    id: int,
+    user: User = Depends(treasurer_only),
+    db: Session = Depends(get_db),
+):
+    """총무 본인이 등록한 승인 대기(PENDING) 내역에 대해 수정 요청을 등록합니다 (PRD §4.3).
+    - 총무 본인 건만 가능 (타 사용자 403)
+    - PENDING 상태만 가능 (그 외 400)
+    - 확정 선점 중(tx_confirm 존재)이면 409 차단 (확정되면 정정으로 가야 함)
+    - 이미 요청된 건은 200 반환 (Idempotent)
+    - 요청 시 revision_requested_at 기록 및 감사·회장 대상 알림 생성
+    """
+    try:
+        entry = db.query(DBEntry).filter(DBEntry.id == id).first()
+    except SQLAlchemyError as e:
+        logger.exception("수정 요청 중 항목(%d) 조회 오류: %s", id, e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 처리 중 오류가 발생했습니다.",
+        )
+
+    if not entry:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"항목(id={id})을 찾을 수 없습니다.",
+        )
+
+    # 1. 작성자 본인 확인 (다른 총무/사용자 403 차단)
+    if entry.created_by != user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="본인이 등록한 내역만 수정 요청할 수 있습니다.",
+        )
+
+    # 2. 조건부 UPDATE: PENDING 상태, tx_confirm IS NULL, revision_requested_at IS NULL (PRD §4.3, #40 확정 경쟁 방지)
+    now = datetime.now(timezone.utc)
+    try:
+        updated = (
+            db.query(DBEntry)
+            .filter(
+                DBEntry.id == id,
+                DBEntry.status == EntryStatus.PENDING.value,
+                DBEntry.tx_confirm.is_(None),
+                DBEntry.revision_requested_at.is_(None),
+            )
+            .update(
+                {"revision_requested_at": now},
+                synchronize_session=False,
+            )
+        )
+    except SQLAlchemyError as e:
+        db.rollback()
+        logger.exception("수정 요청 조건부 갱신 중 데이터베이스 오류: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 처리 중 오류가 발생했습니다.",
+        )
+
+    if updated == 1:
+        # 1행: 선점 성공 -> 알림 생성 후 commit
+        try:
+            create_notification(db, NotificationKind.ENTRY_EDIT_REQUESTED, entry_id=entry.id)
+            db.commit()
+            db.refresh(entry)
+        except SQLAlchemyError as e:
+            db.rollback()
+            logger.exception("수정 요청 저장 중 데이터베이스 오류: %s", e)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="데이터베이스 처리 중 오류가 발생했습니다.",
+            )
+        return _to_schema(entry, db=db)
+
+    # 0행: 선점 실패 -> 다시 읽어서 세부 원인에 따라 응답 분기
+    db.rollback()
+    try:
+        refreshed = db.query(DBEntry).filter(DBEntry.id == id).first()
+    except SQLAlchemyError as e:
+        logger.exception("수정 요청 재조회 중 데이터베이스 오류: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 처리 중 오류가 발생했습니다.",
+        )
+
+    if not refreshed:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"항목(id={id})을 찾을 수 없습니다.",
+        )
+
+    # (1) 이미 수정 요청된 건: 200 반환 (멱등성)
+    if refreshed.revision_requested_at is not None:
+        return _to_schema(refreshed, db=db)
+
+    # (2) 상태가 PENDING이 아님: 400 차단
+    if refreshed.status != EntryStatus.PENDING.value and refreshed.status != EntryStatus.PENDING:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"승인 대기(PENDING) 상태의 내역만 수정 요청할 수 있습니다 (현재: {refreshed.status or 'DRAFT'}).",
+        )
+
+    # (3) 확정(또는 반려)이 먼저 선점(tx_confirm 존재): 409 차단 (확정되면 정정으로 가야 함)
+    if refreshed.tx_confirm:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="확정 처리 중인 내역은 수정 요청할 수 없습니다.",
+        )
+
+    # (4) 기타 경합 fallback
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="동시 요청 경합으로 인해 수정 요청 처리에 실패했습니다. 다시 시도해 주세요.",
     )
 
 
@@ -627,9 +1059,13 @@ async def confirm_entry(
     except EntryConflict as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except ChainRevert as e:
-        raise HTTPException(
+        reason_code = e.reason.value if hasattr(e.reason, "value") else str(e.reason)
+        return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"온체인 승인이 거부되었습니다 ({e.reason.value if hasattr(e.reason, 'value') else e.reason}).",
+            content={
+                "detail": f"온체인 승인이 거부되었습니다 ({reason_code}).",
+                "fail_reason": reason_code,
+            },
         )
     except ChainUnavailable:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="블록체인 네트워크와 통신할 수 없습니다.")
@@ -788,9 +1224,13 @@ async def reject_entry(
     except EntryConflict as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except ChainRevert as e:
-        raise HTTPException(
+        reason_code = e.reason.value if hasattr(e.reason, "value") else str(e.reason)
+        return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"온체인 반려가 거부되었습니다 ({e.reason.value if hasattr(e.reason, 'value') else e.reason}).",
+            content={
+                "detail": f"온체인 반려가 거부되었습니다 ({reason_code}).",
+                "fail_reason": reason_code,
+            },
         )
     except ChainUnavailable:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="블록체인 네트워크와 통신할 수 없습니다.")

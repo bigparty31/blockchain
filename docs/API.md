@@ -374,6 +374,9 @@
 ### 1. 수입·지출 목록 조회 (`GET /entries`)
 - **설명**: 장부 내역 목록을 최신순으로 조회합니다. (필터 쿼리: `kind`, `status`)
 - **타임스탬프**: `occurred_at`은 사용일 KST 00:00:00 기준 Unix 초(정수)입니다.
+- **등록자 지갑 주소**: `registrant` 필드에 온체인 등록자 지갑 주소(`0x...`)가 실려 내려옵니다 (체인을 못 읽으면 DB 등록자 지갑 주소로 대체). 승인·반려 서명(`entryCommit`) 생성 시 체인의 registrant로 사용됩니다.
+- **블록 번호**: 목록 조회 시에는 블록체인 RPC 부하 및 호출 비용 절감을 위해 `block_number`가 항상 `null`로 반환됩니다. 확정·반려 트랜잭션의 블록 번호는 단건 상세 조회(`GET /entries/{id}`) 또는 온체인 원장 조회(`GET /entries/{id}/onchain`)에서 확인하실 수 있습니다.
+- **조회 성능 및 RPC 보호**: 감사·회장 홈 폴링(15초) 및 앱 3초 타임아웃 방지를 위해, 목록 조회에서는 `PENDING` 건에 대해서만 최대 1.5초 이내로 온체인 조회를 시도하고 초과·실패 시 DB 값으로 즉시 응답합니다. (앱은 서명 직전 단건 상세 조회 `GET /entries/{id}`로 온체인 값을 최종 확인합니다)
 - **초안(`DRAFT`) 제외 기준**:
   - 온체인 트랜잭션이 아직 발생하지 않은 미완성 초안(`status IS NULL`)은 **학생 앱과 총무 일반 장부 목록에서 모두 제외**됩니다.
   - **학생 앱**: 온체인에 등록 완료된 `CONFIRMED` 및 `PENDING` 건만 조회 가능합니다.
@@ -385,50 +388,144 @@
   {
     "id": 1,
     "term_id": 1,
+    "term_code": 20261,
     "kind": "EXPENSE",
     "amount": 35000,
     "counterparty": "한결문구",
     "purpose": "신입생 환영회 명찰 및 필기구 구매",
     "occurred_at": 1788793200,
     "status": "CONFIRMED",
-    "receipt_path": "/receipts/sample_01.jpg"
+    "receipt_path": "/receipts/sample_01.jpg",
+    "registrant": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+    "block_number": null
   },
   {
     "id": 2,
     "term_id": 1,
+    "term_code": 20261,
     "kind": "EXPENSE",
     "amount": 120000,
     "counterparty": "청년피자",
     "purpose": "개강총회 다과 주문",
     "occurred_at": 1788706800,
     "status": "PENDING",
-    "receipt_path": "/receipts/sample_02.jpg"
-  },
+    "receipt_path": "/receipts/sample_02.jpg",
+    "registrant": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+    "block_number": null
+  }
+]
+```
+
+### 1.1 수입·지출 내역 단건 상세 조회 (`GET /entries/{id}`)
+- **설명**: 내역 ID로 특정 수입/지출 내역의 상세 정보를 조회합니다.
+- **등록자 및 추가 필드**:
+  - `registrant`: 온체인 등록자 지갑 주소(`0x...`)가 실려 내려옵니다 (미기록 또는 체인 단절 시 DB 등록자의 지갑 주소로 대체).
+  - `creator_name`: 등록자 이름(총무 실명, 예: `"김총무"`)이 실려 내려옵니다.
+  - `block_number`: 확정/반려 트랜잭션이 안착된 블록 번호가 실려 내려옵니다 (`tx_confirm` 또는 `tx_pending` 기준 receipt 조회, 체인 미안착 시 `null`).
+  - `block_reason`: 예산 초과 등으로 지출이 차단(`BLOCKED`)된 경우 그 사유(`BUDGET_EXCEEDED`, `BUDGET_EXPIRED`, `BUDGET_NOT_FOUND`)가 실려 내려옵니다 (정상 등록 시 `null`).
+  - `duplicate_of`: 영수증 중복 경고(`ocr_status == "DUPLICATE"`) 발생 시, 겹치는 기존 원본 Entry ID가 실려 내려옵니다 (정상 시 `null`).
+  - `revision_requested_at`: 총무가 수정 요청을 제출한 일시(Unix 초)가 실려 내려옵니다 (미요청 시 `null`). 승인 화면에서 이 값이 존재하면 확정 버튼을 숨기고 반려만 노출해야 합니다.
+
+**Response (`200 OK`)**
+```json
+{
+  "id": 1,
+  "term_id": 1,
+  "term_code": 20261,
+  "kind": "EXPENSE",
+  "amount": 35000,
+  "counterparty": "한결문구",
+  "purpose": "신입생 환영회 명찰 및 필기구 구매",
+  "occurred_at": 1788793200,
+  "status": "CONFIRMED",
+  "block_reason": null,
+  "receipt_path": "/receipts/sample_01.jpg",
+  "created_by": 2,
+  "creator_name": "김총무",
+  "registrant": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+  "block_number": 102,
+  "duplicate_of": null,
+  "revision_requested_at": null
+}
+```
+
+### 1.2 [T5] 본인 작성 미제출 초안 목록 조회 (`GET /entries/drafts`)
+- **설명**: 총무 본인이 작성하였으나 아직 블록체인 기기 서명을 제출하지 않은 초안(`status IS NULL`) 목록을 조회합니다. 앱이 종료되거나 이탈한 후에도 미제출 초안을 다시 불러와 서명을 이어갈 수 있습니다.
+- **권한**: 총무(`TREASURER`) 전용. (학생·감사·회장은 `403 Forbidden`)
+
+**Response (`200 OK`)**
+```json
+[
   {
-    "id": 3,
+    "id": 5,
     "term_id": 1,
-    "kind": "INCOME",
-    "amount": 5000000,
-    "counterparty": "컴퓨터공학과 학생회비 일괄 납부",
-    "purpose": "2026-2학기 학과 학생회비 수납",
-    "occurred_at": 1788620400,
-    "status": "CONFIRMED",
-    "receipt_path": null
+    "term_code": 20261,
+    "kind": "EXPENSE",
+    "amount": 45000,
+    "counterparty": "알파문구",
+    "purpose": "중간고사 간식 박스 테이프 구매",
+    "occurred_at": 1788793200,
+    "status": null,
+    "block_reason": null,
+    "created_by": 2,
+    "creator_name": "김총무",
+    "tx_pending": null,
+    "receipt_path": "/receipts/sample_01.jpg",
+    "receipt_hash": "0x11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff",
+    "duplicate_of": null,
+    "revision_requested_at": null
   }
 ]
 ```
 
 ### 2. 지출 및 수입 신규 등록 흐름 (2단계 등록 프로세스)
-지출/수입 등록은 블록체인 EIP-712 기기 서명 검증을 위해 **2단계**로 진행됩니다:
-1. **1단계 (초안 등록 및 검증)**: 클라이언트가 거래 내역을 전송하여 서버에 초안을 생성하고 고유 id를 발급받습니다.
-2. **2단계 (앱 서명 및 체인 제출)**: 모바일 앱에서 기기 서명(EIP-712 `RecordRequest`)을 완료하여 서버/릴레이어에 제출하면 스마트 컨트랙트 트랜잭션이 발행되고 `PENDING` 상태로 전환됩니다.
+지출/수입 등록은 영수증 업로드 및 블록체인 EIP-712 기기 서명 검증을 위해 아래 절차로 진행됩니다:
+1. **[사전 단계] 영수증 파일 업로드 (`POST /receipts`)**: 총무가 영수증 이미지를 업로드하고, 서버에서 바이트를 보존해 산출한 `receipt_hash`와 `receipt_path`를 획득합니다.
+2. **1단계 (초안 등록 및 검증, `POST /entries`)**: 클라이언트가 영수증 해시와 거래 내역을 전송하여 서버에 초안을 생성하고 고유 id를 발급받습니다.
+3. **2단계 (앱 서명 및 체인 제출, `POST /entries/{id}/submit`)**: 모바일 앱에서 기기 서명(EIP-712 `RecordRequest`)을 완료하여 서버/릴레이어에 제출하면 스마트 컨트랙트 트랜잭션이 발행되고 `PENDING` 상태로 전환됩니다.
+
+---
+
+#### 2.0 [사전] 영수증 파일 업로드 (`POST /receipts`, `GET /receipts/{filename}`)
+- **설명**: 총무가 촬영하거나 선택한 영수증 이미지를 서버에 업로드합니다 (`multipart/form-data`). 서버는 파일의 원본 바이트를 보존하여 SHA-256 해시를 계산하고 파일명에 반영해 저장합니다.
+- **권한**: 총무(`TREASURER`) 전용.
+- **조회/열람**: 업로드된 파일은 `GET /receipts/{filename}`으로 언제든 원본 이미지를 다운로드하거나 모바일 앱 화면에서 열람(S3)할 수 있습니다.
+
+**Request (`POST /receipts`)**
+- Header: `Content-Type: multipart/form-data`
+- Body: `file: <바이너리 이미지 파일>`
+
+**Response (`201 Created`)**
+```json
+{
+  "receipt_hash": "0xdef4567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+  "receipt_path": "/receipts/def4567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef.jpg",
+  "filename": "receipt_20261106.jpg",
+  "size": 245120
+}
+```
+
+| 코드 | 경우 (`POST /receipts`, `GET /receipts/{filename}`) |
+| --- | --- |
+| `201` | 영수증 업로드 성공 및 해시 발급 완료 |
+| `200` | `GET /receipts/{filename}` 파일 다운로드 성공 |
+| `400` | 빈 파일이거나 파일 파라미터 누락 |
+| `403` | 총무(`TREASURER`)가 아님 |
+| `404` | `GET /receipts/{filename}` 파일 미존재 |
 
 ---
 
 #### 2.1 [1단계] 초안 등록 및 검증 (`POST /entries`)
 - **설명**: 총무가 영수증 해시와 거래 내역을 입력하여 초안을 생성합니다. 블록체인 기록 전이므로 온체인 상태가 아니며, 고유 `id`만 발급됩니다.
 - **권한**: 총무(`TREASURER`)만. 컨트랙트도 등록자를 총무로 제한합니다(`NotRegistrant`). 학생·감사·회장은 `403`, 토큰이 없으면 `401` (인증 §3).
-- **등록자**: `created_by`에는 토큰의 사용자 id가 기록됩니다.
+- **영수증 필수 및 검증 (PRD §4.3, B2, B3)**:
+  - **지출(`EXPENSE`)**: 신규 일반 지출은 `receipt_hash`가 필수입니다 (누락 시 `400 Bad Request`). 단, 정정 지출(`corrects_entry_id`가 지정된 환불·정정 건)은 영수증이 선택값입니다 (`docs/HASHING.md` §2 샘플 3).
+  - **수입(`INCOME`)**: `receipt_hash`는 선택값입니다.
+  - **해시 형식 검증**: `receipt_hash`는 `0x`로 시작하는 64자리 소문자 16진수(`^0x[0-9a-f]{64}$`)여야 합니다 (대문자, 0x 누락, 길이 불일치 시 `400 Bad Request`).
+  - **파일 존재 검증**: 사전에 `POST /receipts`로 업로드되지 않았거나 서버에 존재하지 않는 파일의 해시는 `400 Bad Request`로 거부됩니다.
+- **영수증 중복 검증 (PRD §6, §8, B4)**:
+  - 기존 승인번호+결제일시+금액 또는 영수증 해시가 이미 등록되어 있는 경우, `409 Conflict`로 차단하지 않고 **정상 등록하되 `ocr_status = "DUPLICATE"` 경고 상태로 등록**합니다. (감사 승인 시 소명 사유가 강제됩니다)
+  - 단, 반려(`REJECTED`)되었거나 예산초과 차단(`BLOCKED`)된 내역은 장부에 유효하게 안착되지 않았으므로, 동일 영수증으로 재등록할 수 있도록 **중복 대조 대상에서 제외**됩니다.
 
 **Request**
 ```json
@@ -440,7 +537,8 @@
   "purpose": "개강총회 다과 주문",
   "budget_id": 1,
   "occurred_at": 1788706800,
-  "receipt_hash": "0xdef4567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+  "receipt_hash": "0xdef4567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+  "receipt_path": "/receipts/def4567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef.jpg"
 }
 ```
 
@@ -454,6 +552,15 @@
   "message": "지출 초안이 등록되었으며, 기기 서명 제출 대기 상태입니다."
 }
 ```
+
+| 코드 | 경우 (`POST /entries`) |
+| --- | --- |
+| `201` | 초안 ID 채번 완료 |
+| `400` | 지출 시 `receipt_hash` 누락, 해시 형식 불일치(대문자·길이 오류), 서버 미존재 영수증, 거래처/목적 제어문자 포함 또는 빈 문자열, `occurred_at` 자정 시각 불일치, 수입 내역에 예산 배정 시도 |
+| `401` | 로그인 토큰 없음 |
+| `403` | 총무(`TREASURER`)가 아님 |
+| `422` | 요청 본문 유효성 검증 실패 (문자열 길이 초과 등) |
+| `503` | 데이터베이스 오류 |
 
 ---
 
@@ -495,7 +602,38 @@
 
 ---
 
-#### 2.3 초안 수명주기 및 예외 처리 정책 (모바일 앱 등록 화면 가이드)
+#### 2.3 [T4] 수입·지출 내역 수정 요청 (`POST /entries/{id}/request-revision`)
+- **설명**: 총무가 이미 온체인에 등록되어 승인 대기 중인 `PENDING` 내역에 대해 수정 요청을 등록합니다 (PRD §4.3).
+- **효과**:
+  - `revision_requested_at` 일시가 기록되며 감사·회장에게 알림(`ENTRY_EDIT_REQUESTED`)이 발행됩니다.
+  - 이 값이 존재하는 내역은 승인권자의 확정 버튼이 숨겨지고 반려만 가능해지며, 온체인 확정 시도 시 차단됩니다 (#40 연계).
+- **권한 및 검증**:
+  - 총무(`TREASURER`) 본인이 등록한 건만 가능 (`created_by == user.id`, 타 총무/사용자는 `403 Forbidden`).
+  - `PENDING` 상태만 가능 (초안, 확정, 반려 건은 `400 Bad Request`).
+  - 확정이 선점 중(`tx_confirm` 존재)이면 `409 Conflict` (확정이 먼저 처리되면 총무는 정정 등록으로 진행해야 함).
+  - 이미 수정 요청된 건에 재요청 시 `200 OK` 및 동일한 `EntryResponse` 반환 (멱등성 보장).
+
+**Request**
+- URL: `POST /entries/{id}/request-revision`
+- Header: `Authorization: Bearer <총무 토큰>`
+- Body: 없음
+
+**Response (`200 OK`)**
+- `EntryResponse` 반환 (`revision_requested_at` 필드가 채워짐)
+
+| 코드 | 경우 (`POST /entries/{id}/request-revision`) |
+| --- | --- |
+| `200` | 수정 요청 등록 완료 또는 이미 요청된 건의 멱등 응답 |
+| `400` | `PENDING` 상태가 아님 (이미 확정/반려되었거나 미제출 초안) |
+| `401` | 로그인 토큰 없음 |
+| `403` | 총무(`TREASURER`)가 아니거나 본인이 작성한 내역이 아님 |
+| `404` | 항목(`id`)을 찾을 수 없음 |
+| `409` | 확정 처리(`tx_confirm`)가 선점 진행 중인 내역 |
+| `503` | 데이터베이스 오류 |
+
+---
+
+#### 2.4 초안 수명주기 및 예외 처리 정책 (모바일 앱 등록 화면 가이드)
 총무가 1단계로 ID를 발급받은 뒤 모바일 앱 기기 서명(2단계) 단계에서 이탈하거나 오류가 발생한 경우의 처리 정책입니다:
 
 1. **서명 실패/이탈 시 재시도 (`Retry`) 허용**:
@@ -558,13 +696,55 @@
 
 | 코드 | 경우 |
 | --- | --- |
-| `400` | `PENDING`이 아님, 사유 없음, 서명 형식 오류, 서명자 불일치, 체인이 거부함 |
+| `400` | `PENDING`이 아님, 사유 없음, 서명 형식 오류, 서명자 불일치, 체인이 거부함 (`fail_reason` 코드 동봉) |
 | `403` | 감사·회장이 아님, 본인이 등록한 항목 |
 | `404` | 없는 항목 |
 | `409` | 확정이 처리 중, 다른 요청이 먼저 처리함 또는 처리 중. 잠시 뒤 다시 조회합니다 |
 | `503` | 노드·DB 오류. 트랜잭션이 들어갔는지 모르면 같은 요청을 다시 보내 결과를 확인합니다 |
 
 확정(`POST /entries/{id}/confirm`)도 반려가 처리 중이면 같은 방식으로 `409`입니다.
+
+#### 온체인 거부 시 `fail_reason` 코드 (400 Bad Request)
+체인이 확정(`confirm`)·반려(`reject`)·등록(`submit`)을 거부(`ChainRevert`)하면, `detail` 문구와 함께 최상위에 기계 판독용 `fail_reason` 코드가 함께 반환됩니다.
+앱은 문자열 파싱 없이 `fail_reason` 코드로 분기할 수 있습니다.
+- 예산 관련 거부 코드: `InsufficientBudget`(예산 잔량 부족), `BudgetExpired`(집행 기간 만료), `BudgetNotFound`(예산 미존재)
+- 서명/상태 거부 코드: `InvalidStatus`(이미 처리됨), `SignatureExpired`(서명 유효시한 만료), `SelfApproval`(자기 승인/반려), `EntryCommitMismatch` 등
+
+**온체인 승인 거부 응답 예시 (`400 Bad Request`)**
+```json
+{
+  "detail": "온체인 승인이 거부되었습니다 (InsufficientBudget).",
+  "fail_reason": "InsufficientBudget"
+}
+```
+
+---
+
+### 5. 온체인 원장 항목 조회 (`GET /entries/{id}/onchain`)
+- **설명**: 스마트 컨트랙트 원장(`getEntry`) 및 블록체인 트랜잭션 기록(`entry_tx_detail`)을 직접 조회합니다. 모바일 앱의 1단계/2단계 검증(등록자 지갑 주소 대조, 해시 대조, 블록 번호 대조)에 사용됩니다.
+- **체인 미등록 항목**: 체인에 아직 올라가지 않았거나 없는 건은 `404 Not Found`를 반환합니다.
+
+**Response (`200 OK`)**
+```json
+{
+  "id": 1,
+  "hash": "0x3b8d...",
+  "amount": 35000,
+  "kind": "EXPENSE",
+  "status": "CONFIRMED",
+  "term": 20261,
+  "occurred_at": 1788793200,
+  "budget_id": 1,
+  "corrects_id": 0,
+  "registrant": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+  "approver": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+  "had_warning": false,
+  "reason_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+  "block_number": 102,
+  "block_reason": null,
+  "tx_hash": "0x2222222222222222222222222222222222222222222222222222222222222222"
+}
+```
 
 ---
 
