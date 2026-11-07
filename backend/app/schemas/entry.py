@@ -64,17 +64,23 @@ class EntryResponse(BaseModel):
     ocr_approval_no: Optional[str] = Field(None, description="영수증 카드 승인번호")
     ocr_paid_at: Optional[int] = Field(None, description="OCR 인식 결제 일시")
     ocr_status: Optional[OCRStatus] = Field(None, description="OCR 대조 상태")
+    duplicate_of: Optional[int] = Field(None, description="중복 경고(DUPLICATE) 시 원본 기존 Entry ID")
     category_warning: bool = Field(False, description="예산 카테고리 불일치 경고 여부")
     warning_ack_reason: Optional[str] = Field(None, description="경고 무시 승인 사유")
     status: Optional[EntryStatus] = Field(None, description="장부 상태 (초안은 null, 온체인은 PENDING | CONFIRMED | REJECTED | BLOCKED)")
+    block_reason: Optional[BlockReason] = Field(None, description="차단 사유 (BLOCKED 시)")
     created_by: int = Field(..., description="등록자 User ID (총무)")
+    creator_name: Optional[str] = Field(None, description="등록자 이름 (총무 실명)")
     approved_by: Optional[int] = Field(None, description="승인자 User ID (감사·회장). CONFIRMED 일 때만 값이 있다")
     rejected_by: Optional[int] = Field(None, description="반려자 User ID (감사/회장)")
     reject_reason: Optional[str] = Field(None, description="반려 사유")
     tx_pending: Optional[str] = Field(None, description="Pending 등록 트랜잭션 해시")
     tx_confirm: Optional[str] = Field(None, description="확정 또는 반려 트랜잭션 해시. 처리 중에도 채워진다")
+    registrant: Optional[str] = Field(None, description="온체인 등록자 지갑 주소 (0x...)")
+    block_number: Optional[int] = Field(None, description="확정/반려 트랜잭션 블록 번호")
     corrects_entry_id: Optional[int] = Field(None, description="정정 대상 원본 Entry ID")
     correction_reason: Optional[CorrectionReason] = Field(None, description="정정 사유 유형")
+    revision_requested_at: Optional[int] = Field(None, description="수정 요청 일시 (Unix 초 단위)")
 
 
 class EntryCreate(BaseModel):
@@ -145,3 +151,24 @@ class EntryRejectResponse(BaseModel):
     id: int = Field(..., description="Entry ID")
     status: EntryStatus = Field(EntryStatus.REJECTED, description="장부 상태 (REJECTED)")
     message: str = Field("온체인에 성공적으로 반려(REJECTED) 기록되었습니다.")
+
+
+class OnChainEntryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int = Field(..., description="내역 고유 ID")
+    hash: Optional[str] = Field(None, description="메타데이터 조합 해시 (0x...)")
+    amount: Optional[int] = Field(None, description="금액 (원 단위, int256 호환 정수)")
+    kind: Optional[EntryKind] = Field(None, description="수입/지출 구분 (INCOME | EXPENSE)")
+    status: Optional[EntryStatus] = Field(None, description="온체인 장부 상태 (PENDING | CONFIRMED | REJECTED | BLOCKED)")
+    term: Optional[int] = Field(None, description="온체인 학기 코드 (YYYYS 형식)")
+    occurred_at: Optional[int] = Field(None, description="거래 발생 일시 (Unix 초 단위)")
+    budget_id: Optional[int] = Field(None, description="배정 예산 ID (0은 없음)")
+    corrects_id: Optional[int] = Field(None, description="정정 대상 원본 Entry ID (0은 없음)")
+    registrant: Optional[str] = Field(None, description="온체인 등록자 지갑 주소 (0x...)")
+    approver: Optional[str] = Field(None, description="승인자/반려자 지갑 주소 (0x... 또는 미처리 시 0x00...00)")
+    had_warning: Optional[bool] = Field(None, description="경고 동반 승인 여부 (tx 기록에서 확인)")
+    reason_hash: Optional[str] = Field(None, description="사유 해시 (반려 사유 또는 경고 승인 사유 해시)")
+    block_number: Optional[int] = Field(None, description="트랜잭션 블록 번호")
+    block_reason: Optional[BlockReason] = Field(None, description="차단 사유 (BLOCKED 시)")
+    tx_hash: Optional[str] = Field(None, description="트랜잭션 해시")

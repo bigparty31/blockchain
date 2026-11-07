@@ -11,7 +11,7 @@ from sqlalchemy.orm import sessionmaker
 from app.auth import users
 from app.auth.security import create_access_token
 from app.chain import ChainUnavailable, FakeChainClient, fake_signature, get_chain_client
-from app.chain.models import BlockReason
+from app.chain.models import BlockReason, RevertReason
 from app.database import Base, get_db
 from app.main import app
 from app.routers import entries as entries_router
@@ -28,6 +28,9 @@ client = TestClient(app)
 TREASURER_WALLET = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"  # 시드 총무 지갑
 AUDITOR_WALLET = "0x90F79bf6EB2c4f870365E785982E1f101E93b906"    # 시드 감사 지갑
 PRESIDENT_WALLET = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"  # 시드 회장 지갑
+
+TEST_RECEIPT_HASH = "0x" + "a" * 64
+TEST_RECEIPT_PATH = "/receipts/sample_01.jpg"
 
 _test_session_factory = None
 _test_chain = FakeChainClient()
@@ -225,6 +228,7 @@ def test_create_entry_draft_and_submit(auth_header):
         "budget_id": 2,
         "occurred_at": 1788793200,
         "receipt_hash": "0x11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff",
+        "receipt_path": TEST_RECEIPT_PATH,
         "ocr_amount": 45000,
         "ocr_approval_no": "99887766",
         "ocr_paid_at": 1788829999,
@@ -279,6 +283,8 @@ def test_submit_signature_mismatch_fails(auth_header):
         "purpose": "서명 불일치 검증용",
         "budget_id": 2,
         "occurred_at": 1788793200,
+        "receipt_hash": TEST_RECEIPT_HASH,
+        "receipt_path": TEST_RECEIPT_PATH,
     }
     res_draft = client.post("/entries", json=req_body, headers=auth_header(Role.TREASURER))
     assert res_draft.status_code == 201
@@ -305,6 +311,8 @@ def test_submit_invalid_signature_format_fails(auth_header):
         "purpose": "서명 형식 오류 검증용",
         "budget_id": 2,
         "occurred_at": 1788793200,
+        "receipt_hash": TEST_RECEIPT_HASH,
+        "receipt_path": TEST_RECEIPT_PATH,
     }
     res_draft = client.post("/entries", json=req_body, headers=auth_header(Role.TREASURER))
     draft_id = res_draft.json()["id"]
@@ -331,6 +339,8 @@ def test_submit_blocked_budget_exceeded(auth_header):
         "purpose": "축제 음향 장비 렌탈",
         "budget_id": 2,
         "occurred_at": 1788793200,
+        "receipt_hash": TEST_RECEIPT_HASH,
+        "receipt_path": TEST_RECEIPT_PATH,
     }
     res_draft = client.post("/entries", json=req_body, headers=auth_header(Role.TREASURER))
     assert res_draft.status_code == 201
@@ -361,8 +371,8 @@ def test_submit_blocked_budget_exceeded(auth_header):
     assert blocked_entry["tx_pending"] == submit_data["tx_pending"]
 
 
-def test_ocr_duplication_conflict(auth_header):
-    """동일한 승인번호/결제일시/금액 중복 등록 시 409 Conflict 발생 검증"""
+def test_ocr_duplication_warning_returns_201_duplicate(auth_header):
+    """동일한 승인번호/결제일시/금액 중복 등록 시 409 차단 대신 201 Created 및 ocr_status=DUPLICATE 경고 전환 검증 (PRD v0.15 §6, §8, B4)"""
     dup_body = {
         "term_id": 1,
         "kind": "EXPENSE",
@@ -371,14 +381,22 @@ def test_ocr_duplication_conflict(auth_header):
         "purpose": "명찰 중복 구매 시도",
         "budget_id": 2,
         "occurred_at": 1788793200,
+        "receipt_hash": "0x" + "bb" * 32,
+        "receipt_path": TEST_RECEIPT_PATH,
         "ocr_amount": 35000,
         "ocr_approval_no": "12345678",
         "ocr_paid_at": 1788825820,
         "ocr_status": "MATCH",
     }
     res = client.post("/entries", json=dup_body, headers=auth_header(Role.TREASURER))
-    assert res.status_code == 409
-    assert "이미 등록된 영수증입니다" in res.json()["detail"]
+    assert res.status_code == 201
+    saved = res.json()
+    assert saved["id"] is not None
+
+    with _test_session_factory() as db:
+        row = db.query(DBEntry).filter(DBEntry.id == saved["id"]).first()
+        assert row is not None
+        assert row.ocr_status == "DUPLICATE"
 
 
 def test_create_income_with_budget_returns_400(auth_header):
@@ -423,6 +441,8 @@ DRAFT_BODY = {
     "purpose": "권한 검사용 초안",
     "budget_id": 2,
     "occurred_at": 1788793200,
+    "receipt_hash": TEST_RECEIPT_HASH,
+    "receipt_path": TEST_RECEIPT_PATH,
 }
 SUBMIT_BODY = {"deadline": 9999999999, "signature": fake_signature(TREASURER_WALLET)}
 
@@ -533,6 +553,8 @@ def test_confirm_entry_success(auth_header):
         "purpose": "승인 테스트용 구매",
         "budget_id": 2,
         "occurred_at": 1788793200,
+        "receipt_hash": TEST_RECEIPT_HASH,
+        "receipt_path": TEST_RECEIPT_PATH,
     }
     res_draft = client.post("/entries", json=draft_body, headers=auth_header(Role.TREASURER))
     entry_id = res_draft.json()["id"]
@@ -570,6 +592,8 @@ def test_confirm_self_approval_is_blocked(auth_header):
         "purpose": "자기 승인 차단 검증",
         "budget_id": 2,
         "occurred_at": 1788793200,
+        "receipt_hash": TEST_RECEIPT_HASH,
+        "receipt_path": TEST_RECEIPT_PATH,
     }
     res_draft = client.post("/entries", json=draft_body, headers=auth_header(Role.TREASURER))
     entry_id = res_draft.json()["id"]
@@ -609,6 +633,8 @@ def test_confirm_signer_mismatch_fails(auth_header):
         "purpose": "승인 서명 불일치 검증",
         "budget_id": 2,
         "occurred_at": 1788793200,
+        "receipt_hash": TEST_RECEIPT_HASH,
+        "receipt_path": TEST_RECEIPT_PATH,
     }
     res_draft = client.post("/entries", json=draft_body, headers=auth_header(Role.TREASURER))
     entry_id = res_draft.json()["id"]
@@ -640,6 +666,8 @@ def test_reject_entry_success(auth_header):
         "purpose": "반려 테스트용 구매",
         "budget_id": 2,
         "occurred_at": 1788793200,
+        "receipt_hash": TEST_RECEIPT_HASH,
+        "receipt_path": TEST_RECEIPT_PATH,
     }
     res_draft = client.post("/entries", json=draft_body, headers=auth_header(Role.TREASURER))
     entry_id = res_draft.json()["id"]
@@ -682,6 +710,7 @@ def test_confirm_ocr_mismatch_requires_warning_reason(auth_header):
         "budget_id": 2,
         "occurred_at": 1788793200,
         "receipt_hash": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+        "receipt_path": TEST_RECEIPT_PATH,
         "ocr_amount": 48000,
         "ocr_approval_no": "11223344",
         "ocr_paid_at": 1788829999,
@@ -730,6 +759,8 @@ def test_confirm_without_warning_rejects_warning_reason(auth_header):
         "purpose": "정상 거래 승인",
         "budget_id": 2,
         "occurred_at": 1788793200,
+        "receipt_hash": TEST_RECEIPT_HASH,
+        "receipt_path": TEST_RECEIPT_PATH,
     }
     res_draft = client.post("/entries", json=draft_body, headers=auth_header(Role.TREASURER))
     entry_id = res_draft.json()["id"]
@@ -761,6 +792,8 @@ def test_confirm_ocr_no_number_is_normal(auth_header):
         "purpose": "승인번호 없는 계좌이체 영수증",
         "budget_id": 2,
         "occurred_at": 1788793200,
+        "receipt_hash": TEST_RECEIPT_HASH,
+        "receipt_path": TEST_RECEIPT_PATH,
         "ocr_status": "NO_NUMBER",
     }
     res_draft = client.post("/entries", json=draft_body, headers=auth_header(Role.TREASURER))
@@ -813,6 +846,8 @@ def test_submit_entry_retry_recovers_state_2(auth_header, monkeypatch):
         "purpose": "상태 2 재시도 복구 검증",
         "budget_id": 2,
         "occurred_at": 1788793200,
+        "receipt_hash": TEST_RECEIPT_HASH,
+        "receipt_path": TEST_RECEIPT_PATH,
     }
     res_draft = client.post("/entries", json=draft_body, headers=auth_header(Role.TREASURER))
     assert res_draft.status_code == 201
@@ -881,6 +916,8 @@ def test_reject_blocked_when_confirm_in_flight(auth_header):
         "purpose": "확정 선점 중 반려 차단 검증",
         "budget_id": 2,
         "occurred_at": 1788793200,
+        "receipt_hash": TEST_RECEIPT_HASH,
+        "receipt_path": TEST_RECEIPT_PATH,
     }
     res_draft = client.post("/entries", json=draft_body, headers=auth_header(Role.TREASURER))
     entry_id = res_draft.json()["id"]
@@ -930,6 +967,8 @@ def _pending_entry(auth_header) -> int:
         "purpose": "반려 선점 검증",
         "budget_id": 2,
         "occurred_at": 1788793200,
+        "receipt_hash": TEST_RECEIPT_HASH,
+        "receipt_path": TEST_RECEIPT_PATH,
     }
     entry_id = client.post("/entries", json=draft_body, headers=auth_header(Role.TREASURER)).json()["id"]
     res = client.post(
@@ -1092,6 +1131,8 @@ def test_confirm_when_chain_unavailable_on_get_entry_returns_503(auth_header, mo
         "purpose": "노드 장애 에스컬레이션 검증",
         "budget_id": 2,
         "occurred_at": 1788793200,
+        "receipt_hash": TEST_RECEIPT_HASH,
+        "receipt_path": TEST_RECEIPT_PATH,
     }
     res_draft = client.post("/entries", json=draft_body, headers=auth_header(Role.TREASURER))
     entry_id = res_draft.json()["id"]
@@ -1148,6 +1189,8 @@ def test_get_entry_by_id_draft_returns_404(auth_header):
         "purpose": "초안 단건 조회 차단 검증",
         "budget_id": 2,
         "occurred_at": 1788793200,
+        "receipt_hash": TEST_RECEIPT_HASH,
+        "receipt_path": TEST_RECEIPT_PATH,
     }
     res_draft = client.post("/entries", json=draft_body, headers=auth_header(Role.TREASURER))
     assert res_draft.status_code == 201
@@ -1171,6 +1214,8 @@ def test_create_entry_counterparty_max_length(auth_header):
         "purpose": "상호명 길이 검증",
         "budget_id": 2,
         "occurred_at": 1788793200,
+        "receipt_hash": TEST_RECEIPT_HASH,
+        "receipt_path": TEST_RECEIPT_PATH,
     }
 
     # 1. 정확히 100자 -> 201 통과
@@ -1226,7 +1271,583 @@ def test_create_entry_optional_string_max_lengths(auth_header, field, value):
         "purpose": "부가 문자열 길이 검증",
         "budget_id": 2,
         "occurred_at": 1788793200,
+        "receipt_hash": TEST_RECEIPT_HASH,
+        "receipt_path": TEST_RECEIPT_PATH,
         field: value,
     }
     res = client.post("/entries", json=body, headers=auth_header(Role.TREASURER))
     assert res.status_code == 422
+
+
+# ---------------------------------------------------------------- registrant, onchain endpoint & fail_reason
+
+
+def test_entry_response_registrant(auth_header):
+    """GET /entries 및 GET /entries/{id}에서 registrant 필드 반환 검증"""
+    # 1. 단건 상세 조회
+    res = client.get("/entries/1")
+    assert res.status_code == 200
+    data = res.json()
+    assert "registrant" in data
+    assert data["registrant"] is not None
+    assert data["registrant"].startswith("0x")
+
+    # 2. 목록 조회
+    res_list = client.get("/entries")
+    assert res_list.status_code == 200
+    entries = res_list.json()
+    assert len(entries) > 0
+    for e in entries:
+        assert "registrant" in e
+        assert e["registrant"] is not None
+
+
+def test_get_entries_and_detail_return_200_when_chain_setup_fails(auth_header):
+    """체인 클라이언트 초기화 실패(ChainSetupError 등) 시에도 GET /entries 및 GET /entries/{id}가 200으로 동작하고 DB 등록자 지갑으로 대체된다."""
+    from app.chain import ChainSetupError
+
+    def broken_chain_client():
+        raise ChainSetupError("체인 노드 미기동 또는 연결 실패")
+
+    app.dependency_overrides[get_chain_client] = broken_chain_client
+
+    # 1. 목록 조회: 200 OK 및 DB registrant 대체
+    res_list = client.get("/entries")
+    assert res_list.status_code == 200
+    entries = res_list.json()
+    assert len(entries) > 0
+    assert entries[0]["registrant"].lower() == TREASURER_WALLET.lower()
+    assert entries[0]["block_number"] is None
+
+    # 2. 단건 상세 조회: 200 OK 및 DB registrant 대체
+    res_detail = client.get("/entries/1")
+    assert res_detail.status_code == 200
+    detail = res_detail.json()
+    assert detail["registrant"].lower() == TREASURER_WALLET.lower()
+    assert detail["block_number"] is None
+
+
+def test_get_entries_slow_node_returns_200_within_timeout(auth_header, monkeypatch):
+    """체인 RPC 응답이 지연되어도 GET /entries가 타임아웃 없이 1.5초 이내에 200 OK와 DB 등록자 지갑으로 반환된다."""
+    import asyncio
+
+    async def slow_get_entry(entry_id):
+        await asyncio.sleep(5.0)
+        return None
+
+    monkeypatch.setattr(_test_chain, "get_entry", slow_get_entry)
+
+    start_t = time.time()
+    res_list = client.get("/entries")
+    elapsed = time.time() - start_t
+
+    assert res_list.status_code == 200
+    assert elapsed < 2.5  # 1.5초 wait_for에 의해 3초 앱 타임아웃 이전에 안전하게 반환
+    entries = res_list.json()
+    assert len(entries) > 0
+    assert entries[0]["registrant"].lower() == TREASURER_WALLET.lower()
+
+
+def test_get_onchain_entry_endpoint(auth_header):
+    """GET /entries/{id}/onchain 엔드포인트 동작 검증"""
+    now = int(time.time())
+    # 신규 항목 생성 및 submit
+    body = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 25000,
+        "counterparty": "체인조회테스트",
+        "purpose": "온체인조회 검증",
+        "budget_id": 1,
+        "occurred_at": 1788793200,
+        "receipt_hash": TEST_RECEIPT_HASH,
+        "receipt_path": TEST_RECEIPT_PATH,
+    }
+    res_create = client.post("/entries", json=body, headers=auth_header(Role.TREASURER))
+    entry_id = res_create.json()["id"]
+
+    res_submit = client.post(
+        f"/entries/{entry_id}/submit",
+        json={"deadline": now + 600, "signature": fake_signature(TREASURER_WALLET)},
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_submit.status_code == 200
+
+    # GET /entries/{entry_id}/onchain 호출
+    res_onchain = client.get(f"/entries/{entry_id}/onchain")
+    assert res_onchain.status_code == 200
+    data = res_onchain.json()
+    assert data["id"] == entry_id
+    assert data["amount"] == 25000
+    assert data["kind"] == "EXPENSE"
+    assert data["status"] == "PENDING"
+    assert data["registrant"].lower() == TREASURER_WALLET.lower()
+    assert data["block_number"] is not None
+
+    # 존재하지 않는 체인 항목은 404
+    res_not_found = client.get("/entries/99999/onchain")
+    assert res_not_found.status_code == 404
+
+
+def test_confirm_entry_fail_reason_on_chain_revert(auth_header):
+    """POST /entries/{id}/confirm 실패(ChainRevert) 시 400과 fail_reason 코드 반환 검증"""
+    now = int(time.time())
+    body = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 30000,
+        "counterparty": "예산초과상점",
+        "purpose": "확정 실패 사유코드 검증",
+        "budget_id": 1,
+        "occurred_at": 1788793200,
+        "receipt_hash": TEST_RECEIPT_HASH,
+        "receipt_path": TEST_RECEIPT_PATH,
+    }
+    res_create = client.post("/entries", json=body, headers=auth_header(Role.TREASURER))
+    entry_id = res_create.json()["id"]
+
+    client.post(
+        f"/entries/{entry_id}/submit",
+        json={"deadline": now + 600, "signature": fake_signature(TREASURER_WALLET)},
+        headers=auth_header(Role.TREASURER),
+    )
+
+    # FakeChainClient에 InsufficientBudget 강제 주입
+    _test_chain.fail_next("confirm_entry", RevertReason.INSUFFICIENT_BUDGET)
+
+    confirm_body = {
+        "deadline": now + 600,
+        "signature": fake_signature(AUDITOR_WALLET),
+        "warning_reason": None,
+    }
+    res_confirm = client.post(
+        f"/entries/{entry_id}/confirm",
+        json=confirm_body,
+        headers=auth_header(Role.AUDITOR),
+    )
+    assert res_confirm.status_code == 400
+    res_json = res_confirm.json()
+    assert res_json["fail_reason"] == "InsufficientBudget"
+    assert "온체인 승인이 거부되었습니다 (InsufficientBudget)." in res_json["detail"]
+
+
+def test_reject_entry_fail_reason_on_chain_revert(auth_header):
+    """POST /entries/{id}/reject 실패(ChainRevert) 시 400과 fail_reason 코드 반환 검증"""
+    now = int(time.time())
+    body = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 12000,
+        "counterparty": "반려테스트점",
+        "purpose": "반려 실패 사유코드 검증",
+        "budget_id": 1,
+        "occurred_at": 1788793200,
+        "receipt_hash": TEST_RECEIPT_HASH,
+        "receipt_path": TEST_RECEIPT_PATH,
+    }
+    res_create = client.post("/entries", json=body, headers=auth_header(Role.TREASURER))
+    entry_id = res_create.json()["id"]
+
+    client.post(
+        f"/entries/{entry_id}/submit",
+        json={"deadline": now + 600, "signature": fake_signature(TREASURER_WALLET)},
+        headers=auth_header(Role.TREASURER),
+    )
+
+    # FakeChainClient에 InvalidStatus 강제 주입
+    _test_chain.fail_next("reject_entry", RevertReason.INVALID_STATUS)
+
+    reject_body = {
+        "deadline": now + 600,
+        "signature": fake_signature(AUDITOR_WALLET),
+        "reject_reason": "증빙 불충분으로 반려합니다.",
+    }
+    res_reject = client.post(
+        f"/entries/{entry_id}/reject",
+        json=reject_body,
+        headers=auth_header(Role.AUDITOR),
+    )
+    assert res_reject.status_code == 400
+    res_json = res_reject.json()
+    assert res_json["fail_reason"] == "InvalidStatus"
+    assert "온체인 반려가 거부되었습니다 (InvalidStatus)." in res_json["detail"]
+
+
+# ---------------------------------------------------------------- B2, B3, B4 영수증 필수화·해시검증·중복경고 신규 회귀 테스트
+
+
+def test_expense_requires_receipt_hash_returns_400(auth_header):
+    """B2: 지출(EXPENSE) 등록 시 영수증(receipt_hash)이 없으면 400 Bad Request 반환"""
+    body = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 10000,
+        "counterparty": "해시누락점",
+        "purpose": "영수증 없는 지출 차단",
+        "budget_id": 2,
+        "occurred_at": 1788793200,
+        "receipt_hash": None,
+    }
+    res = client.post("/entries", json=body, headers=auth_header(Role.TREASURER))
+    assert res.status_code == 400
+    assert "영수증(receipt_hash)은 필수입니다" in res.json()["detail"]
+
+
+def test_income_optional_receipt_hash_returns_201(auth_header):
+    """B2: 수입(INCOME) 등록 시 영수증(receipt_hash)이 없어도 201 Created 정상 성공"""
+    body = {
+        "term_id": 1,
+        "kind": "INCOME",
+        "amount": 100000,
+        "counterparty": "영수증없는수입원",
+        "purpose": "학생회비 납부",
+        "budget_id": None,
+        "occurred_at": 1788793200,
+        "receipt_hash": None,
+    }
+    res = client.post("/entries", json=body, headers=auth_header(Role.TREASURER))
+    assert res.status_code == 201
+    assert "id" in res.json()
+
+
+def test_receipt_hash_format_validation(auth_header):
+    """B3: 영수증 해시는 0x로 시작하는 64자리 소문자 hex여야 하며, 대문자/길이오류/접두사 누락 시 400 차단"""
+    base_body = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 10000,
+        "counterparty": "해시형식검증점",
+        "purpose": "해시 형식 검증",
+        "budget_id": 2,
+        "occurred_at": 1788793200,
+        "receipt_path": TEST_RECEIPT_PATH,
+    }
+
+    # 1. 대문자 포함 시 400
+    res_upper = client.post(
+        "/entries",
+        json={**base_body, "receipt_hash": "0x" + "A" * 64},
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_upper.status_code == 400
+    assert "소문자 16진수" in res_upper.json()["detail"]
+
+    # 2. 0x 접두사 누락 시 400
+    res_no_prefix = client.post(
+        "/entries",
+        json={**base_body, "receipt_hash": "a" * 64},
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_no_prefix.status_code == 400
+    assert "소문자 16진수" in res_no_prefix.json()["detail"]
+
+    # 3. 길이 부족(63자) 시 400
+    res_short = client.post(
+        "/entries",
+        json={**base_body, "receipt_hash": "0x" + "a" * 63},
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_short.status_code == 400
+    assert "소문자 16진수" in res_short.json()["detail"]
+
+
+def test_receipt_file_not_found_returns_400(auth_header):
+    """B2: 서버 저장소에 존재하지 않는 파일/미업로드 해시는 400 Bad Request 차단"""
+    body = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 10000,
+        "counterparty": "유령파일상점",
+        "purpose": "존재하지 않는 영수증 등록 차단",
+        "budget_id": 2,
+        "occurred_at": 1788793200,
+        "receipt_hash": "0x" + "f" * 64,
+        "receipt_path": "/receipts/non_existent_file_12345.jpg",
+    }
+    res = client.post("/entries", json=body, headers=auth_header(Role.TREASURER))
+    assert res.status_code == 400
+    assert "서버에 존재하지 않는 영수증입니다" in res.json()["detail"]
+
+
+def test_duplicate_receipt_hash_sets_ocr_status_duplicate(auth_header):
+    """B4: 동일한 receipt_hash 중복 등록 시 409 대신 201 Created 및 ocr_status=DUPLICATE 경고 전환 검증"""
+    body = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 20000,
+        "counterparty": "해시중복상점",
+        "purpose": "중복 영수증 해시 등록",
+        "budget_id": 2,
+        "occurred_at": 1788793200,
+        # 시드 e1의 receipt_hash 중복 사용
+        "receipt_hash": "0xabc1234567890abcdef1234567890abcdef1234567890abcdef1234567890abc",
+        "receipt_path": TEST_RECEIPT_PATH,
+        "ocr_amount": 20000,
+        "ocr_approval_no": "99998888",
+        "ocr_paid_at": 1788825820,
+        "ocr_status": "MATCH",
+    }
+    res = client.post("/entries", json=body, headers=auth_header(Role.TREASURER))
+    assert res.status_code == 201
+    data = res.json()
+    assert data["id"] is not None
+
+    with _test_session_factory() as db:
+        row = db.query(DBEntry).filter(DBEntry.id == data["id"]).first()
+        assert row is not None
+        assert row.ocr_status == "DUPLICATE"
+
+
+def test_duplicate_receipt_ignores_rejected_and_blocked(auth_header):
+    """반려(REJECTED)되거나 예산초과 차단(BLOCKED)된 항목의 영수증으로 재등록 시 DUPLICATE 경고가 붙지 않음"""
+    # 1. 시드 DB의 e1을 REJECTED 상태로 변경
+    with _test_session_factory() as db:
+        e1 = db.query(DBEntry).filter(DBEntry.id == 1).first()
+        e1.status = "REJECTED"
+        e1.reject_reason = "영수증 식별 불가"
+        e1.rejected_by = 3
+        db.commit()
+
+    # e1과 동일한 영수증 해시로 재등록 시도
+    body = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 20000,
+        "counterparty": "재등록상점",
+        "purpose": "반려 후 재등록",
+        "budget_id": 2,
+        "occurred_at": 1788793200,
+        "receipt_hash": "0xabc1234567890abcdef1234567890abcdef1234567890abcdef1234567890abc",
+        "receipt_path": TEST_RECEIPT_PATH,
+        "ocr_amount": 20000,
+        "ocr_approval_no": "99998888",
+        "ocr_paid_at": 1788825820,
+        "ocr_status": "MATCH",
+    }
+    res = client.post("/entries", json=body, headers=auth_header(Role.TREASURER))
+    assert res.status_code == 201
+    data = res.json()
+
+    with _test_session_factory() as db:
+        row = db.query(DBEntry).filter(DBEntry.id == data["id"]).first()
+        assert row is not None
+        # REJECTED 항목은 제외되었으므로 MATCH 상태 유지 (DUPLICATE 아님)
+        assert row.ocr_status == "MATCH"
+
+
+def test_correction_expense_optional_receipt_hash(auth_header):
+    """지출 정정(corrects_entry_id 있음)의 경우 영수증(receipt_hash) 없이도 201 성공 (docs/HASHING.md 샘플 3)"""
+    body = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": -10000,
+        "counterparty": "환불문구점",
+        "purpose": "물품 반품 환불 정정",
+        "budget_id": 2,
+        "occurred_at": 1788793200,
+        "corrects_entry_id": 1,
+        "correction_reason": "REFUND",
+        "receipt_hash": None,
+        "receipt_path": None,
+    }
+    res = client.post("/entries", json=body, headers=auth_header(Role.TREASURER))
+    assert res.status_code == 201
+    assert "id" in res.json()
+
+
+# ---------------------------------------------------------------- T4 수정 요청 & T5 초안 목록 테스트
+
+
+def test_get_my_drafts_endpoint(auth_header):
+    """GET /entries/drafts: 총무 본인의 미제출 초안만 조회되고 서명 제출 후 목록에서 제외됨 검증 (T5)"""
+    # 1. 초안 2건 생성
+    body1 = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 10000,
+        "counterparty": "초안상점1",
+        "purpose": "초안1",
+        "budget_id": 2,
+        "occurred_at": 1788793200,
+        "receipt_hash": TEST_RECEIPT_HASH,
+        "receipt_path": TEST_RECEIPT_PATH,
+    }
+    body2 = {
+        "term_id": 1,
+        "kind": "INCOME",
+        "amount": 50000,
+        "counterparty": "초안입금처",
+        "purpose": "초안2",
+        "budget_id": None,
+        "occurred_at": 1788793200,
+    }
+    id1 = client.post("/entries", json=body1, headers=auth_header(Role.TREASURER)).json()["id"]
+    id2 = client.post("/entries", json=body2, headers=auth_header(Role.TREASURER)).json()["id"]
+
+    # 2. GET /entries/drafts 목록 조회
+    res_drafts = client.get("/entries/drafts", headers=auth_header(Role.TREASURER))
+    assert res_drafts.status_code == 200
+    drafts = res_drafts.json()
+    draft_ids = [d["id"] for d in drafts]
+    assert id1 in draft_ids
+    assert id2 in draft_ids
+    for d in drafts:
+        assert d["status"] is None  # 초안은 status null
+
+    # 3. 비총무 권한 호출 시 403 차단
+    res_forbidden = client.get("/entries/drafts", headers=auth_header(Role.STUDENT))
+    assert res_forbidden.status_code == 403
+
+    # 4. id1을 submit하면 초안 목록에서 사라짐
+    submit_body = {
+        "deadline": int(time.time()) + 600,
+        "signature": fake_signature(TREASURER_WALLET),
+    }
+    res_submit = client.post(f"/entries/{id1}/submit", json=submit_body, headers=auth_header(Role.TREASURER))
+    assert res_submit.status_code == 200
+
+    res_after = client.get("/entries/drafts", headers=auth_header(Role.TREASURER))
+    after_ids = [d["id"] for d in res_after.json()]
+    assert id1 not in after_ids
+    assert id2 in after_ids
+
+
+def test_request_entry_revision_success(auth_header, monkeypatch):
+    """POST /entries/{id}/request-revision: PENDING 상태의 본인 등록 건에 대해 정상 수정 요청 및 알림 생성 검증 (T4)"""
+    entry_id = _pending_entry(auth_header)
+    notified = []
+
+    def mock_create_notification(db, kind, **kwargs):
+        notified.append((kind, kwargs))
+
+    monkeypatch.setattr(entries_router, "create_notification", mock_create_notification)
+
+    # 1. 수정 요청 호출
+    res = client.post(f"/entries/{entry_id}/request-revision", headers=auth_header(Role.TREASURER))
+    assert res.status_code == 200
+    data = res.json()
+    assert data["id"] == entry_id
+    assert data["revision_requested_at"] is not None
+    assert isinstance(data["revision_requested_at"], int)
+
+    # 알림 발송 검증
+    assert len(notified) == 1
+    assert notified[0][0] == entries_router.NotificationKind.ENTRY_EDIT_REQUESTED
+    assert notified[0][1]["entry_id"] == entry_id
+
+    # DB 저장 확인
+    with _test_session_factory() as db:
+        row = db.query(DBEntry).filter(DBEntry.id == entry_id).first()
+        assert row.revision_requested_at is not None
+
+    # 2. 동일 건 재요청 시 200 멱등성 검증
+    res_repeat = client.post(f"/entries/{entry_id}/request-revision", headers=auth_header(Role.TREASURER))
+    assert res_repeat.status_code == 200
+    assert res_repeat.json()["revision_requested_at"] == data["revision_requested_at"]
+
+
+def test_request_entry_revision_forbidden_for_other_treasurer(second_treasurer, auth_header):
+    """다른 총무가 등록한 건에 대해 수정 요청 시 403 Forbidden 차단 검증"""
+    entry_id = _pending_entry(auth_header)  # 시드 총무가 작성한 건
+    res = client.post(f"/entries/{entry_id}/request-revision", headers=second_treasurer.headers)
+    assert res.status_code == 403
+    assert "본인이 등록한 내역만" in res.json()["detail"]
+
+
+def test_request_entry_revision_not_pending_fails(auth_header):
+    """PENDING이 아닌 상태(CONFIRMED, 초안 등)의 내역에 수정 요청 시 400 Bad Request 차단 검증"""
+    # 1. 시드 id=1 (CONFIRMED)
+    res_confirmed = client.post("/entries/1/request-revision", headers=auth_header(Role.TREASURER))
+    assert res_confirmed.status_code == 400
+    assert "승인 대기(PENDING) 상태의 내역만" in res_confirmed.json()["detail"]
+
+    # 2. 미제출 초안 건
+    draft_res = client.post("/entries", json=DRAFT_BODY, headers=auth_header(Role.TREASURER))
+    draft_id = draft_res.json()["id"]
+    res_draft = client.post(f"/entries/{draft_id}/request-revision", headers=auth_header(Role.TREASURER))
+    assert res_draft.status_code == 400
+    assert "승인 대기(PENDING) 상태의 내역만" in res_draft.json()["detail"]
+
+
+def test_request_entry_revision_conflict_when_confirm_in_flight(auth_header):
+    """확정 처리가 선점 중(tx_confirm 존재)인 경우 409 Conflict 차단 검증"""
+    entry_id = _pending_entry(auth_header)
+    with _test_session_factory() as db:
+        row = db.query(DBEntry).filter(DBEntry.id == entry_id).first()
+        row.tx_confirm = "0x" + "7" * 64
+        row.approved_by = 3
+        db.commit()
+
+    res = client.post(f"/entries/{entry_id}/request-revision", headers=auth_header(Role.TREASURER))
+    assert res.status_code == 409
+    assert "확정 처리 중인 내역은 수정 요청할 수 없습니다." in res.json()["detail"]
+
+
+# ---------------------------------------------------------------- 응답 필드 보강 (duplicate_of, block_reason, creator_name)
+
+
+def test_entry_response_supplementary_fields(auth_header):
+    """EntryResponse 보강 필드(duplicate_of, block_reason, creator_name) 반환 검증"""
+    # 1. 첫 번째 지출 내역 생성 (원본)
+    body1 = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 20000,
+        "counterparty": "원본상점",
+        "purpose": "물품구매1",
+        "budget_id": 2,
+        "occurred_at": 1788793200,
+        "receipt_hash": TEST_RECEIPT_HASH,
+        "receipt_path": TEST_RECEIPT_PATH,
+    }
+    res1 = client.post("/entries", json=body1, headers=auth_header(Role.TREASURER))
+    assert res1.status_code == 201
+    orig_id = res1.json()["id"]
+
+    # 2. 동일한 영수증으로 두 번째 지출 내역 생성 (중복 발생 -> DUPLICATE)
+    body2 = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 20000,
+        "counterparty": "중복상점",
+        "purpose": "물품구매2",
+        "budget_id": 2,
+        "occurred_at": 1788793200,
+        "receipt_hash": TEST_RECEIPT_HASH,
+        "receipt_path": TEST_RECEIPT_PATH,
+    }
+    res2 = client.post("/entries", json=body2, headers=auth_header(Role.TREASURER))
+    assert res2.status_code == 201
+    dup_id = res2.json()["id"]
+
+    # 3. GET /entries/drafts 로 초안 목록 조회 시 duplicate_of 및 creator_name 검증
+    drafts_res = client.get("/entries/drafts", headers=auth_header(Role.TREASURER))
+    assert drafts_res.status_code == 200
+    drafts = {d["id"]: d for d in drafts_res.json()}
+
+    # 원본 건은 duplicate_of가 None
+    assert drafts[orig_id]["duplicate_of"] is None
+    assert drafts[orig_id]["creator_name"] == "김총무"
+
+    # 중복 건은 duplicate_of 가 원본 건 id(orig_id)를 가리킴
+    assert drafts[dup_id]["ocr_status"] == "DUPLICATE"
+    assert drafts[dup_id]["duplicate_of"] == orig_id
+    assert drafts[dup_id]["creator_name"] == "김총무"
+
+    # 4. 차단(BLOCKED) 건의 block_reason 반환 검증
+    with _test_session_factory() as db:
+        row = db.query(DBEntry).filter(DBEntry.id == orig_id).first()
+        row.status = "BLOCKED"
+        row.block_reason = "BUDGET_EXCEEDED"
+        db.commit()
+
+    detail_res = client.get(f"/entries/{orig_id}")
+    assert detail_res.status_code == 200
+    detail_data = detail_res.json()
+    assert detail_data["status"] == "BLOCKED"
+    assert detail_data["block_reason"] == "BUDGET_EXCEEDED"
+    assert detail_data["creator_name"] == "김총무"
+
+
+
+

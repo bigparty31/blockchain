@@ -635,6 +635,8 @@ def test_get_budgets_reflects_chain_remaining(auth_header):
             "purpose": "명찰 구매",
             "budget_id": 2,
             "occurred_at": 1788793200,
+            "receipt_path": "/receipts/sample_01.jpg",
+            "receipt_hash": "0x" + "a" * 64,
         },
         headers=auth_header(Role.TREASURER),
     )
