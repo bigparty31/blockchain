@@ -568,6 +568,108 @@
 
 ---
 
+## 계좌 대조
+
+PRD v0.15 §4.6. 총무가 은행에서 내려받은 거래내역 CSV를 올리면 원장과 1:1로 맞추고, 짝이 없는 거래를 지목합니다.
+- **원장에 자동 반영하지 않습니다.** 파일은 검사 용도로만 씁니다.
+- 업로드는 **총무만**, 조회는 **임원(총무·감사·회장)**만. 토큰이 없으면 `401`, 권한이 없으면 `403`.
+- 같은 학기에 여러 번 올릴 수 있습니다. 새로 올리면 같은 학기 이전 스냅샷의 짝을 풀고 **최신 파일로 다시 맞춥니다**(원장 1건은 은행 거래 1줄에만 짝 — `uq_bank_tran_matched_entry`). 이전 스냅샷은 파일 해시·거래 줄을 근거로 남고 `superseded: true`가 됩니다.
+
+**대조 규칙**
+- 방향(입금=`INCOME`, 출금=`EXPENSE`)·금액·날짜(KST)가 모두 같으면 짝. 짝이 된 원장은 후보에서 빠집니다(같은 날 같은 금액 2건이면 원장도 2건 있어야 둘 다 맞음).
+- 후보는 **정정이 아닌 원본 중 `PENDING`·`CONFIRMED`만**. 초안·`REJECTED`·`BLOCKED`는 제외 — 예산 초과로 차단된 지출의 출금은 `UNREGISTERED`로 드러납니다.
+- 금액은 **원본 + 확정된 정정의 순금액**. 순금액이 0 이하(전액 환불)면 후보가 아닙니다. 확정 항목을 대기 항목보다 먼저 짝짓습니다.
+
+### 1. 거래내역 업로드·대조 (`POST /bank/snapshots`)
+
+**Request**
+```json
+{
+  "term_id": 1,
+  "file_base64": "6rGw656Y7J287IucLOyggeyalCwu...",
+  "file_hash": "0x9f2c…(선택, 64자리 소문자 hex)"
+}
+```
+- `file_base64`: 은행에서 받은 CSV **원본 바이트**의 base64 (최대 2MB). 인코딩은 UTF-8(BOM 허용)·CP949 둘 다 받습니다.
+- `file_hash` (선택): 앱이 계산한 원본 바이트 SHA-256 (`0x` + 소문자 hex). 주면 서버 재계산과 대조해 다르면 `400`, 대문자면 `422` (`HASHING.md` §4·§5).
+- 지원 형식: NH(`거래일시`)·KB(`거래일자`+`거래시각`) 등 헤더 이름으로 컬럼을 찾습니다. 위쪽 안내 줄(계좌번호·조회기간)·빈 줄·합계 줄은 건너뜁니다.
+
+**Response (`201 Created`)** — `GET /bank/snapshots/{id}`와 같은 대조 결과
+```json
+{
+  "snapshot_id": 1,
+  "term_id": 1,
+  "file_hash": "0x…",
+  "bank_balance": 1171000,
+  "snapshot_at": "2026-11-07T05:00:00Z",
+  "period_start": "2026-03-05",
+  "period_end": "2026-03-18",
+  "superseded": false,
+  "summary": {
+    "total": 5, "matched": 4, "matched_pending": 0, "unregistered": 1,
+    "unregistered_out_amount": 12000, "unregistered_in_amount": 0, "unbacked": 0
+  },
+  "transactions": [
+    { "id": 2, "tran_date": "2026-03-10", "tran_time": "14:03:11", "description": "카드출금 OO문구점",
+      "direction": "OUT", "amount": 35000, "balance_after": 1215000, "status": "MATCHED", "entry_id": 2 },
+    { "id": 5, "tran_date": "2026-03-18", "tran_time": "08:55:19", "description": "카드출금 OO편의점",
+      "direction": "OUT", "amount": 12000, "balance_after": 1171000, "status": "UNREGISTERED", "entry_id": null }
+  ],
+  "unbacked_entries": []
+}
+```
+
+| 필드 | 설명 |
+| --- | --- |
+| `bank_balance` | 시간순 마지막 거래의 거래후잔액. 결산(`GET /settlement`)의 `balance_gap`이 최신 스냅샷의 이 값을 씁니다 |
+| `period_start`·`period_end` | 파일에 들어 있는 거래 날짜 범위 |
+| `transactions[].description` | 적요 + 거래점 (예: `카드출금 OO문구점`) |
+| `transactions[].status` | 아래 표. `superseded`면 `null` |
+| `unbacked_entries[]` | 원장엔 **확정**돼 있는데 이 파일(기간 안)에 대응 거래가 없는 항목 — 가짜 등록 의심. `entry_id`, `kind`, `amount`(순금액), `date`, `counterparty`, `purpose` |
+| `summary.unregistered_out_amount` | 미등록 출금 합계 — 장부에 없이 나간 돈 |
+| `summary` | `superseded`면 `null` |
+
+| `status` | 의미 |
+| --- | --- |
+| `MATCHED` | 확정 원장 항목과 짝 |
+| `MATCHED_PENDING` | 승인 대기 항목과 짝 — 확정 전이라 판단 보류 |
+| `UNREGISTERED` | 계좌에는 있는데 원장에 없음 (미등록 의심) |
+
+| 코드 | 경우 |
+| --- | --- |
+| `201` | 업로드·대조 완료 |
+| `400` | base64 아님, 빈 파일, `file_hash` 불일치, CSV 형식 오류(헤더 없음, 출금·입금 둘 다/둘 다 없음, 날짜·금액을 못 읽음 — `detail`에 몇 번째 거래인지 나옴) |
+| `404` | `term_id`의 학기가 없음 |
+| `409` | 같은 학기에 같은 파일(해시)이 이미 있음 → 원장을 고친 뒤엔 재대조(`/rematch`)를 쓰세요. 또는 같은 학기 대조가 동시에 진행됨(다시 시도) |
+| `413` | 파일이 2MB 초과 |
+| `422` | 필드 누락, `file_hash` 형식 오류 |
+| `503` | DB 오류 |
+
+### 2. 재대조 (`POST /bank/snapshots/{snapshot_id}/rematch`)
+- 미등록 건을 등록·승인한 뒤 **같은 파일로 다시 맞출 때** 씁니다 (같은 파일은 다시 올릴 수 없어 `409`). 총무만.
+- 응답은 1번과 같은 대조 결과(`200`).
+- `404` 스냅샷 없음, `409` 더 최근 업로드가 있음(최신 스냅샷에서 재대조) 또는 동시 진행, `503` DB 오류.
+
+### 3. 업로드 목록 (`GET /bank/snapshots?term_id=`)
+- `term_id` 필수. 최근 업로드가 먼저 옵니다.
+```json
+[
+  { "id": 2, "term_id": 1, "file_hash": "0x…", "bank_balance": 1168000,
+    "snapshot_at": "2026-11-07T06:00:00Z", "uploaded_by": 2, "superseded": false },
+  { "id": 1, "term_id": 1, "file_hash": "0x…", "bank_balance": 1171000,
+    "snapshot_at": "2026-11-07T05:00:00Z", "uploaded_by": 2, "superseded": true }
+]
+```
+
+### 4. 대조 결과 조회 (`GET /bank/snapshots/{snapshot_id}`)
+- 1번 응답과 같은 형태(`200`). 짝은 업로드(또는 재대조) 때 정한 것을 쓰고, 상태는 **조회 시점의 원장**으로 다시 매깁니다 — 업로드 뒤 짝 항목이 반려됐으면 `UNREGISTERED`로 보입니다. 새로 등록한 항목을 짝지으려면 재대조를 쓰세요.
+- 이전 스냅샷(`superseded: true`)은 거래 줄만 보이고 `summary`는 `null`, `status`는 모두 `null`입니다.
+- `404` 스냅샷 없음, `503` DB 오류.
+
+**한계** — 파일 해시의 온체인 기록은 컨트랙트가 정해지지 않아 아직 없습니다(`tx_hash` 비어 있음). 원본 파일은 저장하지 않고 해시만 저장합니다. 날짜는 같은 날만 짝으로 봅니다.
+
+---
+
 ## 검증
 
 ### 1. 장부 잔액 요약 (`GET /balance`)
