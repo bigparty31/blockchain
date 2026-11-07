@@ -10,6 +10,7 @@ from app.routers.auth import router as auth_router
 from app.routers.entries import router as entries_router
 from app.routers.balance import router as balance_router
 from app.routers.budgets import router as budgets_router
+from app.routers.settlement import router as settlement_router
 from app.routers.users import router as users_router
 from app.routers.chain import router as chain_router
 from app.routers.terms import router as terms_router
@@ -71,6 +72,7 @@ app.include_router(auth_router)
 app.include_router(entries_router)
 app.include_router(balance_router)
 app.include_router(budgets_router)
+app.include_router(settlement_router)
 app.include_router(users_router)
 app.include_router(chain_router)
 app.include_router(terms_router)
