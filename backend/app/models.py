@@ -25,6 +25,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship
 
 from app.database import Base
+from app.schemas.notification import NotificationKind
 
 # SQLite에서는 INTEGER PRIMARY KEY여야 자동 증가(rowid)가 활성화되고,
 # PostgreSQL에서는 BIGINT / BIGSERIAL로 동작하도록 variant 지정
@@ -423,4 +424,77 @@ class Objection(Base):
         CheckConstraint("answered_at IS NULL OR answered_at >= raised_at", name="ck_objections_dates"),
         Index("idx_objections_entry_id", "entry_id"),
         Index("idx_objections_status", "status"),
+    )
+
+
+# =============================================================================
+# 10. 알림 (notifications, device_tokens) — PRD §4.8, docs/NOTIFICATION_API.md
+# =============================================================================
+# 재알림 대상 종류. 처리되면 닫히고(resolved_at), 재알림 작업이 next_remind_at 으로 다시 알린다
+NOTIFICATION_REMIND_KINDS = (
+    NotificationKind.ENTRY_REGISTERED.value,
+    NotificationKind.ENTRY_EDIT_REQUESTED.value,
+    NotificationKind.REVISION_REQUESTED.value,
+    NotificationKind.REVISION_PRESIDENT_SIGNED.value,
+    NotificationKind.SIGNATURE_DEADLINE_NEAR.value,
+)
+
+
+class Notification(Base):
+    """임원 한 명에게 간 알림 한 건. 학생에게는 행을 만들지 않는다 — 학생은 FCM 토픽 푸시만 받는다 (PRD §4.8).
+
+    대상 건(항목·증액 요청·이의)이 지워지면 알림도 함께 지운다(CASCADE). 알림은 파생 데이터라 본 데이터 삭제를 막지 않는다 —
+    예: 예산 발행이 시드 더미 증액 요청을 정리할 때 (routers/budgets.py _cleanup_unissued_seed_versions).
+    """
+
+    __tablename__ = "notifications"
+
+    id = Column(ID_TYPE, primary_key=True, autoincrement=True, doc="고유 ID")
+    user_id = Column(BigInteger, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, doc="받는 임원 ID")
+    kind = Column(String(40), nullable=False, doc="docs/enums.md notification kind")
+    entry_id = Column(BigInteger, ForeignKey("entries.id", ondelete="CASCADE"), nullable=True, doc="대상 항목")
+    budget_revision_request_id = Column(
+        BigInteger, ForeignKey("budget_revision_requests.id", ondelete="CASCADE"), nullable=True, doc="대상 증액 요청"
+    )
+    objection_id = Column(
+        BigInteger, ForeignKey("objections.id", ondelete="CASCADE"), nullable=True, doc="대상 이의 (v0.13 범위 밖이라 비어 있다)"
+    )
+    body = Column(Text, nullable=False, doc="서버가 kind 로 만든 문구. 만들 때 저장한다")
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), doc="처음 알린 일시")
+    notified_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), doc="마지막으로 알린 일시 (목록 정렬 기준)")
+    read_at = Column(DateTime(timezone=True), nullable=True, doc="읽은 일시. 재알림 때 비운다")
+    resolved_at = Column(DateTime(timezone=True), nullable=True, doc="처리돼 닫힌 일시. 재알림 대상 종류만 닫힌다")
+    remind_count = Column(Integer, nullable=False, server_default=text("0"), default=0, doc="재알림 횟수 (최대 3)")
+    next_remind_at = Column(DateTime(timezone=True), nullable=True, doc="다음 재알림 일시. 재알림 대상이 아니거나 끝났으면 NULL")
+
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN (" + ", ".join(f"'{kind.value}'" for kind in NotificationKind) + ")",
+            name="ck_notifications_kind",
+        ),
+        CheckConstraint("entry_id IS NULL OR budget_revision_request_id IS NULL", name="ck_notifications_single_target"),
+        CheckConstraint("remind_count >= 0", name="ck_notifications_remind_count"),
+        Index("idx_notifications_user_open", "user_id", "resolved_at", "read_at"),
+        Index("idx_notifications_entry", "entry_id"),
+        Index("idx_notifications_revision", "budget_revision_request_id"),
+        Index("idx_notifications_next_remind", "next_remind_at"),
+    )
+
+
+class DeviceToken(Base):
+    """임원 기기의 FCM 등록 토큰 (학생회 서버에 등록). 학생은 토픽을 구독하므로 등록하지 않는다."""
+
+    __tablename__ = "device_tokens"
+
+    id = Column(ID_TYPE, primary_key=True, autoincrement=True, doc="고유 ID")
+    user_id = Column(BigInteger, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, doc="임원 ID")
+    platform = Column(String(20), nullable=False, doc="android (iOS 제외, PRD §4.8)")
+    token = Column(String(512), nullable=False, doc="FCM 등록 토큰. 한 기기에 한 행 — 다른 사람이 올리면 그 사람에게 넘어간다")
+    registered_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), doc="등록(또는 넘겨받은) 일시")
+    revoked_at = Column(DateTime(timezone=True), nullable=True, doc="해제 일시 (로그아웃, FCM 무효 응답)")
+
+    __table_args__ = (
+        CheckConstraint("platform IN ('android')", name="ck_device_tokens_platform"),
+        UniqueConstraint("token", name="uq_device_tokens_token"),
+        Index("idx_device_tokens_user", "user_id"),
     )
