@@ -8,6 +8,9 @@
   외래키와 출처가 같아야 시드가 덜 된 DB 에서도 상태 변경이 외래키 오류로 롤백되지 않는다. 「총무」는 그 건의 등록자다
 - 문구(body)는 인자로 받지 않는다. 만들 때 kind 와 대상 건의 값으로 만들어 저장한다. 앱은 받은 문구를 그대로 표시한다
 - 잘못 부르면(대상 id 누락, 없는 건) ValueError 다. 조용히 넘기면 알림이 빠진 것을 아무도 모른다
+- 만든 알림은 받는 사람의 기기로도 푸시한다. 같은 세션이 commit 된 뒤에만 나간다 (app/services/push.py)
+- 학생에게는 행을 만들지 않고 토픽(students_{학기 코드})으로만 보낸다: 확정(notify_students_confirmed),
+  장부–계좌 차이(notify_students_balance_mismatch, 계좌 대조에서 부른다)
 """
 import logging
 import os
@@ -17,11 +20,21 @@ from typing import Iterable, List, Optional
 from sqlalchemy import update
 from sqlalchemy.orm import Session
 
-from app.models import NOTIFICATION_REMIND_KINDS, BudgetRevisionRequest, Entry, Notification, User
+from app.models import NOTIFICATION_REMIND_KINDS, BudgetRevisionRequest, Entry, Notification, Term, User
 from app.schemas.auth import Role
 from app.schemas.notification import NotificationKind
+from app.services import push
 
-__all__ = ["NotificationKind", "REMIND_KINDS", "create_notification", "resolve_notifications", "remind_interval"]
+__all__ = [
+    "NotificationKind",
+    "REMIND_KINDS",
+    "create_notification",
+    "resolve_notifications",
+    "remind_interval",
+    "notify_students_confirmed",
+    "notify_students_balance_mismatch",
+    "student_topic",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -116,19 +129,19 @@ def create_notification(
     body = _body(kind, entry, revision)
     next_remind_at = now + remind_interval() if kind in REMIND_KINDS else None
     for user_id in recipients:
-        db.add(
-            Notification(
-                user_id=user_id,
-                kind=kind.value,
-                entry_id=entry_id,
-                budget_revision_request_id=budget_revision_request_id,
-                body=body,
-                created_at=now,
-                notified_at=now,
-                remind_count=0,
-                next_remind_at=next_remind_at,
-            )
+        notification = Notification(
+            user_id=user_id,
+            kind=kind.value,
+            entry_id=entry_id,
+            budget_revision_request_id=budget_revision_request_id,
+            body=body,
+            created_at=now,
+            notified_at=now,
+            remind_count=0,
+            next_remind_at=next_remind_at,
         )
+        db.add(notification)
+        push.queue_notification(db, notification)
 
 
 def resolve_notifications(
@@ -151,6 +164,35 @@ def resolve_notifications(
         .values(resolved_at=_now(), next_remind_at=None)
         .execution_options(synchronize_session=False)
     )
+
+
+def student_topic(term_code: int) -> str:
+    """학생 앱이 로그인할 때 구독하는 토픽. 학기 코드(YYYYS)다 — DB 의 Term.id 가 아니다."""
+    return f"students_{term_code}"
+
+
+def notify_students_confirmed(db: Session, entry_id: int) -> None:
+    """확정된 항목을 그 학기 학생 전원에게 토픽으로 알린다 (금액과 사용처, 공개 정보). commit 된 뒤에 나간다."""
+    entry = db.get(Entry, entry_id)
+    if entry is None:
+        raise ValueError(f"항목이 없다 (entry_id={entry_id})")
+    term_code = _term_code(db, entry.term_id)
+    message = push.PushMessage(push.TITLE, f"{_entry_label(entry)}이 확정되었습니다.", {"term_code": str(term_code), "entry_id": str(entry.id)})
+    push.queue_job(db, push.TopicPush(student_topic(term_code), message))
+
+
+def notify_students_balance_mismatch(db: Session, term_id: int) -> None:
+    """계좌 대조에서 장부와 계좌 잔액이 다를 때 그 학기 학생 전원에게 알린다 (문승준, 계좌 대조). commit 된 뒤에 나간다."""
+    term_code = _term_code(db, term_id)
+    message = push.PushMessage(push.TITLE, "장부와 계좌 잔액이 다릅니다.", {"term_code": str(term_code)})
+    push.queue_job(db, push.TopicPush(student_topic(term_code), message))
+
+
+def _term_code(db: Session, term_id: int) -> int:
+    term = db.get(Term, term_id)
+    if term is None:
+        raise ValueError(f"학기가 없다 (term_id={term_id})")
+    return term.term_code
 
 
 # ---------------------------------------------------------------- 받는 사람·문구
