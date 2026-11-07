@@ -90,3 +90,34 @@ def test_get_receipt_file_not_found_returns_404(tmp_path, monkeypatch):
     res = client.get("/receipts/non_existent_file.jpg")
     assert res.status_code == 404
 
+
+def test_upload_receipt_disallowed_extension_returns_400(auth_header):
+    """지원하지 않는 확장자(.html, .exe, .sh 등) 업로드 시 400 Bad Request 차단 검증"""
+    files = {"file": ("malicious.html", io.BytesIO(b"<h1>hello</h1>"), "text/html")}
+    res = client.post("/receipts", files=files, headers=auth_header(Role.TREASURER))
+
+    assert res.status_code == 400
+    assert "지원하지 않는 파일 형식" in res.json()["detail"]
+
+
+def test_upload_receipt_file_too_large_returns_400(auth_header):
+    """10MB 초과 파일 업로드 시 400 Bad Request 차단 검증"""
+    # 10MB + 1바이트
+    large_content = b"a" * (10 * 1024 * 1024 + 1)
+    files = {"file": ("huge.jpg", io.BytesIO(large_content), "image/jpeg")}
+    res = client.post("/receipts", files=files, headers=auth_header(Role.TREASURER))
+
+    assert res.status_code == 400
+    assert "10MB" in res.json()["detail"]
+
+
+def test_upload_receipt_allowed_extensions(auth_header):
+    """허용 확장자(jpg, jpeg, png, webp, pdf) 5종은 모두 201 Created 정상 업로드 검증"""
+    for ext in ("jpg", "jpeg", "png", "webp", "pdf"):
+        content = f"test-content-{ext}".encode()
+        files = {"file": (f"test_file.{ext}", io.BytesIO(content), "application/octet-stream")}
+        res = client.post("/receipts", files=files, headers=auth_header(Role.TREASURER))
+        assert res.status_code == 201
+        assert res.json()["receipt_path"].endswith(f".{ext}")
+
+

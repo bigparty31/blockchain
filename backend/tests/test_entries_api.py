@@ -1655,3 +1655,147 @@ def test_correction_expense_optional_receipt_hash(auth_header):
     assert "id" in res.json()
 
 
+def test_arbitrary_server_file_path_without_uploaded_hash_returns_400(auth_header):
+    """서버의 아무 파일(app/main.py 등) 경로를 지정해도 미업로드 해시이면 400 Bad Request 차단 (리뷰어 피드백 1)"""
+    body = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 15000,
+        "counterparty": "임의경로상점",
+        "purpose": "서버 내부 파일 도용 시도",
+        "budget_id": 2,
+        "occurred_at": 1788793200,
+        "receipt_hash": "0x" + "1" * 64,  # 저장소에 없는 해시
+        "receipt_path": "backend/app/main.py",  # 실제 존재하는 서버 파일
+    }
+    res = client.post("/entries", json=body, headers=auth_header(Role.TREASURER))
+    assert res.status_code == 400
+    assert "서버에 존재하지 않는 영수증" in res.json()["detail"]
+
+
+def test_server_resolves_and_overwrites_receipt_path(auth_header):
+    """클라이언트가 receipt_path에 엉뚱한 경로를 보내도, 서버가 해시로 찾은 실제 파일 경로(/receipts/{hash}.*)로 덮어씌움 (리뷰어 피드백 1)"""
+    body = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 15000,
+        "counterparty": "경로보정상점",
+        "purpose": "서버 경로 보정 확인",
+        "budget_id": 2,
+        "occurred_at": 1788793200,
+        "receipt_hash": TEST_RECEIPT_HASH,  # conftest에서 준비한 'a'*64.jpg
+        "receipt_path": "/fake/wrong/path.jpg",
+    }
+    res = client.post("/entries", json=body, headers=auth_header(Role.TREASURER))
+    assert res.status_code == 201
+    entry_id = res.json()["id"]
+
+    with _test_session_factory() as db:
+        row = db.query(DBEntry).filter(DBEntry.id == entry_id).first()
+        assert row is not None
+        # 클라이언트의 /fake/wrong/path.jpg 가 아니라 실제 저장소 파일명으로 채워짐
+        assert row.receipt_path == f"/receipts/{'a' * 64}.jpg"
+
+
+def test_duplicate_check_ignores_draft_entries(auth_header):
+    """제출되지 않은 미제출 초안(status NULL)끼리는 영수증이 같아도 DUPLICATE가 되지 않음 (리뷰어 피드백 2)"""
+    # 1. 초안 1 생성 (status NULL)
+    body1 = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 25000,
+        "counterparty": "초안상점1",
+        "purpose": "미제출 초안 1",
+        "budget_id": 2,
+        "occurred_at": 1788793200,
+        "receipt_hash": TEST_RECEIPT_HASH,
+        "ocr_status": "MATCH",
+    }
+    res1 = client.post("/entries", json=body1, headers=auth_header(Role.TREASURER))
+    assert res1.status_code == 201
+    id1 = res1.json()["id"]
+
+    # 2. 동일한 영수증 해시로 초안 2 생성 -> 초안 1은 PENDING/CONFIRMED가 아니므로 중복 걸리지 않음
+    body2 = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 25000,
+        "counterparty": "초안상점2",
+        "purpose": "미제출 초안 2",
+        "budget_id": 2,
+        "occurred_at": 1788793200,
+        "receipt_hash": TEST_RECEIPT_HASH,
+        "ocr_status": "MATCH",
+    }
+    res2 = client.post("/entries", json=body2, headers=auth_header(Role.TREASURER))
+    assert res2.status_code == 201
+    id2 = res2.json()["id"]
+
+    with _test_session_factory() as db:
+        row2 = db.query(DBEntry).filter(DBEntry.id == id2).first()
+        assert row2.ocr_status == "MATCH"  # DUPLICATE 아님!
+
+
+def test_duplicate_check_ignores_correction_original_entry(auth_header):
+    """정정 건이 원본 영수증을 그대로 다시 붙여도 원본 건(corrects_entry_id)은 중복 대조에서 제외됨 (리뷰어 피드백 2)"""
+    # e1은 시드 DB에서 CONFIRMED 상태인 확정 건
+    with _test_session_factory() as db:
+        e1 = db.query(DBEntry).filter(DBEntry.id == 1).first()
+        e1_hash = e1.receipt_hash
+
+    # e1의 정정 항목 등록 (동일 영수증 해시 재사용)
+    body = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": -5000,
+        "counterparty": "한결문구",
+        "purpose": "영수증 재확인 정정",
+        "budget_id": 2,
+        "occurred_at": 1788793200,
+        "corrects_entry_id": 1,
+        "correction_reason": "RECEIPT_RECHECK",
+        "receipt_hash": e1_hash,
+        "ocr_status": "MATCH",
+    }
+    res = client.post("/entries", json=body, headers=auth_header(Role.TREASURER))
+    assert res.status_code == 201
+    entry_id = res.json()["id"]
+
+    with _test_session_factory() as db:
+        row = db.query(DBEntry).filter(DBEntry.id == entry_id).first()
+        # 원본 건(e1)은 제외되었으므로 DUPLICATE가 되지 않고 MATCH 유지
+        assert row.ocr_status == "MATCH"
+
+
+def test_duplicate_sets_duplicate_of_in_response_and_query(auth_header):
+    """확정 건과 중복 시 duplicate_of에 기존 건 ID가 반환되고 상세 조회에서도 확인됨 (리뷰어 피드백 4)"""
+    # e1은 시드 DB에서 CONFIRMED 상태인 ID=1 항목
+    body = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 35000,
+        "counterparty": "중복발생상점",
+        "purpose": "중복 건 duplicate_of 테스트",
+        "budget_id": 2,
+        "occurred_at": 1788793200,
+        "receipt_hash": "0xabc1234567890abcdef1234567890abcdef1234567890abcdef1234567890abc",
+        "ocr_status": "MATCH",
+    }
+    res = client.post("/entries", json=body, headers=auth_header(Role.TREASURER))
+    assert res.status_code == 201
+    data = res.json()
+    assert data["duplicate_of"] == 1  # e1의 id=1을 지목!
+
+    # GET /entries/{id} 상세 조회에서도 duplicate_of 가 내려오는지 확인
+    # (단, 상세 조회를 위해 임시로 status='PENDING' 부여)
+    with _test_session_factory() as db:
+        e = db.query(DBEntry).filter(DBEntry.id == data["id"]).first()
+        e.status = "PENDING"
+        db.commit()
+
+    res_detail = client.get(f"/entries/{data['id']}")
+    assert res_detail.status_code == 200
+    assert res_detail.json()["duplicate_of"] == 1
+    assert res_detail.json()["ocr_status"] == "DUPLICATE"
+
+

@@ -33,7 +33,7 @@ from app.services.chain_tx import (
 )
 from app.database import get_db
 from app.models import Budget as DBBudget, Entry as DBEntry, Term as DBTerm, User as DBUser
-from app.routers.receipts import receipt_file_exists
+from app.routers.receipts import receipt_file_exists, resolve_receipt_path
 from app.schemas.auth import Role
 from app.schemas.entry import (
     BlockReason,
@@ -101,10 +101,59 @@ async def _get_chain_registrant(entry_id: int, chain: ChainClient) -> str:
     return chain_entry.registrant
 
 
+# 중복 비교 대상 상태 (PRD §6, #36 OCR과 동일):
+# PENDING, CONFIRMED만 대조하며 초안(status IS NULL), REJECTED, BLOCKED는 제외한다.
+DUPLICATE_TARGET_STATUSES = ("PENDING", "CONFIRMED")
+
+
+def _find_duplicate_of(entry: DBEntry, db: Optional[Session]) -> Optional[int]:
+    """중복 경고(DUPLICATE) 상태인 내역의 원본 기존 Entry ID를 조회합니다."""
+    if db is None:
+        return None
+    ocr_val = entry.ocr_status.value if hasattr(entry.ocr_status, "value") else entry.ocr_status
+    if ocr_val != OCRStatus.DUPLICATE.value:
+        return None
+
+    dup_filters = [DBEntry.status.in_(DUPLICATE_TARGET_STATUSES), DBEntry.id != entry.id]
+    if entry.corrects_entry_id is not None:
+        dup_filters.append(DBEntry.id != entry.corrects_entry_id)
+
+    # 1. receipt_hash 가 있으면 동일 해시의 이전 유효 건 검색
+    if entry.receipt_hash:
+        matched = (
+            db.query(DBEntry.id)
+            .filter(DBEntry.receipt_hash == entry.receipt_hash, *dup_filters)
+            .order_by(DBEntry.id.asc())
+            .first()
+        )
+        if matched:
+            return matched.id
+
+    # 2. OCR 승인정보가 있으면 동일 결제 건 검색
+    if entry.ocr_approval_no and entry.ocr_paid_at:
+        matched = (
+            db.query(DBEntry.id)
+            .filter(
+                DBEntry.ocr_approval_no == entry.ocr_approval_no,
+                DBEntry.ocr_paid_at == entry.ocr_paid_at,
+                DBEntry.amount == entry.amount,
+                *dup_filters,
+            )
+            .order_by(DBEntry.id.asc())
+            .first()
+        )
+        if matched:
+            return matched.id
+
+    return None
+
+
 def _to_schema(
     entry: DBEntry,
     chain_registrant: Optional[str] = None,
     block_number: Optional[int] = None,
+    duplicate_of: Optional[int] = None,
+    db: Optional[Session] = None,
 ) -> EntryResponse:
     """DB Entry ORM 모델을 EntryResponse 스키마로 변환"""
     # 선점 때 미리 적은 값이다. 체인에서 끝나기 전에는 내보내지 않는다 (실패하면 비워진다). 앱의 단건 검증은 체인 approver 가
@@ -115,6 +164,10 @@ def _to_schema(
     registrant = chain_registrant
     if not registrant and getattr(entry, "creator", None) and entry.creator.wallet_address:
         registrant = entry.creator.wallet_address
+
+    # duplicate_of 계산
+    if duplicate_of is None and db is not None:
+        duplicate_of = _find_duplicate_of(entry, db)
 
     return EntryResponse(
         id=entry.id,
@@ -134,6 +187,7 @@ def _to_schema(
         ocr_approval_no=entry.ocr_approval_no,
         ocr_paid_at=entry.ocr_paid_at,
         ocr_status=OCRStatus(entry.ocr_status) if entry.ocr_status else None,
+        duplicate_of=duplicate_of,
         category_warning=entry.category_warning,
         warning_ack_reason=entry.warning_ack_reason if confirmed else None,
         status=EntryStatus(entry.status) if entry.status else None,
@@ -207,7 +261,7 @@ async def get_entries(
             pass
 
     results = [
-        _to_schema(e, chain_registrant=chain_registrants.get(e.id))
+        _to_schema(e, chain_registrant=chain_registrants.get(e.id), db=db)
         for e in db_entries
     ]
     return results
@@ -255,7 +309,7 @@ async def get_entry_by_id(
     except Exception:
         pass
 
-    return _to_schema(entry, chain_registrant=chain_registrant, block_number=block_num)
+    return _to_schema(entry, chain_registrant=chain_registrant, block_number=block_num, db=db)
 
 
 @router.get("/{id}/onchain", response_model=OnChainEntryResponse, summary="온체인 원장 항목 조회")
@@ -369,13 +423,7 @@ async def create_entry(
 
     # 3.1 영수증 필수 및 해시·파일 검증 (PRD v0.15 §4.3, B2, B3)
     # 신규 일반 지출(정정 건이 아닌 경우)만 receipt_hash 필수 (정정·환불 건은 docs/HASHING.md 샘플 3처럼 영수증 없을 수 있음)
-    if entry.kind == EntryKind.EXPENSE and entry.corrects_entry_id is None:
-        if not entry.receipt_hash or not entry.receipt_hash.strip():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="지출(EXPENSE) 내역 등록 시 영수증(receipt_hash)은 필수입니다.",
-            )
-
+    server_receipt_path = None
     if entry.receipt_hash:
         # B3: 소문자 hex 66자 검증 (대문자, 0x 누락, 길이 불일치 차단)
         if not re.match(r"^0x[0-9a-f]{64}$", entry.receipt_hash):
@@ -384,8 +432,21 @@ async def create_entry(
                 detail="영수증 해시는 0x로 시작하는 64자리 소문자 16진수여야 합니다.",
             )
 
-        # B2: 파일 없는 해시 400 차단
-        if not receipt_file_exists(entry.receipt_path, entry.receipt_hash):
+        # 해시로만 저장소의 {hash}.* 파일을 찾고, receipt_path는 서버가 찾은 파일로 채운다 (리뷰어 피드백)
+        server_receipt_path = resolve_receipt_path(entry.receipt_hash)
+        if not server_receipt_path:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="업로드되지 않았거나 서버에 존재하지 않는 영수증입니다.",
+            )
+
+    if entry.kind == EntryKind.EXPENSE and entry.corrects_entry_id is None:
+        if not entry.receipt_hash or not entry.receipt_hash.strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="지출(EXPENSE) 내역 등록 시 영수증(receipt_hash)은 필수입니다.",
+            )
+        if not server_receipt_path:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="업로드되지 않았거나 서버에 존재하지 않는 영수증입니다.",
@@ -399,11 +460,15 @@ async def create_entry(
         )
 
     # 5. 영수증 중복 검사 (PRD §6, §8, B4: 409 차단 대신 DUPLICATE 경고로 등록 허용)
-    # 반려(REJECTED)·예산초과차단(BLOCKED)된 건은 장부에 유효하게 안착되지 않았으므로
-    # 동일 영수증 재등록 시 중복 경고 대상에서 제외한다.
+    # 중복 비교 대상: PENDING·CONFIRMED만 대조 (초안 status NULL, REJECTED, BLOCKED 제외)
+    # 정정 건(corrects_entry_id)인 경우 원본 건은 대조에서 제외 (리뷰어 피드백)
     effective_ocr_status = entry.ocr_status
     is_duplicate = False
-    excluded_statuses = ("REJECTED", "BLOCKED")
+    duplicate_of_id: Optional[int] = None
+
+    dup_filters = [DBEntry.status.in_(DUPLICATE_TARGET_STATUSES)]
+    if entry.corrects_entry_id is not None:
+        dup_filters.append(DBEntry.id != entry.corrects_entry_id)
 
     if entry.ocr_approval_no and entry.ocr_paid_at:
         try:
@@ -413,12 +478,14 @@ async def create_entry(
                     DBEntry.ocr_approval_no == entry.ocr_approval_no,
                     DBEntry.ocr_paid_at == entry.ocr_paid_at,
                     DBEntry.amount == entry.amount,
-                    or_(DBEntry.status.is_(None), ~DBEntry.status.in_(excluded_statuses)),
+                    *dup_filters,
                 )
+                .order_by(DBEntry.id.asc())
                 .first()
             )
             if existing_ocr:
                 is_duplicate = True
+                duplicate_of_id = existing_ocr.id
         except SQLAlchemyError as e:
             logger.exception("영수증 중복 조회 중 데이터베이스 오류: %s", e)
             raise HTTPException(
@@ -432,12 +499,14 @@ async def create_entry(
                 db.query(DBEntry)
                 .filter(
                     DBEntry.receipt_hash == entry.receipt_hash,
-                    or_(DBEntry.status.is_(None), ~DBEntry.status.in_(excluded_statuses)),
+                    *dup_filters,
                 )
+                .order_by(DBEntry.id.asc())
                 .first()
             )
             if existing_hash:
                 is_duplicate = True
+                duplicate_of_id = existing_hash.id
         except SQLAlchemyError as e:
             logger.exception("영수증 해시 중복 조회 중 데이터베이스 오류: %s", e)
             raise HTTPException(
@@ -467,7 +536,7 @@ async def create_entry(
             purpose=canonical_purpose,
             budget_id=entry.budget_id,
             occurred_at=entry.occurred_at,
-            receipt_path=entry.receipt_path,
+            receipt_path=server_receipt_path,
             receipt_hash=entry.receipt_hash,
             meta_hash=computed_meta_hash,
             hash_version=1,
@@ -500,6 +569,7 @@ async def create_entry(
 
     return EntryCreateResponse(
         id=db_entry.id,
+        duplicate_of=duplicate_of_id,
         message="지출/수입 초안이 등록되었으며, 기기 서명 제출 대기 상태입니다.",
     )
 
