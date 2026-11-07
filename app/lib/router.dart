@@ -4,6 +4,7 @@ import 'core/enums.dart';
 import 'models/entry_model.dart';
 import 'services/auth_service.dart';
 import 'screens/council/approval_list_screen.dart';
+import 'screens/council/budget_revision_approval_screen.dart';
 import 'screens/council/correction_screen.dart';
 import 'screens/council/council_home_screen.dart';
 import 'screens/council/expense_create_screen.dart';
@@ -67,6 +68,9 @@ class AppRoutes {
   /// 카메라·생체인증 실기 테스트 (임원). 인자 없음
   static const councilHardwareTest = '/council/hardware-test';
 
+  /// 예산 증액 승인 (회장: 요청 서명, 감사: 승인 서명). 인자 없음 — 단계는 로그인한 역할로 정한다
+  static const councilBudgetRevisions = '/council/budget-revisions';
+
   // ── 회장 (screens/president/) ───────────────────────────────
   /// 예산 편성 (임원). 인자: [UserRole] — 로그인한 역할과 같아야 한다.
   /// 회장이 아니면 화면이 안내만 보여준다.
@@ -119,6 +123,11 @@ class AppRouter {
         return _guarded(settings, _approvers, (_) => const InquiryResponseScreen());
       case AppRoutes.councilHardwareTest:
         return _guarded(settings, _officers, (_) => const HardwareTestScreen());
+      case AppRoutes.councilBudgetRevisions:
+        // 화면 단계(회장 서명·감사 승인)는 인자가 아니라 세션 역할로 고른다
+        // 가드가 확인한 그 순간의 역할을 넘긴다 (빌더가 나중에 돌 때 세션을 다시 읽지 않는다)
+        final role = _sessionRole;
+        return _guarded(settings, _approvers, (_) => BudgetRevisionApprovalScreen(role: role!));
 
       // 회장
       case AppRoutes.presidentBudgetPlan:
