@@ -170,11 +170,13 @@ class EntryRegistrationService implements EntryRegistrar {
   /// 바뀌었거나 서버가 다른 파일을 저장했다는 뜻이고, 그 해시로 등록하면 학생이 내려받은 영수증과 기록이 어긋난다.
   @override
   Future<ReceiptUpload> uploadReceipt(List<int> bytes, {required String filename}) async {
-    final request = http.MultipartRequest('POST', Uri.parse('${ApiConfig.baseUrl}/receipts'))
-      ..headers.addAll(AuthService().authHeaders)
-      ..files.add(http.MultipartFile.fromBytes('file', bytes, filename: filename));
     final body = await sendAndDecode(
-      () async => http.Response.fromStream(await client.send(request).timeout(uploadTimeout)),
+      (authHeaders) async {
+        final request = http.MultipartRequest('POST', Uri.parse('${ApiConfig.baseUrl}/receipts'))
+          ..headers.addAll(authHeaders)
+          ..files.add(http.MultipartFile.fromBytes('file', bytes, filename: filename));
+        return http.Response.fromStream(await client.send(request).timeout(uploadTimeout));
+      },
       what: '영수증 업로드',
     );
     final hash = body['receipt_hash'];

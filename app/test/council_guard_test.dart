@@ -17,6 +17,7 @@ import 'support/registration.dart';
 void main() {
   setUp(() {
     AuthService.store = MemoryTokenStore();
+    AuthService.lockStore = MemoryLoginLockStore();
     AuthService().resetAttempts();
     // 목업 목록(items)으로 가드를 본다. 서버 목록 경로는 council_decision_test.dart
     ApiService.useDemoData = true;
