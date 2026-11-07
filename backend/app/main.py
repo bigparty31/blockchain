@@ -16,6 +16,7 @@ from app.routers.terms import router as terms_router
 from app.routers.budget_revisions import router as budget_revisions_router
 from app.routers.receipts import router as receipts_router
 from app.routers.memberships import router as memberships_router
+from app.routers.ocr import router as ocr_router
 
 
 @asynccontextmanager
@@ -77,6 +78,7 @@ app.include_router(terms_router)
 app.include_router(budget_revisions_router)
 app.include_router(receipts_router)
 app.include_router(memberships_router)
+app.include_router(ocr_router)
 
 
 @app.get("/", tags=["Health"])
