@@ -7,7 +7,12 @@ from app.schemas.entry import (
     OCRStatus,
 )
 from app.schemas.balance import BalanceResponse
-from app.schemas.budget import BudgetResponse
+from app.schemas.budget import (
+    BudgetResponse,
+    BudgetIssueCreate,
+    BudgetIssueSubmit,
+    BudgetIssueResponse,
+)
 from app.schemas.term import TermResponse
 from app.schemas.budget_revision import (
     BudgetRevisionRequestCreate,
@@ -26,6 +31,9 @@ __all__ = [
     "OCRStatus",
     "BalanceResponse",
     "BudgetResponse",
+    "BudgetIssueCreate",
+    "BudgetIssueSubmit",
+    "BudgetIssueResponse",
     "TermResponse",
     "BudgetRevisionRequestCreate",
     "BudgetRevisionSignRequest",
