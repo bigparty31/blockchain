@@ -8,6 +8,7 @@ import '../../core/enums.dart';
 import '../../core/format.dart';
 import '../../models/entry_model.dart';
 import '../../models/objection_model.dart';
+import '../../services/auth_service.dart';
 import '../../services/student_api_service.dart';
 import 'objection_screen.dart';
 import 'widgets/student_badges.dart';
@@ -146,8 +147,20 @@ class _EntryDetailScreenState extends State<EntryDetailScreen> {
     }
   }
 
+  /// **예외를 여기서 잡는다.** `initState` 에서 await 되지 않으므로 올라가면
+  /// 처리되지 않은 비동기 오류가 된다 (`_verify` 와 같은 이유).
   Future<void> _loadObjections() async {
-    final list = await _api.fetchObjections(entryId: _entry.id);
+    final List<ObjectionModel> list;
+    try {
+      list = await _api.fetchObjections(entryId: _entry.id);
+    } on SessionExpired {
+      // 세션이 끊겼다 — `main.dart` 가 로그인 화면으로 보낸다. 이의 목록을
+      // 비워 두되 「이의 없음」으로 단정하지는 않는다 (아래 `_objections` 는
+      // 초기값 그대로 남는다).
+      return;
+    } catch (_) {
+      return;
+    }
     if (mounted) setState(() => _objections = list);
   }
 
@@ -554,45 +567,88 @@ class _EntryDetailScreenState extends State<EntryDetailScreen> {
     final path = _entry.receiptPath ?? '';
     final url = path.startsWith('http') ? path : '${ApiConfig.baseUrl}$path';
 
+    // **카드와 확대 화면이 같은 provider 를 쓴다.** 확대 화면에서 경로로 다시
+    // 받으면 두 요청 사이에 파일이 바뀌었을 때 **검증한 파일과 크게 띄운 파일이
+    // 달라진다** ([_receiptBytes] 와 같은 이유). 작게 볼 때보다 크게 볼 때가 더
+    // 문제다 — 학생이 금액을 직접 읽으려고 띄우는 화면이라서다.
+    //
+    // 검증에 쓴 바이트가 있으면 그것을 그린다. 아직 못 받았을 때만 네트워크로
+    // 떨어진다 (검증 전 잠깐, 또는 다운로드 실패).
+    // 삼항으로 쓰면 두 갈래의 공통 타입이 `Object` 로 추론돼 컴파일되지 않는다.
+    final ImageProvider image;
+    if (_receiptBytes != null) {
+      image = MemoryImage(_receiptBytes!);
+    } else {
+      image = NetworkImage(url);
+    }
+
     return Container(
       padding: const EdgeInsets.all(18),
       decoration: AppTheme.cardDecoration,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            '영수증',
-            style: TextStyle(
-              fontSize: 14,
-              fontWeight: FontWeight.bold,
-              color: AppTheme.textMain,
-            ),
+          Row(
+            children: [
+              const Text(
+                '영수증',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.bold,
+                  color: AppTheme.textMain,
+                ),
+              ),
+              const Spacer(),
+              // 썸네일이 눌린다는 것을 적어 둔다. 적지 않으면 아무도 안 누른다 —
+              // 카드 안 이미지는 보통 장식이라서다.
+              Icon(Icons.zoom_in_rounded,
+                  size: 14, color: AppTheme.textSub.withOpacity(0.9)),
+              const SizedBox(width: 4),
+              Text(
+                '눌러서 크게 보기',
+                style: TextStyle(
+                  fontSize: 11,
+                  color: AppTheme.textSub.withOpacity(0.9),
+                ),
+              ),
+            ],
           ),
           const SizedBox(height: 12),
           ClipRRect(
             borderRadius: BorderRadius.circular(14),
-            child: Container(
-              width: double.infinity,
-              constraints: const BoxConstraints(minHeight: 160),
-              color: AppTheme.bgPage,
-              // 검증에 쓴 바이트가 있으면 그것을 그린다. 아직 못 받았을 때만
-              // 네트워크로 떨어진다 (검증 전 잠깐, 또는 다운로드 실패).
-              child: _receiptBytes != null
-                  ? Image.memory(
-                      _receiptBytes!,
-                      fit: BoxFit.cover,
-                      errorBuilder: (_, __, ___) => _receiptFallback(),
-                    )
-                  : Image.network(
-                      url,
-                      fit: BoxFit.cover,
-                      errorBuilder: (_, __, ___) => _receiptFallback(),
-                    ),
+            child: GestureDetector(
+              onTap: () => _openReceipt(image),
+              child: Container(
+                width: double.infinity,
+                constraints: const BoxConstraints(minHeight: 160),
+                color: AppTheme.bgPage,
+                child: Image(
+                  image: image,
+                  fit: BoxFit.cover,
+                  errorBuilder: (_, __, ___) => _receiptFallback(),
+                ),
+              ),
             ),
           ),
           const SizedBox(height: 12),
           if (receipt != null) _buildReceiptCheck(receipt),
         ],
+      ),
+    );
+  }
+
+  /// 영수증 확대 보기 (스토리보드 4 ③ 「누르면 확대보기 → 전체 화면 이미지,
+  /// 닫으면 상세 화면」).
+  ///
+  /// 카드 안 썸네일은 `BoxFit.cover` 라 영수증의 아래쪽이 잘린다. 품목과 금액
+  /// 줄이 보통 그 잘린 자리에 있고, 그 줄이 곧 이의 제기의 근거다 — **잘린
+  /// 썸네일만 두면 이 화면이 하려는 일(근거를 직접 보여주기)이 반쯤 막힌다.**
+  Future<void> _openReceipt(ImageProvider image) {
+    return Navigator.push<void>(
+      context,
+      MaterialPageRoute<void>(
+        fullscreenDialog: true,
+        builder: (_) => ReceiptViewerScreen(image: image),
       ),
     );
   }
@@ -665,13 +721,18 @@ class _EntryDetailScreenState extends State<EntryDetailScreen> {
               ),
             ],
           ),
-          if (receipt.expected != null) ...[
-            const SizedBox(height: 8),
-            _hashLine('기록된 해시', receipt.expected!),
-          ],
-          if (receipt.actual != null) ...[
-            const SizedBox(height: 4),
-            _hashLine('내려받은 파일의 해시', receipt.actual!),
+          // 해시 두 줄은 **어긋났을 때만** 보여준다. 통과했을 때는 바로 위
+          // 한 문장이 같은 말을 이미 다 하고, 잘린 해시 두 줄을 눈으로 비교하는
+          // 학생은 없다. 반면 어긋났을 때는 이 두 값이 이의 제기에 붙일 증거가 된다.
+          if (receipt.state == CheckState.failed) ...[
+            if (receipt.expected != null) ...[
+              const SizedBox(height: 8),
+              _hashLine('기록된 해시', receipt.expected!),
+            ],
+            if (receipt.actual != null) ...[
+              const SizedBox(height: 4),
+              _hashLine('내려받은 파일의 해시', receipt.actual!),
+            ],
           ],
         ],
       ),
@@ -721,8 +782,8 @@ class _EntryDetailScreenState extends State<EntryDetailScreen> {
           ),
           const SizedBox(height: 4),
           Text(
-            '등록 시 해시만 먼저 기록(Pending)하고, 승인 시 확정(Confirm)됩니다. '
-            '두 기록이 모두 남아 승인 전 변경을 추적할 수 있습니다.',
+            '등록 시 해시만 먼저 기록(Pending)하고, 승인되면 확정·반려되면 반려가 '
+            '두 번째 기록으로 남습니다. 두 기록이 모두 남아 승인 전 변경을 추적할 수 있습니다.',
             style: TextStyle(
               fontSize: 11,
               color: AppTheme.textSub.withOpacity(0.9),
@@ -731,7 +792,7 @@ class _EntryDetailScreenState extends State<EntryDetailScreen> {
           ),
           const SizedBox(height: 12),
           _txRow('Pending 트랜잭션', _entry.txPending),
-          _txRow('Confirm 트랜잭션', _entry.txConfirm),
+          _txRow(_secondTxLabel, _entry.txConfirm),
           // `block_number` 가 응답에 실려 오면 자동으로 값이 뜬다 (S10).
           // 그때까지만 아래 안내가 대신 자리를 지킨다.
           if (_entry.blockNumber != null)
@@ -747,6 +808,27 @@ class _EntryDetailScreenState extends State<EntryDetailScreen> {
         ],
       ),
     );
+  }
+
+  /// 두 번째 온체인 기록의 이름. **`tx_confirm` 은 확정과 반려가 같이 쓰는 칸이다**
+  /// (`backend/app/services/chain_tx.py` — 반려도 이 칸에 선점하고 기록한다).
+  ///
+  /// 그래서 무조건 「Confirm 트랜잭션」이라고 적으면 **반려된 지출의 반려 기록을
+  /// 학생이 「확정 트랜잭션」으로 읽는다.** 반려된 건에 확정 기록이 있다고 말하는 셈이라,
+  /// 이 화면이 하려는 일(무엇이 어떻게 처리됐는지 보여주기)과 정반대가 된다.
+  /// 손종인 님 전달 사항(11/4).
+  ///
+  /// 상태를 모르는 경우(`PENDING` 인데 값이 있는 선점 중 등)에는 **단정하지 않는다** —
+  /// 둘 중 어느 것인지 모르므로 둘 다 적는다.
+  String get _secondTxLabel {
+    switch (_entry.status) {
+      case EntryStatus.CONFIRMED:
+        return '확정 트랜잭션';
+      case EntryStatus.REJECTED:
+        return '반려 트랜잭션';
+      default:
+        return '확정·반려 기록';
+    }
   }
 
   Widget _txRow(String label, String? hash) {
@@ -894,6 +976,59 @@ class _EntryDetailScreenState extends State<EntryDetailScreen> {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// 영수증 전체 화면 (스토리보드 4 ③).
+///
+/// **넘겨받은 provider 를 그대로 쓴다** — 경로를 받아 여기서 다시 내려받지 않는다.
+/// 검증 3단계가 해시를 재계산한 바로 그 바이트를 크게 띄우기 위해서다
+/// (`_EntryDetailScreenState._receiptBytes`).
+///
+/// 화면 바깥으로 공개한 이유는 [canObject] 와 같다 — 「영수증을 누르면 확대된다」는
+/// 눈에 안 보이는 회귀라 테스트로 직접 못박아 두기 위해서다.
+class ReceiptViewerScreen extends StatelessWidget {
+  final ImageProvider image;
+  const ReceiptViewerScreen({super.key, required this.image});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      // 영수증 사진은 테두리가 흰 종이라 밝은 배경에서는 어디까지가 사진인지
+      // 구분이 안 된다.
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        foregroundColor: Colors.white,
+        elevation: 0,
+        title: const Text('영수증'),
+        leading: IconButton(
+          icon: const Icon(Icons.close_rounded),
+          tooltip: '닫기',
+          onPressed: () => Navigator.pop(context),
+        ),
+      ),
+      body: Center(
+        // 전체 화면만으로는 안 읽히는 사진이 많아 손가락으로 더 키울 수 있게 한다.
+        // 영수증 품목 줄은 작게 찍힌다.
+        child: InteractiveViewer(
+          minScale: 1,
+          maxScale: 5,
+          child: Image(
+            image: image,
+            fit: BoxFit.contain,
+            errorBuilder: (_, __, ___) => const Padding(
+              padding: EdgeInsets.all(32),
+              child: Text(
+                '영수증 이미지를 불러올 수 없습니다',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 13, color: Colors.white70),
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -1048,12 +1183,11 @@ class _VerificationCard extends StatelessWidget {
                     ? '재계산한 값이 기록된 값과 다름'
                     : '대조할 해시가 없음',
           ),
-          const SizedBox(height: 10),
-          _hashRow('앱에서 재계산한 값', r.recomputedHash, color),
-          const SizedBox(height: 6),
-          // 「무엇과 비교했는가」를 정확히 말한다. 대조하지 못했는데 값을 나란히
-          // 보여주면 비교한 것처럼 읽힌다.
-          if (r.comparedAgainst == null)
+          // 「무엇과 비교했는가」는 **접지 않는다.** 배지의 의미 자체를 바꾸는
+          // 말이라 (대조 못 한 것을 통과로 읽으면 안 된다) 값과 달리 펼쳐 봐야
+          // 할 것이 아니다.
+          if (r.comparedAgainst == null) ...[
+            const SizedBox(height: 8),
             Text(
               r.chainDataAvailable
                   ? '체인에 아직 해시가 기록되지 않아 대조하지 못했습니다. '
@@ -1064,22 +1198,34 @@ class _VerificationCard extends StatelessWidget {
                 color: AppTheme.textSub.withOpacity(0.9),
                 height: 1.4,
               ),
-            )
-          else ...[
-            _hashRow(
-              r.onChainHash != null ? '블록체인에 기록된 값' : '서버가 내려준 값',
-              r.comparedAgainst!,
-              color,
             ),
-            if (r.onChainHash == null) ...[
-              const SizedBox(height: 4),
-              Text(
-                '체인 값을 직접 읽지 못해 서버 값과 비교했습니다.',
-                style:
-                    TextStyle(fontSize: 10, color: AppTheme.textSub.withOpacity(0.9)),
-              ),
-            ],
+          ] else if (r.onChainHash == null) ...[
+            const SizedBox(height: 8),
+            Text(
+              '체인 값을 직접 읽지 못해 서버 값과 비교했습니다.',
+              style: TextStyle(fontSize: 10, color: AppTheme.textSub.withOpacity(0.9)),
+            ),
           ],
+
+          const SizedBox(height: 8),
+          // 값 **자체**는 접어 둔다. 비교는 이미 1단계 배지가 해줬고, 잘린 해시를
+          // 눈으로 맞춰 보는 학생은 없다. 어긋났을 때만 펼친 채로 시작한다.
+          HashDisclosure(
+            autoExpand: r.hashState == CheckState.failed,
+            children: [
+              _hashRow(context, '앱에서 재계산한 값', r.recomputedHash, color),
+              // 대조하지 못했는데 값을 나란히 보여주면 비교한 것처럼 읽힌다.
+              if (r.comparedAgainst != null) ...[
+                const SizedBox(height: 6),
+                _hashRow(
+                  context,
+                  r.onChainHash != null ? '블록체인에 기록된 값' : '서버가 내려준 값',
+                  r.comparedAgainst!,
+                  color,
+                ),
+              ],
+            ],
+          ),
 
           const SizedBox(height: 16),
 
@@ -1205,29 +1351,145 @@ class _VerificationCard extends StatelessWidget {
     );
   }
 
-  Widget _hashRow(String label, String hash, Color color) {
+  /// 해시 한 줄. **탭하면 잘리지 않은 전체 값이 복사된다.**
+  ///
+  /// 화면에 그리는 것은 가운데를 잘라낸 값이라 그 자체로는 아무 데도 옮길 수
+  /// 없다. 값을 펼쳐 보는 유일한 쓸모가 어긋났을 때 이의 제기에 붙이는 것인데
+  /// (`_HashDisclosure`), 복사가 안 되면 그 쓸모가 화면 안에서 끝난다.
+  Widget _hashRow(BuildContext context, String label, String hash, Color color) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(label, style: const TextStyle(fontSize: 10, color: AppTheme.textSub)),
         const SizedBox(height: 2),
-        Container(
-          width: double.infinity,
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: color.withOpacity(0.2)),
-          ),
-          child: Text(
-            Fmt.shortHash(hash, head: 18, tail: 10),
-            style: const TextStyle(
-              fontSize: 11,
-              fontFamily: 'monospace',
-              color: AppTheme.textMain,
+        GestureDetector(
+          onTap: () {
+            Clipboard.setData(ClipboardData(text: hash));
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('$label을 복사했습니다'),
+                behavior: SnackBarBehavior.floating,
+                duration: const Duration(seconds: 2),
+              ),
+            );
+          },
+          child: Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: color.withOpacity(0.2)),
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    Fmt.shortHash(hash, head: 18, tail: 10),
+                    style: const TextStyle(
+                      fontSize: 11,
+                      fontFamily: 'monospace',
+                      color: AppTheme.textMain,
+                    ),
+                  ),
+                ),
+                const Icon(Icons.copy_rounded, size: 12, color: AppTheme.textSub),
+              ],
             ),
           ),
         ),
+      ],
+    );
+  }
+}
+
+/// 해시 값 두 줄의 접기·펼치기.
+///
+/// **기본은 접힘이다.** 잘린 해시를 눈으로 맞춰 보는 학생은 없고, 그 비교
+/// 결과는 이미 1단계 배지에 나와 있다. 값을 나란히 깔아 두는 것이 검증력을
+/// 더해 주지도 않는다 — 가운데가 잘린 그 두 줄도 결국 앱이 골라 보여준
+/// 값이라, 믿는 대상이 배지에서 문자열로 옮겨 갈 뿐이다.
+///
+/// **어긋났을 때는 다르다.** 그때는 이 두 값이 학생이 이의 제기에 붙일 수
+/// 있는 증거가 되므로 ([autoExpand]) 처음부터 펼친 채로 둔다. 접어 두는 것은
+/// 「평소엔 배지만, 깨졌을 때만 값」이라는 뜻이고, 값을 없애는 것이 아니다.
+///
+/// 화면 바깥으로 공개한 이유는 [canObject] 와 같다 — 「기본은 접힘, 불일치면
+/// 펼침」은 눈에 안 보이는 회귀라 테스트로 직접 못박아 두기 위해서다.
+class HashDisclosure extends StatefulWidget {
+  /// 1단계가 불일치로 판정됐는지 — 펼친 상태로 시작할 조건이다.
+  final bool autoExpand;
+  final List<Widget> children;
+
+  const HashDisclosure({
+    super.key,
+    required this.autoExpand,
+    required this.children,
+  });
+
+  @override
+  State<HashDisclosure> createState() => _HashDisclosureState();
+}
+
+class _HashDisclosureState extends State<HashDisclosure>
+    with AutomaticKeepAliveClientMixin {
+  late bool _open = widget.autoExpand;
+
+  /// 사용자가 직접 접거나 펼쳤는지.
+  ///
+  /// 이 화면은 `ListView` 라 화면 밖으로 나간 자식을 버리고, 돌아올 때 새로
+  /// 만든다. 그러면 `_open` 이 [HashDisclosure.autoExpand] 로 되돌아가서
+  /// **펼쳐 둔 해시 값이 스크롤 한 번에 다시 접힌다.** 긴 해시를 비교하려고
+  /// 펼친 학생이 위아래로 오가며 보는 화면이라 더 그렇다.
+  ///
+  /// 손대지 않았다면 되돌아가도 상관없다 — 초기값은 [HashDisclosure.autoExpand]
+  /// 로 똑같이 재현된다. 손댄 뒤부터만 상태를 지킬 가치가 생기므로, 그때부터
+  /// [wantKeepAlive] 를 켜서 이 자식이 버려지지 않게 한다.
+  bool _touched = false;
+
+  @override
+  bool get wantKeepAlive => _touched;
+
+  void _toggle() {
+    setState(() {
+      _open = !_open;
+      _touched = true;
+    });
+    updateKeepAlive();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context); // AutomaticKeepAliveClientMixin 의 요구사항
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: _toggle,
+          child: Row(
+            children: [
+              Icon(
+                _open ? Icons.expand_less_rounded : Icons.expand_more_rounded,
+                size: 15,
+                color: AppTheme.textSub,
+              ),
+              const SizedBox(width: 3),
+              Text(
+                _open ? '해시 값 숨기기' : '해시 값 보기',
+                style: const TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  color: AppTheme.textSub,
+                ),
+              ),
+            ],
+          ),
+        ),
+        if (_open) ...[
+          const SizedBox(height: 8),
+          ...widget.children,
+        ],
       ],
     );
   }
