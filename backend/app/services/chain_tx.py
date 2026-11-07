@@ -7,6 +7,8 @@
 확정은 같은 규칙을 tx_confirm 으로 한다 — PENDING 이고 tx_confirm NULL → tx_confirm 있음(approved_by·경고 사유도 함께)
 → CONFIRMED. 반려도 같은 칸을 쓴다 — tx_confirm 있음(rejected_by·사유도 함께) → REJECTED. 칸이 하나라 한 항목에 확정과 반려가
 같이 나가지 않는다. 상대 단계의 선점(자기 첫 extra 칸이 비어 있다)은 읽지도 비우지도 않는다.
+T4 수정 요청(revision_requested_at)이 있으면 확정을 선점하지 않는다. 라우터 검사만으로는 수정 요청과 확정이 동시에 오면 둘 다 통과한다.
+반려는 막지 않는다 — 수정 요청은 반려를 거쳐 재등록된다 (PRD §4.3).
 
 - 선점: ChainClient 의 before_broadcast 콜백에서 조건부 UPDATE 를 하고 바로 commit 한다. 보내기 전에 ② 가 DB 에 남는다.
   선점하지 못하면(다른 요청이 먼저 잡음) EntryConflict 를 던지고, 그러면 ChainClient 는 보내지 않는다.
@@ -94,6 +96,7 @@ class _Step:
     competitor: RevertReason  # 콜백 전에 이 revert 면 다른 요청이 먼저 보냈을 수 있다
     extra: tuple = ()  # 선점할 때 함께 적고 비울 때 함께 비우는 칸. 첫 칸은 이 단계의 선점이면 반드시 채워진다
     rival: str = ""  # 같은 칸을 쓰는 상대 단계의 이름
+    must_be_empty: tuple = ()  # 선점할 때 비어 있어야 하는 칸. 값이 있으면 보내지 않고 409 다
 
 
 _RECORD = _Step(
@@ -113,6 +116,7 @@ _CONFIRM = _Step(
     RevertReason.INVALID_STATUS,
     ("approved_by", "warning_ack_reason"),
     "반려",
+    ("revision_requested_at",),
 )
 _REJECT = _Step(
     "반려",
@@ -133,6 +137,7 @@ class _Row:
     status: Optional[str]
     claim: Optional[str]  # 단계의 선점 칸 (tx_pending·tx_confirm)
     extra: tuple  # 단계의 extra 칸 값
+    barred: bool = False  # must_be_empty 칸에 값이 있다
 
     def claimed_by(self, step: _Step) -> bool:
         """선점이 이 단계의 것인가. 확정은 approved_by, 반려는 rejected_by 를 채운다 — 비어 있으면 같은 칸을 쓰는 상대의 것이다."""
@@ -308,7 +313,12 @@ class _Store:
             try:
                 rows = db.execute(
                     update(Entry)
-                    .where(Entry.id == entry_id, _column(step).is_(None), _status_is(step.ready))
+                    .where(
+                        Entry.id == entry_id,
+                        _column(step).is_(None),
+                        _status_is(step.ready),
+                        *(getattr(Entry, name).is_(None) for name in step.must_be_empty),
+                    )
                     .values({step.column: tx_hash, **extra})
                     .execution_options(synchronize_session=False)
                 ).rowcount
@@ -322,6 +332,8 @@ class _Store:
                 _raise_taken(current, step, entry_id)
                 if current.status != step.ready:
                     raise ValueError(f"{step.name}할 수 있는 상태가 아니다 (id={entry_id}, status={current.status})")
+                if current.barred:
+                    raise EntryConflict(entry_id, f"수정 요청 중인 내역은 {step.name}할 수 없다 (id={entry_id})")
                 raise EntryInFlight(entry_id, f"다른 요청이 먼저 보냈다 (id={entry_id})")
 
         await self._run(work)
@@ -369,7 +381,12 @@ def _row(db: Session, step: _Step, entry_id: int) -> _Row:
     entry = db.get(Entry, entry_id)
     if entry is None:
         raise LookupError(f"항목이 없다 (id={entry_id})")
-    return _Row(entry.status, getattr(entry, step.column), tuple(getattr(entry, name) for name in step.extra))
+    return _Row(
+        entry.status,
+        getattr(entry, step.column),
+        tuple(getattr(entry, name) for name in step.extra),
+        any(getattr(entry, name) is not None for name in step.must_be_empty),
+    )
 
 
 def _raise_taken(row: _Row, step: _Step, entry_id: int) -> None:
