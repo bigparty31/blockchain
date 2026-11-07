@@ -13,6 +13,7 @@ import 'package:student_council_app/core/signing/eip712.dart';
 import 'package:student_council_app/core/signing/signing_service.dart';
 import 'package:student_council_app/models/entry_model.dart';
 import 'package:student_council_app/services/auth_service.dart';
+import 'package:student_council_app/services/budget_revision_service.dart';
 import 'package:student_council_app/services/chain_domain_service.dart';
 import 'package:student_council_app/services/entry_decision_service.dart';
 import 'package:student_council_app/services/entry_registration_service.dart';
@@ -246,5 +247,113 @@ void main() {
     );
     expect((await readEntry(b)).status, EntryStatus.PENDING, reason: '확정 실패는 revert — 반려로 넘길 수 있다');
   }, skip: !_e2e);
+
+  group('정정 · 다시 등록 · 증액 요청 (보드 11/7)', () {
+    EntryRegistrationService registrar() =>
+        EntryRegistrationService(signer: SigningService(authenticator: FakeAuthenticator()));
+
+    test('확정된 지출을 감액 정정하면 원본을 가리키는 음수 항목이 체인에 올라가고, 승인으로 확정된다', () async {
+      final (original, o) = await register(kind: EntryKind.EXPENSE, amount: 30000, budgetId: 1);
+      expect(o.status, EntryStatus.PENDING);
+      await loginAs('20240003', auditorKey);
+      await decisions.confirm(await readEntry(original));
+      final src = await readEntry(original);
+      expect(src.status, EntryStatus.CONFIRMED);
+
+      // 정정 화면과 같은 초안 — 원본의 종류·학기·거래처·사용일·예산, 증감분, 상세 사유는 목적 칸 (HASHING 샘플 3)
+      await loginAs('20240002', _treasurerKey);
+      final reg = registrar();
+      final evidence = utf8.encode('correction evidence ${DateTime.now().microsecondsSinceEpoch}');
+      final up = await serverHasReceipts() ? await reg.uploadReceipt(evidence, filename: 'receipt.jpg') : null;
+      final draft = EntryDraft(
+        kind: src.kind,
+        termId: src.termId,
+        amount: -10000,
+        counterparty: src.counterparty,
+        purpose: 'e2e 입력 오류 정정',
+        budgetId: src.budgetId,
+        occurredAt: src.occurredAt,
+        receiptHash: up?.hash,
+        receiptPath: up?.path,
+        correctsEntryId: src.id,
+        correctionReason: CorrectionReason.INPUT_ERROR,
+      );
+      final id = await reg.saveDraft(draft);
+      final outcome = await reg.submit(id, draft);
+      expect(outcome.status, EntryStatus.PENDING, reason: '서명의 correctsId·음수 금액을 체인이 받았다');
+
+      await loginAs('20240003', auditorKey);
+      final pending = await readEntry(id);
+      expect(pending.correctsEntryId, original);
+      expect(pending.correctionReason, CorrectionReason.INPUT_ERROR);
+      expect(pending.amount, -10000);
+      await decisions.confirm(pending);
+      expect((await readEntry(id)).status, EntryStatus.CONFIRMED, reason: '감액 정정 확정 — 예산으로 refund');
+    }, skip: !_e2e);
+
+    test('반려된 지출을 같은 영수증으로 다시 등록하면 새 번호로 PENDING — 영수증은 서버에서 받아 해시를 대조한다', () async {
+      if (!await serverHasReceipts()) return markTestSkipped('서버에 /receipts 가 없다 (#66 전)');
+      final (old, _) = await register(kind: EntryKind.EXPENSE, amount: 20000, budgetId: 1);
+      await loginAs('20240003', auditorKey);
+      await decisions.reject(await readEntry(old), 'e2e 반려 — 금액 확인');
+      final rejected = await readEntry(old);
+      expect(rejected.status, EntryStatus.REJECTED);
+
+      await loginAs('20240002', _treasurerKey);
+      final reg = registrar();
+      final bytes = await reg.downloadReceipt(rejected.receiptPath!);
+      expect(bytes, isNotNull);
+      expect(Hashing.fileHash(bytes!), rejected.receiptHash, reason: '서버가 준 해시를 믿지 않고 받은 바이트로 확인한다');
+
+      final draft = EntryDraft(
+        kind: rejected.kind,
+        termId: rejected.termId,
+        amount: 18000, // 고친 금액
+        counterparty: rejected.counterparty,
+        purpose: rejected.purpose,
+        budgetId: rejected.budgetId,
+        occurredAt: rejected.occurredAt,
+        receiptHash: rejected.receiptHash,
+        receiptPath: rejected.receiptPath,
+      );
+      final id = await reg.saveDraft(draft);
+      final outcome = await reg.submit(id, draft);
+      expect(id, isNot(old));
+      expect(outcome.status, EntryStatus.PENDING);
+      final again = await readEntry(id);
+      expect(again.amount, 18000);
+      expect((await readEntry(old)).status, EntryStatus.REJECTED, reason: '이전 기록은 그대로 남는다');
+      // 같은 영수증 해시가 반려 건에 이미 있다 — 서버(#66)가 이것도 중복으로 보는지 기록해 둔다
+      // ignore: avoid_print
+      print('다시 등록한 #$id 의 ocr_status = ${again.ocrStatus?.code}');
+    }, skip: !_e2e);
+
+    test('차단된 지출을 근거로 증액을 요청하면 PENDING 요청이 생기고 차단 지출과 연결된다', () async {
+      final (blocked, o) = await register(kind: EntryKind.EXPENSE, amount: 999000000, budgetId: 3);
+      expect(o.status, EntryStatus.BLOCKED);
+
+      await loginAs('20240002', _treasurerKey);
+      final budgets = jsonDecode(utf8.decode(
+              (await http.get(Uri.parse('$base/budgets'), headers: AuthService().authHeaders)).bodyBytes))
+          as List<dynamic>;
+      final b3 = budgets.cast<Map<String, dynamic>>().firstWhere((b) => b['id'] == 3);
+      final requestId = await BudgetRevisionService().requestIncrease(IncreaseRequestDraft(
+        termId: b3['term_id'] as int,
+        category: b3['category'] as String,
+        budgetId: 3,
+        amount: 500000,
+        reason: 'e2e 증액 — 무대 장비 대여료 인상\n견적서 기준',
+        blockedEntryId: blocked,
+      ));
+
+      final res = await http.get(Uri.parse('$base/budget-revisions/$requestId'), headers: AuthService().authHeaders);
+      expect(res.statusCode, 200, reason: res.body);
+      final r = jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
+      expect(r['status'], 'PENDING', reason: '회장 서명을 기다린다');
+      expect(r['blocked_entry_id'], blocked);
+      expect(r['requested_amount'], 500000, reason: '증액분');
+      expect(r['budget_id'], 3);
+    }, skip: !_e2e);
+  });
 }
 

@@ -1,9 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:student_council_app/core/enums.dart';
+import 'package:student_council_app/core/hashing.dart';
 import 'package:student_council_app/screens/council/correction_screen.dart';
 import 'package:student_council_app/screens/council/input_rules.dart';
 import 'package:student_council_app/screens/council/inquiry_response_screen.dart';
 import 'package:student_council_app/services/api_service.dart';
+import 'package:student_council_app/services/entry_registration_service.dart';
+
+import 'support/registration.dart';
 
 /// 정정 화면은 **증감분**을 기록하고, 이의 답변은 **다시 답변할 수 없다**.
 ///
@@ -34,11 +39,17 @@ void main() {
   });
 
   group('정정 화면', () {
-    Future<void> pumpScreen(WidgetTester tester) async {
+    // 서버·체인 대신 받은 초안을 기록하는 등록기 (support/registration.dart)
+    late FakeRegistrar reg;
+
+    Future<void> pumpScreen(WidgetTester tester, {int? initialTargetId}) async {
       tester.view.physicalSize = const Size(411, 2800);
       tester.view.devicePixelRatio = 1.0;
       addTearDown(tester.view.reset);
-      await tester.pumpWidget(const MaterialApp(home: CorrectionScreen()));
+      reg = FakeRegistrar();
+      await tester.pumpWidget(MaterialApp(
+        home: CorrectionScreen(registrar: reg, pickReceipt: fakeReceipt, initialTargetId: initialTargetId),
+      ));
       await tester.pumpAndSettle();
     }
 
@@ -131,6 +142,92 @@ void main() {
       expect(find.text('정정 등록 완료!'), findsOneWidget);
       expect(find.text('금액 변경: ₩ 35,000 → ₩ 30,000'), findsOneWidget);
       expect(find.text('기록되는 정정 금액: -₩ 5,000'), findsOneWidget, reason: '기록되는 정정 금액은 증감분');
+      expect(find.text('정정 번호: #100 · 승인 대기'), findsOneWidget);
+
+      // 체인에 올라간 것은 원본을 가리키는 증감분 한 건 — 원본의 종류·학기·거래처·사용일·예산 그대로 (HASHING 샘플 3)
+      expect(reg.submits, hasLength(1));
+      final d = reg.submits.single.$2;
+      expect(d.correctsEntryId, 1);
+      expect(d.correctionReason, CorrectionReason.INPUT_ERROR);
+      expect(d.amount, -5000);
+      expect(d.kind, EntryKind.EXPENSE);
+      expect(d.termId, 1);
+      expect(d.budgetId, 2);
+      expect(d.counterparty, '한결문구');
+      expect(d.purpose, '실제 영수증 확인 결과 금액 정정');
+      expect(d.occurredAt, 1788793200);
+      expect(d.receiptHash, isNull, reason: '증빙을 붙이지 않았다');
+      expect(d.toCreateJson()['corrects_entry_id'], 1);
+      expect(d.toCreateJson()['correction_reason'], 'INPUT_ERROR');
+      // 서명의 correctsId 는 원본 id — 0 이면 체인이 정정이 아닌 음수 금액으로 보고 거부한다
+      final msg = EntryRegistrationService.recordMessage(id: 100, draft: d, term: 20262, deadline: 1);
+      expect(msg.values['correctsId'], 1);
+      expect(msg.values['amount'], -5000);
+    });
+
+    testWidgets('증빙 영수증을 붙이면 원본을 먼저 올리고 그 해시·경로를 싣는다', (tester) async {
+      await pumpScreen(tester);
+      await lookup(tester, '1');
+      await tester.enterText(amountField(), '30000');
+      await tester.enterText(detailField(), '실제 영수증 확인 결과 금액 정정');
+      await tester.ensureVisible(find.text('수정 증빙 자료 재첨부 (영수증, 선택)'));
+      await tester.tap(find.text('수정 증빙 자료 재첨부 (영수증, 선택)'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('수정 증빙 첨부 완료됨'), findsOneWidget);
+
+      await tester.ensureVisible(find.text('정정 제출하기'));
+      await tester.tap(find.text('정정 제출하기'));
+      await tester.pumpAndSettle();
+      expect(reg.uploads, hasLength(1));
+      final d = reg.submits.single.$2;
+      expect(d.receiptHash, Hashing.fileHash(fakeReceiptBytes));
+      expect(d.receiptPath, FakeRegistrar.pathOf(fakeReceiptBytes));
+    });
+
+    testWidgets('기타(OTHER) 사유도 고를 수 있다 — 상세 사유가 목적 칸에 들어간다', (tester) async {
+      await pumpScreen(tester);
+      await lookup(tester, '1');
+      await tester.ensureVisible(find.text('기타'));
+      await tester.tap(find.text('기타'));
+      await tester.pumpAndSettle();
+      await tester.enterText(amountField(), '30000');
+      await tester.enterText(detailField(), '부가세 별도 표기 착오');
+      await tester.ensureVisible(find.text('정정 제출하기'));
+      await tester.tap(find.text('정정 제출하기'));
+      await tester.pumpAndSettle();
+      final d = reg.submits.single.$2;
+      expect(d.correctionReason, CorrectionReason.OTHER);
+      expect(d.purpose, '부가세 별도 표기 착오');
+    });
+
+    testWidgets('제출이 실패하면 알리고, 다시 제출할 때 같은 초안 번호를 쓴다', (tester) async {
+      await pumpScreen(tester);
+      await lookup(tester, '1');
+      await tester.enterText(amountField(), '30000');
+      await tester.enterText(detailField(), '실제 영수증 확인 결과 금액 정정');
+      reg.failNextSubmit = const EntryDecisionException(EntryDecisionFailure.signing, '서명을 취소했어요.');
+      await tester.ensureVisible(find.text('정정 제출하기'));
+      await tester.tap(find.text('정정 제출하기'));
+      await tester.pumpAndSettle();
+      expect(find.text('서명을 취소했어요.'), findsOneWidget);
+      expect(find.text('정정 등록 완료!'), findsNothing);
+
+      await tester.tap(find.text('정정 제출하기'));
+      await tester.pumpAndSettle();
+      expect(find.text('정정 등록 완료!'), findsOneWidget);
+      expect(reg.drafts, hasLength(1), reason: '초안은 한 번만 저장한다');
+      expect(reg.submits.map((s) => s.$1), [100, 100]);
+    });
+
+    testWidgets('내 등록 현황에서 넘어오면 원본 번호가 채워진 채 바로 조회된다', (tester) async {
+      await pumpScreen(tester, initialTargetId: 1);
+      for (var i = 0; i < 20; i++) {
+        await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
+        await tester.pump();
+        if (find.textContaining('현재 금액').evaluate().isNotEmpty) break;
+      }
+      await tester.pumpAndSettle();
+      expect(find.textContaining('현재 금액 ₩ 35,000'), findsOneWidget);
     });
 
     Future<void> chooseReclassify(WidgetTester tester) async {
@@ -185,6 +282,31 @@ void main() {
       expect(find.textContaining('행사비 +₩ 35,000'), findsNWidgets(2), reason: '미리보기 + 완료 다이얼로그');
       expect(find.textContaining('사업비 -₩ 35,000'), findsNWidgets(2));
       expect(find.text('정정 등록 완료!'), findsNothing, reason: '1건짜리 정정으로 올라가면 안 된다');
+
+      // 새 예산(+)이 먼저, 원래 예산(−)이 나중 — 둘 다 원본을 가리킨다
+      expect(reg.submits.map((s) => (s.$2.budgetId, s.$2.amount, s.$2.correctsEntryId)).toList(), [
+        (1, 35000, 1),
+        (2, -35000, 1),
+      ]);
+    });
+
+    testWidgets('재분류의 증액(+)이 차단되면 감액(−)은 올리지 않는다', (tester) async {
+      await pumpScreen(tester);
+      reg.remaining[1] = 10000; // 새 예산(행사비)에 35,000원이 없다
+      await lookup(tester, '1');
+      await chooseReclassify(tester);
+      await tester.ensureVisible(find.byType(DropdownButtonFormField<int>));
+      await tester.tap(find.byType(DropdownButtonFormField<int>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.textContaining('행사비 · 잔량').last);
+      await tester.pumpAndSettle();
+      await tester.enterText(detailField(), '예산 항목을 잘못 골랐어요');
+      await tester.ensureVisible(find.text('정정 제출하기'));
+      await tester.tap(find.text('정정 제출하기'));
+      await tester.pumpAndSettle();
+      expect(find.text('정정이 예산 검사에서 차단됐어요'), findsOneWidget);
+      expect(reg.submits, hasLength(1), reason: '감액만 확정되면 원래 예산만 돌려받고 지출이 사라진다');
+      expect(reg.submits.single.$2.amount, 35000);
     });
 
     testWidgets('조회 전에 고른 새 예산이 조회한 내역의 원래 예산이면 선택을 비운다 — 화면이 깨지지 않고 제출도 막힌다',

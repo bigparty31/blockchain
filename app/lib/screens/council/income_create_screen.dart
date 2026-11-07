@@ -2,11 +2,13 @@ import 'package:flutter/material.dart';
 import '../../core/app_theme.dart';
 import '../../core/enums.dart';
 import '../../core/hashing.dart';
+import '../../models/entry_model.dart';
 import '../../services/api_service.dart';
 import '../../services/entry_registration_service.dart';
 import 'input_rules.dart';
 import 'receipt_picker.dart';
 import 'registration_result.dart';
+import 'resubmit.dart';
 
 /// [이승호 담당: app/lib/screens/council/]
 /// 2. 수입 등록 화면
@@ -17,7 +19,10 @@ class IncomeCreateScreen extends StatefulWidget {
   /// 영수증 원본 바이트를 고른다. 주지 않으면 카메라·갤러리 ([pickReceiptBytes]).
   final ReceiptPicker? pickReceipt;
 
-  const IncomeCreateScreen({super.key, this.registrar, this.pickReceipt});
+  /// 반려된 수입을 고쳐 새로 등록할 때 그 건 ([canResubmit]). 이전 값으로 채워 연다 (PRD §4.3 T4 3단계).
+  final EntryModel? resubmitOf;
+
+  const IncomeCreateScreen({super.key, this.registrar, this.pickReceipt, this.resubmitOf});
 
   @override
   State<IncomeCreateScreen> createState() => _IncomeCreateScreenState();
@@ -29,7 +34,7 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
   final _amountController = TextEditingController();
   final _memoController = TextEditingController();
 
-  DateTime _selectedDate = DateTime.now();
+  DateTime _selectedDate = kstToday();
   String _incomeType = '학생회비 수납';
 
   /// 영수증(입금 확인서 등) 원본 바이트의 해시. 수입은 영수증이 선택이다 (지출은 필수).
@@ -52,10 +57,41 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
   int? _termId;
   String? _termError;
 
+  /// 다시 등록할 때 이전 영수증을 쓰지 못한 이유.
+  String? _receiptNote;
+
   @override
   void initState() {
     super.initState();
-    _loadTerm();
+    final source = widget.resubmitOf;
+    if (source == null) {
+      _loadTerm();
+    } else {
+      _prefill(source);
+    }
+  }
+
+  /// 이전 건의 값으로 채운다. 학기는 이전 건의 학기 그대로, 분류는 이전 수입 사유 그대로 둔다
+  /// (목록에 없는 사유면 「기타」 칸이 골라진 채 이전 문구가 기록된다). 메모는 장부에 없어서 비워 둔다.
+  void _prefill(EntryModel e) {
+    _termId = e.termId;
+    _sourceController.text = e.counterparty;
+    _amountController.text = '${e.amount}';
+    _incomeType = e.purpose;
+    _selectedDate = pickerDateOf(e.occurredAt);
+    if (e.receiptHash == null) return;
+    restoreReceipt(_registrar, e).then((restored) {
+      if (!mounted || _receiptHash != null) return;
+      setState(() {
+        if (restored == null) {
+          _receiptNote = '이전 영수증을 불러오지 못했어요. 필요하면 다시 첨부해 주세요.';
+          return;
+        }
+        _receiptBytes = restored.$1;
+        _receiptHash = restored.$2.hash;
+        _upload = restored.$2;
+      });
+    });
   }
 
   Future<void> _loadTerm() async {
@@ -83,6 +119,7 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
       _receiptBytes = bytes;
       _receiptHash = Hashing.fileHash(bytes);
       _upload = null;
+      _receiptNote = null;
     });
   }
 
@@ -219,6 +256,7 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              if (widget.resubmitOf != null) ResubmitBanner(source: widget.resubmitOf!, receiptNote: _receiptNote),
               // 수입 유형 선택 카드 (가로 스크롤)
               SizedBox(
                 height: 94,

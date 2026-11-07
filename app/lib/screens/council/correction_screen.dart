@@ -4,15 +4,30 @@ import '../../core/entry_merge.dart';
 import '../../core/enums.dart';
 import '../../core/app_theme.dart';
 import '../../core/format.dart';
+import '../../core/hashing.dart';
 import '../../models/budget_model.dart';
 import '../../models/entry_model.dart';
 import '../../services/api_service.dart';
+import '../../services/entry_registration_service.dart';
 import 'input_rules.dart';
+import 'receipt_picker.dart';
 
 /// [이승호 담당: app/lib/screens/council/]
-/// 4. 정정 등록 화면 (스토리보드 10)
+/// 4. 정정 등록 화면 (스토리보드 10, T8) — 확정된 원본을 고치지 않고 증감분을 새 항목으로 올린다 (PRD §4.4).
+///
+/// 등록은 일반 지출·수입과 같다 — 초안 `POST /entries`(`corrects_entry_id`·`correction_reason` 포함) → 기기 키로
+/// `RecordRequest`(`correctsId` = 원본) 서명 → `POST /entries/{id}/submit`. 감사·회장 승인을 받아야 확정된다.
 class CorrectionScreen extends StatefulWidget {
-  const CorrectionScreen({super.key});
+  /// 정정할 원본 번호 — 내 등록 현황에서 넘어오면 채워진 채 바로 조회한다.
+  final int? initialTargetId;
+
+  /// 초안 저장·서명 제출. 주지 않으면 서버 ([EntryRegistrationService]).
+  final EntryRegistrar? registrar;
+
+  /// 증빙 영수증 원본 바이트를 고른다. 주지 않으면 카메라·갤러리 ([pickReceiptBytes]).
+  final ReceiptPicker? pickReceipt;
+
+  const CorrectionScreen({super.key, this.initialTargetId, this.registrar, this.pickReceipt});
 
   @override
   State<CorrectionScreen> createState() => _CorrectionScreenState();
@@ -25,7 +40,15 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
   final _detailController = TextEditingController();
 
   CorrectionReason _selectedReason = CorrectionReason.INPUT_ERROR;
-  bool _hasCorrectionReceipt = false;
+
+  /// 증빙 영수증 (선택). 원본 바이트·해시와 서버에 올린 결과 — 같은 사진은 한 번만 올린다.
+  List<int>? _receiptBytes;
+  String? _receiptHash;
+  ReceiptUpload? _upload;
+  bool get _hasCorrectionReceipt => _receiptHash != null;
+
+  late final EntryRegistrar _registrar = widget.registrar ?? EntryRegistrationService();
+  bool _submitting = false;
 
   /// 재분류에서 옮겨 갈 예산. 예산 목록은 `GET /budgets` (서버가 없으면 예시 데이터).
   List<BudgetModel> _budgets = const [];
@@ -36,6 +59,13 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
   @override
   void initState() {
     super.initState();
+    final initial = widget.initialTargetId;
+    if (initial != null) {
+      _entryIdController.text = '$initial';
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _lookupTarget();
+      });
+    }
     ApiService().fetchBudgets().then((b) {
       if (mounted) setState(() => _budgets = b);
     }, onError: (Object e) {
@@ -168,13 +198,113 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
     super.dispose();
   }
 
-  /// 재분류 — 정정 2건으로 올린다 (PRD §4.4). 새 예산에 증액(+)을 **먼저**, 원래 예산에 감액(−)을 **나중에**
-  /// 확정한다. 순서는 서버가 강제하고, 둘 중 하나만 확정된 동안은 「재분류 진행 중」으로 보인다.
-  void _submitReclassify() {
+  /// 정정 한 건의 초안. **원본의 종류·학기·거래처·사용일**을 그대로 쓰고(HASHING 샘플 3), 목적 칸에는 상세 사유를
+  /// 적는다(PRD §4.4). [amount] 는 증감분, [budgetId] 는 정정이 쓰거나 돌려받을 예산이다 — 수입은 예산이 없다.
+  EntryDraft _draftFor(EntryModel original, {required int amount, required int? budgetId, String? receiptPath}) =>
+      EntryDraft(
+        kind: original.kind, // 다르면 체인이 CorrectionKindMismatch
+        termId: original.termId, // 다르면 체인이 TermMismatch
+        amount: amount,
+        counterparty: original.counterparty,
+        purpose: _detailController.text,
+        budgetId: original.kind == EntryKind.INCOME ? null : budgetId,
+        occurredAt: original.occurredAt,
+        receiptHash: _receiptHash,
+        receiptPath: receiptPath,
+        correctsEntryId: original.id,
+        correctionReason: _selectedReason,
+      );
+
+  /// 영수증을 붙였으면 원본을 먼저 올린다 — 같은 사진은 한 번만 (#66: 파일 없는 해시는 400).
+  Future<String?> _ensureUploaded() async {
+    final bytes = _receiptBytes;
+    if (bytes == null) return null;
+    _upload ??= await _registrar.uploadReceipt(bytes, filename: receiptFilename(bytes));
+    return _upload!.path;
+  }
+
+  /// 영수증을 고른다 — 원본 바이트를 그대로 해시한다 (HASHING §4). 다시 누르면 다른 사진으로 바꾼다.
+  Future<void> _attachReceipt() async {
+    final bytes = await (widget.pickReceipt ?? pickReceiptBytes)(context);
+    if (bytes == null || !mounted) return;
+    setState(() {
+      _receiptBytes = bytes;
+      _receiptHash = Hashing.fileHash(bytes);
+      _upload = null;
+    });
+  }
+
+  /// 이번 제출로 체인에 올라간 정정 — 재분류 둘째 건이 실패하면 첫째 건은 다시 올리지 않는다.
+  final List<_Registered> _registered = [];
+
+  /// 저장했지만 아직 제출하지 못한 초안 — 같은 입력으로 다시 제출하면 같은 번호를 쓴다 (API §2.3).
+  (EntryDraft, int)? _unsent;
+
+  Future<_Registered> _register(EntryDraft draft) async {
+    final unsent = _unsent;
+    final id = unsent != null && unsent.$1 == draft ? unsent.$2 : await _registrar.saveDraft(draft);
+    _unsent = (draft, id);
+    final outcome = await _registrar.submit(id, draft);
+    _unsent = null;
+    return _Registered(draft, id, outcome);
+  }
+
+  Future<void> _submitCorrection() async {
+    if (_submitting) return;
+    final valid = _formKey.currentState!.validate();
+    if (_target == null) {
+      setState(() => _targetError ??= '먼저 [내역 조회] 로 정정할 내역을 확인해 주세요.');
+      return;
+    }
+    if (!valid) return;
     final target = _target!;
-    final amount = target.finalAmount;
-    final from = target.original.budgetId;
-    showDialog(
+    final original = target.original;
+    setState(() => _submitting = true);
+
+    String? failure;
+    try {
+      final path = await _ensureUploaded();
+      // 재분류는 새 예산에 증액(+)을 먼저, 원래 예산에 감액(−)을 나중에 올린다 (PRD §4.4, 확정 순서는 서버가 강제)
+      final drafts = _isReclassify
+          ? [
+              _draftFor(original, amount: target.finalAmount, budgetId: _newBudgetId, receiptPath: path),
+              _draftFor(original, amount: -target.finalAmount, budgetId: original.budgetId, receiptPath: path),
+            ]
+          : [_draftFor(original, amount: _delta!, budgetId: original.budgetId, receiptPath: path)];
+      for (final draft in drafts) {
+        if (_registered.any((r) => r.draft == draft)) continue;
+        final r = await _register(draft);
+        _registered.add(r);
+        // 증액(+)이 차단되면 감액(−)을 올리지 않는다 — 감액만 확정되면 원래 예산만 돌려받고 지출이 사라진다
+        if (r.outcome.status == EntryStatus.BLOCKED) break;
+      }
+    } on EntryDecisionException catch (e) {
+      failure = e.message;
+    }
+    if (!mounted) return;
+    setState(() => _submitting = false);
+    if (failure != null) {
+      final done = _registered.map((r) => '#${r.id}').join(', ');
+      _snack(_registered.isEmpty
+          ? failure
+          : '$done 은 등록됐어요. 나머지는 등록하지 못했어요: $failure 다시 제출하면 나머지만 올려요.');
+      return;
+    }
+    await _showResult(target);
+  }
+
+  void _snack(String text) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text), behavior: SnackBarBehavior.floating));
+  }
+
+  /// 등록 결과 — 건마다 번호와 체인 상태(`PENDING`·`BLOCKED`).
+  Future<void> _showResult(EntryChain target) async {
+    final registered = List.of(_registered);
+    final blocked = registered.any((r) => r.outcome.status == EntryStatus.BLOCKED);
+    final reclassify = _isReclassify;
+    String statusOf(_Registered r) =>
+        r.outcome.status == EntryStatus.BLOCKED ? '차단 (${r.outcome.blockReason?.code ?? '-'})' : '승인 대기';
+    await showDialog<void>(
       context: context,
       builder: (ctx) => Dialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
@@ -186,12 +316,19 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
               Container(
                 width: 60,
                 height: 60,
-                decoration: BoxDecoration(color: AppTheme.pending.withOpacity(0.12), shape: BoxShape.circle),
-                child: const Icon(Icons.swap_horiz_rounded, color: AppTheme.pending, size: 28),
+                decoration: BoxDecoration(
+                  color: (blocked ? AppTheme.expense : AppTheme.pending).withOpacity(0.12),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(blocked ? Icons.block_rounded : (reclassify ? Icons.swap_horiz_rounded : Icons.send_rounded),
+                    color: blocked ? AppTheme.expense : AppTheme.pending, size: 28),
               ),
               const SizedBox(height: 16),
-              const Text('재분류 정정 2건 등록 완료!',
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: AppTheme.textMain),
+              Text(
+                blocked
+                    ? '정정이 예산 검사에서 차단됐어요'
+                    : (reclassify ? '재분류 정정 2건 등록 완료!' : '정정 등록 완료!'),
+                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: AppTheme.textMain),
                 textAlign: TextAlign.center,
               ),
               const SizedBox(height: 12),
@@ -203,23 +340,40 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     _InfoRow(label: '대상 내역', value: '#${target.original.id} ${target.original.counterparty}'),
-                    _InfoRow(label: '① 먼저', value: '${_budgetName(_newBudgetId)} ${_signed(amount)}'),
-                    _InfoRow(label: '② 나중', value: '${_budgetName(from)} ${_signed(-amount)}'),
+                    _InfoRow(label: '정정 사유', value: '${_selectedReason.label} (${_selectedReason.code})'),
+                    if (!reclassify) ...[
+                      _InfoRow(
+                        label: '금액 변경',
+                        value: '${Fmt.won(target.finalAmount)} → ${Fmt.won(_correctedAmount!)}',
+                      ),
+                      _InfoRow(label: '기록되는 정정 금액', value: _signed(registered.first.draft.amount)),
+                      _InfoRow(label: '정정 번호', value: '#${registered.first.id} · ${statusOf(registered.first)}'),
+                    ] else
+                      for (final (i, r) in registered.indexed)
+                        _InfoRow(
+                          label: i == 0 ? '① 먼저' : '② 나중',
+                          value: '#${r.id} ${_budgetName(r.draft.budgetId)} ${_signed(r.draft.amount)} · ${statusOf(r)}',
+                        ),
                   ],
                 ),
               ),
               const SizedBox(height: 8),
-              const Text('① 이 확정된 뒤에만 ② 를 승인할 수 있어요. 순서는 서버가 확인해요. 한쪽만 확정된 동안은 「재분류 진행 중」으로 표시돼요.',
-                style: TextStyle(color: AppTheme.textSub, fontSize: 12, height: 1.4),
+              Text(
+                blocked
+                    ? (reclassify
+                        ? '새 예산의 잔량이 모자라 ① 이 차단돼 ② 는 올리지 않았어요. 예산을 늘린 뒤 다시 정정해 주세요.'
+                        : '증액 정정은 일반 지출처럼 잔량 검사를 거쳐요. 예산을 늘린 뒤 다시 정정해 주세요.')
+                    : (reclassify
+                        ? '① 이 확정된 뒤에만 ② 를 승인할 수 있어요. 한쪽만 확정된 동안은 「재분류 진행 중」으로 표시돼요.'
+                        : '감사·회장의 승인을 기다려요. 원본은 그대로 남고 증감분만 새 기록으로 올라가요.'),
+                style: const TextStyle(color: AppTheme.textSub, fontSize: 12, height: 1.4),
                 textAlign: TextAlign.center,
               ),
-              const SizedBox(height: 4),
-              const Text('※ 서버 연동 전 목업 결과예요', style: TextStyle(color: AppTheme.textSub, fontSize: 11)),
               const SizedBox(height: 16),
               SizedBox(
                 width: double.infinity,
                 child: GradientButton(
-                  onPressed: () { Navigator.pop(ctx); Navigator.pop(context); },
+                  onPressed: () => Navigator.pop(ctx),
                   label: '확인',
                   icon: Icons.check_rounded,
                   gradient: const LinearGradient(colors: [Color(0xFFF59E0B), Color(0xFFEF4444)]),
@@ -230,91 +384,7 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
         ),
       ),
     );
-  }
-
-  void _submitCorrection() {
-    final valid = _formKey.currentState!.validate();
-    if (_target == null) {
-      setState(() => _targetError ??= '먼저 [내역 조회] 로 정정할 내역을 확인해 주세요.');
-      return;
-    }
-    if (_isReclassify) {
-      if (valid) _submitReclassify();
-      return;
-    }
-    if (valid) {
-      final target = _target!;
-      final delta = _delta!;
-      showDialog(
-        context: context,
-        builder: (ctx) => Dialog(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-          child: Padding(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  width: 60,
-                  height: 60,
-                  decoration: BoxDecoration(
-                    color: AppTheme.pending.withOpacity(0.12),
-                    shape: BoxShape.circle,
-                  ),
-                  child: const Icon(Icons.send_rounded, color: AppTheme.pending, size: 28),
-                ),
-                const SizedBox(height: 16),
-                const Text('정정 등록 완료!',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: AppTheme.textMain),
-                ),
-                const SizedBox(height: 12),
-                Container(
-                  padding: const EdgeInsets.all(14),
-                  decoration: BoxDecoration(color: AppTheme.bgPage, borderRadius: BorderRadius.circular(12)),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      _InfoRow(label: '대상 내역', value: '#${target.original.id} ${target.original.counterparty}'),
-                      _InfoRow(
-                        label: '정정 사유',
-                        value: '${_selectedReason.label} (${_selectedReason.code})',
-                      ),
-                      _InfoRow(
-                        label: '금액 변경',
-                        value: '${Fmt.won(target.finalAmount)} → ${Fmt.won(_correctedAmount!)}',
-                      ),
-                      _InfoRow(label: '기록되는 정정 금액', value: _signed(delta)),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 8),
-                const Text('감사단 및 회장에게 승인 요청이 전달되었습니다',
-                  style: TextStyle(color: AppTheme.textSub, fontSize: 12),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 4),
-                const Text('※ 서버 연동 전 목업 결과예요',
-                  style: TextStyle(color: AppTheme.textSub, fontSize: 11),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 16),
-                SizedBox(
-                  width: double.infinity,
-                  child: GradientButton(
-                    onPressed: () { Navigator.pop(ctx); Navigator.pop(context); },
-                    label: '확인',
-                    icon: Icons.check_rounded,
-                    gradient: const LinearGradient(
-                      colors: [Color(0xFFF59E0B), Color(0xFFEF4444)],
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      );
-    }
+    if (mounted) Navigator.pop(context);
   }
 
   @override
@@ -501,6 +571,7 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
                   ),
                   items: _budgets
                       .where((b) => b.id != _target?.original.budgetId)
+                      .where((b) => _target == null || b.termId == _target!.original.termId)
                       .map((b) => DropdownMenuItem(value: b.id, child: Text('${b.category} · 잔량 ${Fmt.won(b.remainingAmount)}', overflow: TextOverflow.ellipsis)))
                       .toList(),
                   onChanged: (v) => setState(() => _newBudgetId = v),
@@ -585,24 +656,7 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
 
               // 증빙 첨부
               GestureDetector(
-                onTap: () {
-                  setState(() => _hasCorrectionReceipt = true);
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: const Row(
-                        children: [
-                          Icon(Icons.attach_file_rounded, color: Colors.white, size: 18),
-                          SizedBox(width: 10),
-                          Expanded(child: Text('수정 증빙 영수증 첨부 완료')),
-                        ],
-                      ),
-                      backgroundColor: AppTheme.success,
-                      behavior: SnackBarBehavior.floating,
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                      margin: const EdgeInsets.all(16),
-                    ),
-                  );
-                },
+                onTap: _attachReceipt,
                 child: AnimatedContainer(
                   duration: const Duration(milliseconds: 200),
                   padding: const EdgeInsets.all(16),
@@ -638,7 +692,9 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
                       // Expanded: 좁은 화면·큰 글자에서 글자가 넘치지 않고 줄바꿈된다
                       Expanded(
                         child: Text(
-                          _hasCorrectionReceipt ? '수정 증빙 첨부 완료됨 ✓' : '수정 증빙 자료 재첨부 (영수증)',
+                          _hasCorrectionReceipt
+                              ? '수정 증빙 첨부 완료됨 ✓ · ${Fmt.shortHash(_receiptHash!)}'
+                              : '수정 증빙 자료 재첨부 (영수증, 선택)',
                           style: TextStyle(
                             color: _hasCorrectionReceipt ? AppTheme.success : AppTheme.primary,
                             fontWeight: FontWeight.w600,
@@ -653,8 +709,8 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
               const SizedBox(height: 28),
 
               GradientButton(
-                onPressed: _submitCorrection,
-                label: '정정 제출하기',
+                onPressed: _submitting ? null : _submitCorrection,
+                label: _submitting ? '제출 중...' : '정정 제출하기',
                 icon: Icons.send_rounded,
                 gradient: const LinearGradient(
                   colors: [Color(0xFFF59E0B), Color(0xFFEF4444)],
@@ -667,6 +723,14 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
       ),
     );
   }
+}
+
+/// 체인에 올라간 정정 한 건 — 초안, 번호, 제출 결과.
+class _Registered {
+  final EntryDraft draft;
+  final int id;
+  final SubmitOutcome outcome;
+  const _Registered(this.draft, this.id, this.outcome);
 }
 
 /// 조회한 정정 대상 요약 — 사용자가 어느 내역의 어느 금액을 고치는지 눈으로 확인하게 한다.
