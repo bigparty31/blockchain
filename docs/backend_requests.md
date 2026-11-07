@@ -114,7 +114,6 @@
 ```json
 {
   "id": 1, "user_id": 3, "term_id": 1, "token_id": 128,
-  "commit_hash": "0x7d3a9f1c...",
   "minted_at": 1788620400,
   "burned_at": null,
   "qr_payload": "SCA:2026-2:U000003"
