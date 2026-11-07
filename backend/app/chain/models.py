@@ -239,6 +239,17 @@ class ChainEntry(_Frozen):
     approver: str = Field(..., description="확정·반려 서명자 주소. 미처리면 address(0). 형식은 registrant 와 같다")
 
 
+class EntryTxDetail(_Frozen):
+    """트랜잭션 하나가 항목에 남긴 기록. 블록 번호(S10)와 반려·경고 사유 해시 대조(S4)가 읽는다."""
+
+    tx_hash: str
+    status: EntryStatus = Field(..., description="이 트랜잭션의 결과. 항목의 지금 status 와 다를 수 있다 (등록 뒤 확정)")
+    block_number: int
+    block_reason: Optional[BlockReason] = None
+    reason_hash: Optional[str] = Field(None, description="반려 사유 또는 경고 승인 사유의 해시. 원문은 DB 에 있다 (HASHING §3)")
+    had_warning: bool = False
+
+
 class BudgetTxResult(_Frozen):
     """발행·증액 트랜잭션이 블록에 들어간 뒤의 결과. revert 는 ChainRevert 로 올라간다."""
 
@@ -258,6 +269,11 @@ class ChainBudget(_Frozen):
     expires_at: int
     version: int
     reclaim_count: int
+
+    @property
+    def remaining(self) -> int:
+        """BudgetToken.remaining 과 같은 식이다. getBudget 한 번으로 읽어, 잔량과 나머지 값이 같은 블록의 것이다."""
+        return self.issued - self.spent
 
 
 # ---------------------------------------------------------------- 에러

@@ -694,6 +694,69 @@ def test_confirming_a_confirmed_entry_is_a_conflict(engine, db):
     assert chain.sends == 2  # 등록 1 + 확정 1
 
 
+# ---------------------------------------------------------------- T4 수정 요청과 확정
+
+
+def test_entry_with_an_edit_request_is_not_confirmed(engine, db):
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    write(engine, entry_id, revision_requested_at=datetime.now(timezone.utc))
+    before = row(engine, entry_id)
+    with pytest.raises(EntryConflict, match="수정 요청") as raised:
+        asyncio.run(approve(db, chain, entry_id))
+    assert not isinstance(raised.value, EntryInFlight)  # 다시 요청해도 결과가 바뀌지 않는다. 처리 중이라고 답하지 않는다
+    assert row(engine, entry_id) == before
+    assert asyncio.run(chain.get_entry(entry_id)).status is EntryStatus.PENDING
+
+
+def test_edit_request_arriving_after_the_router_check_still_stops_confirmation(engine, db):
+    # 라우터 검사를 지난 뒤 수정 요청이 들어온 경우. 선점의 조건부 UPDATE 가 마지막 방어선이다
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    chain.before_send = lambda: write(engine, entry_id, revision_requested_at=datetime.now(timezone.utc))
+    with pytest.raises(EntryConflict, match="수정 요청"):
+        asyncio.run(approve(db, chain, entry_id))
+    chain.before_send = None
+    assert row(engine, entry_id)["tx_confirm"] is None and row(engine, entry_id)["approved_by"] is None
+    assert asyncio.run(chain.get_entry(entry_id)).status is EntryStatus.PENDING
+
+
+def test_retry_after_a_failed_confirmation_is_stopped_by_an_edit_request(engine, db):
+    # 앞선 확정이 블록에서 실패해 이 요청의 서명으로 다시 보내려는 순간에도 수정 요청을 본다
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    write(
+        engine,
+        entry_id,
+        tx_confirm="0x" + "dd" * 32,
+        approved_by=AUDITOR_ID,
+        revision_requested_at=datetime.now(timezone.utc),
+    )
+    chain.tx_result_errors = [ChainRevert(RevertReason.UNKNOWN, "확정이 블록에서 실패")]
+    with pytest.raises(EntryConflict, match="수정 요청"):
+        asyncio.run(approve(db, chain, entry_id))
+    assert row(engine, entry_id)["tx_confirm"] is None and row(engine, entry_id)["approved_by"] is None
+    assert asyncio.run(chain.get_entry(entry_id)).status is EntryStatus.PENDING
+
+
+def test_confirmation_already_sent_is_recorded_even_if_an_edit_request_follows(engine, db):
+    # 선점한 뒤 온 수정 요청은 이미 나간 트랜잭션을 되돌리지 못한다. DB 는 체인 결과를 따른다
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    chain.on_broadcast = lambda tx_hash: write(engine, entry_id, revision_requested_at=datetime.now(timezone.utc))
+    assert asyncio.run(approve(db, chain, entry_id)).status is EntryStatus.CONFIRMED
+    assert row(engine, entry_id)["status"] == "CONFIRMED"
+
+
+def test_entry_with_an_edit_request_can_still_be_rejected(engine, db):
+    # T4 는 수정 요청 → 반려 → 재등록이다 (PRD §4.3)
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    write(engine, entry_id, revision_requested_at=datetime.now(timezone.utc))
+    assert asyncio.run(refuse(db, chain, entry_id)).status is EntryStatus.REJECTED
+    assert row(engine, entry_id)["status"] == "REJECTED"
+
+
 # ---------------------------------------------------------------- 반려
 
 
