@@ -36,6 +36,7 @@ from app.chain.models import (
     BudgetTxResult,
     ChainBudget,
     ChainEntry,
+    EntryTxDetail,
     ChainRevert,
     ChainUnavailable,
     ConfirmApproval,
@@ -80,10 +81,14 @@ class FakeChainClient:
         # 정정 가능 항목(원본·재분류 양수 정정)의 순금액. 원장의 netAmountOf 와 같은 규칙으로 갱신한다
         self._net: dict[int, int] = {}
         self._budgets: dict[int, ChainBudget] = {}
+        self._memberships: dict[tuple[str, int], int] = {}  # (주소 소문자, 학기 코드) → 유효한 tokenId
+        self._membership_count = 0
         self._tx_count = 0
         # tx hash 에 섞는 인스턴스별 값. 서버를 다시 켜 새 가짜가 생겨도 DB 에 남은 옛 hash 와 겹치지 않는다 (tx_result)
         self._tx_salt = secrets.token_hex(8)
         self._landed: dict[str, tuple[int, TxResult]] = {}  # 블록에 들어간 트랜잭션 hash → (id, 결과). tx_result 가 읽는다
+        self._blocks: dict[str, int] = {}  # 트랜잭션 hash → 블록 번호. 들어간 순서대로 하나씩 오른다 (entry_tx_detail)
+        self._reasons: dict[str, tuple[Optional[str], bool]] = {}  # 트랜잭션 hash → (사유 해시, 경고 승인 여부)
         self._fail: dict[str, Union[RevertReason, BudgetRevertReason]] = {}
         self._unavailable: dict[str, tuple[bool, bool]] = {}  # method → (sent, landed)
         self._send_lock: Optional[asyncio.Lock] = None
@@ -145,6 +150,20 @@ class FakeChainClient:
         signature = check_signature(signature)
         return await self._send("reject_entry", lambda tx: self._reject(decision, signature, tx), before_broadcast)
 
+    async def entry_tx_detail(self, tx_hash: str, entry_id: int) -> Optional[EntryTxDetail]:
+        result = await self.tx_result(tx_hash, entry_id)
+        if result is None:
+            return None
+        reason_hash, had_warning = self._reasons.get(result.tx_hash, (None, False))
+        return EntryTxDetail(
+            tx_hash=result.tx_hash,
+            status=result.status,
+            block_number=self._blocks[result.tx_hash],
+            block_reason=result.block_reason,
+            reason_hash=reason_hash,
+            had_warning=had_warning,
+        )
+
     async def get_entry(self, entry_id: int) -> Optional[ChainEntry]:
         return self._entries.get(entry_id)
 
@@ -194,6 +213,27 @@ class FakeChainClient:
             if (budget.term, budget.category) == (term, category):
                 return budget.id
         return 0
+
+    # ------------------------------------------------------------ 회원권 (MembershipSBT)
+    # 발행·소각 릴레이는 아직 없어서, 테스트가 grant_membership·burn_membership 으로 체인 상태를 만든다
+
+    def grant_membership(self, account: str, term: int) -> int:
+        """(account, term) 에 회원권을 발행한 것으로 둔다. 이미 유효하면 그 tokenId 를 돌려준다 (컨트랙트의 건너뛰기와 같다)."""
+        key = (check_address(account).lower(), term)
+        if key not in self._memberships:
+            self._membership_count += 1
+            self._memberships[key] = self._membership_count
+        return self._memberships[key]
+
+    def burn_membership(self, account: str, term: int) -> None:
+        """(account, term) 의 회원권을 소각한 것으로 둔다. 소각하면 tokenOf 가 0 이 된다."""
+        self._memberships.pop((check_address(account).lower(), term), None)
+
+    async def has_valid_membership(self, account: str, term: int) -> bool:
+        return (check_address(account).lower(), term) in self._memberships
+
+    async def membership_token_of(self, account: str, term: int) -> int:
+        return self._memberships.get((check_address(account).lower(), term), 0)
 
     # ------------------------------------------------------------ 컨트랙트 흉내
 
@@ -290,8 +330,20 @@ class FakeChainClient:
         def commit() -> None:
             self._entries[entry.id] = entry.model_copy(update={"status": EntryStatus.CONFIRMED, "approver": approver})
             self._update_net(entry)
+            self._spend(entry)
+            if a.had_warning:
+                self._reasons[tx_hash] = (a.warning_reason_hash, True)
 
         return entry.id, TxResult(tx_hash=tx_hash, status=EntryStatus.CONFIRMED), commit
+
+    def _spend(self, entry: ChainEntry) -> None:
+        """확정된 지출을 예산에 반영한다. 원장이 부르는 BudgetToken.spend·refund 와 같은 계산이다 (음수 정정은 되돌린다).
+
+        발행하지 않은 예산은 건너뛴다 — 가짜의 원장 시나리오는 예산 발행 없이 budget_id 만 쓰기도 한다.
+        """
+        budget = self._budgets.get(entry.budget_id)
+        if entry.kind is EntryKind.EXPENSE and budget is not None:
+            self._budgets[budget.id] = budget.model_copy(update={"spent": budget.spent + entry.amount})
 
     def _reject(self, d: RejectDecision, signature: str, tx_hash: str) -> Prepared:
         self._precheck("reject_entry", d.deadline)
@@ -303,6 +355,7 @@ class FakeChainClient:
 
         def commit() -> None:
             self._entries[entry.id] = entry.model_copy(update={"status": EntryStatus.REJECTED, "approver": approver})
+            self._reasons[tx_hash] = (d.reason_hash, False)
 
         return entry.id, TxResult(tx_hash=tx_hash, status=EntryStatus.REJECTED), commit
 
@@ -422,6 +475,7 @@ class FakeChainClient:
         """블록에 들어갔다 — 상태를 바꾸고 결과를 hash 로 남긴다 (tx_result)."""
         commit()
         self._landed[tx_hash] = (entry_id, result)
+        self._blocks[tx_hash] = len(self._blocks) + 1
 
     def _lock(self) -> asyncio.Lock:
         # asyncio.Lock 은 처음 경합한 이벤트 루프에 묶인다. 테스트마다 루프가 바뀌니(asyncio.run) 루프별로 만든다

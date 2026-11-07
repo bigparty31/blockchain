@@ -14,6 +14,7 @@ from app.chain.models import (
     BudgetTxResult,
     ChainBudget,
     ChainEntry,
+    EntryTxDetail,
     ConfirmApproval,
     IncreaseRequest,
     IssueRequest,
@@ -124,6 +125,16 @@ class ChainClient(Protocol):
         """
         ...
 
+    async def entry_tx_detail(self, tx_hash: str, entry_id: int) -> Optional[EntryTxDetail]:
+        """그 트랜잭션이 항목에 남긴 기록을 receipt 로 읽는다. 블록 번호와 사유 해시가 있다. None 은 아직 블록에 없다는 뜻이다.
+
+        이벤트를 블록 범위로 훑지 않는다. RPC 의 조회 범위 제한에 걸리지 않게, DB 에 저장한 hash(tx_pending·tx_confirm)로 읽는다.
+
+        Raises:
+            tx_result 와 같다.
+        """
+        ...
+
     async def get_entry(self, entry_id: int) -> Optional[ChainEntry]:
         """AccountingLedger.getEntry. 온체인에 없으면 None.
 
@@ -175,4 +186,17 @@ class ChainClient(Protocol):
 
     async def budget_id_of(self, term: int, category: str) -> int:
         """BudgetToken.budgetIdOf. 그 학기·항목의 예산 id. 최신 블록 기준이고 없으면 0."""
+        ...
+
+    async def has_valid_membership(self, account: str, term: int) -> bool:
+        """MembershipSBT.hasValidMembership. 그 학기(term = 학기 코드 YYYYS)의 소각되지 않은 회원권이 있으면 True.
+
+        Raises:
+            ChainUnavailable: 노드에 닿지 못했다. 미보유가 아니라 '모름'이다.
+            ChainSetupError: 배포 기록에 MembershipSBT 가 없다 (아직 배포 전).
+        """
+        ...
+
+    async def membership_token_of(self, account: str, term: int) -> int:
+        """MembershipSBT.tokenOf. 그 학기의 유효한 tokenId. 없거나 소각됐으면 0. 예외는 has_valid_membership 과 같다."""
         ...
