@@ -34,7 +34,7 @@ void main() {
                 data: MediaQuery.of(context).copyWith(textScaler: TextScaler.linear(scale)),
                 child: child!,
               ),
-              home: ApprovalListScreen(role: UserRole.AUDITOR, currentUserId: 3),
+              home: ApprovalListScreen(role: UserRole.AUDITOR, currentUserId: 3, items: buildApprovalMockItems()),
             ),
           );
           await tester.pumpAndSettle();
