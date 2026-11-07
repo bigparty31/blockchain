@@ -171,7 +171,7 @@ def test_unknown_or_non_student(db_session, auth_header, user_id):
 
 
 def test_unverifiable_is_not_rejection(db_session, auth_header):
-    def broken(db, user_id, term_id):
+    async def broken(db, user_id, term_id):
         raise MembershipUnavailable("RPC 연결 실패")
 
     app.dependency_overrides[get_membership_checker] = lambda: broken
@@ -190,7 +190,7 @@ def test_already_checked_in_skips_membership_check(db_session, auth_header):
     scan(auth_header)
     calls = []
 
-    def spy(db, user_id, term_id):
+    async def spy(db, user_id, term_id):
         calls.append(user_id)
         raise MembershipUnavailable()
 
@@ -201,7 +201,7 @@ def test_already_checked_in_skips_membership_check(db_session, auth_header):
 
 def test_concurrent_scan_returns_already_checked_in(db_session, auth_header):
     # 회원권 확인과 기록 사이에 다른 스캐너가 먼저 기록한 상황을 재현한다
-    def racing(db, user_id, term_id):
+    async def racing(db, user_id, term_id):
         other = db_session()
         other.add(CheckIn(event_id=1, user_id=user_id, scanned_by=3))
         other.commit()
@@ -281,3 +281,14 @@ def test_create_event_bad_name(db_session, auth_header, name):
     res = client.post("/events", json={"term_id": TERM, "name": name, "held_at": "2026-10-01T10:00:00+09:00"},
                       headers=auth_header(Role.TREASURER))
     assert res.status_code == 422
+
+
+def test_shared_membership_exception_is_unverifiable(db_session, auth_header):
+    # 공용 함수(app/services/membership.py)가 던지는 예외를 그대로 잡아야 한다 — 클래스가 다르면 500 이 된다
+    from app.services import membership as shared
+
+    async def chain_down(db, user_id, term_id):
+        raise shared.MembershipUnavailable("노드 응답 없음")
+
+    app.dependency_overrides[get_membership_checker] = lambda: chain_down
+    assert scan(auth_header).json()["result"] == "UNVERIFIABLE"

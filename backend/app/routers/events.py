@@ -133,7 +133,7 @@ async def check_in(
             return res
 
         try:
-            member = has_membership(db, student_id, event.term_id)
+            member = await has_membership(db, student_id, event.term_id)
         except MembershipUnavailable:
             logger.warning("회원권 확인 불가: event=%s user=%s", event_id, student_id)
             res.result = CheckInResult.UNVERIFIABLE
