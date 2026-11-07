@@ -86,11 +86,13 @@ Future<Map<String, dynamic>> postSigned(
   String? conflictMessage,
 }) async {
   final http.Response res;
+  // 보내기 직전의 토큰을 잡아 둔다 — 늦게 온 401 이 그 사이 다시 로그인해 만든 새 세션을 지우지 않게
+  final auth = AuthService().authSnapshot;
   try {
     res = await client
         .post(
           Uri.parse(url),
-          headers: {...AuthService().authHeaders, 'Content-Type': 'application/json'},
+          headers: {...auth.headers, 'Content-Type': 'application/json'},
           body: jsonEncode(body),
         )
         .timeout(timeout);
@@ -112,7 +114,7 @@ Future<Map<String, dynamic>> postSigned(
         return const {};
       }
     case 401:
-      await AuthService().reportUnauthorized();
+      await AuthService().reportUnauthorized(token: auth.token);
       throw const EntryDecisionException(EntryDecisionFailure.unauthorized, '로그인이 끝났어요. 다시 로그인해 주세요.');
     case 403:
       throw EntryDecisionException(EntryDecisionFailure.forbidden, detail ?? '이 작업을 할 권한이 없어요.');

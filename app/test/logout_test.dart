@@ -63,7 +63,10 @@ void main() {
   setUp(() async {
     store = MemoryTokenStore();
     AuthService.store = store;
-    AuthService().resetAttempts();
+    // 잠금 보관소도 갈아끼운다 — 기본값은 `flutter_secure_storage` 라
+    // 테스트에서 플랫폼 채널이 응답하지 않는다.
+    AuthService.lockStore = MemoryLoginLockStore();
+    await AuthService().resetAttempts();
     AuthService().onUnauthorized = null;
     stubScreens();
   });
@@ -80,7 +83,7 @@ void main() {
     AuthService.client = authServer(role.code);
     await AuthService().login('20240001', 'userPassword123!');
     expect(AuthService().session, isNotNull, reason: '로그인이 안 된 상태로 테스트를 시작했다');
-    expect(store.value, 'token-abc');
+    expect(store.value?.token, 'token-abc');
 
     await tester.pumpWidget(MaterialApp(home: homeScreenFor(role)));
     // 홈 화면의 조회 Future 는 가짜 시계에서 끝나지 않아 pumpAndSettle 을 쓰지 않는다.
@@ -112,7 +115,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
 
     expect(AuthService().session, isNotNull);
-    expect(store.value, 'token-abc', reason: '취소했는데 토큰이 지워졌다');
+    expect(store.value?.token, 'token-abc', reason: '취소했는데 토큰이 지워졌다');
     expect(find.byType(LoginScreen), findsNothing);
   });
 
@@ -128,7 +131,7 @@ void main() {
 
     expect(find.byType(AlertDialog), findsNothing);
     expect(AuthService().session, isNotNull);
-    expect(store.value, 'token-abc');
+    expect(store.value?.token, 'token-abc');
   });
 
   testWidgets('확인하면 토큰을 지우고 로그인 화면으로 간다', (tester) async {
@@ -142,7 +145,7 @@ void main() {
 
     expect(AuthService().session, isNull);
     // 세션만 비우고 보관소를 두면 앱을 다시 켤 때 그 세션으로 되살아난다.
-    expect(store.value, isNull, reason: '기기에서 토큰이 지워지지 않았다');
+    expect(store.value?.token, isNull, reason: '기기에서 토큰이 지워지지 않았다');
     expect(AuthService().authHeaders, isEmpty);
     expect(find.byType(LoginScreen), findsOneWidget);
   });
@@ -156,7 +159,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
     await tester.pump(const Duration(milliseconds: 400));
 
-    expect(store.value, isNull, reason: '임원 세션이 남으면 다음 사람에게 승인 화면이 열린다');
+    expect(store.value?.token, isNull, reason: '임원 세션이 남으면 다음 사람에게 승인 화면이 열린다');
     expect(find.byType(LoginScreen), findsOneWidget);
   });
 

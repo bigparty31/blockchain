@@ -4,6 +4,7 @@ import '../../core/entry_merge.dart';
 import '../../core/entry_verifier.dart';
 import '../../core/enums.dart';
 import '../../core/format.dart';
+import '../../services/auth_service.dart';
 import '../../services/student_api_service.dart';
 import 'entry_detail_screen.dart';
 import 'widgets/student_badges.dart';
@@ -74,6 +75,26 @@ class _EntryListScreenState extends State<EntryListScreen> {
       }
 
       _verifyAll();
+    } on SessionExpired {
+      // 세션이 끊겼다. `AuthService.onUnauthorized` 가 로그인 화면으로 보내므로
+      // 여기서는 목록을 비우기만 한다 — **예시 데이터로 메우지 않는다.**
+      // 잡지 않으면 `_load` 가 await 되지 않아(`initState`) 처리되지 않은 비동기
+      // 예외가 되고, 테스트에서는 그대로 실패로 뜬다.
+      if (mounted) {
+        setState(() {
+          _chains = [];
+          _reports.clear();
+        });
+      }
+    } on LedgerUnavailable {
+      // 실서버를 보고 있는데 조회가 깨졌다. 빈 목록이 「내역 없음」으로 읽히는
+      // 문제는 남지만, 지어낸 내역을 보여주는 것보다 낫다.
+      if (mounted) {
+        setState(() {
+          _chains = [];
+          _reports.clear();
+        });
+      }
     } finally {
       if (mounted) setState(() => _loading = false);
     }

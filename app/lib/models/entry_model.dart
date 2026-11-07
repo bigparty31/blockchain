@@ -40,9 +40,8 @@ class EntryModel {
   /// `term_id` 는 1부터 매긴 행 번호라, 둘을 그냥 비교하면 `1 != 20262` 로
   /// **모든 항목이 변조 판정된다** (IAccountingLedger: "DB 의 Term.id 가 아니다").
   ///
-  /// `terms.term_code` 는 ERD 에 들어갔지만 `EntryResponse` 에는 아직 실려 오지
-  /// 않아 지금은 항상 null 이고, 그동안 학기 대조는 「모름」으로 남는다.
-  /// 필드가 생기면 응답에 실려 오는 즉시 검증에 들어간다 — 앱 쪽은 손댈 것이 없다.
+  /// 서버(`develop` 의 `GET /entries`)는 `term_code` 를 실어 준다. 옛 서버·시연용 더미처럼 없으면 null 이고,
+  /// 그때 학기 대조는 「모름」으로 남는다 — 승인·반려 서명은 학기 코드가 없으면 서명 전에 멈춘다.
   final int? termCode;
 
   final int? correctsEntryId;
