@@ -17,6 +17,7 @@ import 'approval_list_screen.dart';
 import 'budget_revision_screen.dart';
 import 'correction_approval_screen.dart';
 import 'correction_screen.dart';
+import 'signing_key_screen.dart';
 import 'my_entries_screen.dart';
 import 'inquiry_response_screen.dart';
 import 'hardware_test_screen.dart';
@@ -441,6 +442,14 @@ class _CouncilHomeScreenState extends State<CouncilHomeScreen> with WidgetsBindi
             badge: '준비 중',
             gradient: LinearGradient(colors: [Color(0xFF6366F1), Color(0xFF8B5CF6)]),
           ),
+          _MenuData(
+            title: '서명 키',
+            subtitle: '이 기기의 서명 키 만들기·주소 확인',
+            icon: Icons.vpn_key_rounded,
+            badge: '임원 공통',
+            gradient: LinearGradient(colors: [Color(0xFF64748B), Color(0xFF475569)]),
+            target: SigningKeyScreen(),
+          ),
         ]
       : const [
           _MenuData(
@@ -482,6 +491,14 @@ class _CouncilHomeScreenState extends State<CouncilHomeScreen> with WidgetsBindi
             badge: '증액만 가능',
             gradient: LinearGradient(colors: [Color(0xFF3B82F6), Color(0xFF6C63FF)]),
             target: BudgetRevisionScreen(),
+          ),
+          _MenuData(
+            title: '서명 키',
+            subtitle: '이 기기의 서명 키 만들기·주소 확인',
+            icon: Icons.vpn_key_rounded,
+            badge: '임원 공통',
+            gradient: LinearGradient(colors: [Color(0xFF64748B), Color(0xFF475569)]),
+            target: SigningKeyScreen(),
           ),
         ];
 
