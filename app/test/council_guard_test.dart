@@ -14,6 +14,7 @@ import 'package:student_council_app/services/auth_service.dart';
 void main() {
   setUp(() {
     AuthService.store = MemoryTokenStore();
+    AuthService.lockStore = MemoryLoginLockStore();
     AuthService().resetAttempts();
   });
 
