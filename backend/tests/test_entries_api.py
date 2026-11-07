@@ -11,7 +11,7 @@ from sqlalchemy.orm import sessionmaker
 from app.auth import users
 from app.auth.security import create_access_token
 from app.chain import ChainUnavailable, FakeChainClient, fake_signature, get_chain_client
-from app.chain.models import BlockReason
+from app.chain.models import BlockReason, RevertReason
 from app.database import Base, get_db
 from app.main import app
 from app.routers import entries as entries_router
@@ -1230,3 +1230,191 @@ def test_create_entry_optional_string_max_lengths(auth_header, field, value):
     }
     res = client.post("/entries", json=body, headers=auth_header(Role.TREASURER))
     assert res.status_code == 422
+
+
+# ---------------------------------------------------------------- registrant, onchain endpoint & fail_reason
+
+
+def test_entry_response_registrant(auth_header):
+    """GET /entries 및 GET /entries/{id}에서 registrant 필드 반환 검증"""
+    # 1. 단건 상세 조회
+    res = client.get("/entries/1")
+    assert res.status_code == 200
+    data = res.json()
+    assert "registrant" in data
+    assert data["registrant"] is not None
+    assert data["registrant"].startswith("0x")
+
+    # 2. 목록 조회
+    res_list = client.get("/entries")
+    assert res_list.status_code == 200
+    entries = res_list.json()
+    assert len(entries) > 0
+    for e in entries:
+        assert "registrant" in e
+        assert e["registrant"] is not None
+
+
+def test_get_entries_and_detail_return_200_when_chain_setup_fails(auth_header):
+    """체인 클라이언트 초기화 실패(ChainSetupError 등) 시에도 GET /entries 및 GET /entries/{id}가 200으로 동작하고 DB 등록자 지갑으로 대체된다."""
+    from app.chain import ChainSetupError
+
+    def broken_chain_client():
+        raise ChainSetupError("체인 노드 미기동 또는 연결 실패")
+
+    app.dependency_overrides[get_chain_client] = broken_chain_client
+
+    # 1. 목록 조회: 200 OK 및 DB registrant 대체
+    res_list = client.get("/entries")
+    assert res_list.status_code == 200
+    entries = res_list.json()
+    assert len(entries) > 0
+    assert entries[0]["registrant"].lower() == TREASURER_WALLET.lower()
+    assert entries[0]["block_number"] is None
+
+    # 2. 단건 상세 조회: 200 OK 및 DB registrant 대체
+    res_detail = client.get("/entries/1")
+    assert res_detail.status_code == 200
+    detail = res_detail.json()
+    assert detail["registrant"].lower() == TREASURER_WALLET.lower()
+    assert detail["block_number"] is None
+
+
+def test_get_entries_slow_node_returns_200_within_timeout(auth_header, monkeypatch):
+    """체인 RPC 응답이 지연되어도 GET /entries가 타임아웃 없이 1.5초 이내에 200 OK와 DB 등록자 지갑으로 반환된다."""
+    import asyncio
+
+    async def slow_get_entry(entry_id):
+        await asyncio.sleep(5.0)
+        return None
+
+    monkeypatch.setattr(_test_chain, "get_entry", slow_get_entry)
+
+    start_t = time.time()
+    res_list = client.get("/entries")
+    elapsed = time.time() - start_t
+
+    assert res_list.status_code == 200
+    assert elapsed < 2.5  # 1.5초 wait_for에 의해 3초 앱 타임아웃 이전에 안전하게 반환
+    entries = res_list.json()
+    assert len(entries) > 0
+    assert entries[0]["registrant"].lower() == TREASURER_WALLET.lower()
+
+
+def test_get_onchain_entry_endpoint(auth_header):
+    """GET /entries/{id}/onchain 엔드포인트 동작 검증"""
+    now = int(time.time())
+    # 신규 항목 생성 및 submit
+    body = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 25000,
+        "counterparty": "체인조회테스트",
+        "purpose": "온체인조회 검증",
+        "budget_id": 1,
+        "occurred_at": 1788793200,
+    }
+    res_create = client.post("/entries", json=body, headers=auth_header(Role.TREASURER))
+    entry_id = res_create.json()["id"]
+
+    res_submit = client.post(
+        f"/entries/{entry_id}/submit",
+        json={"deadline": now + 600, "signature": fake_signature(TREASURER_WALLET)},
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_submit.status_code == 200
+
+    # GET /entries/{entry_id}/onchain 호출
+    res_onchain = client.get(f"/entries/{entry_id}/onchain")
+    assert res_onchain.status_code == 200
+    data = res_onchain.json()
+    assert data["id"] == entry_id
+    assert data["amount"] == 25000
+    assert data["kind"] == "EXPENSE"
+    assert data["status"] == "PENDING"
+    assert data["registrant"].lower() == TREASURER_WALLET.lower()
+    assert data["block_number"] is not None
+
+    # 존재하지 않는 체인 항목은 404
+    res_not_found = client.get("/entries/99999/onchain")
+    assert res_not_found.status_code == 404
+
+
+def test_confirm_entry_fail_reason_on_chain_revert(auth_header):
+    """POST /entries/{id}/confirm 실패(ChainRevert) 시 400과 fail_reason 코드 반환 검증"""
+    now = int(time.time())
+    body = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 30000,
+        "counterparty": "예산초과상점",
+        "purpose": "확정 실패 사유코드 검증",
+        "budget_id": 1,
+        "occurred_at": 1788793200,
+    }
+    res_create = client.post("/entries", json=body, headers=auth_header(Role.TREASURER))
+    entry_id = res_create.json()["id"]
+
+    client.post(
+        f"/entries/{entry_id}/submit",
+        json={"deadline": now + 600, "signature": fake_signature(TREASURER_WALLET)},
+        headers=auth_header(Role.TREASURER),
+    )
+
+    # FakeChainClient에 InsufficientBudget 강제 주입
+    _test_chain.fail_next("confirm_entry", RevertReason.INSUFFICIENT_BUDGET)
+
+    confirm_body = {
+        "deadline": now + 600,
+        "signature": fake_signature(AUDITOR_WALLET),
+        "warning_reason": None,
+    }
+    res_confirm = client.post(
+        f"/entries/{entry_id}/confirm",
+        json=confirm_body,
+        headers=auth_header(Role.AUDITOR),
+    )
+    assert res_confirm.status_code == 400
+    res_json = res_confirm.json()
+    assert res_json["fail_reason"] == "InsufficientBudget"
+    assert "온체인 승인이 거부되었습니다 (InsufficientBudget)." in res_json["detail"]
+
+
+def test_reject_entry_fail_reason_on_chain_revert(auth_header):
+    """POST /entries/{id}/reject 실패(ChainRevert) 시 400과 fail_reason 코드 반환 검증"""
+    now = int(time.time())
+    body = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 12000,
+        "counterparty": "반려테스트점",
+        "purpose": "반려 실패 사유코드 검증",
+        "budget_id": 1,
+        "occurred_at": 1788793200,
+    }
+    res_create = client.post("/entries", json=body, headers=auth_header(Role.TREASURER))
+    entry_id = res_create.json()["id"]
+
+    client.post(
+        f"/entries/{entry_id}/submit",
+        json={"deadline": now + 600, "signature": fake_signature(TREASURER_WALLET)},
+        headers=auth_header(Role.TREASURER),
+    )
+
+    # FakeChainClient에 InvalidStatus 강제 주입
+    _test_chain.fail_next("reject_entry", RevertReason.INVALID_STATUS)
+
+    reject_body = {
+        "deadline": now + 600,
+        "signature": fake_signature(AUDITOR_WALLET),
+        "reject_reason": "증빙 불충분으로 반려합니다.",
+    }
+    res_reject = client.post(
+        f"/entries/{entry_id}/reject",
+        json=reject_body,
+        headers=auth_header(Role.AUDITOR),
+    )
+    assert res_reject.status_code == 400
+    res_json = res_reject.json()
+    assert res_json["fail_reason"] == "InvalidStatus"
+    assert "온체인 반려가 거부되었습니다 (InvalidStatus)." in res_json["detail"]
