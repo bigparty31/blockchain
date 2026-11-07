@@ -14,6 +14,7 @@ from app.schemas.receipt import ReceiptUploadResponse
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/receipts", tags=["Receipts"])
+command_router = router
 
 treasurer_only = require_roles(Role.TREASURER)
 

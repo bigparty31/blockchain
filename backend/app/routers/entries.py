@@ -68,7 +68,11 @@ WARNING_OCR_STATUSES = {
     OCRStatus.UNREADABLE.value,
 }
 
-router = APIRouter(prefix="/entries", tags=["Entries"])
+# PRD v0.15 §9.1 & §10: 2서버 구조(student_api / council_api)를 위한 라우터 분리
+# 학생 서버는 query_router(읽기 전용 DB)만 마운트하고, 학생회 서버는 router(통합) 또는 command_router를 마운트한다.
+query_router = APIRouter(prefix="/entries", tags=["Entries (Queries)"])
+command_router = APIRouter(prefix="/entries", tags=["Entries (Commands)"])
+router = APIRouter()
 
 # 등록·서명 제출은 총무만 가능 (컨트랙트 NotRegistrant)
 treasurer_only = require_roles(Role.TREASURER)
@@ -251,8 +255,8 @@ async def _get_chain_client_safe(request: Request) -> Optional[ChainClient]:
         return None
 
 
-@router.get("", response_model=List[EntryResponse], summary="수입·지출 내역 목록 조회")
-@router.get("/", response_model=List[EntryResponse], include_in_schema=False)
+@query_router.get("", response_model=List[EntryResponse], summary="수입·지출 내역 목록 조회")
+@query_router.get("/", response_model=List[EntryResponse], include_in_schema=False)
 async def get_entries(
     request: Request,
     db: Session = Depends(get_db),
@@ -298,7 +302,7 @@ async def get_entries(
     return results
 
 
-@router.get("/drafts", response_model=List[EntryResponse], summary="본인 작성 미제출 초안 목록 조회 (T5)")
+@command_router.get("/drafts", response_model=List[EntryResponse], summary="본인 작성 미제출 초안 목록 조회 (T5)")
 async def get_my_drafts(
     user: User = Depends(treasurer_only),
     db: Session = Depends(get_db),
@@ -320,7 +324,7 @@ async def get_my_drafts(
     return [_to_schema(e, db=db) for e in drafts]
 
 
-@router.get("/{id}", response_model=EntryResponse, summary="수입·지출 내역 단건 상세 조회")
+@query_router.get("/{id}", response_model=EntryResponse, summary="수입·지출 내역 단건 상세 조회")
 async def get_entry_by_id(
     id: int,
     request: Request,
@@ -365,7 +369,7 @@ async def get_entry_by_id(
     return _to_schema(entry, chain_registrant=chain_registrant, block_number=block_num, db=db)
 
 
-@router.get("/{id}/onchain", response_model=OnChainEntryResponse, summary="온체인 원장 항목 조회")
+@query_router.get("/{id}/onchain", response_model=OnChainEntryResponse, summary="온체인 원장 항목 조회")
 async def get_onchain_entry(
     id: int,
     db: Session = Depends(get_db),
@@ -429,13 +433,13 @@ async def get_onchain_entry(
     )
 
 
-@router.post(
+@command_router.post(
     "",
     response_model=EntryCreateResponse,
     status_code=status.HTTP_201_CREATED,
     summary="수입·지출 초안 등록 (1단계)",
 )
-@router.post(
+@command_router.post(
     "/",
     response_model=EntryCreateResponse,
     status_code=status.HTTP_201_CREATED,
@@ -611,7 +615,7 @@ async def create_entry(
     )
 
 
-@router.post(
+@command_router.post(
     "/{id}/submit",
     response_model=EntrySubmitResponse,
     summary="초안 기기 서명 제출 및 온체인 등록 (2단계)",
@@ -782,7 +786,7 @@ async def submit_entry(
     )
 
 
-@router.post(
+@command_router.post(
     "/{id}/request-revision",
     response_model=EntryResponse,
     summary="수입·지출 내역 수정 요청 (T4)",
@@ -856,7 +860,7 @@ async def request_entry_revision(
     return _to_schema(entry, db=db)
 
 
-@router.post(
+@command_router.post(
     "/{id}/confirm",
     response_model=EntryConfirmResponse,
     summary="수입·지출 내역 승인 (온체인 confirmEntry)",
@@ -1042,7 +1046,7 @@ async def confirm_entry(
     )
 
 
-@router.post(
+@command_router.post(
     "/{id}/reject",
     response_model=EntryRejectResponse,
     summary="수입·지출 내역 반려 (온체인 rejectEntry)",
@@ -1204,3 +1208,10 @@ async def reject_entry(
         status=EntryStatus.REJECTED,
         message="온체인에 성공적으로 반려(REJECTED) 기록되었습니다.",
     )
+
+
+# 기존 main.py 및 통합 사용을 위해 하위 라우터를 router에 포함
+# 주의: /entries/drafts 가 /entries/{id} 보다 먼저 라우팅 매칭되도록 command_router를 먼저 포함한다.
+router.include_router(command_router)
+router.include_router(query_router)
+

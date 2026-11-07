@@ -35,7 +35,17 @@ python -m scripts.seed
 - **기존 시드 DB에서 마이그레이션(`8c6ab430f272`) 적용 시 초기화 필요**: 이미 이전 버전에서 시드(`scripts.seed`)를 실행한 DB는 기존 행사비 `version=2` 더미 행에 `revision_request_id`가 없어 `ck_budget_versions_revision_request_id` 제약 위반으로 `alembic upgrade head`가 실패합니다(시드된 상태에서 `downgrade` 후 재`upgrade` 시에도 `ck_budget_rev_approved_tx` 제약으로 동일하게 실패). 기존 DB를 초기화(SQLite는 `.db` 파일 삭제, PostgreSQL은 컨테이너 볼륨/스키마 초기화)한 뒤 `alembic upgrade head`와 `python -m scripts.seed`를 다시 실행해 주세요.
 
 ### 1.2 서버 실행
+
+PRD v0.15 §9.1 및 §10 아키텍처에 따라 서버는 **학생용(조회 전용)**과 **학생회용(풀 기능)** 2개 인스턴스로 분리 실행할 수 있습니다:
+
 ```powershell
+# 1) 학생용 API (조회 전용, Read-Only DB, 쓰기 엔드포인트 차단)
+uvicorn app.main_student:app --reload --host 0.0.0.0 --port 8001
+
+# 2) 학생회용 API (기기 서명 제출·온체인 릴레이·증액·영수증 업로드 등 풀 기능)
+uvicorn app.main_council:app --reload --host 0.0.0.0 --port 8000
+
+# (참고) 기존 통합 개발용 서버 실행:
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 - `--host 0.0.0.0`: 같은 로컬 네트워크 내 모바일 실기기 및 에뮬레이터에서 접근 가능

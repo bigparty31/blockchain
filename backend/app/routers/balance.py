@@ -13,6 +13,7 @@ from app.schemas.balance import BalanceResponse
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/balance", tags=["Balance"])
+query_router = router
 
 
 @router.get("", response_model=BalanceResponse, summary="장부 잔액 요약 조회")
