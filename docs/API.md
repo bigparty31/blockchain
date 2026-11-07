@@ -360,9 +360,12 @@
 
 ### 1.1 수입·지출 내역 단건 상세 조회 (`GET /entries/{id}`)
 - **설명**: 내역 ID로 특정 수입/지출 내역의 상세 정보를 조회합니다.
-- **등록자 및 블록 번호**:
+- **등록자 및 추가 필드**:
   - `registrant`: 온체인 등록자 지갑 주소(`0x...`)가 실려 내려옵니다 (미기록 또는 체인 단절 시 DB 등록자의 지갑 주소로 대체).
+  - `creator_name`: 등록자 이름(총무 실명, 예: `"김총무"`)이 실려 내려옵니다.
   - `block_number`: 확정/반려 트랜잭션이 안착된 블록 번호가 실려 내려옵니다 (`tx_confirm` 또는 `tx_pending` 기준 receipt 조회, 체인 미안착 시 `null`).
+  - `block_reason`: 예산 초과 등으로 지출이 차단(`BLOCKED`)된 경우 그 사유(`BUDGET_EXCEEDED`, `BUDGET_EXPIRED`, `BUDGET_NOT_FOUND`)가 실려 내려옵니다 (정상 등록 시 `null`).
+  - `duplicate_of`: 영수증 중복 경고(`ocr_status == "DUPLICATE"`) 발생 시, 겹치는 기존 원본 Entry ID가 실려 내려옵니다 (정상 시 `null`).
   - `revision_requested_at`: 총무가 수정 요청을 제출한 일시(Unix 초)가 실려 내려옵니다 (미요청 시 `null`). 승인 화면에서 이 값이 존재하면 확정 버튼을 숨기고 반려만 노출해야 합니다.
 
 **Response (`200 OK`)**
@@ -377,9 +380,13 @@
   "purpose": "신입생 환영회 명찰 및 필기구 구매",
   "occurred_at": 1788793200,
   "status": "CONFIRMED",
+  "block_reason": null,
   "receipt_path": "/receipts/sample_01.jpg",
+  "created_by": 2,
+  "creator_name": "김총무",
   "registrant": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
   "block_number": 102,
+  "duplicate_of": null,
   "revision_requested_at": null
 }
 ```
@@ -401,9 +408,13 @@
     "purpose": "중간고사 간식 박스 테이프 구매",
     "occurred_at": 1788793200,
     "status": null,
+    "block_reason": null,
+    "created_by": 2,
+    "creator_name": "김총무",
     "tx_pending": null,
     "receipt_path": "/receipts/sample_01.jpg",
     "receipt_hash": "0x11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff",
+    "duplicate_of": null,
     "revision_requested_at": null
   }
 ]

@@ -103,10 +103,61 @@ async def _get_chain_registrant(entry_id: int, chain: ChainClient) -> str:
     return chain_entry.registrant
 
 
+def _find_duplicate_of(entry: DBEntry, db: Optional[Session]) -> Optional[int]:
+    """중복 경고(DUPLICATE) 상태인 내역의 원본 기존 Entry ID를 조회합니다."""
+    if db is None:
+        return None
+    ocr_val = entry.ocr_status.value if hasattr(entry.ocr_status, "value") else entry.ocr_status
+    if ocr_val != OCRStatus.DUPLICATE.value:
+        return None
+
+    excluded = ("REJECTED", "BLOCKED")
+    # 1. receipt_hash 가 있으면 동일 해시의 이전 유효 건 검색
+    if entry.receipt_hash:
+        try:
+            orig = (
+                db.query(DBEntry.id)
+                .filter(
+                    DBEntry.id != entry.id,
+                    DBEntry.receipt_hash == entry.receipt_hash,
+                    or_(DBEntry.status.is_(None), ~DBEntry.status.in_(excluded)),
+                )
+                .order_by(DBEntry.id.asc())
+                .first()
+            )
+            if orig:
+                return orig[0]
+        except SQLAlchemyError:
+            pass
+
+    # 2. ocr_approval_no, ocr_paid_at 이 있으면 동일 승인번호/결제시각의 이전 유효 건 검색
+    if entry.ocr_approval_no and entry.ocr_paid_at:
+        try:
+            orig = (
+                db.query(DBEntry.id)
+                .filter(
+                    DBEntry.id != entry.id,
+                    DBEntry.ocr_approval_no == entry.ocr_approval_no,
+                    DBEntry.ocr_paid_at == entry.ocr_paid_at,
+                    or_(DBEntry.status.is_(None), ~DBEntry.status.in_(excluded)),
+                )
+                .order_by(DBEntry.id.asc())
+                .first()
+            )
+            if orig:
+                return orig[0]
+        except SQLAlchemyError:
+            pass
+
+    return None
+
+
 def _to_schema(
     entry: DBEntry,
     chain_registrant: Optional[str] = None,
     block_number: Optional[int] = None,
+    duplicate_of: Optional[int] = None,
+    db: Optional[Session] = None,
 ) -> EntryResponse:
     """DB Entry ORM 모델을 EntryResponse 스키마로 변환"""
     # 선점 때 미리 적은 값이다. 체인에서 끝나기 전에는 내보내지 않는다 (실패하면 비워진다). 앱의 단건 검증은 체인 approver 가
@@ -117,6 +168,30 @@ def _to_schema(
     registrant = chain_registrant
     if not registrant and getattr(entry, "creator", None) and entry.creator.wallet_address:
         registrant = entry.creator.wallet_address
+
+    creator_name = None
+    if getattr(entry, "creator", None) and entry.creator.name:
+        creator_name = entry.creator.name
+    elif db is not None and getattr(entry, "created_by", None):
+        try:
+            u = db.query(DBUser.name).filter(DBUser.id == entry.created_by).first()
+            if u:
+                creator_name = u[0]
+        except SQLAlchemyError:
+            pass
+
+    # block_reason enum 파싱
+    block_reason_enum = None
+    if getattr(entry, "block_reason", None):
+        try:
+            b_val = entry.block_reason.value if hasattr(entry.block_reason, "value") else str(entry.block_reason)
+            block_reason_enum = BlockReason(b_val)
+        except (ValueError, KeyError):
+            pass
+
+    # duplicate_of 계산
+    if duplicate_of is None and db is not None:
+        duplicate_of = _find_duplicate_of(entry, db)
 
     return EntryResponse(
         id=entry.id,
@@ -136,10 +211,13 @@ def _to_schema(
         ocr_approval_no=entry.ocr_approval_no,
         ocr_paid_at=entry.ocr_paid_at,
         ocr_status=OCRStatus(entry.ocr_status) if entry.ocr_status else None,
+        duplicate_of=duplicate_of,
         category_warning=entry.category_warning,
         warning_ack_reason=entry.warning_ack_reason if confirmed else None,
         status=EntryStatus(entry.status) if entry.status else None,
+        block_reason=block_reason_enum,
         created_by=entry.created_by,
+        creator_name=creator_name,
         approved_by=entry.approved_by if confirmed else None,
         rejected_by=entry.rejected_by if rejected else None,
         reject_reason=entry.reject_reason if rejected else None,
@@ -214,7 +292,7 @@ async def get_entries(
             pass
 
     results = [
-        _to_schema(e, chain_registrant=chain_registrants.get(e.id))
+        _to_schema(e, chain_registrant=chain_registrants.get(e.id), db=db)
         for e in db_entries
     ]
     return results
@@ -239,7 +317,7 @@ async def get_my_drafts(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="데이터베이스 처리 중 오류가 발생했습니다.",
         )
-    return [_to_schema(e) for e in drafts]
+    return [_to_schema(e, db=db) for e in drafts]
 
 
 @router.get("/{id}", response_model=EntryResponse, summary="수입·지출 내역 단건 상세 조회")
@@ -284,7 +362,7 @@ async def get_entry_by_id(
     except Exception:
         pass
 
-    return _to_schema(entry, chain_registrant=chain_registrant, block_number=block_num)
+    return _to_schema(entry, chain_registrant=chain_registrant, block_number=block_num, db=db)
 
 
 @router.get("/{id}/onchain", response_model=OnChainEntryResponse, summary="온체인 원장 항목 조회")
@@ -759,7 +837,7 @@ async def request_entry_revision(
 
     # 4. 이미 수정 요청된 경우 200 멱등 반환
     if entry.revision_requested_at is not None:
-        return _to_schema(entry)
+        return _to_schema(entry, db=db)
 
     # 5. revision_requested_at 기록 및 감사·회장 대상 알림 생성
     try:
@@ -775,7 +853,7 @@ async def request_entry_revision(
             detail="데이터베이스 처리 중 오류가 발생했습니다.",
         )
 
-    return _to_schema(entry)
+    return _to_schema(entry, db=db)
 
 
 @router.post(

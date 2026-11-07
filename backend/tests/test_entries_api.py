@@ -1783,4 +1783,71 @@ def test_request_entry_revision_conflict_when_confirm_in_flight(auth_header):
     assert "확정 처리 중인 내역은 수정 요청할 수 없습니다." in res.json()["detail"]
 
 
+# ---------------------------------------------------------------- 응답 필드 보강 (duplicate_of, block_reason, creator_name)
+
+
+def test_entry_response_supplementary_fields(auth_header):
+    """EntryResponse 보강 필드(duplicate_of, block_reason, creator_name) 반환 검증"""
+    # 1. 첫 번째 지출 내역 생성 (원본)
+    body1 = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 20000,
+        "counterparty": "원본상점",
+        "purpose": "물품구매1",
+        "budget_id": 2,
+        "occurred_at": 1788793200,
+        "receipt_hash": TEST_RECEIPT_HASH,
+        "receipt_path": TEST_RECEIPT_PATH,
+    }
+    res1 = client.post("/entries", json=body1, headers=auth_header(Role.TREASURER))
+    assert res1.status_code == 201
+    orig_id = res1.json()["id"]
+
+    # 2. 동일한 영수증으로 두 번째 지출 내역 생성 (중복 발생 -> DUPLICATE)
+    body2 = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 20000,
+        "counterparty": "중복상점",
+        "purpose": "물품구매2",
+        "budget_id": 2,
+        "occurred_at": 1788793200,
+        "receipt_hash": TEST_RECEIPT_HASH,
+        "receipt_path": TEST_RECEIPT_PATH,
+    }
+    res2 = client.post("/entries", json=body2, headers=auth_header(Role.TREASURER))
+    assert res2.status_code == 201
+    dup_id = res2.json()["id"]
+
+    # 3. GET /entries/drafts 로 초안 목록 조회 시 duplicate_of 및 creator_name 검증
+    drafts_res = client.get("/entries/drafts", headers=auth_header(Role.TREASURER))
+    assert drafts_res.status_code == 200
+    drafts = {d["id"]: d for d in drafts_res.json()}
+
+    # 원본 건은 duplicate_of가 None
+    assert drafts[orig_id]["duplicate_of"] is None
+    assert drafts[orig_id]["creator_name"] == "김총무"
+
+    # 중복 건은 duplicate_of 가 원본 건 id(orig_id)를 가리킴
+    assert drafts[dup_id]["ocr_status"] == "DUPLICATE"
+    assert drafts[dup_id]["duplicate_of"] == orig_id
+    assert drafts[dup_id]["creator_name"] == "김총무"
+
+    # 4. 차단(BLOCKED) 건의 block_reason 반환 검증
+    with _test_session_factory() as db:
+        row = db.query(DBEntry).filter(DBEntry.id == orig_id).first()
+        row.status = "BLOCKED"
+        row.block_reason = "BUDGET_EXCEEDED"
+        db.commit()
+
+    detail_res = client.get(f"/entries/{orig_id}")
+    assert detail_res.status_code == 200
+    detail_data = detail_res.json()
+    assert detail_data["status"] == "BLOCKED"
+    assert detail_data["block_reason"] == "BUDGET_EXCEEDED"
+    assert detail_data["creator_name"] == "김총무"
+
+
+
 
