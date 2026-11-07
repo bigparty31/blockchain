@@ -32,6 +32,15 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
   SnapshotModel? _snapshot;
   int _unseen = 0;
 
+  /// 통장 스냅샷만 못 읽었는지.
+  ///
+  /// **카드를 그냥 숨기면 안 된다.** 실서버에서는 `fetchLatestSnapshot` 이
+  /// 실패를 null 로 돌려주는데(예시 잔액을 지어내지 않기 위해), 그 null 로
+  /// 카드를 빼 버리면 **계좌 대조 기능 자체가 없는 화면**이 된다. 장부는
+  /// 멀쩡히 보이니 학생은 빠진 것이 있다는 것도 모른다 — 「못 읽었다」가
+  /// 「그런 기능이 없다」로 읽히는 것은 [_loadFailed] 와 같은 종류의 사고다.
+  bool _snapshotUnavailable = false;
+
   /// 마지막 조회가 중간에 깨졌는지 (스토리보드 2 ⑥ 「조회 실패」).
   ///
   /// **빈 화면으로 두면 안 된다.** 조회가 깨지면 `_entries` 와 `_budgets` 가 빈
@@ -68,6 +77,8 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
         _entries = entries;
         _budgets = budgets;
         _snapshot = snapshot;
+        // 실서버에서 못 읽으면 null 이다 (데모 모드에서는 예시 스냅샷이 온다).
+        _snapshotUnavailable = snapshot == null;
         _unseen = EntryMerge.unseenCount(entries, lastSeen);
         _loadFailed = false;
       });
@@ -79,6 +90,8 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
           _entries = [];
           _budgets = [];
           _snapshot = null;
+          // 화면 전체가 「불러올 수 없습니다」로 바뀌므로 스냅샷만 따로 말하지 않는다.
+          _snapshotUnavailable = false;
           _unseen = 0;
           _loadFailed = true;
         });
@@ -144,6 +157,11 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
                         snapshot: _snapshot!,
                         ledgerBalance: _ledgerBalance,
                       ),
+                      const SizedBox(height: 20),
+                    ]
+                    // 못 읽었으면 **빠뜨리지 않고 그렇다고 말한다** (스토리보드 2 ⑥).
+                    else if (_snapshotUnavailable) ...[
+                      const _BankDiffUnavailable(),
                       const SizedBox(height: 20),
                     ],
                     _buildQuickActions(),
@@ -684,6 +702,61 @@ class _EmptyBudgets extends StatelessWidget {
               fontSize: 11,
               color: AppTheme.textSub.withOpacity(0.95),
               height: 1.4,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 통장 스냅샷을 못 읽었을 때 그 자리 (S11)
+///
+/// **예시 잔액으로 메우지 않고, 숨기지도 않는다.** 숨기면 계좌 대조라는 기능이
+/// 없는 화면이 되어, 미등록 지출을 드러내는 장치가 꺼져 있는 것을 아무도 모른다.
+/// 「일치한다」고 말하지 않는 것이 이 카드의 요점이다 — 지금은 **대조를 못 한
+/// 상태**이고, 그것은 일치와 다르다.
+class _BankDiffUnavailable extends StatelessWidget {
+  const _BankDiffUnavailable();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: AppTheme.textSub.withOpacity(0.06),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: AppTheme.textSub.withOpacity(0.2)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.cloud_off_rounded, size: 18, color: AppTheme.textSub.withOpacity(0.8)),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  '계좌 대조를 불러오지 못했습니다',
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                    color: AppTheme.textMain,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  '장부와 계좌가 맞는지 지금은 확인할 수 없습니다. '
+                  '일치한다는 뜻이 아닙니다.',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: AppTheme.textSub.withOpacity(0.95),
+                    height: 1.4,
+                  ),
+                ),
+              ],
             ),
           ),
         ],
