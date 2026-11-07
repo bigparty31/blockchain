@@ -43,20 +43,75 @@ class ApiConfig {
   /// 서버가 실제로 나뉘면 `--dart-define` 으로 주소만 바꾸면 되고 앱 코드는 그대로다.
   static const _defaultPort = 8000;
 
-  static String get studentBaseUrl =>
-      _studentOverride.isNotEmpty ? _studentOverride : 'http://$_host:$_defaultPort';
+  /// 테스트에서 두 주소를 **다르게** 주기 위한 자리.
+  ///
+  /// [_studentOverride]·[_councilOverride] 는 `String.fromEnvironment` 라
+  /// **컴파일 타임 상수**이고, 기본값은 둘 다 같은 주소다. 그래서 주소 분기를
+  /// 통째로 지워도 `baseUrl == studentBaseUrl == councilBaseUrl` 이 되어
+  /// 테스트가 그대로 통과했다 — 분기가 맞는지 물을 수 없는 테스트였다.
+  /// 여기를 런타임에 갈아끼울 수 있게 두면 **두 주소가 다른 상황**을 만들 수 있고,
+  /// 그때야 「역할에 맞는 서버로 갔는지」가 실패할 수 있는 질문이 된다.
+  ///
+  /// 실행 코드는 이 값을 쓰지 않는다. 테스트가 [resetOverrides] 로 되돌린다.
+  static String? studentBaseUrlOverride;
+  static String? councilBaseUrlOverride;
 
-  static String get councilBaseUrl =>
-      _councilOverride.isNotEmpty ? _councilOverride : 'http://$_host:$_defaultPort';
+  static String get studentBaseUrl => studentBaseUrlOverride ?? _compiled(_studentOverride);
 
-  /// 지금 쓸 주소. 역할을 모르면(로그인 전) **학생 서버**다.
+  static String get councilBaseUrl => councilBaseUrlOverride ?? _compiled(_councilOverride);
+
+  static String _compiled(String value) =>
+      value.isNotEmpty ? value : 'http://$_host:$_defaultPort';
+
+  /// 테스트 격리 — `tearDown` 에서 부른다.
+  static void resetOverrides() {
+    studentBaseUrlOverride = null;
+    councilBaseUrlOverride = null;
+  }
+
+  /// **이 역할이 쓸 주소.** 역할을 모르면(로그인 전) 학생 서버다.
   ///
   /// 로그인은 양쪽 서버에 다 있다 (PRD §9.1). 로그인 전에는 역할을 알 수 없으니
   /// 바깥에 가장 넓게 열려 있는 학생 서버로 보내고, 응답의 role 을 본 뒤부터
-  /// 주소를 가른다. 임원이 학생 서버로 로그인해도 토큰은 정상 발급되고,
-  /// 그 다음 요청부터 [activeRole] 이 학생회 서버를 가리킨다.
-  static String get baseUrl =>
-      activeRole == null || activeRole == UserRole.STUDENT ? studentBaseUrl : councilBaseUrl;
+  /// 주소를 가른다.
+  ///
+  /// [baseUrl] 과 따로 있는 이유: 로그인 **도중**에는 [activeRole] 이 아직 비어
+  /// 있는데 이미 역할을 알고 있는 순간이 있다 (`POST /auth/login` 응답을 받은
+  /// 직후). 그때 `GET /auth/me` 를 [baseUrl] 로 보내면 학생 서버로 가고,
+  /// 학생 서버가 임원 토큰을 받지 않으므로 **임원은 로그인 자체가 막힌다.**
+  /// 역할을 아는 쪽이 주소를 직접 고를 수 있어야 한다
+  /// (`AuthService.login`·`AuthService.restore`).
+  static String baseUrlFor(UserRole? role) =>
+      role == null || role == UserRole.STUDENT ? studentBaseUrl : councilBaseUrl;
+
+  /// 지금 쓸 주소 — 로그인이 끝난 뒤의 모든 요청이 쓴다.
+  static String get baseUrl => baseUrlFor(activeRole);
+
+  /// 이 URL 이 **우리 서버**인가.
+  ///
+  /// 두 가지 판단의 기준이다:
+  ///   1. `Authorization` 헤더를 붙일지 — 외부 주소(S3·CDN)에 우리 JWT 를
+  ///      보내면 그 서버가 학생 토큰을 받아 간다. 영수증 `receipt_path` 는
+  ///      절대 URL 일 수 있고 백엔드에 출처 제한이 없다.
+  ///   2. `401` 을 세션 만료로 볼지 — 남의 서버가 준 401 로 우리 세션을
+  ///      로그아웃시키면 멀쩡한 로그인이 끊긴다. presigned URL 은 `Authorization`
+  ///      헤더가 붙었다는 이유만으로 거부하기도 한다.
+  ///
+  /// scheme·host·port 가 모두 같아야 한다. [Uri.port] 는 scheme 기본값으로
+  /// 채워지므로 `http://h` 와 `http://h:80` 은 같다고 본다.
+  static bool isOwnOrigin(String url) {
+    final target = Uri.tryParse(url);
+    if (target == null || !target.hasAuthority) return false;
+
+    for (final base in <String>{studentBaseUrl, councilBaseUrl}) {
+      final b = Uri.tryParse(base);
+      if (b == null || !b.hasAuthority) continue;
+      if (target.scheme == b.scheme && target.host == b.host && target.port == b.port) {
+        return true;
+      }
+    }
+    return false;
+  }
 
   // Endpoints — 조회는 양쪽 서버에 다 있다.
   static String get entries => '$baseUrl/entries';
