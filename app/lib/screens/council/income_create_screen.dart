@@ -22,6 +22,9 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
   DateTime _selectedDate = DateTime.now();
   String _incomeType = '학생회비 수납';
 
+  /// 영수증(입금 확인서 등) 첨부 여부. 수입은 영수증이 선택이다 (지출은 필수). 목업이라 파일은 고르지 않는다.
+  bool _hasReceipt = false;
+
   final List<Map<String, dynamic>> _incomeTypeInfos = [
     {'label': '학생회비 수납', 'icon': Icons.people_rounded, 'color': const Color(0xFF06B6D4)},
     {'label': '단과대/학교 지원금', 'icon': Icons.account_balance_rounded, 'color': const Color(0xFF3B82F6)},
@@ -75,6 +78,7 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
         ('출처', _sourceController.text),
         ('금액', '${_amountController.text}원'),
         ('일자', date),
+        ('영수증', _hasReceipt ? '첨부' : '없음'),
       ],
       // 수입은 예산 검사 대상이 아니라 BLOCKED 가 없다. 감사 승인 전까지 PENDING.
       result: const RegistrationResult.pending(),
@@ -256,6 +260,37 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
               ),
               const SizedBox(height: 14),
 
+              // 영수증 첨부 (선택)
+              GestureDetector(
+                onTap: () => setState(() => _hasReceipt = !_hasReceipt),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                  decoration: BoxDecoration(
+                    color: _hasReceipt ? AppTheme.income.withOpacity(0.08) : const Color(0xFFFAF9FF),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: _hasReceipt ? AppTheme.income : AppTheme.divider, width: 1.5),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(_hasReceipt ? Icons.check_circle_rounded : Icons.attach_file_rounded,
+                        color: _hasReceipt ? AppTheme.income : AppTheme.textSub, size: 20),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Text(
+                          _hasReceipt ? '영수증 첨부 완료 (탭하여 해제)' : '영수증 첨부 (선택)',
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: _hasReceipt ? FontWeight.bold : FontWeight.normal,
+                            color: _hasReceipt ? AppTheme.income : AppTheme.textSub,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 14),
+
               TextFormField(
                 controller: _memoController,
                 maxLines: 3,
@@ -269,7 +304,7 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
 
               GradientButton(
                 onPressed: _submitIncome,
-                label: '수입 내역 등록하기',
+                label: '제출하기',
                 icon: Icons.add_circle_rounded,
                 gradient: AppTheme.incomeGradient,
               ),

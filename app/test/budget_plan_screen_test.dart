@@ -6,6 +6,8 @@ import 'package:student_council_app/router.dart';
 import 'package:student_council_app/screens/president/budget_plan_screen.dart';
 import 'package:student_council_app/services/budget_issuer.dart';
 
+import 'support/session.dart';
+
 /// 예산 편성 화면(스토리보드 15)이 상태별로 제대로 그려지고 동작하는지 본다.
 ///
 /// 규칙 자체(KST 환산·중복·한도)는 `budget_plan_test.dart` 가 본다. 여기서는
@@ -329,10 +331,24 @@ void main() {
       return (route! as MaterialPageRoute<dynamic>).builder(context);
     }
 
+    tearDown(signOutForTest);
+
     testWidgets('UserRole 인자로 예산 편성 화면을 만든다', (tester) async {
+      await signInAs(UserRole.PRESIDENT);
       final widget = await built(tester, UserRole.PRESIDENT);
       expect(widget, isA<BudgetPlanScreen>());
       expect((widget! as BudgetPlanScreen).role, UserRole.PRESIDENT);
+    });
+
+    testWidgets('권한은 로그인한 역할로 정한다 — 인자로 회장을 주장해도 열리지 않는다', (tester) async {
+      await signInAs(UserRole.AUDITOR);
+      expect(await built(tester, UserRole.PRESIDENT), isNot(isA<BudgetPlanScreen>()));
+
+      await signInAs(UserRole.STUDENT);
+      expect(await built(tester, UserRole.STUDENT), isNot(isA<BudgetPlanScreen>()));
+
+      await signOutForTest();
+      expect(await built(tester, UserRole.PRESIDENT), isNot(isA<BudgetPlanScreen>()));
     });
 
     testWidgets('인자가 없거나 틀리면 오류 화면을 띄운다 — 조용히 기본값으로 대체하지 않는다', (tester) async {

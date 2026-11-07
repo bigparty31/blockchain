@@ -11,6 +11,9 @@ import 'package:student_council_app/services/api_service.dart';
 /// 사유 필수·KST 자정·BLOCKED 표시는 어기면 서버가 400 으로 거부하거나
 /// 서명 뒤 `HASH_MISMATCH` 로 되돌아오는 규칙이다 (docs/HASHING.md).
 void main() {
+  // 목업 화면 테스트 — 서버 없이 시연용 더미로 돈다. 실패 표시는 api_unavailable_test.dart 가 본다 (PRD v0.14 §7.3).
+  setUp(() => ApiService.useDemoData = true);
+
   group('InputRules — 한 줄 텍스트 (§1.1)', () {
     test('정상 입력은 통과한다', () {
       expect(InputRules.singleLine('한결문구', fieldName: '사용처'), isNull);
@@ -113,7 +116,7 @@ void main() {
       tester.view.physicalSize = const Size(411, 1200);
       tester.view.devicePixelRatio = 1.0;
       addTearDown(tester.view.reset);
-      await tester.pumpWidget(const MaterialApp(home: ApprovalListScreen()));
+      await tester.pumpWidget(MaterialApp(home: ApprovalListScreen(role: UserRole.AUDITOR, currentUserId: 5)));
       await tester.pumpAndSettle();
     }
 
@@ -147,7 +150,7 @@ void main() {
     testWidgets('OCR 경고가 있는 항목은 사유 없이 승인할 수 없다', (tester) async {
       await pumpScreen(tester);
 
-      expect(find.textContaining('경고 무시 사유가 필요해요'), findsNWidgets(2)); // OCR 1건 + 카테고리 1건
+      expect(find.textContaining('경고 무시 사유가 필요해요'), findsNWidgets(3)); // OCR 불일치 1건 + 카테고리 1건 + 영수증 중복 1건
 
       // 경고 항목은 목록의 세 번째 카드 (id 6)
       await tester.tap(find.text('승인 서명').at(2));
