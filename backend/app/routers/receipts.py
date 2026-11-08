@@ -114,19 +114,29 @@ async def upload_receipt(
             detail=f"지원하지 않는 파일 형식입니다: '{ext}'. (jpg, jpeg, png, webp, pdf만 허용)",
         )
 
-    content = await file.read()
-    if len(content) == 0:
+    # 2. 파일 청크 읽기 및 크기 제한 (최대 10MB, 초과 즉시 중단)
+    chunks = []
+    total_size = 0
+    chunk_size = 64 * 1024  # 64KB
+    while True:
+        chunk = await file.read(chunk_size)
+        if not chunk:
+            break
+        total_size += len(chunk)
+        if total_size > MAX_FILE_SIZE:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"파일 크기가 너무 큽니다. 최대 10MB까지 업로드 가능합니다.",
+            )
+        chunks.append(chunk)
+
+    if total_size == 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="빈 파일은 업로드할 수 없습니다.",
         )
 
-    # 2. 파일 크기 제한 (최대 10MB)
-    if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"파일 크기가 너무 큽니다 ({len(content)} bytes). 최대 10MB까지 업로드 가능합니다.",
-        )
+    content = b"".join(chunks)
 
     # 3. 원본 바이트 보존 SHA-256 해시 계산 (소문자 hex 66자: 0x + 64자)
     raw_hash = hashlib.sha256(content).hexdigest().lower()

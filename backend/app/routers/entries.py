@@ -673,8 +673,11 @@ async def create_entry(
             detail="occurred_at은 사용일의 KST 자정(00:00:00 KST) Unix timestamp 초 단위여야 합니다.",
         )
 
-    # 3.1 영수증 필수 및 해시·파일 검증 (PRD v0.15 §4.3, B2, B3)
-    # 신규 일반 지출(정정 건이 아닌 경우)만 receipt_hash 필수 (정정·환불 건은 docs/HASHING.md 샘플 3처럼 영수증 없을 수 있음)
+    # 3.0 정정 규칙 및 금액 부호 서버 검사 (PRD v0.15 §4.4, docs/CONTRACTS.md '정정', B7)
+    _validate_correction_rules(db, entry)
+
+    # 3.1 영수증 필수 및 해시·파일 검증 (PRD v0.15 §4.3, §13, B2, B3)
+    # 일반 지출 및 양수(증액·재분류) 정정 지출은 receipt_hash 필수 (음수 감액 정정 건만 docs/HASHING.md 샘플 3처럼 영수증 생략 허용)
     server_receipt_path = None
     if entry.receipt_hash:
         # B3: 소문자 hex 66자 검증 (대문자, 0x 누락, 길이 불일치 차단)
@@ -692,7 +695,7 @@ async def create_entry(
                 detail="업로드되지 않았거나 서버에 존재하지 않는 영수증입니다.",
             )
 
-    if entry.kind == EntryKind.EXPENSE and entry.corrects_entry_id is None:
+    if entry.kind == EntryKind.EXPENSE and (entry.corrects_entry_id is None or entry.amount > 0):
         if not entry.receipt_hash or not entry.receipt_hash.strip():
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -710,9 +713,6 @@ async def create_entry(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="수입 내역에는 예산을 연결할 수 없습니다.",
         )
-
-    # 4.1 정정 규칙 서버 검사 (PRD v0.15 §4.4, docs/CONTRACTS.md '정정', B7)
-    _validate_correction_rules(db, entry)
 
     # 5. 영수증 중복 검사 (PRD §6, §8, B4: 409 차단 대신 DUPLICATE 경고로 등록 허용)
     # 중복 비교 대상: PENDING·CONFIRMED만 대조 (초안 status NULL, REJECTED, BLOCKED 제외)
