@@ -29,6 +29,9 @@ from app.routers.budget_revisions import command_router as budget_revisions_comm
 from app.routers.receipts import command_router as receipts_command_router
 from app.routers.users import command_router as users_command_router
 from app.routers.ocr import command_router as ocr_command_router
+from app.routers.settlement import router as settlement_command_router
+from app.routers.events import router as events_command_router
+from app.routers.bank import router as bank_command_router
 
 
 # 학생용 조회 전용 라우터 목록 (student_api)
@@ -51,6 +54,9 @@ COUNCIL_COMMAND_ROUTERS: List[APIRouter] = [
     receipts_command_router,
     users_command_router,
     ocr_command_router,
+    settlement_command_router,
+    events_command_router,
+    bank_command_router,
 ]
 
 # 학생회용 전체 라우터 (조회 + 쓰기)
@@ -69,4 +75,7 @@ COUNCIL_ALL_ROUTERS: List[APIRouter] = [
     receipts_command_router,
     users_command_router,
     ocr_command_router,
+    settlement_command_router,
+    events_command_router,
+    bank_command_router,
 ]
