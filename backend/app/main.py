@@ -17,6 +17,7 @@ from app.routers.events import router as events_router
 from app.routers.budget_revisions import router as budget_revisions_router
 from app.routers.memberships import router as memberships_router
 from app.routers.ocr import router as ocr_router
+from app.routers.bank import router as bank_router
 
 
 @asynccontextmanager
@@ -79,6 +80,7 @@ app.include_router(events_router)
 app.include_router(budget_revisions_router)
 app.include_router(memberships_router)
 app.include_router(ocr_router)
+app.include_router(bank_router)
 
 
 @app.get("/", tags=["Health"])
