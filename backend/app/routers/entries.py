@@ -149,8 +149,9 @@ def _calculate_net_amount(db: Session, target: DBEntry) -> int:
 def _validate_reclassify_negative_order(
     db: Session, target: DBEntry, negative_amount: int, exclude_entry_id: Optional[int] = None
 ) -> None:
-    """항목 재분류(RECLASSIFY) 순서 강제: 새 예산에 대한 양수 정정이 먼저 확정(CONFIRMED)되어 있어야
-    원래 예산에 대한 음수(감액) 재분류 정정을 등록·확정할 수 있습니다 (PRD v0.15 §4.4, B7).
+    """항목 재분류(RECLASSIFY) 확정 순서 강제: 새 예산에 대한 양수 정정이 먼저 확정(CONFIRMED)되어 있어야
+    원래 예산에 대한 음수(감액) 재분류 정정을 확정할 수 있습니다 (PRD v0.15 §4.4, B7).
+    앱에서 양수·음수 2건을 연속으로 초안 등록할 수 있도록 등록 단계가 아닌 확정(confirm) 단계에서만 검사합니다.
     """
     pos_rows = (
         db.query(DBEntry)
@@ -284,8 +285,6 @@ def _validate_correction_rules(db: Session, entry: EntryCreate) -> None:
                 detail="감액(음수) 정정의 예산(budget_id)은 정정 대상의 예산과 같아야 합니다. (CorrectionBudgetMismatch)",
             )
         try:
-            if entry.correction_reason == CorrectionReason.RECLASSIFY:
-                _validate_reclassify_negative_order(db, target, entry.amount)
             net_amount = _calculate_net_amount(db, target)
         except SQLAlchemyError as e:
             logger.exception("정정 순금액 계산 중 데이터베이스 오류: %s", e)

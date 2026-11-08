@@ -2415,27 +2415,10 @@ def test_correction_negative_budget_mismatch_and_exceeds_original(auth_header):
 
 
 def test_reclassify_order_positive_first_enforced(auth_header):
-    """항목 재분류(RECLASSIFY): 새 예산 양수 정정이 먼저 CONFIRMED되어야 원래 예산 음수 정정이 허용됨 (PRD v0.15 §4.4)"""
-    # 1. 양수 재분류 없이 먼저 음수 RECLASSIFY 등록 시도 -> 400 차단!
-    res_neg_first = client.post(
-        "/entries",
-        json={
-            "term_id": 1,
-            "kind": "EXPENSE",
-            "amount": -35000,
-            "counterparty": "한결문구",
-            "purpose": "재분류 감액 먼저 시도",
-            "budget_id": 2,
-            "occurred_at": 1788793200,
-            "corrects_entry_id": 1,
-            "correction_reason": "RECLASSIFY",
-        },
-        headers=auth_header(Role.TREASURER),
-    )
-    assert res_neg_first.status_code == 400
-    assert "양수(증액) 정정이 먼저 확정(CONFIRMED)" in res_neg_first.json()["detail"]
+    """항목 재분류(RECLASSIFY): 앱의 2건 연속 등록(양수·음수)은 201로 허용하되, 확정(confirm) 단계에서 양수 선확정 순서를 강제함 (PRD v0.15 §4.4)"""
+    now = int(time.time())
 
-    # 2. 양수 재분류인데 원본과 같은 예산(budget_id=2) 지정 시 -> 400 차단!
+    # 1. 양수 재분류인데 원본과 같은 예산(budget_id=2) 지정 시 -> 등록 단계에서 400 차단!
     res_same_budget = client.post(
         "/entries",
         json={
@@ -2448,13 +2431,14 @@ def test_reclassify_order_positive_first_enforced(auth_header):
             "occurred_at": 1788793200,
             "corrects_entry_id": 1,
             "correction_reason": "RECLASSIFY",
+            "receipt_hash": TEST_RECEIPT_HASH,
         },
         headers=auth_header(Role.TREASURER),
     )
     assert res_same_budget.status_code == 400
     assert "다른 새 예산" in res_same_budget.json()["detail"]
 
-    # 3. 새 예산(budget_id=1)으로 양수 RECLASSIFY 등록 (201)
+    # 2. 앱에서 새 예산(budget_id=1) 양수 RECLASSIFY 와 원래 예산(budget_id=2) 음수 RECLASSIFY 2건을 연속으로 등록 -> 둘 다 201 성공!
     res_pos = client.post(
         "/entries",
         json={
@@ -2474,31 +2458,7 @@ def test_reclassify_order_positive_first_enforced(auth_header):
     assert res_pos.status_code == 201
     pos_reclass_id = res_pos.json()["id"]
 
-    # 아직 양수 정정이 CONFIRMED 되기 전(초안 상태)에 음수 RECLASSIFY 시도 -> 여전히 400 차단!
-    res_neg_before_confirm = client.post(
-        "/entries",
-        json={
-            "term_id": 1,
-            "kind": "EXPENSE",
-            "amount": -35000,
-            "counterparty": "한결문구",
-            "purpose": "양수 미확정 상태에서 음수 시도",
-            "budget_id": 2,
-            "occurred_at": 1788793200,
-            "corrects_entry_id": 1,
-            "correction_reason": "RECLASSIFY",
-        },
-        headers=auth_header(Role.TREASURER),
-    )
-    assert res_neg_before_confirm.status_code == 400
-
-    # 4. 양수 RECLASSIFY가 CONFIRMED 확정된 후 -> 원래 예산(budget_id=2) 음수 RECLASSIFY 등록 201 성공!
-    with _test_session_factory() as db:
-        row = db.query(DBEntry).filter(DBEntry.id == pos_reclass_id).first()
-        row.status = "CONFIRMED"
-        db.commit()
-
-    res_neg_ok = client.post(
+    res_neg = client.post(
         "/entries",
         json={
             "term_id": 1,
@@ -2513,9 +2473,36 @@ def test_reclassify_order_positive_first_enforced(auth_header):
         },
         headers=auth_header(Role.TREASURER),
     )
-    assert res_neg_ok.status_code == 201
+    assert res_neg.status_code == 201
+    neg_reclass_id = res_neg.json()["id"]
 
-    # 5. 재분류 양수 정정(pos_reclass_id, budget_id=1) 자체를 대상으로 감액 정정 가능 검증 (docs/CONTRACTS.md '정정')
+    # 3. 2건 모두 PENDING 상태로 전환
+    with _test_session_factory() as db:
+        for eid in (pos_reclass_id, neg_reclass_id):
+            row = db.query(DBEntry).filter(DBEntry.id == eid).first()
+            row.status = "PENDING"
+        db.commit()
+
+    # 4. 양수 정정이 아직 CONFIRMED 되기 전(PENDING 상태)에 음수 RECLASSIFY 를 먼저 확정 시도 -> 400 차단!
+    res_confirm_neg_early = client.post(
+        f"/entries/{neg_reclass_id}/confirm",
+        json={"deadline": now + 600, "signature": fake_signature(AUDITOR_WALLET), "warning_reason": None},
+        headers=auth_header(Role.AUDITOR),
+    )
+    assert res_confirm_neg_early.status_code == 400
+    assert "양수(증액) 정정이 먼저 확정(CONFIRMED)" in res_confirm_neg_early.json()["detail"]
+
+    # 5. 양수 RECLASSIFY 가 CONFIRMED 된 후에는 음수 RECLASSIFY 의 순서 검사가 통과함!
+    with _test_session_factory() as db:
+        pos_row = db.query(DBEntry).filter(DBEntry.id == pos_reclass_id).first()
+        pos_row.status = "CONFIRMED"
+        db.commit()
+        neg_row = db.query(DBEntry).filter(DBEntry.id == neg_reclass_id).first()
+        orig_row = db.query(DBEntry).filter(DBEntry.id == 1).first()
+        # _validate_reclassify_negative_order 통과 확인
+        entries_router._validate_reclassify_negative_order(db, orig_row, neg_row.amount, exclude_entry_id=neg_row.id)
+
+    # 6. 재분류 양수 정정(pos_reclass_id, budget_id=1) 자체를 대상으로 감액 정정 가능 검증 (docs/CONTRACTS.md '정정')
     res_revert_reclass = client.post(
         "/entries",
         json={
