@@ -2193,6 +2193,7 @@ def test_correction_invalid_target_rejected(auth_header):
             "occurred_at": 1788793200,
             "corrects_entry_id": 1,
             "correction_reason": "INPUT_ERROR",
+            "receipt_hash": TEST_RECEIPT_HASH,
         },
         headers=auth_header(Role.TREASURER),
     )
@@ -2384,6 +2385,7 @@ def test_correction_negative_budget_mismatch_and_exceeds_original(auth_header):
             "occurred_at": 1788793200,
             "corrects_entry_id": 1,
             "correction_reason": "INPUT_ERROR",
+            "receipt_hash": TEST_RECEIPT_HASH,
         },
         headers=auth_header(Role.TREASURER),
     )
@@ -2465,6 +2467,7 @@ def test_reclassify_order_positive_first_enforced(auth_header):
             "occurred_at": 1788793200,
             "corrects_entry_id": 1,
             "correction_reason": "RECLASSIFY",
+            "receipt_hash": TEST_RECEIPT_HASH,
         },
         headers=auth_header(Role.TREASURER),
     )
