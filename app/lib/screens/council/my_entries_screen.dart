@@ -84,16 +84,23 @@ class MyEntryItem {
       date: Fmt.date(e.occurredAt),
       state: state,
       isIncome: income,
-      // 차단 사유는 목록 응답에 없다 (체인 이벤트에만 있다). 무엇을 하면 되는지를 적는다
+      // 차단 사유는 서버가 `block_reason` 으로 준다. 못 받았으면(옛 서버) 일반 안내로 둔다
       note: switch (state) {
         MyEntryState.rejected => e.rejectReason,
-        MyEntryState.blocked => '예산 검사에서 차단됐어요 (잔량 부족·마감). 증액이 승인되면 다시 등록할 수 있어요.',
+        MyEntryState.blocked => _blockedNote(e.blockReason),
         _ => null,
       },
       entry: e,
     );
   }
 }
+
+/// 차단 건 안내. 사유를 알면 사유를 적고, 증액이 해법인 잔량 부족에만 증액을 권한다.
+String _blockedNote(BlockReason? reason) => switch (reason) {
+      BlockReason.BUDGET_EXCEEDED => '${reason!.label} — 증액이 승인되면 다시 등록할 수 있어요.',
+      BlockReason.BUDGET_EXPIRED || BlockReason.BUDGET_NOT_FOUND => '${reason!.label} — 예산을 확인해 주세요.',
+      null => '예산 검사에서 차단됐어요 (잔량 부족·마감). 증액이 승인되면 다시 등록할 수 있어요.',
+    };
 
 /// **목업** 내 등록 건 — 테스트·화면 캡처용 ([MyEntriesScreen.items]). 서버 목록은 `GET /entries` 에서 내가 등록한 건이다.
 List<MyEntryItem> buildMyEntryMockItems() => const [
