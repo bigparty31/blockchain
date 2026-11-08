@@ -424,3 +424,50 @@ class Objection(Base):
         Index("idx_objections_entry_id", "entry_id"),
         Index("idx_objections_status", "status"),
     )
+
+
+# =============================================================================
+# 10. 행사 (events) — PRD v0.15 §4.2, §8
+# =============================================================================
+class Event(Base):
+    __tablename__ = "events"
+
+    id = Column(ID_TYPE, primary_key=True, autoincrement=True, doc="고유 ID")
+    term_id = Column(BigInteger, ForeignKey("terms.id", ondelete="RESTRICT"), nullable=False, doc="학기 ID (이 학기 회원권으로 입장 판정)")
+    name = Column(String(100), nullable=False, doc="행사명")
+    held_at = Column(DateTime(timezone=True), nullable=False, doc="행사 일시")
+    created_by = Column(BigInteger, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, doc="등록한 임원 ID")
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), doc="등록 일시")
+
+    # 관계 정의 — 기존 User·Term 클래스는 건드리지 않으려고 back_populates 없이 단방향으로 둔다
+    term = relationship("Term")
+    creator = relationship("User", foreign_keys=[created_by])
+    check_ins = relationship("CheckIn", back_populates="event")
+
+    __table_args__ = (
+        Index("idx_events_term_id", "term_id"),
+    )
+
+
+# =============================================================================
+# 11. 입장 기록 (check_ins) — 한 행사에 한 학생은 한 번만 입장 (PRD v0.15 §4.2)
+# =============================================================================
+class CheckIn(Base):
+    __tablename__ = "check_ins"
+
+    id = Column(ID_TYPE, primary_key=True, autoincrement=True, doc="고유 ID")
+    event_id = Column(BigInteger, ForeignKey("events.id", ondelete="RESTRICT"), nullable=False, doc="행사 ID")
+    user_id = Column(BigInteger, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, doc="입장한 학생 ID")
+    scanned_by = Column(BigInteger, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, doc="스캔한 임원 ID")
+    scanned_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), doc="입장 일시")
+
+    # 관계 정의
+    event = relationship("Event", back_populates="check_ins")
+    user = relationship("User", foreign_keys=[user_id])
+    scanner = relationship("User", foreign_keys=[scanned_by])
+
+    __table_args__ = (
+        # 중복 입장 차단의 최종 방어선. 동시에 두 번 스캔돼도 DB 가 하나만 받는다
+        UniqueConstraint("event_id", "user_id", name="uq_check_ins_event_user"),
+        Index("idx_check_ins_user_id", "user_id"),
+    )

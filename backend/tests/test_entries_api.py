@@ -1636,7 +1636,8 @@ def test_duplicate_receipt_ignores_rejected_and_blocked(auth_header):
 
 
 def test_correction_expense_optional_receipt_hash(auth_header):
-    """지출 정정(corrects_entry_id 있음)의 경우 영수증(receipt_hash) 없이도 201 성공 (docs/HASHING.md 샘플 3)"""
+    """음수 감액 정정 지출(corrects_entry_id 있음, amount < 0)은 영수증(receipt_hash) 없이 201 성공하되,
+    양수 증액·재분류 정정 지출(amount > 0)은 영수증이 없으면 400 Bad Request로 차단 (docs/HASHING.md 샘플 3, PRD §13)"""
     body = {
         "term_id": 1,
         "kind": "EXPENSE",
@@ -1653,6 +1654,18 @@ def test_correction_expense_optional_receipt_hash(auth_header):
     res = client.post("/entries", json=body, headers=auth_header(Role.TREASURER))
     assert res.status_code == 201
     assert "id" in res.json()
+
+    # 양수 정정 지출에 영수증 누락 시 400 차단
+    pos_body = {
+        **body,
+        "amount": 10000,
+        "purpose": "양수 정정 영수증 누락",
+        "correction_reason": "RECLASSIFY",
+        "budget_id": 1,
+    }
+    res_pos = client.post("/entries", json=pos_body, headers=auth_header(Role.TREASURER))
+    assert res_pos.status_code == 400
+    assert "영수증(receipt_hash)은 필수" in res_pos.json()["detail"]
 
 
 # ---------------------------------------------------------------- T4 수정 요청 & T5 초안 목록 테스트
