@@ -313,12 +313,14 @@ def test_postgres_sequence_sync_advances_only_and_never_rewinds():
     # - budgets: MAX(id)=3, 이미 시퀀스가 (last_value=3, is_called=True) -> 이미 다음 값 4이므로 건드리지 않음
     # - budget_versions: MAX(id)=4, 롤백 등으로 시퀀스가 앞서 있음 (last_value=9, is_called=True) -> 절대 되감지 않음
     # - entries: 빈 테이블 MAX(id)=None -> 절대 되감지 않음
+    # - budget_revision_requests: 행사비 v2 근거로 MAX(id)=1, 초기 상태 (1, False) -> setval(1, true) 호출
     max_ids = {
         "users": 5,
         "terms": 1,
         "budgets": 3,
         "budget_versions": 4,
         "entries": None,
+        "budget_revision_requests": 1,
     }
     seq_states = {
         "public.users_id_seq": (1, False),
@@ -326,6 +328,7 @@ def test_postgres_sequence_sync_advances_only_and_never_rewinds():
         "public.budgets_id_seq": (3, True),
         "public.budget_versions_id_seq": (9, True),
         "public.entries_id_seq": (7, True),
+        "public.budget_revision_requests_id_seq": (1, False),
     }
     setval_calls = []
 
@@ -363,6 +366,7 @@ def test_postgres_sequence_sync_advances_only_and_never_rewinds():
     assert setval_calls == [
         ("public.users_id_seq", 5),
         ("public.terms_id_seq", 1),
+        ("public.budget_revision_requests_id_seq", 1),
     ]
 
 

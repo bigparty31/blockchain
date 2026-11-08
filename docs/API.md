@@ -86,8 +86,12 @@
 ## 예산
 
 ### 1. 예산 현황 목록 (`GET /budgets`)
-- **설명**: 카테고리별 예산 편성액, 실시간 잔여액, 집행률을 조회합니다. (앱 예산 카드 및 프로그레스 바 바인딩용)
-- **잔량 반영 기준**: `CONFIRMED` 확정 건만 잔량 차감에 반영되며, `PENDING`(대기) 상태 건은 예산 잔량에서 차감되지 않습니다.
+- **설명**: 카테고리별 예산 편성액, 실시간 잔여액, 집행률을 조회합니다. (앱 예산 카드 및 프로그레스 바 바인딩용, 쿼리 파라미터: `term_id`)
+- **노출 및 잔량 반영 기준**:
+  - 온체인(`BudgetToken.getBudget`)에 발행 확인된 예산만 반환하며, 미발행 초안(`DRAFT`), 온체인 미발행 시드 더미 행, 체인 응답 미확인(`NO_RESPONSE`) 대기 건은 목록에서 제외됩니다.
+  - 잔량은 온체인 `ChainBudget.remaining` 기준(`CONFIRMED` 확정 건만 반영, `PENDING` 대기 건은 미차감)으로 계산합니다.
+- **오류 응답**:
+  - `503 Service Unavailable`: 블록체인 네트워크(`get_budget`) 또는 DB와 통신할 수 없을 때 (미검증 DB 추정치로 대체하지 않음)
 
 **Response (`200 OK`)**
 ```json
@@ -126,10 +130,13 @@
 ]
 ```
 
-### 2. 예산 최초 편성 (`POST /budgets`)
-- **설명**: 학기 초 회장이 항목별 예산을 최초 등록합니다. (`PRESIDENT` 전용)
+### 2. 예산 최초 편성 (`POST /budgets`, `POST /budgets/{id}/submit`)
+- **설명**: 학기 초 회장이 항목별 예산을 최초 등록하고 EIP-712 `IssueRequest` 서명으로 온체인 발행(`relay_issue`)합니다. (`PRESIDENT` 전용, 지출 `EXPENSE` 8종 항목만 허용)
+- **2단계 발행 흐름**:
+  1. **1단계 (`POST /budgets`)**: `term_id`, `category`, `planned_amount`, `expires_at`을 보내 서명 대상 `id`, `term_code`, `category_hash` 초안(`status: "DRAFT"`, `201 Created`)을 발급받습니다.
+  2. **2단계 (`POST /budgets/{id}/submit`)**: 앱에서 `IssueRequest`에 회장 기기 서명을 수행한 뒤 `planned_amount`, `expires_at`, `deadline`, `signature`를 제출해 온체인 발행(`200 OK`, `status: "ISSUED" | "ALREADY_ISSUED" | "REJECTED" | "NO_RESPONSE"`)을 완료합니다.
 
-**Request**
+**Request (`POST /budgets` - 1단계 초안 ID 발급)**
 ```json
 {
   "term_id": 1,
@@ -139,16 +146,226 @@
 }
 ```
 
-**Response (`201 Created`)**
+**Response (`201 Created` - 1단계 초안)**
 ```json
 {
   "id": 1,
+  "term_id": 1,
+  "term_code": 20262,
   "category": "행사비",
+  "category_hash": "0x...",
   "planned_amount": 2500000,
+  "expires_at": 1797260399,
   "version": 1,
-  "status": "ISSUED"
+  "status": "DRAFT",
+  "issue_status": null,
+  "tx_hash": null,
+  "reason": null,
+  "existing_id": null,
+  "message": "예산 초안 ID가 준비되었습니다. 회장 기기 서명을 제출해 주세요."
 }
 ```
+
+**Request (`POST /budgets/{id}/submit` - 2단계 서명 제출)**
+```json
+{
+  "planned_amount": 2500000,
+  "expires_at": 1797260399,
+  "deadline": 1797263999,
+  "signature": "0x..."
+}
+```
+
+**Response (`200 OK` - 2단계 온체인 발행 완료)**
+```json
+{
+  "id": 1,
+  "term_id": 1,
+  "term_code": 20262,
+  "category": "행사비",
+  "category_hash": "0x...",
+  "planned_amount": 2500000,
+  "expires_at": 1797260399,
+  "version": 1,
+  "status": "ISSUED",
+  "issue_status": "issued",
+  "tx_hash": "0x...",
+  "reason": null,
+  "existing_id": null,
+  "message": "예산 토큰이 온체인에 발행되었습니다."
+}
+```
+
+| 코드 | 경우 (`POST /budgets`, `POST /budgets/{id}/submit`) |
+| --- | --- |
+| `201` / `200` | `POST /budgets` 초안 발급(`201`, `status: "DRAFT"` 또는 `"ALREADY_ISSUED"`), `POST /budgets/{id}/submit` 체인 처리 결과(`200`, `status: "ISSUED" \| "ALREADY_ISSUED" \| "REJECTED" \| "NO_RESPONSE"`) |
+| `400` | 승인되지 않은 항목 또는 지출(`EXPENSE` 8종)이 아닌 수입 항목, 서명 형식 오류(`MalformedSignature`), 서명자 지갑 불일치 |
+| `403` | 회장(`PRESIDENT`)이 아님 |
+| `404` | 존재하지 않는 학기(`term_id`) 또는 예산(`id`) |
+| `409` | 다른 발행 요청이 이미 `tx_issue`를 선점해 처리 중이거나, 온체인에 동일 학기·항목 예산이 DB와 다른 ID(`existing.id != id`)로 이미 발행된 경우 |
+| `422` | 요청 본문 유효성 검증 실패 (카테고리 50자 초과, `planned_amount` 0 이하, `expires_at` 범위 초과/음수) |
+| `503` | 릴레이어 전송 불가(`NOT_SENT`, `ChainSetupError`) 또는 DB 오류 |
+
+---
+
+### 3. 예산 증액 워크플로우 (`/budget-revisions`)
+예산 증액은 **총무 요청(1단계) → 회장 EIP-712 서명(2단계) → 감사 EIP-712 서명 및 온체인 릴레이(3단계)** 순서로 진행됩니다 (`PENDING` → `PRESIDENT_SIGNED` → `APPROVED` / `REJECTED`).
+
+#### 앱 서명 대상: EIP-712 `IncreaseRequest` (`BudgetToken` 도메인)
+회장과 감사는 **동일한 `IncreaseRequest` 구조체 값**에 각각 EIP-712 서명합니다 (`docs/CONTRACTS.md` 참조).
+
+| Solidity 필드 | 타입 | 백엔드 매핑 (`IncreaseRequest`) | 설명 |
+| --- | --- | --- | --- |
+| `budgetId` | `uint256` | `budget_id` | 증액 대상 온체인 예산 ID (`> 0`) |
+| `amount` | `uint256` | `requested_amount` | **증액분** 원 단위 양의 정수 (`> 0`, 변경 후 총액이 아님) |
+| `reasonHash` | `bytes32` | `text_hash(reason)` | 정규화된 증액 사유(`reason`) 원문의 UTF-8 SHA-256 해시 (`0x` + 64자 hex) |
+| `version` | `uint256` | `signed_version` | **회장 서명 당시의 현재 온체인 예산 버전** (`>= 1`). 감사 승인 시에도 회장이 서명했던 `signed_version`을 그대로 사용 |
+| `deadline` | `uint256` | `signature_deadline` | 회장이 지정한 서명 만료 시한 (Unix 초). 감사 승인 시에도 저장된 `signature_deadline`을 그대로 사용 |
+
+---
+
+#### 3.1 [1단계] 예산 증액 요청 등록 (`POST /budget-revisions`)
+- **설명**: 총무가 기존 온체인 발행 예산에 대해 증액을 요청합니다 (`TREASURER` 전용).
+- **사전 검증**: 대상 예산이 온체인에 발행되어 있고(`BudgetVersion` 및 `getBudget` 존재) 마감일(`expires_at`)이 지나지 않았는지 확인합니다. 온체인 미발행 초안·시드 예산이나 마감 경과 예산은 1단계에서 `400 Bad Request`로 차단됩니다.
+
+**Request**
+```json
+{
+  "term_id": 1,
+  "category": "운영비",
+  "requested_amount": 500000,
+  "reason": "신학기 비품 구매로 인한 운영비 부족",
+  "budget_id": 1,
+  "blocked_entry_id": 10
+}
+```
+- `budget_id` 생략 시 `term_id` + `category`로 대상 예산을 자동 매핑합니다.
+- `blocked_entry_id`(선택)는 같은 학기·예산의 `EXPENSE`이면서 `BLOCKED` 또는 `PENDING` 상태인 지출만 연동할 수 있습니다.
+
+**Response (`201 Created`)**
+```json
+{
+  "id": 2,
+  "term_id": 1,
+  "category": "운영비",
+  "budget_id": 1,
+  "blocked_entry_id": 10,
+  "requested_amount": 500000,
+  "reason": "신학기 비품 구매로 인한 운영비 부족",
+  "requested_by": 2,
+  "requested_at": "2026-09-05T09:00:00Z",
+  "status": "PENDING",
+  "president_signed_by": null,
+  "president_signature": null,
+  "president_signed_at": null,
+  "signature_deadline": null,
+  "signed_version": null,
+  "tx_increase": null,
+  "resolved_by": null,
+  "resolved_at": null,
+  "reject_reason": null,
+  "created_at": "2026-09-05T09:00:00Z"
+}
+```
+
+| 코드 | 경우 (`POST /budget-revisions`) |
+| --- | --- |
+| `201` | 증액 요청 생성 완료 (`status: "PENDING"`) |
+| `400` | `requested_amount <= 0`, 사유 공백·제어문자 포함, 온체인 미발행(초안·시드) 예산, 마감일(`expires_at`) 경과 예산, `blocked_entry_id` 조건 불일치 |
+| `403` | 총무(`TREASURER`)가 아님 |
+| `404` | 학기(`term_id`), 대상 예산, 또는 `blocked_entry_id`를 찾을 수 없음 |
+| `503` | 온체인 예산 조회(`get_budget`) 중 블록체인 통신 오류 |
+
+---
+
+#### 3.2 [2단계] 회장 EIP-712 서명 제출 (`POST /budget-revisions/{id}/sign`)
+- **설명**: 회장이 `PENDING` 상태의 증액 요청에 대해 EIP-712 `IncreaseRequest` 서명값을 제출합니다 (`PRESIDENT` 전용, 요청 총무와 동일인 불가).
+- **검증**: `signed_version`이 현재 예산 최신 버전과 일치하는지, `signature_deadline`이 현재 시각 이후인지, 복원된 서명자(`signer_of`)가 회장 본인의 `wallet_address`와 일치하는지 확인한 뒤 `PRESIDENT_SIGNED`로 전이합니다.
+
+**Request**
+```json
+{
+  "president_signature": "0x...",
+  "signature_deadline": 1793548800,
+  "signed_version": 1
+}
+```
+
+**Response (`200 OK`)**
+- `BudgetRevisionResponse` 반환 (`status: "PRESIDENT_SIGNED"`, `president_signed_by`, `president_signature`, `president_signed_at`, `signature_deadline`, `signed_version` 채워짐)
+
+| 코드 | 경우 (`POST /budget-revisions/{id}/sign`) |
+| --- | --- |
+| `200` | 회장 서명 저장 및 `PRESIDENT_SIGNED` 전이 완료 |
+| `400` | `PENDING` 상태가 아님, 마감일(`expires_at`) 경과 예산, 온체인 미발행 예산, `signature_deadline` 과거 시각, `signed_version` 불일치, 서명 형식 오류 또는 회장 지갑 주소 불일치, 요청 총무 본인 서명 시도 |
+| `403` | 회장(`PRESIDENT`)이 아님 |
+| `404` | 증액 요청(`id`) 또는 대상 예산을 찾을 수 없음 |
+| `503` | 온체인 예산 조회 중 블록체인 통신 오류 |
+
+---
+
+#### 3.3 [3단계] 감사 최종 승인 및 온체인 증액 릴레이 (`POST /budget-revisions/{id}/approve`)
+- **설명**: 감사가 `PRESIDENT_SIGNED` 상태의 요청에 대해 동일한 `IncreaseRequest`(`version = signed_version`, `deadline = signature_deadline`, `reasonHash = text_hash(reason)`)에 서명한 `auditor_signature`를 제출하면, 서버가 `BudgetToken.increase`를 릴레이하고 온체인 반영이 확인된 뒤에만 새 `BudgetVersion`을 생성하고 `APPROVED`로 확정합니다 (`AUDITOR` 전용, 요청 총무·서명 회장과 동일인 불가).
+- **재시도 및 동시성 보장**:
+  - 브로드캐스트 직전 `tx_increase`와 처리 감사(`resolved_by`)를 함께 조건부 선점합니다.
+  - 응답 유실(`503`) 후 재시도할 때는 `tx_increase`가 있으면 예산 마감일 사전 검사를 건너뛰고 앞선 트랜잭션 결과를 먼저 확인하여 복구합니다.
+  - 다른 감사가 진행 중이거나 이미 온체인에 반영된 건을 재시도하면 `409 Conflict`를 반환하며, 승인자(`resolved_by`, `BudgetVersion.approved_by`)는 실제 서명한 원래 감사로 보존됩니다.
+  - `SignatureExpired` 또는 `VersionMismatch` 발생 시 회장 서명 필드를 초기화하고 `PENDING` 상태로 되돌린 뒤 `400 Bad Request`(재서명 안내)를 반환합니다.
+
+**Request**
+```json
+{
+  "auditor_signature": "0x..."
+}
+```
+
+**Response (`200 OK`)**
+- `BudgetRevisionResponse` 반환 (`status: "APPROVED"`, `tx_increase`, `resolved_by`, `resolved_at` 채워짐, 새 `BudgetVersion` 생성됨)
+
+| 코드 | 경우 (`POST /budget-revisions/{id}/approve`) |
+| --- | --- |
+| `200` | 온체인 증액(`INCREASED`) 확인 및 `APPROVED` 확정 완료 |
+| `400` | `PRESIDENT_SIGNED` 상태가 아님, 서명 시한 만료/`SignatureExpired`/`VersionMismatch`(`PENDING`으로 자동 롤백 후 재서명 안내), 예산 마감일 경과(`BudgetExpired`, 롤백 없음), 서명 형식 오류 또는 감사 지갑 불일치, 요청자·회장 서명자와 동일인 |
+| `403` | 감사(`AUDITOR`)가 아님 |
+| `404` | 증액 요청(`id`) 또는 대상 예산을 찾을 수 없음 |
+| `409` | 동시에 다른 승인 요청이 처리 중이거나, 다른 감사가 선점·승인한 요청에 대한 재시도 |
+| `503` | 블록체인 응답 미확인(`NO_RESPONSE`, `tx_increase` 선점 유지 — 재시도 시 앞선 결과 확인) 또는 릴레이어 미전송(`NOT_SENT`, 선점 해제) / DB 오류 |
+
+---
+
+#### 3.4 예산 증액 반려 (`POST /budget-revisions/{id}/reject`)
+- **설명**: 회장 또는 감사가 `PENDING` 또는 `PRESIDENT_SIGNED` 상태의 증액 요청을 반려합니다 (`PRESIDENT`, `AUDITOR` 전용, 요청 총무 본인 불가).
+
+**Request**
+```json
+{
+  "reject_reason": "기타 예비비 항목으로 대체 집행 가능하여 반려함"
+}
+```
+
+**Response (`200 OK`)**
+- `BudgetRevisionResponse` 반환 (`status: "REJECTED"`, `resolved_by`, `resolved_at`, `reject_reason` 채워짐)
+
+| 코드 | 경우 (`POST /budget-revisions/{id}/reject`) |
+| --- | --- |
+| `200` | 반려(`REJECTED`) 처리 완료 |
+| `400` | 반려 사유 공백·제어문자 포함, 이미 `APPROVED`/`REJECTED` 완료된 요청, 요청 총무 본인 반려 시도 |
+| `403` | 회장(`PRESIDENT`) 또는 감사(`AUDITOR`)가 아님 |
+| `404` | 증액 요청(`id`)을 찾을 수 없음 |
+| `409` | 온체인 증액 릴레이(`tx_increase`)가 진행 중인 요청 |
+
+---
+
+#### 3.5 예산 증액 요청 목록 및 단건 조회 (`GET /budget-revisions`, `GET /budget-revisions/{id}`)
+- **설명**: 학생회 임원(`TREASURER`, `PRESIDENT`, `AUDITOR`)이 예산 증액 요청 목록 또는 단건 상세를 조회합니다.
+- **쿼리 파라미터 (`GET /budget-revisions`)**: `term_id`(선택), `status_filter`(선택: `PENDING`, `PRESIDENT_SIGNED`, `APPROVED`, `REJECTED`)
+- **시한 만료 자동 정리**: 조회 시 `PRESIDENT_SIGNED` 상태이면서 `tx_increase`가 없고 `signature_deadline`이 경과한 건은 자동으로 `PENDING` 상태로 되돌린 뒤 결과를 반환합니다.
+
+| 코드 | 경우 (`GET /budget-revisions`, `GET /budget-revisions/{id}`) |
+| --- | --- |
+| `200` | 목록(`List[BudgetRevisionResponse]`) 또는 단건(`BudgetRevisionResponse`) 반환 |
+| `403` | 학생회 임원(`TREASURER`, `PRESIDENT`, `AUDITOR`)이 아님 |
+| `404` | 단건 조회 시 존재하지 않는 증액 요청(`id`) |
 
 ---
 
@@ -317,13 +534,46 @@
 }
 ```
 
+### 4. 반려 (`POST /entries/{id}/reject`)
+- **설명**: 감사·회장이 기기 서명(`RejectDecision`)과 사유를 제출해 `PENDING` 항목을 `REJECTED`로 끝냅니다. 확정과 같은 `tx_confirm` 칸을 선점하므로 한 항목에 확정과 반려가 함께 나가지 않습니다.
+- **처리 중 응답 값**: 체인에서 끝나기 전에는 목록·단건 응답의 `rejected_by`·`reject_reason`이 `null`입니다. 확정도 같아서 `approved_by`·`warning_ack_reason`은 `CONFIRMED`일 때만 값이 있습니다. `tx_confirm`은 처리 중에도 채워집니다.
+
+**Request**
+```json
+{
+  "deadline": 1790700000,
+  "signature": "0x6f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a1b",
+  "reject_reason": "영수증 식별 불가"
+}
+```
+
+**Response (`200 OK`)**
+```json
+{
+  "id": 2,
+  "status": "REJECTED",
+  "message": "온체인에 성공적으로 반려(REJECTED) 기록되었습니다."
+}
+```
+
+| 코드 | 경우 |
+| --- | --- |
+| `400` | `PENDING`이 아님, 사유 없음, 서명 형식 오류, 서명자 불일치, 체인이 거부함 |
+| `403` | 감사·회장이 아님, 본인이 등록한 항목 |
+| `404` | 없는 항목 |
+| `409` | 확정이 처리 중, 다른 요청이 먼저 처리함 또는 처리 중. 잠시 뒤 다시 조회합니다 |
+| `503` | 노드·DB 오류. 트랜잭션이 들어갔는지 모르면 같은 요청을 다시 보내 결과를 확인합니다 |
+
+확정(`POST /entries/{id}/confirm`)도 반려가 처리 중이면 같은 방식으로 `409`입니다.
+
 ---
 
 ## 검증
 
 ### 1. 장부 잔액 요약 (`GET /balance`)
-- **설명**: 대시보드 상단 카드에 표시되는 계좌/장부 잔액 요약입니다. (`CONFIRMED` 확정 건만 반영)
-- **산출식**: `balance = income - expense` (`PENDING`, `BLOCKED`, `REJECTED` 건 제외)
+- **설명**: 대시보드 상단 카드에 표시되는 계좌/장부 잔액 요약입니다. (`entries` 테이블의 `CONFIRMED` 확정 건만 실시간 DB 합산, 쿼리 파라미터: `term_id`)
+- **산출식**: `balance = income - expense` (`PENDING`, `BLOCKED`, `REJECTED` 및 미제출 초안 건 제외, 확정된 음수 정정 `amount < 0` 자동 반영)
+- **오류 응답**: `503 Service Unavailable` (DB 오류)
 
 **Response (`200 OK`)**
 ```json
@@ -372,6 +622,39 @@
   "0x9965507d1a55bcc2695c58ba16fb37d819b0a4dc": 5
 }
 ```
+
+---
+
+## 회원권
+
+### 1. 내 회원권과 입장 QR (`GET /memberships/me`)
+- **설명**: 학생 화면 S5의 SBT 보유 표시와 입장 QR입니다. 보유 여부는 **체인의 `MembershipSBT.hasValidMembership`으로 확인**합니다. DB 기록만 있고 체인에 없으면 미보유입니다 (PRD §13).
+- **권한**: 로그인이 필요합니다(토큰 없으면 `401`). 임원 계정은 회원권을 가질 수 없어 항상 `null`입니다.
+- **학기**: `term_id` 쿼리로 고릅니다. 없으면 진행 중인 학기, 진행 중인 학기가 없으면 가장 최근에 시작한 학기입니다.
+- **학생 주소**: 서버가 `wallet_index`로 파생한 주소(`m/44'/60'/0'/0/{index}`)로 조회합니다. 학번은 체인에 올라가지 않습니다.
+- **QR**: `SCA:<학기>:U<학생 ID 6자리 이상>` (예: `SCA:2026-2:U000001`). 자격 정보는 담지 않습니다. 스캐너가 매번 조회합니다 (`docs/backend_requests.md` §1-4).
+
+**Response (`200 OK`, 보유 중)**
+```json
+{
+  "id": 1,
+  "user_id": 1,
+  "term_id": 2,
+  "token_id": 128,
+  "minted_at": 1788620400,
+  "burned_at": null,
+  "qr_payload": "SCA:2026-2:U000001"
+}
+```
+- `id`·`minted_at`은 DB 기록입니다. 체인에는 있는데 DB 기록이 없거나 tokenId가 다르면 `null`이고, `token_id`는 체인 값입니다.
+
+| 코드 | 경우 |
+| --- | --- |
+| `200` + 본문 | 그 학기 회원권 보유 중 |
+| `200` + `null` | 미보유, 임원 계정, 진행 중이거나 시작한 학기가 없음 |
+| `401` | 토큰 없음·만료 |
+| `404` | `term_id`의 학기가 없음 |
+| `503` | 보유 여부를 확인하지 못함 (체인 장애, `MembershipSBT` 미배포, `STUDENT_WALLET_MNEMONIC` 미설정, DB 오류). **미보유가 아니므로 「납부 확인 필요」로 안내하지 않습니다** |
 
 ---
 
