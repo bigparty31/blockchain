@@ -727,6 +727,74 @@ PRD v0.15 §4.6. 총무가 은행에서 내려받은 거래내역 CSV를 올리�
 
 ---
 
+## 결산
+
+### 1. 학기 결산 (`GET /settlement/{term_id}`)
+- **설명**: 결산 화면(A11)의 요약 카드·예산 집행률·메타지표 (PRD §4.7, §7.4). **확정(`CONFIRMED`)된 항목만** 집계합니다. 초안·대기·반려·차단은 금액에 들어가지 않습니다.
+- **권한**: 임원(총무·감사·회장)만. 토큰이 없으면 `401`, 학생 토큰이면 `403`.
+- **쿼리**: `audit_at` (선택, ISO 8601) — 「감사 D-30 이내 정정」을 셀 감사일. 없으면 학기 종료일, 시간대가 없으면 KST로 봅니다.
+  - 예: `GET /settlement/1?audit_at=2026-12-10T00:00:00%2B09:00` (`+`는 URL에서 `%2B`로)
+
+**Response (`200 OK`)**
+```json
+{
+  "term_id": 1,
+  "term_code": 20262,
+  "term_name": "2026-2학기",
+  "income": 5000000,
+  "expense": 440000,
+  "ledger_balance": 4560000,
+  "bank_balance": 4500000,
+  "bank_snapshot_at": "2026-12-01T00:00:00Z",
+  "balance_gap": 60000,
+  "budgets": [
+    {
+      "budget_id": 1, "category": "행사비",
+      "initial_amount": 2000000, "planned_amount": 2500000, "version": 2,
+      "spent": 310000, "remaining": 2190000, "execution_rate": 0.124
+    }
+  ],
+  "metrics": {
+    "ocr_warning_approved": 1,
+    "category_warning_approved": 1,
+    "corrections": 2,
+    "corrections_by_reason": { "INPUT_ERROR": 1, "RECEIPT_RECHECK": 0, "REFUND": 1, "RECLASSIFY": 0, "OTHER": 0 },
+    "corrections_before_audit": 1,
+    "audit_at": "2026-12-20T00:00:00Z",
+    "budget_revisions": 2,
+    "budget_revisions_after_block": 1,
+    "revision_after_block_rate": 0.5
+  }
+}
+```
+
+| 필드 | 설명 |
+| --- | --- |
+| `income`·`expense` | 확정 수입·지출 합계. 정정(음수 포함)이 반영된 최종값 |
+| `ledger_balance` | 장부잔액 = `income` − `expense` (PRD §7.4) |
+| `bank_balance`·`bank_snapshot_at` | **가장 최근** 계좌 스냅샷(거래내역 업로드)의 통장 잔액과 시각. 스냅샷이 없으면 `null` |
+| `balance_gap` | 장부잔액 − 통장 잔액. 스냅샷이 없으면 `null`. **0이 아니면 장부와 계좌가 어긋난 것** (양수: 장부에 있는데 계좌에 없음) |
+| `budgets[]` | **체인에 발행된(`tx_issue` 있음) 예산만**, 버전이 있는 것만. `initial_amount`는 v1, `planned_amount`는 최신 버전(개정 반영), `spent`는 확정 지출, `execution_rate`는 `spent / planned_amount` (편성액 0이면 `null`) |
+| `ocr_warning_approved` | OCR 경고(`MISMATCH`·`DUPLICATE`·`UNREADABLE`) 상태로 확정된 건수 |
+| `category_warning_approved` | 용도 불일치 경고 상태로 확정된 건수 |
+| `corrections`·`corrections_by_reason` | 확정된 정정 건수와 사유별 분포. 사유 5종은 0이어도 항상 들어 있습니다 |
+| `corrections_before_audit` | 감사일 30일 전부터 감사일까지 등록된 확정 정정 건수 |
+| `budget_revisions`·`budget_revisions_after_block` | 승인된 예산 증액 횟수, 그중 차단(`BLOCKED`) 지출을 근거로 한 횟수 |
+| `revision_after_block_rate` | 초과 집행 이후 개정 비율. 증액이 0회면 `null` |
+
+- 이의 제기 건수는 v0.13에서 범위 밖이라 없습니다.
+- 시각은 시간대가 붙은 ISO 8601 문자열입니다. 표기(`Z`/`+09:00`)는 DB 설정에 따라 다를 수 있으니 문자열로 비교하지 말고 시각으로 파싱해 쓰세요.
+
+| 코드 | 경우 |
+| --- | --- |
+| `200` | 결산 |
+| `401` / `403` | 토큰 없음 / 학생 토큰 |
+| `404` | `term_id`의 학기가 없음 |
+| `422` | `audit_at`이 날짜 형식이 아님 |
+| `503` | DB 오류 |
+
+---
+
 ## 회원권
 
 ### 1. 내 회원권과 입장 QR (`GET /memberships/me`)
