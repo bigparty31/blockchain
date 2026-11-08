@@ -2018,3 +2018,531 @@ def test_duplicate_sets_duplicate_of_in_response_and_query(auth_header):
     assert res_detail.json()["ocr_status"] == "DUPLICATE"
 
 
+# ---------------------------------------------------------------- B7 정정 규칙 검사 강화 테스트 (PRD v0.15 §4.4, docs/CONTRACTS.md)
+
+
+def test_correction_zero_amount_returns_400(auth_header):
+    """금액(amount)이 0인 경우 일반 내역·정정 내역 모두 400 Bad Request 차단 (ZeroAmount)"""
+    body_normal = {
+        "term_id": 1,
+        "kind": "INCOME",
+        "amount": 0,
+        "counterparty": "영원상점",
+        "purpose": "0원 등록 시도",
+        "occurred_at": 1788793200,
+    }
+    res_normal = client.post("/entries", json=body_normal, headers=auth_header(Role.TREASURER))
+    assert res_normal.status_code == 400
+    assert "ZeroAmount" in res_normal.json()["detail"]
+
+    body_corr = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 0,
+        "counterparty": "한결문구",
+        "purpose": "0원 정정 시도",
+        "budget_id": 2,
+        "occurred_at": 1788793200,
+        "corrects_entry_id": 1,
+        "correction_reason": "INPUT_ERROR",
+    }
+    res_corr = client.post("/entries", json=body_corr, headers=auth_header(Role.TREASURER))
+    assert res_corr.status_code == 400
+    assert "ZeroAmount" in res_corr.json()["detail"]
+
+
+def test_normal_entry_negative_amount_or_reason_returns_400(auth_header):
+    """일반 내역(corrects_entry_id=None)에 음수 금액이나 정정 사유를 넣거나, 정정 내역에 사유가 없으면 400 차단"""
+    # 1. 일반 내역 음수 금액
+    res1 = client.post(
+        "/entries",
+        json={
+            "term_id": 1,
+            "kind": "INCOME",
+            "amount": -5000,
+            "counterparty": "음수일반",
+            "purpose": "일반 음수 시도",
+            "occurred_at": 1788793200,
+        },
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res1.status_code == 400
+    assert "양수" in res1.json()["detail"]
+
+    # 2. 일반 내역에 correction_reason 지정
+    res2 = client.post(
+        "/entries",
+        json={
+            "term_id": 1,
+            "kind": "INCOME",
+            "amount": 5000,
+            "counterparty": "사유일반",
+            "purpose": "일반 사유 시도",
+            "occurred_at": 1788793200,
+            "correction_reason": "INPUT_ERROR",
+        },
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res2.status_code == 400
+    assert "정정 사유" in res2.json()["detail"]
+
+    # 3. 정정 내역에 correction_reason 누락
+    res3 = client.post(
+        "/entries",
+        json={
+            "term_id": 1,
+            "kind": "EXPENSE",
+            "amount": -5000,
+            "counterparty": "한결문구",
+            "purpose": "사유 누락 정정",
+            "budget_id": 2,
+            "occurred_at": 1788793200,
+            "corrects_entry_id": 1,
+            "correction_reason": None,
+        },
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res3.status_code == 400
+    assert "필수" in res3.json()["detail"]
+
+
+def test_correction_target_not_found_or_not_confirmed(auth_header):
+    """정정 대상이 없거나(404) CONFIRMED 상태가 아니면(400 CorrectionTargetNotConfirmed) 차단"""
+    # 1. 존재하지 않는 대상 ID
+    res_404 = client.post(
+        "/entries",
+        json={
+            "term_id": 1,
+            "kind": "EXPENSE",
+            "amount": -5000,
+            "counterparty": "한결문구",
+            "purpose": "없는 대상 정정",
+            "budget_id": 2,
+            "occurred_at": 1788793200,
+            "corrects_entry_id": 99999,
+            "correction_reason": "INPUT_ERROR",
+        },
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_404.status_code == 404
+
+    # 2. PENDING 상태인 시드 ID=2를 정정 시도
+    res_pending = client.post(
+        "/entries",
+        json={
+            "term_id": 1,
+            "kind": "EXPENSE",
+            "amount": -5000,
+            "counterparty": "청년피자",
+            "purpose": "미확정 대상 정정",
+            "budget_id": 1,
+            "occurred_at": 1788793200,
+            "corrects_entry_id": 2,
+            "correction_reason": "INPUT_ERROR",
+        },
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_pending.status_code == 400
+    assert "CorrectionTargetNotConfirmed" in res_pending.json()["detail"]
+
+
+def test_correction_invalid_target_rejected(auth_header):
+    """음수 정정, 같은 예산 양수 정정, 수입 양수 정정을 대상으로 다시 정정하려 하면 400 차단 (InvalidCorrectionTarget)"""
+    # 1. 원본(id=1, budget_id=2)에 대한 음수 정정 생성 및 CONFIRMED 처리
+    res_neg = client.post(
+        "/entries",
+        json={
+            "term_id": 1,
+            "kind": "EXPENSE",
+            "amount": -5000,
+            "counterparty": "한결문구",
+            "purpose": "1차 감액 정정",
+            "budget_id": 2,
+            "occurred_at": 1788793200,
+            "corrects_entry_id": 1,
+            "correction_reason": "REFUND",
+        },
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_neg.status_code == 201
+    neg_id = res_neg.json()["id"]
+
+    # 2. 원본(id=1, budget_id=2)에 대한 같은 예산 양수 정정 생성 및 CONFIRMED 처리
+    res_same_pos = client.post(
+        "/entries",
+        json={
+            "term_id": 1,
+            "kind": "EXPENSE",
+            "amount": 10000,
+            "counterparty": "한결문구",
+            "purpose": "같은 예산 증액 정정",
+            "budget_id": 2,
+            "occurred_at": 1788793200,
+            "corrects_entry_id": 1,
+            "correction_reason": "INPUT_ERROR",
+        },
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_same_pos.status_code == 201
+    same_pos_id = res_same_pos.json()["id"]
+
+    # 3. 수입 원본(id=3, kind=INCOME)에 대한 양수 정정 생성 및 CONFIRMED 처리
+    res_inc_pos = client.post(
+        "/entries",
+        json={
+            "term_id": 1,
+            "kind": "INCOME",
+            "amount": 50000,
+            "counterparty": "학생회비",
+            "purpose": "수입 증액 정정",
+            "occurred_at": 1788793200,
+            "corrects_entry_id": 3,
+            "correction_reason": "INPUT_ERROR",
+        },
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_inc_pos.status_code == 201
+    inc_pos_id = res_inc_pos.json()["id"]
+
+    with _test_session_factory() as db:
+        for cid in (neg_id, same_pos_id, inc_pos_id):
+            row = db.query(DBEntry).filter(DBEntry.id == cid).first()
+            row.status = "CONFIRMED"
+        db.commit()
+
+    # 각각을 다시 정정 대상으로 삼으면 모두 InvalidCorrectionTarget (400)
+    for bad_target_id, kind, budget_id in [
+        (neg_id, "EXPENSE", 2),
+        (same_pos_id, "EXPENSE", 2),
+        (inc_pos_id, "INCOME", None),
+    ]:
+        res_bad = client.post(
+            "/entries",
+            json={
+                "term_id": 1,
+                "kind": kind,
+                "amount": -1000,
+                "counterparty": "재정정시도",
+                "purpose": "불가능 대상 정정",
+                "budget_id": budget_id,
+                "occurred_at": 1788793200,
+                "corrects_entry_id": bad_target_id,
+                "correction_reason": "INPUT_ERROR",
+            },
+            headers=auth_header(Role.TREASURER),
+        )
+        assert res_bad.status_code == 400
+        assert "InvalidCorrectionTarget" in res_bad.json()["detail"]
+
+
+def test_correction_kind_or_term_mismatch_returns_400(auth_header):
+    """정정 내역의 kind 또는 term_id가 정정 대상과 다르면 400 차단 (CorrectionKindMismatch / TermMismatch)"""
+    # 1. 지출 원본(id=1, EXPENSE)에 INCOME 정정 시도
+    res_kind = client.post(
+        "/entries",
+        json={
+            "term_id": 1,
+            "kind": "INCOME",
+            "amount": -5000,
+            "counterparty": "한결문구",
+            "purpose": "종류 불일치 정정",
+            "budget_id": None,
+            "occurred_at": 1788793200,
+            "corrects_entry_id": 1,
+            "correction_reason": "INPUT_ERROR",
+        },
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_kind.status_code == 400
+    assert "CorrectionKindMismatch" in res_kind.json()["detail"]
+
+    # 2. 학기(term_id=1) 원본에 term_id=2 정정 시도
+    res_term = client.post(
+        "/entries",
+        json={
+            "term_id": 2,
+            "kind": "EXPENSE",
+            "amount": -5000,
+            "counterparty": "한결문구",
+            "purpose": "학기 불일치 정정",
+            "budget_id": 2,
+            "occurred_at": 1788793200,
+            "corrects_entry_id": 1,
+            "correction_reason": "INPUT_ERROR",
+        },
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_term.status_code == 400
+    assert "TermMismatch" in res_term.json()["detail"]
+
+
+def test_correction_negative_budget_mismatch_and_exceeds_original(auth_header):
+    """감액(음수) 정정 시 예산 불일치(CorrectionBudgetMismatch) 및 누적 순금액 초과(CorrectionExceedsOriginal) 차단"""
+    # 1. 원본(id=1, budget_id=2, amount=35000)에 budget_id=1 로 음수 정정 시도 -> 400
+    res_budget = client.post(
+        "/entries",
+        json={
+            "term_id": 1,
+            "kind": "EXPENSE",
+            "amount": -10000,
+            "counterparty": "한결문구",
+            "purpose": "엉뚱한 예산 환불 시도",
+            "budget_id": 1,
+            "occurred_at": 1788793200,
+            "corrects_entry_id": 1,
+            "correction_reason": "REFUND",
+        },
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_budget.status_code == 400
+    assert "CorrectionBudgetMismatch" in res_budget.json()["detail"]
+
+    # 2. 원본 금액(35000)을 초과하는 -35001 감액 시도 -> 400
+    res_exceed1 = client.post(
+        "/entries",
+        json={
+            "term_id": 1,
+            "kind": "EXPENSE",
+            "amount": -35001,
+            "counterparty": "한결문구",
+            "purpose": "원본 초과 감액 시도",
+            "budget_id": 2,
+            "occurred_at": 1788793200,
+            "corrects_entry_id": 1,
+            "correction_reason": "REFUND",
+        },
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_exceed1.status_code == 400
+    assert "CorrectionExceedsOriginal" in res_exceed1.json()["detail"]
+
+    # 3. -20000 감액 정정 CONFIRMED 처리 -> 남은 순금액 15000
+    res_neg1 = client.post(
+        "/entries",
+        json={
+            "term_id": 1,
+            "kind": "EXPENSE",
+            "amount": -20000,
+            "counterparty": "한결문구",
+            "purpose": "1차 부분 환불",
+            "budget_id": 2,
+            "occurred_at": 1788793200,
+            "corrects_entry_id": 1,
+            "correction_reason": "REFUND",
+        },
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_neg1.status_code == 201
+    neg1_id = res_neg1.json()["id"]
+    with _test_session_factory() as db:
+        row = db.query(DBEntry).filter(DBEntry.id == neg1_id).first()
+        row.status = "CONFIRMED"
+        db.commit()
+
+    # 남은 순금액(15000)을 초과하는 -16000 시도 -> 400
+    res_exceed2 = client.post(
+        "/entries",
+        json={
+            "term_id": 1,
+            "kind": "EXPENSE",
+            "amount": -16000,
+            "counterparty": "한결문구",
+            "purpose": "누적 초과 감액 시도",
+            "budget_id": 2,
+            "occurred_at": 1788793200,
+            "corrects_entry_id": 1,
+            "correction_reason": "REFUND",
+        },
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_exceed2.status_code == 400
+    assert "CorrectionExceedsOriginal" in res_exceed2.json()["detail"]
+
+    # 4. 같은 예산 양수 정정(+10000) CONFIRMED -> 순금액 25000으로 증가 -> -25000 감액 201 허용!
+    res_pos = client.post(
+        "/entries",
+        json={
+            "term_id": 1,
+            "kind": "EXPENSE",
+            "amount": 10000,
+            "counterparty": "한결문구",
+            "purpose": "동일 예산 추가 지출 정정",
+            "budget_id": 2,
+            "occurred_at": 1788793200,
+            "corrects_entry_id": 1,
+            "correction_reason": "INPUT_ERROR",
+        },
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_pos.status_code == 201
+    pos_id = res_pos.json()["id"]
+    with _test_session_factory() as db:
+        row = db.query(DBEntry).filter(DBEntry.id == pos_id).first()
+        row.status = "CONFIRMED"
+        db.commit()
+
+    res_ok = client.post(
+        "/entries",
+        json={
+            "term_id": 1,
+            "kind": "EXPENSE",
+            "amount": -25000,
+            "counterparty": "한결문구",
+            "purpose": "증액 반영 후 전액 환불",
+            "budget_id": 2,
+            "occurred_at": 1788793200,
+            "corrects_entry_id": 1,
+            "correction_reason": "REFUND",
+        },
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_ok.status_code == 201
+
+
+def test_reclassify_order_positive_first_enforced(auth_header):
+    """항목 재분류(RECLASSIFY): 새 예산 양수 정정이 먼저 CONFIRMED되어야 원래 예산 음수 정정이 허용됨 (PRD v0.15 §4.4)"""
+    # 1. 양수 재분류 없이 먼저 음수 RECLASSIFY 등록 시도 -> 400 차단!
+    res_neg_first = client.post(
+        "/entries",
+        json={
+            "term_id": 1,
+            "kind": "EXPENSE",
+            "amount": -35000,
+            "counterparty": "한결문구",
+            "purpose": "재분류 감액 먼저 시도",
+            "budget_id": 2,
+            "occurred_at": 1788793200,
+            "corrects_entry_id": 1,
+            "correction_reason": "RECLASSIFY",
+        },
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_neg_first.status_code == 400
+    assert "양수(증액) 정정이 먼저 확정(CONFIRMED)" in res_neg_first.json()["detail"]
+
+    # 2. 양수 재분류인데 원본과 같은 예산(budget_id=2) 지정 시 -> 400 차단!
+    res_same_budget = client.post(
+        "/entries",
+        json={
+            "term_id": 1,
+            "kind": "EXPENSE",
+            "amount": 35000,
+            "counterparty": "한결문구",
+            "purpose": "같은 예산 재분류 시도",
+            "budget_id": 2,
+            "occurred_at": 1788793200,
+            "corrects_entry_id": 1,
+            "correction_reason": "RECLASSIFY",
+        },
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_same_budget.status_code == 400
+    assert "다른 새 예산" in res_same_budget.json()["detail"]
+
+    # 3. 새 예산(budget_id=1)으로 양수 RECLASSIFY 등록 (201)
+    res_pos = client.post(
+        "/entries",
+        json={
+            "term_id": 1,
+            "kind": "EXPENSE",
+            "amount": 35000,
+            "counterparty": "한결문구",
+            "purpose": "행사비로 항목 재분류 (+)",
+            "budget_id": 1,
+            "occurred_at": 1788793200,
+            "corrects_entry_id": 1,
+            "correction_reason": "RECLASSIFY",
+        },
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_pos.status_code == 201
+    pos_reclass_id = res_pos.json()["id"]
+
+    # 아직 양수 정정이 CONFIRMED 되기 전(초안 상태)에 음수 RECLASSIFY 시도 -> 여전히 400 차단!
+    res_neg_before_confirm = client.post(
+        "/entries",
+        json={
+            "term_id": 1,
+            "kind": "EXPENSE",
+            "amount": -35000,
+            "counterparty": "한결문구",
+            "purpose": "양수 미확정 상태에서 음수 시도",
+            "budget_id": 2,
+            "occurred_at": 1788793200,
+            "corrects_entry_id": 1,
+            "correction_reason": "RECLASSIFY",
+        },
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_neg_before_confirm.status_code == 400
+
+    # 4. 양수 RECLASSIFY가 CONFIRMED 확정된 후 -> 원래 예산(budget_id=2) 음수 RECLASSIFY 등록 201 성공!
+    with _test_session_factory() as db:
+        row = db.query(DBEntry).filter(DBEntry.id == pos_reclass_id).first()
+        row.status = "CONFIRMED"
+        db.commit()
+
+    res_neg_ok = client.post(
+        "/entries",
+        json={
+            "term_id": 1,
+            "kind": "EXPENSE",
+            "amount": -35000,
+            "counterparty": "한결문구",
+            "purpose": "기존 예산에서 재분류 차감 (-)",
+            "budget_id": 2,
+            "occurred_at": 1788793200,
+            "corrects_entry_id": 1,
+            "correction_reason": "RECLASSIFY",
+        },
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_neg_ok.status_code == 201
+
+    # 5. 재분류 양수 정정(pos_reclass_id, budget_id=1) 자체를 대상으로 감액 정정 가능 검증 (docs/CONTRACTS.md '정정')
+    res_revert_reclass = client.post(
+        "/entries",
+        json={
+            "term_id": 1,
+            "kind": "EXPENSE",
+            "amount": -15000,
+            "counterparty": "한결문구",
+            "purpose": "재분류된 항목에서 부분 감액",
+            "budget_id": 1,
+            "occurred_at": 1788793200,
+            "corrects_entry_id": pos_reclass_id,
+            "correction_reason": "INPUT_ERROR",
+        },
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_revert_reclass.status_code == 201
+
+
+def test_correction_reason_other_saves_detail_in_purpose(auth_header):
+    """OTHER(기타) 정정 사유 선택 시 상세 사유를 purpose에 담아 정상 등록됨 검증 (PRD v0.15 §4.4)"""
+    res = client.post(
+        "/entries",
+        json={
+            "term_id": 1,
+            "kind": "EXPENSE",
+            "amount": -3000,
+            "counterparty": "한결문구",
+            "purpose": "기타 상세 사유: 단가 협상 사후 할인 반영",
+            "budget_id": 2,
+            "occurred_at": 1788793200,
+            "corrects_entry_id": 1,
+            "correction_reason": "OTHER",
+        },
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res.status_code == 201
+    cid = res.json()["id"]
+
+    drafts_res = client.get("/entries/drafts", headers=auth_header(Role.TREASURER))
+    assert drafts_res.status_code == 200
+    draft = next(d for d in drafts_res.json() if d["id"] == cid)
+    assert draft["correction_reason"] == "OTHER"
+    assert draft["purpose"] == "기타 상세 사유: 단가 협상 사후 할인 반영"
+
+
+

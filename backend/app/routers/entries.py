@@ -39,6 +39,7 @@ from app.routers.receipts import receipt_file_exists, resolve_receipt_path
 from app.schemas.auth import Role
 from app.schemas.entry import (
     BlockReason,
+    CorrectionReason,
     EntryConfirmRequest,
     EntryConfirmResponse,
     EntryCreate,
@@ -106,6 +107,197 @@ async def _get_chain_registrant(entry_id: int, chain: ChainClient) -> str:
 # 중복 비교 대상 상태 (PRD §6, #36 OCR과 동일):
 # PENDING, CONFIRMED만 대조하며 초안(status IS NULL), REJECTED, BLOCKED는 제외한다.
 DUPLICATE_TARGET_STATUSES = ("PENDING", "CONFIRMED")
+
+
+def _is_valid_correction_target(db: Session, target: DBEntry) -> bool:
+    """정정 대상이 '정정 가능 항목'(원본이거나 다른 예산으로 재분류된 양수 지출 정정)인지 확인합니다 (docs/CONTRACTS.md '정정')."""
+    if target.corrects_entry_id is None:
+        return True
+    # 대상 자체가 정정인 경우: 지출(EXPENSE) 양수 정정이면서 원본과 다른 예산으로 간 재분류 양수 정정만 허용
+    if target.kind == EntryKind.EXPENSE.value and target.amount > 0 and target.budget_id is not None:
+        parent = db.query(DBEntry).filter(DBEntry.id == target.corrects_entry_id).first()
+        if parent is not None and target.budget_id != parent.budget_id:
+            return True
+    return False
+
+
+def _calculate_net_amount(db: Session, target: DBEntry) -> int:
+    """정정 가능 항목의 현재 확정 순금액(netAmount)을 계산합니다 (docs/CONTRACTS.md '정정').
+    - 시작값: target.amount (양수)
+    - target을 가리키는 CONFIRMED 정정 중:
+      - 음수(감액) 정정은 차감
+      - 같은 예산(수입은 둘 다 None) 양수 정정은 합산 (대상에 흡수)
+      - 다른 예산 양수 정정(재분류)은 자기 순금액을 따로 가지므로 원본에 더하지 않음
+    """
+    net = int(target.amount)
+    confirmed_children = (
+        db.query(DBEntry)
+        .filter(
+            DBEntry.corrects_entry_id == target.id,
+            DBEntry.status == EntryStatus.CONFIRMED.value,
+        )
+        .all()
+    )
+    for child in confirmed_children:
+        if child.amount < 0:
+            net += int(child.amount)
+        elif child.amount > 0 and child.budget_id == target.budget_id:
+            net += int(child.amount)
+    return net
+
+
+def _validate_reclassify_negative_order(
+    db: Session, target: DBEntry, negative_amount: int, exclude_entry_id: Optional[int] = None
+) -> None:
+    """항목 재분류(RECLASSIFY) 순서 강제: 새 예산에 대한 양수 정정이 먼저 확정(CONFIRMED)되어 있어야
+    원래 예산에 대한 음수(감액) 재분류 정정을 등록·확정할 수 있습니다 (PRD v0.15 §4.4, B7).
+    """
+    pos_rows = (
+        db.query(DBEntry)
+        .filter(
+            DBEntry.corrects_entry_id == target.id,
+            DBEntry.status == EntryStatus.CONFIRMED.value,
+            DBEntry.amount > 0,
+            DBEntry.budget_id.isnot(None),
+            DBEntry.budget_id != target.budget_id,
+        )
+        .all()
+    )
+    neg_query = db.query(DBEntry).filter(
+        DBEntry.corrects_entry_id == target.id,
+        DBEntry.status == EntryStatus.CONFIRMED.value,
+        DBEntry.amount < 0,
+        DBEntry.correction_reason == CorrectionReason.RECLASSIFY.value,
+    )
+    if exclude_entry_id is not None:
+        neg_query = neg_query.filter(DBEntry.id != exclude_entry_id)
+    neg_rows = neg_query.all()
+
+    confirmed_pos_sum = sum(int(r.amount) for r in pos_rows)
+    confirmed_neg_abs_sum = sum(abs(int(r.amount)) for r in neg_rows)
+
+    if confirmed_pos_sum - confirmed_neg_abs_sum < abs(int(negative_amount)):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="항목 재분류(RECLASSIFY)는 새 예산에 대한 양수(증액) 정정이 먼저 확정(CONFIRMED)된 후에 원래 예산의 음수(감액) 정정을 진행할 수 있습니다.",
+        )
+
+
+def _validate_correction_rules(db: Session, entry: EntryCreate) -> None:
+    """정정 규칙 서버 검사 (PRD v0.15 §4.4, docs/CONTRACTS.md '정정', B7)."""
+    # 1. 차액 0 금지 (ZeroAmount)
+    if entry.amount == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="금액(amount)은 0일 수 없습니다. (ZeroAmount)",
+        )
+
+    # 2. 일반 항목 vs 정정 항목 기본 검증
+    if entry.corrects_entry_id is None:
+        if entry.amount < 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="일반 내역의 금액은 양수여야 합니다. 음수 금액은 정정 내역(corrects_entry_id 지정)에서만 허용됩니다.",
+            )
+        if entry.correction_reason is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="정정 대상(corrects_entry_id)이 없는 일반 내역에는 정정 사유(correction_reason)를 지정할 수 없습니다.",
+            )
+        return
+
+    if entry.correction_reason is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="정정 내역 등록 시 정정 사유(correction_reason)는 필수입니다.",
+        )
+
+    # 3. 정정 대상 존재 및 CONFIRMED 상태 검증 (CorrectionTargetNotConfirmed)
+    try:
+        target = db.query(DBEntry).filter(DBEntry.id == entry.corrects_entry_id).first()
+    except SQLAlchemyError as e:
+        logger.exception("정정 대상 내역 조회 중 데이터베이스 오류: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 처리 중 오류가 발생했습니다.",
+        )
+
+    if not target:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"정정 대상 내역(id={entry.corrects_entry_id})을 찾을 수 없습니다.",
+        )
+
+    if target.status != EntryStatus.CONFIRMED.value:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="확정(CONFIRMED) 상태인 내역만 정정할 수 있습니다. (CorrectionTargetNotConfirmed)",
+        )
+
+    # 4. 정정 가능 대상 제한 (InvalidCorrectionTarget)
+    try:
+        is_valid_target = _is_valid_correction_target(db, target)
+    except SQLAlchemyError as e:
+        logger.exception("정정 대상 자격 조회 중 데이터베이스 오류: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 처리 중 오류가 발생했습니다.",
+        )
+    if not is_valid_target:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="정정 대상은 원본 내역이거나 다른 예산으로 재분류된 양수 정정 내역이어야 합니다. (InvalidCorrectionTarget)",
+        )
+
+    # 5. 종류(kind) 및 학기(term_id) 일치 검증 (CorrectionKindMismatch / TermMismatch)
+    if entry.kind.value != target.kind:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="정정 내역의 수입/지출 구분(kind)은 정정 대상과 같아야 합니다. (CorrectionKindMismatch)",
+        )
+
+    if entry.term_id != target.term_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="정정 내역의 학기(term_id)는 정정 대상과 같아야 합니다. (TermMismatch)",
+        )
+
+    # 6. 항목 재분류(RECLASSIFY) 규칙 및 순서(양수 먼저, 음수 나중) 검증
+    if entry.correction_reason == CorrectionReason.RECLASSIFY:
+        if entry.kind != EntryKind.EXPENSE:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="항목 재분류(RECLASSIFY)는 지출(EXPENSE) 내역에만 사용할 수 있습니다.",
+            )
+        if entry.amount > 0:
+            if entry.budget_id is None or entry.budget_id == target.budget_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="항목 재분류(RECLASSIFY) 양수 정정은 기존과 다른 새 예산(budget_id)을 지정해야 합니다.",
+                )
+
+    # 7. 감액(음수) 정정 시 예산 일치(CorrectionBudgetMismatch) 및 누적 순금액 한도(CorrectionExceedsOriginal) 검증
+    if entry.amount < 0:
+        if entry.kind == EntryKind.EXPENSE and entry.budget_id != target.budget_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="감액(음수) 정정의 예산(budget_id)은 정정 대상의 예산과 같아야 합니다. (CorrectionBudgetMismatch)",
+            )
+        try:
+            if entry.correction_reason == CorrectionReason.RECLASSIFY:
+                _validate_reclassify_negative_order(db, target, entry.amount)
+            net_amount = _calculate_net_amount(db, target)
+        except SQLAlchemyError as e:
+            logger.exception("정정 순금액 계산 중 데이터베이스 오류: %s", e)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="데이터베이스 처리 중 오류가 발생했습니다.",
+            )
+        if net_amount + entry.amount < 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"감액 정정 금액({abs(entry.amount)}원)이 정정 대상의 현재 순금액({net_amount}원)을 초과합니다. (CorrectionExceedsOriginal)",
+            )
 
 
 def _find_duplicate_of(entry: DBEntry, db: Optional[Session]) -> Optional[int]:
@@ -514,6 +706,9 @@ async def create_entry(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="수입 내역에는 예산을 연결할 수 없습니다.",
         )
+
+    # 4.1 정정 규칙 서버 검사 (PRD v0.15 §4.4, docs/CONTRACTS.md '정정', B7)
+    _validate_correction_rules(db, entry)
 
     # 5. 영수증 중복 검사 (PRD §6, §8, B4: 409 차단 대신 DUPLICATE 경고로 등록 허용)
     # 중복 비교 대상: PENDING·CONFIRMED만 대조 (초안 status NULL, REJECTED, BLOCKED 제외)
@@ -968,6 +1163,24 @@ async def confirm_entry(
             status_code=status.HTTP_409_CONFLICT,
             detail="반려 처리 중인 내역은 확정할 수 없습니다.",
         )
+
+    # 항목 재분류(RECLASSIFY) 음수 정정 확정 시: 새 예산의 양수 정정이 먼저 CONFIRMED 되었는지 확인 (PRD v0.15 §4.4, B7)
+    if (
+        not target.tx_confirm
+        and target.corrects_entry_id is not None
+        and target.amount < 0
+        and target.correction_reason == CorrectionReason.RECLASSIFY.value
+    ):
+        try:
+            orig_target = db.query(DBEntry).filter(DBEntry.id == target.corrects_entry_id).first()
+            if orig_target:
+                _validate_reclassify_negative_order(db, orig_target, target.amount, exclude_entry_id=target.id)
+        except SQLAlchemyError as e:
+            logger.exception("재분류 순서 확인 중 데이터베이스 오류: %s", e)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="데이터베이스 처리 중 오류가 발생했습니다.",
+            )
 
     # 학기 코드 조회
     db_term = None
