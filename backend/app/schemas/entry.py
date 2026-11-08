@@ -64,7 +64,7 @@ class EntryResponse(BaseModel):
     ocr_approval_no: Optional[str] = Field(None, description="영수증 카드 승인번호")
     ocr_paid_at: Optional[int] = Field(None, description="OCR 인식 결제 일시")
     ocr_status: Optional[OCRStatus] = Field(None, description="OCR 대조 상태")
-    duplicate_of: Optional[int] = Field(None, description="중복 경고(DUPLICATE) 시 원본 기존 Entry ID")
+    duplicate_of: Optional[int] = Field(None, description="동일 영수증 중복으로 판정된 기존 내역 ID (DUPLICATE일 때만 표시)")
     category_warning: bool = Field(False, description="예산 카테고리 불일치 경고 여부")
     warning_ack_reason: Optional[str] = Field(None, description="경고 무시 승인 사유")
     status: Optional[EntryStatus] = Field(None, description="장부 상태 (초안은 null, 온체인은 PENDING | CONFIRMED | REJECTED | BLOCKED)")
@@ -112,6 +112,7 @@ class EntryCreate(BaseModel):
 
 class EntryCreateResponse(BaseModel):
     id: int = Field(..., description="생성된 초안 Entry ID")
+    duplicate_of: Optional[int] = Field(None, description="동일 영수증 중복으로 판정된 기존 내역 ID (DUPLICATE일 때만 표시)")
     message: str = Field("지출/수입 초안이 등록되었으며, 기기 서명 제출 대기 상태입니다.")
 
 
