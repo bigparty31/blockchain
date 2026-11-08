@@ -2,10 +2,10 @@
 
 알림 1단계 (PRD §4.8, docs/NOTIFICATION_API.md): notifications, device_tokens.
 kind CHECK 는 app/schemas/notification.py 의 NotificationKind 와 같아야 한다 (tests/test_notifications.py 가 확인한다).
-#68(b7e4c2d91a05, 행사·입장)도 8c6ab430f272 에서 갈라진다. 그쪽이 먼저 머지되면 down_revision 을 b7e4c2d91a05 로 바꾼다.
+#68(b7e4c2d91a05, 행사·입장)이 먼저 머지되어 그 뒤에 잇는다.
 
 Revision ID: 8257fdacf035
-Revises: 8c6ab430f272
+Revises: b7e4c2d91a05
 Create Date: 2026-11-07 13:59:07.716555
 
 """
@@ -17,7 +17,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = '8257fdacf035'
-down_revision: Union[str, Sequence[str], None] = '8c6ab430f272'
+down_revision: Union[str, Sequence[str], None] = 'b7e4c2d91a05'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

@@ -77,6 +77,12 @@ erDiagram
 
     SNAPSHOT ||--o{ BANK_TRANSACTION : "CSV 파싱 거래 내역 (snapshot_id)"
 
+    TERM ||--o{ EVENT : "학기 행사 (term_id)"
+    USER ||--o{ EVENT : "행사 등록 임원 (created_by)"
+    EVENT ||--o{ CHECK_IN : "입장 기록 (event_id)"
+    USER ||--o{ CHECK_IN : "입장 학생 (user_id)"
+    USER ||--o{ CHECK_IN : "스캔 임원 (scanned_by)"
+
     USER {
         bigserial id PK "고유 ID"
         varchar student_no UK "학번 (UNIQUE, 로그인 키)"
@@ -204,6 +210,23 @@ erDiagram
         timestamptz answered_at "답변 일시"
         varchar tx_raise "이의 제기 TX 해시"
         varchar tx_answer "답변 기록 TX 해시"
+    }
+
+    EVENT {
+        bigserial id PK "고유 ID"
+        bigint term_id FK "학기 ID (이 학기 회원권으로 입장 판정)"
+        varchar name "행사명"
+        timestamptz held_at "행사 일시"
+        bigint created_by FK "등록한 임원 ID"
+        timestamptz created_at "등록 일시"
+    }
+
+    CHECK_IN {
+        bigserial id PK "고유 ID"
+        bigint event_id FK,UK "행사 ID (event_id, user_id 유일)"
+        bigint user_id FK,UK "입장 학생 ID (event_id, user_id 유일)"
+        bigint scanned_by FK "스캔한 임원 ID"
+        timestamptz scanned_at "입장 일시"
     }
 ```
 
@@ -517,7 +540,44 @@ erDiagram
 
 ---
 
-### 3.10 `notifications` (임원 알림)
+### 3.10 `events` (행사)
+- **요구사항 매핑**: PRD v0.15 §4.2 (SBT 회원권 → QR 입장), §5 A12 (QR 스캐너)
+- **설명**: 학생회 행사. 입장 판정은 QR의 학기가 아니라 **행사의 학기(`term_id`) 회원권**으로 한다.
+
+| 컬럼명 | 데이터 타입 | Null | 기본값 | 제약조건 / 설명 |
+| :--- | :--- | :---: | :---: | :--- |
+| `id` | `BIGSERIAL` | N | Auto | **PK** |
+| `term_id` | `BIGINT` | N | - | **FK** -> `terms(id)` ON DELETE RESTRICT |
+| `name` | `VARCHAR(100)` | N | - | 행사명 |
+| `held_at` | `TIMESTAMPTZ` | N | - | 행사 일시 |
+| `created_by` | `BIGINT` | N | - | **FK** -> `users(id)` ON DELETE RESTRICT, 등록한 임원 |
+| `created_at` | `TIMESTAMPTZ` | N | `now()` | 등록 일시 |
+
+- **인덱스**:
+  - `idx_events_term_id ON events (term_id)`
+
+---
+
+### 3.11 `check_ins` (행사 입장 기록)
+- **요구사항 매핑**: PRD v0.15 §4.2 (같은 행사 중복 스캔은 입장 기록으로 차단)
+- **설명**: QR 스캔으로 입장한 기록. **입장(`ADMITTED`)만 남긴다** — 미보유·판정 불가 등은 기록하지 않는다.
+
+| 컬럼명 | 데이터 타입 | Null | 기본값 | 제약조건 / 설명 |
+| :--- | :--- | :---: | :---: | :--- |
+| `id` | `BIGSERIAL` | N | Auto | **PK** |
+| `event_id` | `BIGINT` | N | - | **FK** -> `events(id)` ON DELETE RESTRICT |
+| `user_id` | `BIGINT` | N | - | **FK** -> `users(id)` ON DELETE RESTRICT, 입장 학생 |
+| `scanned_by` | `BIGINT` | N | - | **FK** -> `users(id)` ON DELETE RESTRICT, 스캔한 임원 |
+| `scanned_at` | `TIMESTAMPTZ` | N | `now()` | 입장 일시 |
+
+- **테이블 제약조건**:
+  - `CONSTRAINT uq_check_ins_event_user UNIQUE (event_id, user_id)` (**한 행사에 한 학생은 한 번만 입장.** 스캐너 두 대가 동시에 찍어도 DB가 하나만 받는 최종 방어선 — 늦은 쪽은 API가 `ALREADY_CHECKED_IN`으로 응답)
+- **인덱스**:
+  - `idx_check_ins_user_id ON check_ins (user_id)`
+
+---
+
+### 3.12 `notifications` (임원 알림)
 - **요구사항 매핑**: PRD v0.15 §4.8(알림과 재알림), A16
 - **설명**: 임원 한 명에게 간 알림 한 건입니다. 학생에게는 행을 만들지 않고 FCM 토픽 푸시만 보냅니다. 알림은 파생 데이터라 대상 건이 지워지면 함께 지워집니다(CASCADE). 기록·닫기 규칙과 API는 `docs/NOTIFICATION_API.md`가 정본입니다.
 
@@ -548,7 +608,7 @@ erDiagram
 
 ---
 
-### 3.11 `device_tokens` (임원 기기 FCM 토큰)
+### 3.13 `device_tokens` (임원 기기 FCM 토큰)
 - **요구사항 매핑**: PRD v0.15 §4.8(FCM), §8
 - **설명**: 임원 앱이 로그인한 뒤 올리는 FCM 등록 토큰입니다. 학생은 토픽을 구독하므로 등록하지 않습니다. 한 기기에 한 행이며, 다른 임원이 같은 기기로 로그인하면 그 사람에게 넘어갑니다.
 
@@ -879,8 +939,36 @@ CREATE INDEX idx_budget_rev_pending ON budget_revision_requests (term_id, status
 CREATE INDEX idx_budget_rev_budget ON budget_revision_requests (budget_id);
 CREATE INDEX idx_budget_rev_requested_by ON budget_revision_requests (requested_by);
 
+-- 행사 (events) — PRD v0.15 §4.2
+CREATE TABLE events (
+    id BIGSERIAL PRIMARY KEY,
+    term_id BIGINT NOT NULL,
+    name VARCHAR(100) NOT NULL,
+    held_at TIMESTAMPTZ NOT NULL,
+    created_by BIGINT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_events_term FOREIGN KEY (term_id) REFERENCES terms(id) ON DELETE RESTRICT,
+    CONSTRAINT fk_events_created_by FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT
+);
 
--- 10. 임원 알림 테이블 (notifications) — docs/NOTIFICATION_API.md
+CREATE INDEX idx_events_term_id ON events (term_id);
+
+-- 행사 입장 기록 (check_ins) — 한 행사에 한 학생은 한 번만 입장
+CREATE TABLE check_ins (
+    id BIGSERIAL PRIMARY KEY,
+    event_id BIGINT NOT NULL,
+    user_id BIGINT NOT NULL,
+    scanned_by BIGINT NOT NULL,
+    scanned_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_check_ins_event FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE RESTRICT,
+    CONSTRAINT fk_check_ins_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT,
+    CONSTRAINT fk_check_ins_scanned_by FOREIGN KEY (scanned_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CONSTRAINT uq_check_ins_event_user UNIQUE (event_id, user_id)
+);
+
+CREATE INDEX idx_check_ins_user_id ON check_ins (user_id);
+
+-- 임원 알림 (notifications) — docs/NOTIFICATION_API.md
 CREATE TABLE notifications (
     id BIGSERIAL PRIMARY KEY,
     user_id BIGINT NOT NULL,
@@ -910,7 +998,7 @@ CREATE INDEX idx_notifications_revision ON notifications (budget_revision_reques
 CREATE INDEX idx_notifications_next_remind ON notifications (next_remind_at);
 
 
--- 11. 임원 기기 FCM 토큰 테이블 (device_tokens)
+-- 임원 기기 FCM 토큰 (device_tokens)
 CREATE TABLE device_tokens (
     id BIGSERIAL PRIMARY KEY,
     user_id BIGINT NOT NULL,
