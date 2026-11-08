@@ -123,6 +123,7 @@ def test_student_api_blocks_council_commands():
 def test_council_api_contains_all_routes():
     """council_api 및 main_app 은 모든 조회 및 쓰기 엔드포인트를 포함해야 한다."""
     council_routes = _extract_routes(council_app)
+    main_routes = _extract_routes(main_app)
 
     # 필수 명령 엔드포인트 포함 검증
     required_commands = [
@@ -141,7 +142,21 @@ def test_council_api_contains_all_routes():
         ("GET", "/budget-revisions"),
         ("POST", "/receipts"),
         ("GET", "/users/wallets"),
+        ("GET", "/settlement/{term_id}"),
+        ("POST", "/events"),
+        ("GET", "/events"),
+        ("POST", "/events/{event_id}/check-in"),
+        ("POST", "/bank/snapshots"),
+        ("POST", "/bank/snapshots/{snapshot_id}/rematch"),
+        ("GET", "/bank/snapshots"),
+        ("GET", "/bank/snapshots/{snapshot_id}"),
     ]
 
     for req in required_commands:
         assert req in council_routes, f"council_api 에 필수 엔드포인트 {req} 가 누락되었습니다."
+
+    assert council_routes == main_routes, (
+        f"council_api 와 main_app 의 라우트 집합이 다릅니다.\n"
+        f"council_api 누락: {main_routes - council_routes}\n"
+        f"main_app 누락: {council_routes - main_routes}"
+    )
