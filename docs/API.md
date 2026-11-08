@@ -532,7 +532,7 @@
   - 정정 대상(`corrects_entry_id`)이 없으면 `404 Not Found`, 확정(`CONFIRMED`) 상태가 아니면 `400`(`CorrectionTargetNotConfirmed`), 원본이나 다른 예산으로 재분류된 양수 지출 정정이 아니면 `400`(`InvalidCorrectionTarget`)으로 차단됩니다.
   - 정정의 `kind`와 `term_id`는 정정 대상과 같아야 합니다(`CorrectionKindMismatch` / `TermMismatch`).
   - 감액(음수) 정정은 대상과 같은 `budget_id`여야 하며(`CorrectionBudgetMismatch`), 대상의 현재 확정 순금액(`netAmount`)을 초과하여 감액할 수 없습니다(`CorrectionExceedsOriginal`).
-  - **항목 재분류(`RECLASSIFY`) 순서 강제**: 새 예산에 대한 양수(증액) 재분류 정정이 먼저 확정(`CONFIRMED`)된 이후에만 원래 예산에 대한 음수(감액) 재분류 정정을 등록·확정할 수 있습니다 (`400 Bad Request`).
+  - **항목 재분류(`RECLASSIFY`) 확정 순서 강제**: 앱에서 양수(증액) 정정과 음수(감액) 정정 2건을 연속으로 등록(`POST /entries`)할 수 있도록 등록 단계에서는 차단하지 않으며, 확정(`POST /entries/{id}/confirm`) 단계에서 새 예산에 대한 양수 재분류 정정이 먼저 확정(`CONFIRMED`)되었는지 검사합니다 (미확정 상태에서 음수 정정을 먼저 확정하려 하면 `400 Bad Request`).
 
 **Request**
 ```json
@@ -563,7 +563,7 @@
 | 코드 | 경우 (`POST /entries`) |
 | --- | --- |
 | `201` | 초안 ID 채번 완료 (`duplicate_of` 포함) |
-| `400` | 지출 시 `receipt_hash` 누락, 해시 형식 불일치(대문자·길이 오류), 서버 미존재 영수증, 거래처/목적 제어문자 포함 또는 빈 문자열, `occurred_at` 자정 시각 불일치, 수입 내역에 예산 배정 시도, 금액 0(`ZeroAmount`), 정정 규칙 위반(`CorrectionTargetNotConfirmed`, `InvalidCorrectionTarget`, `CorrectionKindMismatch`, `TermMismatch`, `CorrectionBudgetMismatch`, `CorrectionExceedsOriginal`, 재분류 양수 선확정 순서 위반) |
+| `400` | 지출 시 `receipt_hash` 누락, 해시 형식 불일치(대문자·길이 오류), 서버 미존재 영수증, 거래처/목적 제어문자 포함 또는 빈 문자열, `occurred_at` 자정 시각 불일치, 수입 내역에 예산 배정 시도, 금액 0(`ZeroAmount`), 정정 규칙 위반(`CorrectionTargetNotConfirmed`, `InvalidCorrectionTarget`, `CorrectionKindMismatch`, `TermMismatch`, `CorrectionBudgetMismatch`, `CorrectionExceedsOriginal`, 재분류 양수 정정에 동일 예산 지정) |
 | `401` | 로그인 토큰 없음 |
 | `403` | 총무(`TREASURER`)가 아님 |
 | `404` | 정정 대상 내역(`corrects_entry_id`)을 찾을 수 없음 |
