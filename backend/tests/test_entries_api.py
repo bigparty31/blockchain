@@ -1806,6 +1806,22 @@ def test_request_entry_revision_not_pending_fails(auth_header):
     assert res_draft.status_code == 400
     assert "승인 대기(PENDING) 상태의 내역만" in res_draft.json()["detail"]
 
+    # 3. 수정 요청(revision_requested_at 기록) 후 반려(REJECTED)된 건에 다시 수정 요청 시 200이 아니라 400 차단
+    rev_entry_id = _pending_entry(auth_header)
+    assert client.post(f"/entries/{rev_entry_id}/request-revision", headers=auth_header(Role.TREASURER)).status_code == 200
+    with _test_session_factory() as db:
+        row = db.query(DBEntry).filter(DBEntry.id == rev_entry_id).first()
+        row.status = "REJECTED"
+        row.rejected_by = 3
+        row.reject_reason = "수정 요청에 따른 반려"
+        db.commit()
+    res_rejected_after_rev = client.post(
+        f"/entries/{rev_entry_id}/request-revision",
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_rejected_after_rev.status_code == 400
+    assert "승인 대기(PENDING) 상태의 내역만" in res_rejected_after_rev.json()["detail"]
+
 
 def test_request_entry_revision_conflict_when_confirm_in_flight(auth_header):
     """확정 처리가 선점 중(tx_confirm 존재)인 경우 409 Conflict 차단 검증"""
