@@ -1297,24 +1297,31 @@ def test_get_entries_and_detail_return_200_when_chain_setup_fails(auth_header):
 
 
 def test_get_entries_slow_node_returns_200_within_timeout(auth_header, monkeypatch):
-    """체인 RPC 응답이 지연되어도 GET /entries가 타임아웃 없이 1.5초 이내에 200 OK와 registrant=None으로 반환된다."""
+    """체인 클라이언트 획득(get_chain_client) 또는 RPC 응답(get_entry)이 지연되어도 GET /entries·GET /entries/{id}가 타임아웃 내에 200 OK와 registrant=None으로 반환된다."""
     import asyncio
 
-    async def slow_get_entry(entry_id):
+    async def slow_chain_client():
         await asyncio.sleep(5.0)
-        return None
+        return _test_chain
 
-    monkeypatch.setattr(_test_chain, "get_entry", slow_get_entry)
+    app.dependency_overrides[get_chain_client] = slow_chain_client
 
     start_t = time.time()
     res_list = client.get("/entries")
     elapsed = time.time() - start_t
 
     assert res_list.status_code == 200
-    assert elapsed < 2.5  # 1.5초 wait_for에 의해 3초 앱 타임아웃 이전에 안전하게 반환
+    assert elapsed < 2.5  # 1.5초 wait_for에 의해 획득 지연까지 포함해 3초 앱 타임아웃 이전에 안전하게 반환
     entries = res_list.json()
     assert len(entries) > 0
     assert entries[0]["registrant"] is None
+
+    start_detail = time.time()
+    res_detail = client.get("/entries/1")
+    elapsed_detail = time.time() - start_detail
+    assert res_detail.status_code == 200
+    assert elapsed_detail < 2.8  # 2.0초 wait_for에 의해 획득 지연까지 포함해 안전하게 반환
+    assert res_detail.json()["registrant"] is None
 
 
 def test_get_onchain_entry_endpoint(auth_header):
