@@ -251,11 +251,15 @@ void main() {
     ];
 
     Future<void> open(WidgetTester tester, {List<EntryModel>? entries}) async {
-      await pump(tester, MyEntriesScreen(currentUserId: 2, loadEntries: () async => entries ?? serverEntries));
+      // 초안은 따로 읽는다 (GET /entries/drafts) — 이 그룹은 초안이 없는 서버를 본다
+      await pump(
+          tester,
+          MyEntriesScreen(
+              currentUserId: 2, loadEntries: () async => entries ?? serverEntries, loadDrafts: () async => const []));
       await waitFor(tester, find.textContaining('전체'));
     }
 
-    testWidgets('내가 등록한 건만 상태별로 센다 — 서버 목록에 없는 초안 칸은 없다', (tester) async {
+    testWidgets('내가 등록한 건만 상태별로 센다 — 초안이 없으면 초안 칸도 없다', (tester) async {
       await open(tester);
       for (final t in ['전체 7', '처리 중 1', '대기 2', '확정 2', '반려 1', '차단 1']) {
         expect(find.text(t), findsOneWidget, reason: t);

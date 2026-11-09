@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../../core/app_theme.dart';
 import '../../core/enums.dart';
 import '../../core/hashing.dart';
+import '../../models/draft_entry.dart';
 import '../../models/entry_model.dart';
 import '../../services/api_service.dart';
 import '../../services/entry_registration_service.dart';
@@ -22,7 +23,10 @@ class IncomeCreateScreen extends StatefulWidget {
   /// 반려된 수입을 고쳐 새로 등록할 때 그 건 ([canResubmit]). 이전 값으로 채워 연다 (PRD §4.3 T4 3단계).
   final EntryModel? resubmitOf;
 
-  const IncomeCreateScreen({super.key, this.registrar, this.pickReceipt, this.resubmitOf});
+  /// 저장해 둔 초안을 이어서 제출할 때 그 초안.
+  final DraftEntry? resumeDraft;
+
+  const IncomeCreateScreen({super.key, this.registrar, this.pickReceipt, this.resubmitOf, this.resumeDraft});
 
   @override
   State<IncomeCreateScreen> createState() => _IncomeCreateScreenState();
@@ -64,11 +68,39 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
   void initState() {
     super.initState();
     final source = widget.resubmitOf;
-    if (source == null) {
-      _loadTerm();
-    } else {
+    final draft = widget.resumeDraft;
+    if (source != null) {
       _prefill(source);
+    } else if (draft != null) {
+      _prefillDraft(draft);
+    } else {
+      _loadTerm();
     }
+  }
+
+  /// 저장해 둔 초안의 값으로 채운다. 학기·분류도 초안 그대로, 번호와 저장 내용을 들고 있어서 고치지 않고 제출하면
+  /// 새 초안을 만들지 않는다.
+  void _prefillDraft(DraftEntry d) {
+    _termId = d.termId;
+    _sourceController.text = d.counterparty;
+    _amountController.text = '${d.amount}';
+    _incomeType = d.purpose;
+    _selectedDate = pickerDateOf(d.occurredAt);
+    _draftId = d.id;
+    _savedDraft = d.toEntryDraft();
+    if (d.receiptHash == null) return;
+    restoreReceiptFile(_registrar, d.receiptHash, d.receiptPath).then((restored) {
+      if (!mounted || _receiptHash != null) return;
+      setState(() {
+        if (restored == null) {
+          _receiptNote = '저장해 둔 영수증을 불러오지 못했어요. 필요하면 다시 첨부해 주세요.';
+          return;
+        }
+        _receiptBytes = restored.$1;
+        _receiptHash = restored.$2.hash;
+        _upload = restored.$2;
+      });
+    });
   }
 
   /// 이전 건의 값으로 채운다. 학기는 이전 건의 학기 그대로, 분류는 이전 수입 사유 그대로 둔다
@@ -257,6 +289,7 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               if (widget.resubmitOf != null) ResubmitBanner(source: widget.resubmitOf!, receiptNote: _receiptNote),
+              if (widget.resumeDraft != null) DraftBanner(draftId: widget.resumeDraft!.id, receiptNote: _receiptNote),
               // 수입 유형 선택 카드 (가로 스크롤)
               SizedBox(
                 height: 94,

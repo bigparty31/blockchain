@@ -3,6 +3,7 @@ import '../../core/app_theme.dart';
 import '../../core/enums.dart';
 import '../../core/format.dart';
 import '../../models/budget_model.dart';
+import '../../models/draft_entry.dart';
 import '../../models/entry_model.dart';
 import '../../services/api_service.dart';
 import '../../services/auth_service.dart';
@@ -51,6 +52,9 @@ class MyEntryItem {
   /// 서버에서 읽은 항목 (서버 목록일 때만). 다시 등록·정정·개정 요청에 넘긴다.
   final EntryModel? entry;
 
+  /// 서버에서 읽은 초안 (초안 카드일 때만). 이어서 제출 화면에 넘긴다.
+  final DraftEntry? draft;
+
   const MyEntryItem({
     required this.id,
     required this.title,
@@ -61,9 +65,34 @@ class MyEntryItem {
     this.isIncome = false,
     this.note,
     this.entry,
+    this.draft,
   });
 
-  bool get isCorrection => entry?.correctsEntryId != null;
+  bool get isCorrection => (entry?.correctsEntryId ?? draft?.correctsEntryId) != null;
+
+  /// 서버 초안 → 카드. [MyEntryItem.fromEntry] 와 같은 모양이다.
+  factory MyEntryItem.fromDraft(DraftEntry d, List<BudgetModel> budgets) {
+    final income = d.kind == EntryKind.INCOME;
+    String category = '수입';
+    if (!income) {
+      category = '예산 #${d.budgetId ?? '-'}';
+      for (final b in budgets) {
+        if (b.id == d.budgetId) category = b.category;
+      }
+    }
+    return MyEntryItem(
+      id: d.id,
+      title: d.correctsEntryId != null
+          ? '#${d.correctsEntryId} 정정 · ${d.counterparty} · ${d.purpose}'
+          : '${d.counterparty} · ${d.purpose}',
+      category: category,
+      amount: d.amount,
+      date: Fmt.date(d.occurredAt),
+      state: MyEntryState.draft,
+      isIncome: income,
+      draft: d,
+    );
+  }
 
   /// 서버 항목 → 카드. 예산 이름은 [budgets] 에서 찾고, 없으면 번호로 적는다.
   factory MyEntryItem.fromEntry(EntryModel e, List<BudgetModel> budgets) {
@@ -185,7 +214,10 @@ class MyEntriesScreen extends StatefulWidget {
   /// 수정 요청 보내기 (테스트용). 주지 않으면 `POST /entries/{id}/request-revision`.
   final Future<EntryModel> Function(int entryId)? requestRevision;
 
-  const MyEntriesScreen({super.key, this.items, this.currentUserId, this.loadEntries, this.registrar, this.requestRevision});
+  /// 초안 목록 읽기 (테스트용). 주지 않으면 `GET /entries/drafts` ([ApiService.fetchDrafts]).
+  final Future<List<DraftEntry>> Function()? loadDrafts;
+
+  const MyEntriesScreen({super.key, this.items, this.currentUserId, this.loadEntries, this.registrar, this.requestRevision, this.loadDrafts});
 
   @override
   State<MyEntriesScreen> createState() => _MyEntriesScreenState();
@@ -200,6 +232,9 @@ class _MyEntriesScreenState extends State<MyEntriesScreen> {
 
   /// 목록을 못 읽은 이유. 빈 목록과 구분한다 — 못 읽은 것을 「등록 건 없음」으로 보이지 않는다.
   String? _error;
+
+  /// 초안 목록만 못 읽었다. 등록 건 목록은 그대로 보이고, 초안이 안 보일 수 있다고 알린다.
+  bool _draftsFailed = false;
 
   @override
   void initState() {
@@ -223,12 +258,25 @@ class _MyEntriesScreenState extends State<MyEntriesScreen> {
       } on ApiUnavailable {
         budgets = const [];
       }
-      final mine = entries.where((e) => e.createdBy == me).toList()..sort((a, b) => b.id.compareTo(a.id));
+      final mine = entries.where((e) => e.createdBy == me).toList();
+      // 초안은 `GET /entries` 에 없다 — 따로 읽는다. 못 읽어도 등록 건 목록은 보여 준다
+      var drafts = const <DraftEntry>[];
+      var draftsFailed = false;
+      try {
+        drafts = await (widget.loadDrafts ?? ApiService().fetchDrafts)();
+      } on ApiUnavailable {
+        draftsFailed = true;
+      }
+      final items = <MyEntryItem>[
+        for (final e in mine) MyEntryItem.fromEntry(e, budgets),
+        for (final d in drafts) MyEntryItem.fromDraft(d, budgets),
+      ]..sort((a, b) => b.id.compareTo(a.id));
       if (!mounted) return;
       setState(() {
         _loading = false;
         _error = null;
-        _items = [for (final e in mine) MyEntryItem.fromEntry(e, budgets)];
+        _draftsFailed = draftsFailed;
+        _items = items;
       });
     } on ApiUnavailable catch (e) {
       if (!mounted) return;
@@ -247,10 +295,14 @@ class _MyEntriesScreenState extends State<MyEntriesScreen> {
 
   /// 주 행동과 (있으면) 보조 행동.
   (_Action, _Action?) _actions(MyEntryItem item) {
+    final d = item.draft;
+    if (d != null) {
+      return (('이어서 제출', Icons.play_arrow_rounded, () => _go(_resumeScreen(d))), null);
+    }
     final e = item.entry;
     if (e == null) return (_mockAction(item), null);
     switch (item.state) {
-      case MyEntryState.draft: // 서버 목록에는 초안이 없다 (`GET /entries` 가 뺀다)
+      case MyEntryState.draft: // 초안은 [MyEntryItem.draft] 로 위에서 처리한다
       case MyEntryState.processing:
         return (('처리 중 — 다시 보낼 수 없어요', Icons.hourglass_top_rounded, null), null);
       case MyEntryState.pending:
@@ -329,6 +381,17 @@ class _MyEntriesScreenState extends State<MyEntriesScreen> {
     if (_fromServer) _load();
   }
 
+  /// 초안을 이어서 제출할 화면. 정정 초안은 정정 화면을 원본 번호로 연다 — 입력값까지 채우지는 않는다
+  /// (정정 화면은 증감분·사유를 새로 고르게 되어 있다).
+  Widget _resumeScreen(DraftEntry d) {
+    if (d.correctsEntryId != null) {
+      return CorrectionScreen(initialTargetId: d.correctsEntryId, registrar: widget.registrar);
+    }
+    return d.kind == EntryKind.INCOME
+        ? IncomeCreateScreen(resumeDraft: d, registrar: widget.registrar)
+        : ExpenseCreateScreen(resumeDraft: d, registrar: widget.registrar);
+  }
+
   Widget _resubmitScreen(EntryModel e) => e.kind == EntryKind.INCOME
       ? IncomeCreateScreen(resubmitOf: e, registrar: widget.registrar)
       : ExpenseCreateScreen(resubmitOf: e, registrar: widget.registrar);
@@ -381,8 +444,10 @@ class _MyEntriesScreenState extends State<MyEntriesScreen> {
       );
     }
 
-    // 서버 목록에는 초안이 없다 — 0 인 칸을 보이지 않는다 (초안 목록 API 가 생기면 다시 센다)
-    final states = _fromServer ? MyEntryState.values.where((s) => s != MyEntryState.draft) : MyEntryState.values;
+    // 서버 목록의 초안 칸은 초안이 있을 때만 — 0 인 칸을 보이지 않는다
+    final states = _fromServer
+        ? MyEntryState.values.where((s) => s != MyEntryState.draft || count(s) > 0)
+        : MyEntryState.values;
 
     Widget body;
     if (_error != null && _items.isEmpty) {
@@ -445,6 +510,15 @@ class _MyEntriesScreenState extends State<MyEntriesScreen> {
               ],
             ),
           ),
+          if (_draftsFailed)
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 4, 16, 4),
+              child: Text(
+                '저장해 둔 초안 목록을 불러오지 못했어요. 아래에 초안이 보이지 않을 수 있어요. 아래로 당겨 다시 읽어 보세요.',
+                key: Key('drafts_failed'),
+                style: TextStyle(fontSize: 12, height: 1.4, color: AppTheme.expense),
+              ),
+            ),
           Expanded(
             child: _fromServer ? RefreshIndicator(onRefresh: _load, child: body) : body,
           ),

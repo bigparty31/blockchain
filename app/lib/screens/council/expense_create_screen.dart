@@ -4,6 +4,7 @@ import '../../core/app_theme.dart';
 import '../../core/format.dart';
 import '../../core/hashing.dart';
 import '../../models/budget_model.dart';
+import '../../models/draft_entry.dart';
 import '../../models/entry_model.dart';
 import '../../services/api_service.dart';
 import '../../services/entry_registration_service.dart';
@@ -25,7 +26,10 @@ class ExpenseCreateScreen extends StatefulWidget {
   /// 반려·차단된 지출을 고쳐 새로 등록할 때 그 건 ([canResubmit]). 이전 값으로 채워 연다 (PRD §4.3 T4 3단계).
   final EntryModel? resubmitOf;
 
-  const ExpenseCreateScreen({super.key, this.registrar, this.pickReceipt, this.resubmitOf});
+  /// 저장해 둔 초안을 이어서 제출할 때 그 초안.
+  final DraftEntry? resumeDraft;
+
+  const ExpenseCreateScreen({super.key, this.registrar, this.pickReceipt, this.resubmitOf, this.resumeDraft});
 
   @override
   State<ExpenseCreateScreen> createState() => _ExpenseCreateScreenState();
@@ -75,6 +79,8 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
     super.initState();
     final source = widget.resubmitOf;
     if (source != null) _prefill(source);
+    final draft = widget.resumeDraft;
+    if (draft != null) _prefillDraft(draft);
     _loadBudgets();
   }
 
@@ -100,6 +106,29 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
     });
   }
 
+  /// 저장해 둔 초안의 값으로 채운다. 그 번호와 저장 내용을 들고 있어서, 고치지 않고 제출하면 새 초안을 만들지 않는다.
+  void _prefillDraft(DraftEntry d) {
+    _titleController.text = d.purpose;
+    _merchantController.text = d.counterparty;
+    _amountController.text = '${d.amount}';
+    _selectedDate = pickerDateOf(d.occurredAt);
+    _draftId = d.id;
+    _savedDraft = d.toEntryDraft();
+    if (d.receiptHash == null) return;
+    restoreReceiptFile(_registrar, d.receiptHash, d.receiptPath).then((restored) {
+      if (!mounted || _receiptHash != null) return; // 그새 다른 사진을 골랐으면 그대로 둔다
+      setState(() {
+        if (restored == null) {
+          _receiptNote = '저장해 둔 영수증을 불러오지 못했어요. 영수증을 다시 첨부해 주세요.';
+          return;
+        }
+        _receiptBytes = restored.$1;
+        _receiptHash = restored.$2.hash;
+        _upload = restored.$2;
+      });
+    });
+  }
+
   /// 예산 잔량을 못 읽은 이유. 잔량 없이 항목만 보이고, 이유를 적는다.
   String? _budgetsError;
 
@@ -112,7 +141,7 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
         _budgets = budgets;
         _remaining = {for (final b in budgets) b.category: b.remainingAmount};
         // 다시 등록이면 이전 건의 예산 항목을 고른다
-        final budgetId = widget.resubmitOf?.budgetId;
+        final budgetId = widget.resubmitOf?.budgetId ?? widget.resumeDraft?.budgetId;
         for (final b in budgets) {
           if (b.id == budgetId && _budgetCategories.contains(b.category)) _selectedBudgetCategory = b.category;
         }
@@ -328,6 +357,7 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               if (widget.resubmitOf != null) ResubmitBanner(source: widget.resubmitOf!, receiptNote: _receiptNote),
+              if (widget.resumeDraft != null) DraftBanner(draftId: widget.resumeDraft!.id, receiptNote: _receiptNote),
               // 영수증 첨부 영역
               GestureDetector(
                 onTap: _attachReceipt,
