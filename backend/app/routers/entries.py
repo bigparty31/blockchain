@@ -1174,16 +1174,16 @@ async def request_entry_revision(
             detail=f"항목(id={id})을 찾을 수 없습니다.",
         )
 
-    # (1) 이미 수정 요청된 건: 200 반환 (멱등성)
-    if refreshed.revision_requested_at is not None:
-        return _to_schema(refreshed, db=db)
-
-    # (2) 상태가 PENDING이 아님: 400 차단
+    # (1) 상태가 PENDING이 아님 (수정 요청 후 이미 REJECTED·CONFIRMED 등으로 전환된 건 포함): 400 차단
     if refreshed.status != EntryStatus.PENDING.value and refreshed.status != EntryStatus.PENDING:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"승인 대기(PENDING) 상태의 내역만 수정 요청할 수 있습니다 (현재: {refreshed.status or 'DRAFT'}).",
         )
+
+    # (2) 여전히 PENDING 상태이면서 이미 수정 요청된 건: 200 반환 (멱등성)
+    if refreshed.revision_requested_at is not None:
+        return _to_schema(refreshed, db=db)
 
     # (3) 확정(또는 반려)이 먼저 선점(tx_confirm 존재): 409 차단 (확정되면 정정으로 가야 함)
     if refreshed.tx_confirm:
