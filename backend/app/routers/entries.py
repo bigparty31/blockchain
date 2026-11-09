@@ -109,9 +109,9 @@ def _to_schema(
     confirmed = entry.status == EntryStatus.CONFIRMED.value
     rejected = entry.status == EntryStatus.REJECTED.value
 
+    # 온체인 등록자(chain_registrant)만 반환한다. 체인 미조회·실패 시 DB 등록자 지갑으로 대체하지 않고 None(null)을 유지하여
+    # 앱이 서명 전 온체인 대조 불가 상태를 감지할 수 있게 한다.
     registrant = chain_registrant
-    if not registrant and getattr(entry, "creator", None) and entry.creator.wallet_address:
-        registrant = entry.creator.wallet_address
 
     return EntryResponse(
         id=entry.id,
@@ -182,22 +182,20 @@ async def get_entries(
         )
 
     # RPC 호출 부하 및 앱 타임아웃(3초) 방지:
-    # 목록 조회에서는 승인 대기 중인 PENDING 건만 최대 1.5초 이내로 온체인 조회를 시도하고,
-    # 노드 응답 지연/오류 시 즉시 DB 등록자 지갑 주소로 대체 반환합니다.
-    # 앱은 서명 직전에 단건 상세 조회(GET /entries/{id})로 최신 온체인 등록자를 최종 확인합니다.
-    pending_entries = [e for e in db_entries if e.status == EntryStatus.PENDING.value]
+    # 목록 조회에서는 최대 1.5초 이내로 온체인 등록자 조회를 시도하고,
+    # 노드 응답 지연/오류 시 DB 값으로 위장하지 않고 registrant=null(None)로 반환하여 앱이 미검증 상태를 식별할 수 있게 합니다.
     chain_registrants: dict[int, str] = {}
 
-    if pending_entries:
+    if db_entries:
         try:
             chain = await _get_chain_client_safe(request)
             if chain is not None:
-                async def _fetch_pending():
-                    tasks = [chain.get_entry(e.id) for e in pending_entries]
+                async def _fetch_all():
+                    tasks = [chain.get_entry(e.id) for e in db_entries]
                     return await asyncio.gather(*tasks, return_exceptions=True)
 
-                fetched = await asyncio.wait_for(_fetch_pending(), timeout=1.5)
-                for e, res in zip(pending_entries, fetched):
+                fetched = await asyncio.wait_for(_fetch_all(), timeout=1.5)
+                for e, res in zip(db_entries, fetched):
                     if not isinstance(res, Exception) and res and res.registrant:
                         chain_registrants[e.id] = res.registrant
         except Exception:
