@@ -228,6 +228,13 @@ erDiagram
         bigint scanned_by FK "스캔한 임원 ID"
         timestamptz scanned_at "입장 일시"
     }
+
+    LOGIN_ATTEMPT {
+        varchar student_no PK "로그인에 쓴 학번 (users 참조 없음)"
+        int failed_count "이번 구간 시도 횟수"
+        bigint last_attempt_at "마지막 시도 (epoch 초)"
+        bigint locked_until "잠금 해제 시각 (epoch 초)"
+    }
 ```
 
 ---
@@ -577,6 +584,26 @@ erDiagram
 
 ---
 
+### 3.12 `login_attempts` (로그인 실패 제한)
+- **요구사항 매핑**: PRD v0.15 §9.1 (실패 횟수는 서버 메모리가 아니라 DB — 학생 서버 2대에서 횟수가 나뉘지 않게), §9.2 (계정 존재 여부를 드러내지 않음)
+- **설명**: 학번별 로그인 시도 횟수와 잠금. **연속 5회 실패하면 15분 잠금**, 잠긴 동안은 맞는 비밀번호도 `429`. 로그인에 성공하면 행을 지운다. 마지막 시도에서 15분이 지났거나 잠금이 끝났으면 처음부터 센다. 규칙은 `backend/app/auth/login_limit.py`.
+- **`users`를 참조하지 않는다.** 없는 학번도 똑같이 세고 잠가야, 잠기는지 여부로 가입 여부가 드러나지 않는다.
+- 시각은 epoch 초(`BIGINT`) — SQLite 시험과 Postgres 운영에서 시간대 처리가 갈리지 않게 한다.
+
+| 컬럼명 | 데이터 타입 | Null | 기본값 | 제약조건 / 설명 |
+| :--- | :--- | :---: | :---: | :--- |
+| `student_no` | `VARCHAR(20)` | N | - | **PK**. 로그인 요청의 학번 그대로 (없는 학번도 기록) |
+| `failed_count` | `INTEGER` | N | `0` | 이번 구간의 시도 횟수. **비밀번호 검사 전에 먼저 올린다** — 동시 요청이 모두 확인을 통과해 한도를 넘지 않게 |
+| `last_attempt_at` | `BIGINT` | N | - | 마지막 시도 시각 (epoch 초) |
+| `locked_until` | `BIGINT` | Y | - | 잠금이 풀리는 시각 (epoch 초). `NULL`이면 잠기지 않음 |
+
+- **테이블 제약조건**:
+  - `CONSTRAINT ck_login_attempts_failed_count CHECK (failed_count >= 0)`
+- **DB 계정**: 학생 서버의 읽기 전용 계정에도 **이 테이블만** `INSERT`·`UPDATE`·`DELETE` 권한이 필요하다 (학생 서버에도 `/auth/login`이 있다).
+- **잠금 수동 해제** (예: 시연 중 누가 임원 학번으로 5회 틀렸을 때): `DELETE FROM login_attempts WHERE student_no = '20240003';`
+
+---
+
 ## 4. 요구사항명세서(Excel) 기능별 데이터 모델 매핑 추적표
 
 | 기능 코드 | 기능명 (Excel 명세서) | 관련 테이블 및 컬럼 | 데이터 모델 반영 내용 |
@@ -915,6 +942,15 @@ CREATE TABLE check_ins (
 );
 
 CREATE INDEX idx_check_ins_user_id ON check_ins (user_id);
+
+-- 로그인 실패 제한 (login_attempts) — PRD v0.15 §9.1, §9.2. users 를 참조하지 않는다 (없는 학번도 기록)
+CREATE TABLE login_attempts (
+    student_no VARCHAR(20) PRIMARY KEY,
+    failed_count INTEGER NOT NULL DEFAULT 0,
+    last_attempt_at BIGINT NOT NULL,
+    locked_until BIGINT,
+    CONSTRAINT ck_login_attempts_failed_count CHECK (failed_count >= 0)
+);
 
 COMMIT;
 ```

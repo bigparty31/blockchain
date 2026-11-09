@@ -471,3 +471,25 @@ class CheckIn(Base):
         UniqueConstraint("event_id", "user_id", name="uq_check_ins_event_user"),
         Index("idx_check_ins_user_id", "user_id"),
     )
+
+
+# =============================================================================
+# 12. 로그인 시도 (login_attempts) — 학번별 연속 실패 5회 잠금 (PRD v0.15 §9.1, §9.2)
+# =============================================================================
+class LoginAttempt(Base):
+    """학번별 로그인 시도 횟수와 잠금. 서버 메모리가 아니라 DB 에 두어 학생 서버가 여러 대여도 횟수가 합쳐진다 (§9.1).
+
+    users 를 참조하지 않는다. 없는 학번도 똑같이 세고 잠가야 잠기는지 여부로 가입 여부가 드러나지 않는다 (§9.2).
+    로그인에 성공하면 행을 지운다. 시각은 epoch 초 — SQLite 시험과 Postgres 운영에서 시간대 처리가 갈리지 않게 한다.
+    """
+
+    __tablename__ = "login_attempts"
+
+    student_no = Column(String(20), primary_key=True, doc="로그인에 쓴 학번 (users 에 없어도 기록)")
+    failed_count = Column(Integer, nullable=False, server_default=text("0"), doc="이번 구간의 시도 횟수 (검사 중인 시도 포함)")
+    last_attempt_at = Column(BigInteger, nullable=False, doc="마지막 시도 시각 (epoch 초). 오래되면 횟수를 처음부터 센다")
+    locked_until = Column(BigInteger, nullable=True, doc="잠금이 풀리는 시각 (epoch 초). NULL 이면 잠기지 않음")
+
+    __table_args__ = (
+        CheckConstraint("failed_count >= 0", name="ck_login_attempts_failed_count"),
+    )
