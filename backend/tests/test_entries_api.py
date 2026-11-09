@@ -1761,12 +1761,20 @@ def test_request_entry_revision_success(auth_header, monkeypatch):
     monkeypatch.setattr(entries_router, "create_notification", mock_create_notification)
 
     # 1. 수정 요청 호출
+    before = int(time.time())
     res = client.post(f"/entries/{entry_id}/request-revision", headers=auth_header(Role.TREASURER))
+    after = int(time.time())
     assert res.status_code == 200
     data = res.json()
     assert data["id"] == entry_id
     assert data["revision_requested_at"] is not None
     assert isinstance(data["revision_requested_at"], int)
+    # SQLite 가 돌려주는 시간대 없는 값을 서버 로컬 시간대(KST 등)로 해석하면 9시간 어긋난다 (#76 Codex 4차)
+    assert before - 1 <= data["revision_requested_at"] <= after + 1
+
+    # 목록·상세 조회도 같은 값이어야 한다
+    detail = client.get(f"/entries/{entry_id}").json()
+    assert detail["revision_requested_at"] == data["revision_requested_at"]
 
     # 알림 발송 검증
     assert len(notified) == 1
