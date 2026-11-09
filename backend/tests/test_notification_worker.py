@@ -118,6 +118,9 @@ def test_interval_is_a_setting(factory, monkeypatch):
 # ---------------------------------------------------------------- 서명 시한
 
 
+REJECTED = {"status": "REJECTED", "resolved_by": AUDITOR, "resolved_at": T0, "reject_reason": "근거 부족"}
+
+
 def signed_revision(factory, deadline: datetime, revision_id: int = 20, tx_increase=None) -> int:
     with factory() as db:
         db.add(
@@ -160,6 +163,54 @@ def test_auditors_hear_once_when_the_deadline_is_near(factory):
 def test_no_deadline_notice(factory, deadline, tx_increase):
     signed_revision(factory, deadline, tx_increase=tx_increase)
     assert worker.notify_deadline_near(factory, T0) == 0
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        REJECTED,  # 감사가 반려했다
+        {"tx_increase": "0x" + "cd" * 32},  # 감사가 승인해 증액이 나갔다
+        {"status": "PENDING", "signature_deadline": None},  # 시한 만료로 되돌아갔다
+        None,  # 시드 정리로 지워졌다
+    ],
+)
+def test_no_deadline_notice_when_the_request_ends_after_it_was_picked(factory, monkeypatch, change):
+    # 후보를 고른 뒤 알림을 만들기 전에 다른 요청이 그 건을 끝내고 커밋한 경우. 끝난 건에 열린 임박 알림이 남으면 재알림까지 간다
+    revision_id = signed_revision(factory, T0 + timedelta(hours=5))
+    pick = worker._deadline_candidates
+
+    def picked_then_changed(db, now_ts, until):
+        candidates = pick(db, now_ts, until)
+        with factory() as other:
+            if change is None:
+                other.delete(other.get(BudgetRevisionRequest, revision_id))
+            else:
+                other.query(BudgetRevisionRequest).filter_by(id=revision_id).update(change)
+                notifications.resolve_notifications(other, budget_revision_request_id=revision_id)
+            other.commit()
+        return candidates
+
+    monkeypatch.setattr(worker, "_deadline_candidates", picked_then_changed)
+    assert worker.notify_deadline_near(factory, T0) == 0
+    assert rows(factory, kind="SIGNATURE_DEADLINE_NEAR") == []
+
+
+def test_deadline_notice_goes_on_for_the_other_requests(factory, monkeypatch):
+    # 한 건이 중간에 끝나도 다른 건은 알린다
+    signed_revision(factory, T0 + timedelta(hours=5), revision_id=20)
+    signed_revision(factory, T0 + timedelta(hours=4), revision_id=21)
+    pick = worker._deadline_candidates
+
+    def picked_then_rejected(db, now_ts, until):
+        candidates = pick(db, now_ts, until)
+        with factory() as other:
+            other.query(BudgetRevisionRequest).filter_by(id=20).update(REJECTED)
+            other.commit()
+        return candidates
+
+    monkeypatch.setattr(worker, "_deadline_candidates", picked_then_rejected)
+    assert worker.notify_deadline_near(factory, T0) == 1
+    assert {n.budget_revision_request_id for n in rows(factory, kind="SIGNATURE_DEADLINE_NEAR")} == {21}
 
 
 def test_threshold_is_a_setting(factory, monkeypatch):

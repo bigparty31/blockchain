@@ -18,7 +18,7 @@ import asyncio
 import logging
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, List, Optional
 
 from sqlalchemy import update
 from sqlalchemy.orm import Session
@@ -130,18 +130,14 @@ def notify_deadline_near(session_factory: Callable[[], Session], now: datetime) 
     until = now_ts + int(deadline_near().total_seconds())
     created = 0
     with session_factory() as db:
-        revisions = (
-            db.query(BudgetRevisionRequest)
-            .filter(
-                BudgetRevisionRequest.status == PRESIDENT_SIGNED,
-                BudgetRevisionRequest.signature_deadline > now_ts,
-                BudgetRevisionRequest.signature_deadline <= until,
-                BudgetRevisionRequest.tx_increase.is_(None),
-            )
-            .order_by(BudgetRevisionRequest.id)
-            .all()
-        )
-        for revision in revisions:
+        for revision_id in [revision.id for revision in _deadline_candidates(db, now_ts, until)]:
+            # 후보를 읽은 뒤 반려·승인·만료가 먼저 커밋됐을 수 있다. 그쪽은 열린 알림을 닫는데, 그때는 임박 알림이 아직 없다.
+            # 여기서 만들면 끝난 건에 열린 알림이 남아 재알림까지 간다. 그래서 행을 잠그고 다시 읽어 아직 서명 대기일 때만 만든다.
+            # 잠근 동안 상태를 바꾸는 쪽(조건부 UPDATE)은 이 commit 을 기다리고, 그 뒤에 도는 resolve_notifications 가 이 알림도 닫는다
+            revision = db.get(BudgetRevisionRequest, revision_id, with_for_update=True, populate_existing=True)
+            if revision is None or not _waiting_for_auditor(revision, now_ts, until):  # 지워졌거나(시드 정리) 이미 끝났다
+                db.rollback()
+                continue
             # 열린 임박 알림이 있으면 이미 알렸다. 시한 만료로 되돌아가면 닫히므로, 다시 서명하면 새로 알린다
             open_notice = (
                 db.query(Notification.id)
@@ -155,8 +151,32 @@ def notify_deadline_near(session_factory: Callable[[], Session], now: datetime) 
             if open_notice is None:
                 create_notification(db, NotificationKind.SIGNATURE_DEADLINE_NEAR, budget_revision_request_id=revision.id)
                 created += 1
-        db.commit()
+            db.commit()  # 건마다 commit 해 잠금을 오래 쥐지 않는다
     return created
+
+
+def _deadline_candidates(db: Session, now_ts: int, until: int) -> List[BudgetRevisionRequest]:
+    return (
+        db.query(BudgetRevisionRequest)
+        .filter(
+            BudgetRevisionRequest.status == PRESIDENT_SIGNED,
+            BudgetRevisionRequest.signature_deadline > now_ts,
+            BudgetRevisionRequest.signature_deadline <= until,
+            BudgetRevisionRequest.tx_increase.is_(None),
+        )
+        .order_by(BudgetRevisionRequest.id)
+        .all()
+    )
+
+
+def _waiting_for_auditor(revision: BudgetRevisionRequest, now_ts: int, until: int) -> bool:
+    """_deadline_candidates 와 같은 조건을 행 하나에 다시 본다."""
+    return (
+        revision.status == PRESIDENT_SIGNED
+        and revision.tx_increase is None
+        and revision.signature_deadline is not None
+        and now_ts < revision.signature_deadline <= until
+    )
 
 
 def expire_signatures(session_factory: Callable[[], Session], now: datetime) -> int:
