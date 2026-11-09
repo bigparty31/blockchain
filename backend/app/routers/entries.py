@@ -112,6 +112,8 @@ async def _get_chain_registrant(entry_id: int, chain: ChainClient) -> str:
 # PENDING, CONFIRMED만 대조하며 초안(status IS NULL), REJECTED, BLOCKED는 제외한다.
 DUPLICATE_TARGET_STATUSES = ("PENDING", "CONFIRMED")
 
+_SUBMIT_DUPLICATE_LOCK = asyncio.Lock()
+
 
 def _is_valid_correction_target(db: Session, target: DBEntry) -> bool:
     """정정 대상이 '정정 가능 항목'(원본이거나 다른 예산으로 재분류된 양수 지출 정정)인지 확인합니다 (docs/CONTRACTS.md '정정')."""
@@ -342,9 +344,18 @@ def _detect_duplicate_entry_id(
     amount: int,
     corrects_entry_id: Optional[int] = None,
     exclude_entry_id: Optional[int] = None,
+    include_inflight: bool = False,
 ) -> Optional[int]:
-    """PENDING·CONFIRMED 내역 중 동일 결제정보(승인번호+결제일시+금액) 또는 동일 영수증 해시가 있는지 검사하여 기존 Entry ID를 반환합니다."""
-    dup_filters = [DBEntry.status.in_(DUPLICATE_TARGET_STATUSES)]
+    """PENDING·CONFIRMED(및 include_inflight=True 시 제출 선점 tx_pending 건) 내역 중 동일 결제정보(승인번호+결제일시+금액) 또는 동일 영수증 해시가 있는지 검사하여 기존 Entry ID를 반환합니다."""
+    if include_inflight:
+        dup_filters = [
+            or_(
+                DBEntry.status.in_(DUPLICATE_TARGET_STATUSES),
+                and_(DBEntry.status.is_(None), DBEntry.tx_pending.isnot(None)),
+            )
+        ]
+    else:
+        dup_filters = [DBEntry.status.in_(DUPLICATE_TARGET_STATUSES)]
     if exclude_entry_id is not None:
         dup_filters.append(DBEntry.id != exclude_entry_id)
     if corrects_entry_id is not None:
@@ -970,39 +981,72 @@ async def submit_entry(
             detail="서명자가 등록자와 일치하지 않습니다.",
         )
 
-    # 6.5 초안 상태에서 동일 영수증으로 2건 이상 만든 뒤 순차 제출하는 경우를 잡기 위해,
-    # PENDING 전환 직전에 이미 PENDING·CONFIRMED 상태가 된 중복 건이 있는지 한 번 더 검사한다 (#66 리뷰 피드백 2).
-    try:
-        dup_id = _detect_duplicate_entry_id(
-            db,
-            receipt_hash=target.receipt_hash,
-            ocr_approval_no=target.ocr_approval_no,
-            ocr_paid_at=target.ocr_paid_at,
-            amount=target.amount,
-            corrects_entry_id=target.corrects_entry_id,
-            exclude_entry_id=target.id,
-        )
-        if dup_id is not None:
-            target.ocr_status = OCRStatus.DUPLICATE.value
-    except SQLAlchemyError as e:
-        logger.exception("서명 제출 시 영수증 중복 재검사 중 데이터베이스 오류: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="데이터베이스 처리 중 오류가 발생했습니다.",
-        )
+    # 6.5 초안 상태에서 동일 영수증으로 2건 이상 만든 뒤 순차·동시 제출하는 경우를 모두 잡기 위해,
+    # 중복 재검사부터 체인 릴레이(PENDING 반영)까지 직렬화하고 PENDING 반영 직후에도 한 번 더 확인한다 (#66 리뷰 피드백 2).
+    target_receipt_hash = target.receipt_hash
+    target_ocr_approval_no = target.ocr_approval_no
+    target_ocr_paid_at = target.ocr_paid_at
+
+    async def _check_dup_and_relay_record():
+        try:
+            db.expire_all()
+            fresh_target = db.query(DBEntry).filter(DBEntry.id == id).first()
+            if fresh_target is not None:
+                dup_id = _detect_duplicate_entry_id(
+                    db,
+                    receipt_hash=fresh_target.receipt_hash,
+                    ocr_approval_no=fresh_target.ocr_approval_no,
+                    ocr_paid_at=fresh_target.ocr_paid_at,
+                    amount=fresh_target.amount,
+                    corrects_entry_id=fresh_target.corrects_entry_id,
+                    exclude_entry_id=id,
+                    include_inflight=True,
+                )
+                if dup_id is not None:
+                    fresh_target.ocr_status = OCRStatus.DUPLICATE.value
+            db.commit()
+        except SQLAlchemyError as e:
+            db.rollback()
+            logger.exception("서명 제출 시 영수증 중복 재검사/커밋 중 데이터베이스 오류: %s", e)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="데이터베이스 처리 중 오류가 발생했습니다.",
+            )
+
+        res = await relay_record(db, chain, record_req, req.signature)
+
+        if res.status == EntryStatus.PENDING:
+            try:
+                db.expire_all()
+                settled_target = db.query(DBEntry).filter(DBEntry.id == id).first()
+                if settled_target is not None and settled_target.ocr_status != OCRStatus.DUPLICATE.value:
+                    dup_after_id = _detect_duplicate_entry_id(
+                        db,
+                        receipt_hash=settled_target.receipt_hash,
+                        ocr_approval_no=settled_target.ocr_approval_no,
+                        ocr_paid_at=settled_target.ocr_paid_at,
+                        amount=settled_target.amount,
+                        corrects_entry_id=settled_target.corrects_entry_id,
+                        exclude_entry_id=id,
+                        include_inflight=False,
+                    )
+                    if dup_after_id is not None:
+                        other_row = db.query(DBEntry).filter(DBEntry.id == dup_after_id).first()
+                        if other_row is None or other_row.ocr_status != OCRStatus.DUPLICATE.value or dup_after_id < id:
+                            settled_target.ocr_status = OCRStatus.DUPLICATE.value
+                            db.commit()
+            except SQLAlchemyError:
+                db.rollback()
+
+        return res
 
     # 7. 체인 릴레이 호출 및 상태 갱신 (chain_tx 서비스 연동)
     try:
-        db.commit()
-    except SQLAlchemyError as e:
-        logger.exception("체인 릴레이 전 데이터베이스 커밋 오류: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="데이터베이스 처리 중 오류가 발생했습니다.",
-        )
-
-    try:
-        tx_result = await relay_record(db, chain, record_req, req.signature)
+        if target_receipt_hash or (target_ocr_approval_no and target_ocr_paid_at):
+            async with _SUBMIT_DUPLICATE_LOCK:
+                tx_result = await _check_dup_and_relay_record()
+        else:
+            tx_result = await _check_dup_and_relay_record()
     except EntryConflict as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except ChainRevert as e:
