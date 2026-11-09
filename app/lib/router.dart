@@ -4,6 +4,7 @@ import 'core/enums.dart';
 import 'models/entry_model.dart';
 import 'services/auth_service.dart';
 import 'screens/council/approval_list_screen.dart';
+import 'screens/council/bank_reconcile_screen.dart';
 import 'screens/council/correction_screen.dart';
 import 'screens/council/council_home_screen.dart';
 import 'screens/council/expense_create_screen.dart';
@@ -71,6 +72,9 @@ class AppRoutes {
   /// 학기 결산 — 요약·예산 집행·메타지표 (감사·회장). 인자 없음
   static const councilSettlement = '/council/settlement';
 
+  /// 계좌 대조 — 은행 거래내역 CSV 와 장부 대조 결과 (임원 조회, 총무만 업로드·재대조). 인자 없음
+  static const councilBankReconcile = '/council/bank-reconcile';
+
   // ── 회장 (screens/president/) ───────────────────────────────
   /// 예산 편성 (임원). 인자: [UserRole] — 로그인한 역할과 같아야 한다.
   /// 회장이 아니면 화면이 안내만 보여준다.
@@ -125,6 +129,10 @@ class AppRouter {
         return _guarded(settings, _officers, (_) => const HardwareTestScreen());
       case AppRoutes.councilSettlement:
         return _guarded(settings, _approvers, (_) => const SettlementScreen());
+      case AppRoutes.councilBankReconcile:
+        // 업로드 버튼 여부는 여는 순간의 역할로 정한다 (빌더가 나중에 돌 때 로그아웃돼 있어도 안전하게)
+        final canUpload = _sessionRole == UserRole.TREASURER;
+        return _guarded(settings, _officers, (_) => BankReconcileScreen(canUpload: canUpload));
 
       // 회장
       case AppRoutes.presidentBudgetPlan:

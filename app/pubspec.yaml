@@ -23,6 +23,8 @@ dependencies:
   # String.trim() 은 BOM 처리가 Python 과 달라 쓰지 않는다.
   unorm_dart: ^0.3.0
   web3dart: ^3.0.3
+  # 계좌 대조(A9) — 은행 거래내역 CSV 를 기기에서 고른다 (11/9 팀장 승인)
+  file_picker: ^10.1.2
 
 dev_dependencies:
   flutter_test:
