@@ -301,16 +301,17 @@ async def get_entries(
 
     if db_entries:
         try:
-            chain = await _get_chain_client_safe(request)
-            if chain is not None:
-                async def _fetch_all():
-                    tasks = [chain.get_entry(e.id) for e in db_entries]
-                    return await asyncio.gather(*tasks, return_exceptions=True)
-
-                fetched = await asyncio.wait_for(_fetch_all(), timeout=1.5)
+            async def _fetch_all():
+                chain = await _get_chain_client_safe(request)
+                if chain is None:
+                    return
+                tasks = [chain.get_entry(e.id) for e in db_entries]
+                fetched = await asyncio.gather(*tasks, return_exceptions=True)
                 for e, res in zip(db_entries, fetched):
                     if not isinstance(res, Exception) and res and res.registrant:
                         chain_registrants[e.id] = res.registrant
+
+            await asyncio.wait_for(_fetch_all(), timeout=1.5)
         except Exception:
             pass
 
@@ -368,20 +369,21 @@ async def get_entry_by_id(
     chain_registrant = None
     block_num = None
     try:
-        chain = await _get_chain_client_safe(request)
-        if chain is not None:
-            async def _fetch_entry_chain_detail():
-                nonlocal chain_registrant, block_num
-                chain_entry = await chain.get_entry(id)
-                if chain_entry and chain_entry.registrant:
-                    chain_registrant = chain_entry.registrant
-                tx_hash = entry.tx_confirm or entry.tx_pending
-                if tx_hash:
-                    tx_detail = await chain.entry_tx_detail(tx_hash, id)
-                    if tx_detail:
-                        block_num = tx_detail.block_number
+        async def _fetch_entry_chain_detail():
+            nonlocal chain_registrant, block_num
+            chain = await _get_chain_client_safe(request)
+            if chain is None:
+                return
+            chain_entry = await chain.get_entry(id)
+            if chain_entry and chain_entry.registrant:
+                chain_registrant = chain_entry.registrant
+            tx_hash = entry.tx_confirm or entry.tx_pending
+            if tx_hash:
+                tx_detail = await chain.entry_tx_detail(tx_hash, id)
+                if tx_detail:
+                    block_num = tx_detail.block_number
 
-            await asyncio.wait_for(_fetch_entry_chain_detail(), timeout=2.0)
+        await asyncio.wait_for(_fetch_entry_chain_detail(), timeout=2.0)
     except Exception:
         pass
 
