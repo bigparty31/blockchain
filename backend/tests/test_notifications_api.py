@@ -206,6 +206,35 @@ def test_late_revoke_does_not_touch_the_token_someone_took_over(auth_header):
     assert tokens() == [(PRESIDENT, "fcm-1", True)]
 
 
+def test_takeover_survives_a_revoke_that_lands_after_it_read_the_row(auth_header, monkeypatch):
+    # 반대 순서 경합 (#78 codex 2차). 회장의 등록이 감사의 활성 토큰을 읽은 직후, 감사의 해제(로그아웃)가 먼저 커밋됐다.
+    # 회장 쪽이 revoked_at=None 을 ORM 속성 대입으로만 하면 읽을 때 값도 None 이라 UPDATE 에서 빠지고, 토큰이 해제된 채 남는다
+    from app.routers import notifications as router_module
+
+    register(auth_header, Role.AUDITOR)
+    real = router_module.datetime
+    fired = []
+
+    class RevokeAfterRead:
+        """_register 가 행을 읽은 다음 처음 부르는 datetime.now() 에서 감사의 해제를 다른 세션으로 커밋한다."""
+
+        @staticmethod
+        def now(tz=None):
+            if not fired:
+                fired.append(True)
+                with _session() as other:
+                    other.query(DeviceToken).filter(
+                        DeviceToken.token == "fcm-1", DeviceToken.user_id == AUDITOR, DeviceToken.revoked_at.is_(None)
+                    ).update({DeviceToken.revoked_at: real.now(timezone.utc)}, synchronize_session=False)
+                    other.commit()
+            return real.now(tz)
+
+    monkeypatch.setattr(router_module, "datetime", RevokeAfterRead)
+    assert register(auth_header, Role.PRESIDENT).status_code == 200
+    assert fired == [True]
+    assert tokens() == [(PRESIDENT, "fcm-1", True)]  # 회장 토큰은 살아 있어야 푸시가 간다
+
+
 def test_revoking_is_200_whatever_happens(auth_header):
     register(auth_header, Role.AUDITOR, token="mine")
     register(auth_header, Role.PRESIDENT, token="theirs")

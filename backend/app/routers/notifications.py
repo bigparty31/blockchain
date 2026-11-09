@@ -152,7 +152,16 @@ def _register(db: Session, user_id: int, req: DeviceTokenRequest) -> DeviceToken
         row = DeviceToken(user_id=user_id, platform=req.platform, token=req.token, registered_at=now)
         db.add(row)
     elif row.user_id != user_id or row.revoked_at is not None:
-        row.user_id, row.platform, row.registered_at, row.revoked_at = user_id, req.platform, now, None
+        # ORM 속성 대입으로 하지 않는다. 읽을 때 revoked_at 이 이미 None(앞사람의 활성 토큰)이면 None 대입은 바뀐 게 없어
+        # UPDATE 에서 빠진다. 그 사이 앞사람의 해제가 먼저 커밋되면 넘겨받은 토큰이 해제된 채 남아 푸시가 안 간다 (#78 codex 2차)
+        db.execute(
+            update(DeviceToken)
+            .where(DeviceToken.id == row.id)
+            .values(user_id=user_id, platform=req.platform, registered_at=now, revoked_at=None)
+            .execution_options(synchronize_session=False)
+        )
+        db.commit()
+        return DeviceTokenResponse(id=row.id, registered_at=_unix(now))
     else:
         return DeviceTokenResponse(id=row.id, registered_at=_unix(row.registered_at))
     db.commit()
