@@ -1283,27 +1283,45 @@ def test_create_entry_optional_string_max_lengths(auth_header, field, value):
 
 
 def test_entry_response_registrant(auth_header):
-    """GET /entries 및 GET /entries/{id}에서 registrant 필드 반환 검증"""
-    # 1. 단건 상세 조회
-    res = client.get("/entries/1")
+    """GET /entries 및 GET /entries/{id}에서 온체인 registrant 필드 반환 검증 (체인 미기록 건은 None)"""
+    now = int(time.time())
+    body = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 15000,
+        "counterparty": "등록자조회상점",
+        "purpose": "온체인 등록자 반환 테스트",
+        "budget_id": 2,
+        "occurred_at": 1788793200,
+        "receipt_hash": TEST_RECEIPT_HASH,
+        "receipt_path": TEST_RECEIPT_PATH,
+    }
+    res_create = client.post("/entries", json=body, headers=auth_header(Role.TREASURER))
+    entry_id = res_create.json()["id"]
+    res_sub = client.post(
+        f"/entries/{entry_id}/submit",
+        json={"deadline": now + 600, "signature": fake_signature(TREASURER_WALLET)},
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_sub.status_code == 200
+
+    # 1. 온체인 등록된 건 단건 상세 조회 -> registrant 채워짐
+    res = client.get(f"/entries/{entry_id}")
     assert res.status_code == 200
     data = res.json()
-    assert "registrant" in data
     assert data["registrant"] is not None
-    assert data["registrant"].startswith("0x")
+    assert data["registrant"].lower() == TREASURER_WALLET.lower()
 
-    # 2. 목록 조회
+    # 2. 목록 조회 -> 온체인 등록된 건은 registrant 채워지고, 체인에 없는 시드 건(id=1)은 None
     res_list = client.get("/entries")
     assert res_list.status_code == 200
-    entries = res_list.json()
-    assert len(entries) > 0
-    for e in entries:
-        assert "registrant" in e
-        assert e["registrant"] is not None
+    entries = {e["id"]: e for e in res_list.json()}
+    assert entries[entry_id]["registrant"].lower() == TREASURER_WALLET.lower()
+    assert entries[1]["registrant"] is None
 
 
 def test_get_entries_and_detail_return_200_when_chain_setup_fails(auth_header):
-    """체인 클라이언트 초기화 실패(ChainSetupError 등) 시에도 GET /entries 및 GET /entries/{id}가 200으로 동작하고 DB 등록자 지갑으로 대체된다."""
+    """체인 클라이언트 초기화 실패(ChainSetupError 등) 시 GET /entries 및 GET /entries/{id}는 200으로 동작하되 registrant는 null(None)로 두어 앱이 확인 불가 상태를 감지하게 한다 (#66 리뷰 3)."""
     from app.chain import ChainSetupError
 
     def broken_chain_client():
@@ -1311,24 +1329,24 @@ def test_get_entries_and_detail_return_200_when_chain_setup_fails(auth_header):
 
     app.dependency_overrides[get_chain_client] = broken_chain_client
 
-    # 1. 목록 조회: 200 OK 및 DB registrant 대체
+    # 1. 목록 조회: 200 OK 및 registrant=None
     res_list = client.get("/entries")
     assert res_list.status_code == 200
     entries = res_list.json()
     assert len(entries) > 0
-    assert entries[0]["registrant"].lower() == TREASURER_WALLET.lower()
+    assert entries[0]["registrant"] is None
     assert entries[0]["block_number"] is None
 
-    # 2. 단건 상세 조회: 200 OK 및 DB registrant 대체
+    # 2. 단건 상세 조회: 200 OK 및 registrant=None
     res_detail = client.get("/entries/1")
     assert res_detail.status_code == 200
     detail = res_detail.json()
-    assert detail["registrant"].lower() == TREASURER_WALLET.lower()
+    assert detail["registrant"] is None
     assert detail["block_number"] is None
 
 
 def test_get_entries_slow_node_returns_200_within_timeout(auth_header, monkeypatch):
-    """체인 RPC 응답이 지연되어도 GET /entries가 타임아웃 없이 1.5초 이내에 200 OK와 DB 등록자 지갑으로 반환된다."""
+    """체인 RPC 응답이 지연되어도 GET /entries가 타임아웃 없이 1.5초 이내에 200 OK와 registrant=None으로 반환된다."""
     import asyncio
 
     async def slow_get_entry(entry_id):
@@ -1345,7 +1363,7 @@ def test_get_entries_slow_node_returns_200_within_timeout(auth_header, monkeypat
     assert elapsed < 2.5  # 1.5초 wait_for에 의해 3초 앱 타임아웃 이전에 안전하게 반환
     entries = res_list.json()
     assert len(entries) > 0
-    assert entries[0]["registrant"].lower() == TREASURER_WALLET.lower()
+    assert entries[0]["registrant"] is None
 
 
 def test_get_onchain_entry_endpoint(auth_header):
@@ -1965,7 +1983,27 @@ def test_duplicate_check_ignores_draft_entries(auth_header):
 
     with _test_session_factory() as db:
         row2 = db.query(DBEntry).filter(DBEntry.id == id2).first()
-        assert row2.ocr_status == "MATCH"  # DUPLICATE 아님!
+        assert row2.ocr_status == "MATCH"  # 아직 둘 다 초안이므로 DUPLICATE 아님!
+
+    # 3. 초안 1 제출(PENDING) 후 초안 2 제출(submit) 시 -> submit 단계 재검사에서 DUPLICATE로 전환됨 (#66 리뷰 2)
+    now = int(time.time())
+    sub1 = client.post(
+        f"/entries/{id1}/submit",
+        json={"deadline": now + 600, "signature": fake_signature(TREASURER_WALLET)},
+        headers=auth_header(Role.TREASURER),
+    )
+    assert sub1.status_code == 200
+
+    sub2 = client.post(
+        f"/entries/{id2}/submit",
+        json={"deadline": now + 600, "signature": fake_signature(TREASURER_WALLET)},
+        headers=auth_header(Role.TREASURER),
+    )
+    assert sub2.status_code == 200
+
+    detail2 = client.get(f"/entries/{id2}").json()
+    assert detail2["ocr_status"] == "DUPLICATE"
+    assert detail2["duplicate_of"] == id1
 
 
 def test_duplicate_check_ignores_correction_original_entry(auth_header):
