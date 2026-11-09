@@ -112,14 +112,7 @@ def create_notification(
     recipients = _recipients(db, kind, entry, revision, user_ids)
     if kind is K.ENTRY_CONFIRM_FAILED:
         # 같은 건의 확정 실패를 아직 읽지 않았으면 다시 만들지 않는다. 읽은 뒤 다시 실패하면 한 번 더 알린다
-        unread = {
-            user_id
-            for (user_id,) in db.query(Notification.user_id).filter(
-                Notification.kind == kind.value,
-                Notification.entry_id == entry_id,
-                Notification.read_at.is_(None),
-            )
-        }
+        unread = _unread_confirm_failed(db, entry_id)
         recipients = [user_id for user_id in recipients if user_id not in unread]
     if not recipients:
         logger.warning("알림 %s 를 받을 사람이 없다 (entry_id=%s, revision_id=%s)", kind.value, entry_id, budget_revision_request_id)
@@ -129,7 +122,7 @@ def create_notification(
     body = _body(kind, entry, revision)
     next_remind_at = now + remind_interval() if kind in REMIND_KINDS else None
     for user_id in recipients:
-        notification = Notification(
+        values = dict(
             user_id=user_id,
             kind=kind.value,
             entry_id=entry_id,
@@ -140,8 +133,46 @@ def create_notification(
             remind_count=0,
             next_remind_at=next_remind_at,
         )
-        db.add(notification)
+        if kind is K.ENTRY_CONFIRM_FAILED:
+            # 위의 조회와 INSERT 사이에 같은 실패가 먼저 기록될 수 있다 (확정 요청 두 개가 브로드캐스트 전에 함께 revert).
+            # uq_notifications_confirm_failed_unread 에 걸리면 건너뛴다
+            new_id = _insert_unless_unread_exists(db, values)
+            if new_id is None:
+                continue  # 이미 기록됐다. 푸시도 그쪽이 보낸다
+            notification = db.get(Notification, new_id)
+        else:
+            notification = Notification(**values)
+            db.add(notification)
         push.queue_notification(db, notification)
+
+
+def _unread_confirm_failed(db: Session, entry_id: int) -> set:
+    """entry_id 의 확정 실패 알림을 아직 읽지 않은 사람."""
+    return {
+        user_id
+        for (user_id,) in db.query(Notification.user_id).filter(
+            Notification.kind == K.ENTRY_CONFIRM_FAILED.value,
+            Notification.entry_id == entry_id,
+            Notification.read_at.is_(None),
+        )
+    }
+
+
+def _insert_unless_unread_exists(db: Session, values: dict) -> Optional[int]:
+    """INSERT ... ON CONFLICT DO NOTHING. 넣었으면 새 id, 이미 있었으면 None.
+
+    IntegrityError 를 세이브포인트로 잡지 않는다 — 세이브포인트 롤백도 세션의 after_rollback 을 일으켜
+    같은 세션에 쌓인 푸시(app/services/push.py)까지 버린다.
+    """
+    dialect = db.get_bind().dialect.name
+    if dialect == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert
+    elif dialect == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert
+    else:
+        raise RuntimeError(f"지원하지 않는 DB 다: {dialect}")
+    stmt = insert(Notification).values(**values).on_conflict_do_nothing().returning(Notification.id)
+    return db.execute(stmt).scalar_one_or_none()
 
 
 def resolve_notifications(

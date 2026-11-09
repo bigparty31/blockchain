@@ -486,6 +486,9 @@ NOTIFICATION_REMIND_KINDS = (
     NotificationKind.SIGNATURE_DEADLINE_NEAR.value,
 )
 
+# 안 읽은 확정 실패 알림 (uq_notifications_confirm_failed_unread 의 조건)
+CONFIRM_FAILED_UNREAD = f"kind = '{NotificationKind.ENTRY_CONFIRM_FAILED.value}' AND read_at IS NULL"
+
 
 class Notification(Base):
     """임원 한 명에게 간 알림 한 건. 학생에게는 행을 만들지 않는다 — 학생은 FCM 토픽 푸시만 받는다 (PRD §4.8).
@@ -525,6 +528,16 @@ class Notification(Base):
         Index("idx_notifications_entry", "entry_id"),
         Index("idx_notifications_revision", "budget_revision_request_id"),
         Index("idx_notifications_next_remind", "next_remind_at"),
+        # 같은 건의 확정 실패는 받는 사람마다 안 읽은 알림이 한 건이다. 실패 기록이 동시에 두 번 와도 DB 가 막는다
+        # (create_notification 은 이 인덱스에 걸리면 건너뛴다). 읽은 뒤 다시 실패하면 새 행이 들어간다
+        Index(
+            "uq_notifications_confirm_failed_unread",
+            "entry_id",
+            "user_id",
+            unique=True,
+            postgresql_where=text(CONFIRM_FAILED_UNREAD),
+            sqlite_where=text(CONFIRM_FAILED_UNREAD),
+        ),
     )
 
 

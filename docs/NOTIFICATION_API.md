@@ -84,6 +84,7 @@
 ## 5. 기기 토큰 해제 (`DELETE /notifications/device-tokens/{token}`)
 
 로그아웃할 때 부른다. 본인 토큰이 아니거나 없는 토큰이어도 `200`이다 — 앱이 결과에 따라 할 일이 없다.
+본인 것이고 해제되지 않은 토큰만 한 번의 조건부 UPDATE로 해제한다. 그사이 같은 기기에서 다른 임원이 토큰을 넘겨받았으면 `revoked: false`이고 그 사람의 토큰은 그대로다.
 
 **Response (`200 OK`)**
 ```json
@@ -229,7 +230,7 @@ def resolve_notifications(
 
 - **알리는 것:** `InsufficientBudget`, `BudgetExpired`. 항목이 `PENDING`으로 남고 총무가 반려 후 재등록이나 증액 요청으로 조치할 수 있는 실패다 (§4.1). 대부분 시뮬레이션에서 걸려 선점 전에 끝나므로 시뮬레이션 revert도 포함한다
 - **알리지 않는 것:** 그 밖의 revert(서명·`entryCommit` 불일치, 권한, 이미 처리됨)는 승인자의 요청 응답으로 끝난다. 총무가 할 일이 없다. `ChainUnavailable`은 실패가 아니라 결과를 모르는 것이라 알리지 않는다
-- **반복 방지:** 그 항목의 `ENTRY_CONFIRM_FAILED` 중 안 읽은 행이 있으면 새로 만들지 않는다. 총무가 읽은 뒤 다시 실패하면 한 번 더 알린다
+- **반복 방지:** 그 항목의 `ENTRY_CONFIRM_FAILED` 중 안 읽은 행이 있으면 새로 만들지 않는다. 총무가 읽은 뒤 다시 실패하면 한 번 더 알린다. 같은 실패가 동시에 두 번 기록돼도 부분 UNIQUE 인덱스(`uq_notifications_confirm_failed_unread`)가 한 건만 남긴다
 - 체인에 남은 것이 없어 상태 전이가 없으므로 항목의 다른 칸은 바꾸지 않고 알림 행만 기록한다
 
 ## 확인이 필요한 것

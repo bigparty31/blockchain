@@ -67,12 +67,21 @@ def upgrade() -> None:
         batch_op.create_index('idx_notifications_next_remind', ['next_remind_at'], unique=False)
         batch_op.create_index('idx_notifications_revision', ['budget_revision_request_id'], unique=False)
         batch_op.create_index('idx_notifications_user_open', ['user_id', 'resolved_at', 'read_at'], unique=False)
+        # 같은 건의 안 읽은 확정 실패는 받는 사람마다 한 건 (동시 기록 중복 방지)
+        batch_op.create_index(
+            'uq_notifications_confirm_failed_unread',
+            ['entry_id', 'user_id'],
+            unique=True,
+            postgresql_where=sa.text("kind = 'ENTRY_CONFIRM_FAILED' AND read_at IS NULL"),
+            sqlite_where=sa.text("kind = 'ENTRY_CONFIRM_FAILED' AND read_at IS NULL"),
+        )
 
 
 
 def downgrade() -> None:
     """Downgrade schema."""
     with op.batch_alter_table('notifications', schema=None) as batch_op:
+        batch_op.drop_index('uq_notifications_confirm_failed_unread')
         batch_op.drop_index('idx_notifications_user_open')
         batch_op.drop_index('idx_notifications_revision')
         batch_op.drop_index('idx_notifications_next_remind')
