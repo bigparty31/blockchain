@@ -51,6 +51,9 @@ class EntryModel {
   final int? correctsEntryId;
   final CorrectionReason? correctionReason;
 
+  /// 총무가 수정을 요청한 시각 (unix seconds). 대기 건에만 생긴다.
+  final int? revisionRequestedAt;
+
   EntryModel({
     required this.id,
     required this.termId,
@@ -80,6 +83,7 @@ class EntryModel {
     this.blockNumber,
     this.correctsEntryId,
     this.correctionReason,
+    this.revisionRequestedAt,
   });
 
   factory EntryModel.fromJson(Map<String, dynamic> json) {
@@ -114,6 +118,8 @@ class EntryModel {
       correctionReason: json['correction_reason'] != null
           ? CorrectionReason.fromCode(json['correction_reason'])
           : null,
+      // 숫자가 아니면 「요청 안 함」으로 둔다 — 시각을 지어내지 않는다
+      revisionRequestedAt: json['revision_requested_at'] is int ? json['revision_requested_at'] as int : null,
     );
   }
 

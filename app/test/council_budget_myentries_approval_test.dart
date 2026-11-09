@@ -295,9 +295,10 @@ void main() {
       expect(find.textContaining('거래처5 · 목적5'), findsOneWidget);
     });
 
-    testWidgets('대기 건은 고칠 수 없고, 처리 중인 건은 다시 보낼 수 없다', (tester) async {
+    testWidgets('대기 건은 고칠 수 없어 「수정 요청」만 열리고, 처리 중인 건은 다시 보낼 수 없다', (tester) async {
       await open(tester);
-      expect(find.text('승인 대기 중 — 고치려면 수정 요청이 필요해요 (준비 중)'), findsNWidgets(2));
+      expect(find.text('수정 요청'), findsNWidgets(2));
+      expect(find.textContaining('(준비 중)'), findsNothing);
       expect(find.text('처리 중 — 다시 보낼 수 없어요'), findsOneWidget);
     });
 
