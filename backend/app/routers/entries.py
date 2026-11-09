@@ -486,12 +486,21 @@ def _to_schema(
         block_number=block_number,
         corrects_entry_id=entry.corrects_entry_id,
         correction_reason=entry.correction_reason,
-        revision_requested_at=(
-            int(entry.revision_requested_at.timestamp())
-            if isinstance(getattr(entry, "revision_requested_at", None), datetime)
-            else (int(entry.revision_requested_at) if getattr(entry, "revision_requested_at", None) is not None else None)
-        ),
+        revision_requested_at=_to_unix_seconds_utc(getattr(entry, "revision_requested_at", None)),
     )
+
+
+def _to_unix_seconds_utc(value) -> Optional[int]:
+    """DB 시각을 Unix 초로 바꾼다. SQLite 는 시간대 없는(naive) datetime 을 돌려주므로 UTC 로 간주한다.
+    naive 값에 .timestamp() 를 바로 쓰면 서버 로컬 시간대(KST 등)로 해석되어 9시간 어긋난다 (budgets._to_unix_seconds 와 동일 규칙).
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return int(value.timestamp())
+    return int(value)
 
 
 async def _get_chain_client_safe(request: Request) -> Optional[ChainClient]:
