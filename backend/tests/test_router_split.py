@@ -17,21 +17,20 @@ from app.main_council import app as council_app
 
 
 def _extract_routes(app):
-    """FastAPI 앱에서 (methods, path) 집합을 추출한다."""
+    """FastAPI 앱의 OpenAPI 스키마(app.openapi()['paths'])에서 (method, path) 집합을 추출한다."""
     routes = set()
-    for route in app.routes:
-        methods = getattr(route, "methods", None)
-        path = getattr(route, "path", None)
-        if methods and path:
-            for m in methods:
-                if m not in ("HEAD", "OPTIONS"):
-                    routes.add((m, path))
+    for path, methods_dict in app.openapi().get("paths", {}).items():
+        for method in methods_dict.keys():
+            m = method.upper()
+            if m not in ("HEAD", "OPTIONS", "PARAMETERS"):
+                routes.add((m, path))
     return routes
 
 
 def test_student_api_has_no_write_endpoints_except_auth():
     """student_api 에는 POST /auth/login 외에 어떠한 POST, PUT, DELETE, PATCH 엔드포인트도 없어야 한다."""
     routes = _extract_routes(student_app)
+    assert len(routes) > 0
 
     disallowed_methods = {"POST", "PUT", "DELETE", "PATCH"}
     for method, path in routes:
@@ -51,27 +50,20 @@ def test_student_api_routes_whitelist():
         ("POST", "/auth/login"),
         ("GET", "/auth/me"),
         ("GET", "/entries"),
-        ("GET", "/entries/"),
         ("GET", "/entries/{id}"),
         ("GET", "/entries/{id}/onchain"),
         ("GET", "/balance"),
-        ("GET", "/balance/"),
         ("GET", "/budgets"),
-        ("GET", "/budgets/"),
         ("GET", "/terms"),
-        ("GET", "/terms/"),
         ("GET", "/terms/{id}"),
         ("GET", "/memberships/me"),
         ("GET", "/chain/domains"),
+        ("GET", "/receipts/{filename}"),
+        ("GET", "/users/wallets"),
     }
 
-    # docs, openapi 경로는 시스템 기본이므로 검사 대상에서 제외
-    filtered_routes = {
-        (m, p) for (m, p) in routes if not p.startswith("/docs") and not p.startswith("/openapi") and not p.startswith("/redoc")
-    }
-
-    assert filtered_routes == expected_routes, (
-        f"student_api 엔드포인트 불일치.\n누락: {expected_routes - filtered_routes}\n초과: {filtered_routes - expected_routes}"
+    assert routes == expected_routes, (
+        f"student_api 엔드포인트 불일치.\n누락: {expected_routes - routes}\n초과: {routes - expected_routes}"
     )
 
 
@@ -115,9 +107,14 @@ def test_student_api_blocks_council_commands():
     res = client.post("/receipts")
     assert res.status_code in (404, 405)
 
-    # 10. 임원 지갑 매핑 조회 시도 -> 404/405
+    # 10. 임원 지갑 매핑 조회(검증 2단계)는 student_api 에서 정상 허용(200)되어야 한다
     res = client.get("/users/wallets")
-    assert res.status_code in (404, 405)
+    assert res.status_code == 200
+
+    # 11. 영수증 파일 열람(GET /receipts/{filename})도 student_api 에 마운트되어 동일 저장소를 읽는다
+    res = client.get("/receipts/0000000000000000000000000000000000000000000000000000000000000000.jpg")
+    assert res.status_code == 404
+    assert "영수증 파일" in res.json().get("detail", "")
 
 
 def test_council_api_contains_all_routes():

@@ -26,8 +26,11 @@ from app.routers.terms import query_router as terms_query_router
 from app.routers.memberships import query_router as memberships_query_router
 from app.routers.chain import query_router as chain_query_router
 from app.routers.budget_revisions import command_router as budget_revisions_command_router
-from app.routers.receipts import command_router as receipts_command_router
-from app.routers.users import command_router as users_command_router
+from app.routers.receipts import (
+    command_router as receipts_command_router,
+    query_router as receipts_query_router,
+)
+from app.routers.users import query_router as users_query_router
 from app.routers.ocr import command_router as ocr_command_router
 from app.routers.settlement import router as settlement_command_router
 from app.routers.events import router as events_command_router
@@ -44,6 +47,8 @@ STUDENT_QUERY_ROUTERS: List[APIRouter] = [
     terms_query_router,
     memberships_query_router,
     chain_query_router,
+    receipts_query_router,
+    users_query_router,
 ]
 
 # 학생회용 쓰기/명령 전용 라우터 목록
@@ -52,7 +57,6 @@ COUNCIL_COMMAND_ROUTERS: List[APIRouter] = [
     budgets_command_router,
     budget_revisions_command_router,
     receipts_command_router,
-    users_command_router,
     ocr_command_router,
     settlement_command_router,
     events_command_router,
@@ -73,7 +77,8 @@ COUNCIL_ALL_ROUTERS: List[APIRouter] = [
     chain_query_router,
     budget_revisions_command_router,
     receipts_command_router,
-    users_command_router,
+    receipts_query_router,
+    users_query_router,
     ocr_command_router,
     settlement_command_router,
     events_command_router,
