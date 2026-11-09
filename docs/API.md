@@ -568,6 +568,108 @@
 
 ---
 
+## 계좌 대조
+
+PRD v0.15 §4.6. 총무가 은행에서 내려받은 거래내역 CSV를 올리면 원장과 1:1로 맞추고, 짝이 없는 거래를 지목합니다.
+- **원장에 자동 반영하지 않습니다.** 파일은 검사 용도로만 씁니다.
+- 업로드는 **총무만**, 조회는 **임원(총무·감사·회장)**만. 토큰이 없으면 `401`, 권한이 없으면 `403`.
+- 같은 학기에 여러 번 올릴 수 있습니다. 새로 올리면 같은 학기 이전 스냅샷의 짝을 풀고 **최신 파일로 다시 맞춥니다**(원장 1건은 은행 거래 1줄에만 짝 — `uq_bank_tran_matched_entry`). 이전 스냅샷은 파일 해시·거래 줄을 근거로 남고 `superseded: true`가 됩니다.
+
+**대조 규칙**
+- 방향(입금=`INCOME`, 출금=`EXPENSE`)·금액·날짜(KST)가 모두 같으면 짝. 짝이 된 원장은 후보에서 빠집니다(같은 날 같은 금액 2건이면 원장도 2건 있어야 둘 다 맞음).
+- 후보는 **정정이 아닌 원본 중 `PENDING`·`CONFIRMED`만**. 초안·`REJECTED`·`BLOCKED`는 제외 — 예산 초과로 차단된 지출의 출금은 `UNREGISTERED`로 드러납니다.
+- 금액은 **원본 + 확정된 정정의 순금액**. 순금액이 0 이하(전액 환불)면 후보가 아닙니다. 확정 항목을 대기 항목보다 먼저 짝짓습니다.
+
+### 1. 거래내역 업로드·대조 (`POST /bank/snapshots`)
+
+**Request**
+```json
+{
+  "term_id": 1,
+  "file_base64": "6rGw656Y7J287IucLOyggeyalCwu...",
+  "file_hash": "0x9f2c…(선택, 64자리 소문자 hex)"
+}
+```
+- `file_base64`: 은행에서 받은 CSV **원본 바이트**의 base64 (최대 2MB). 인코딩은 UTF-8(BOM 허용)·CP949 둘 다 받습니다.
+- `file_hash` (선택): 앱이 계산한 원본 바이트 SHA-256 (`0x` + 소문자 hex). 주면 서버 재계산과 대조해 다르면 `400`, 대문자면 `422` (`HASHING.md` §4·§5).
+- 지원 형식: NH(`거래일시`)·KB(`거래일자`+`거래시각`) 등 헤더 이름으로 컬럼을 찾습니다. 위쪽 안내 줄(계좌번호·조회기간)·빈 줄·합계 줄은 건너뜁니다.
+
+**Response (`201 Created`)** — `GET /bank/snapshots/{id}`와 같은 대조 결과
+```json
+{
+  "snapshot_id": 1,
+  "term_id": 1,
+  "file_hash": "0x…",
+  "bank_balance": 1171000,
+  "snapshot_at": "2026-11-07T05:00:00Z",
+  "period_start": "2026-03-05",
+  "period_end": "2026-03-18",
+  "superseded": false,
+  "summary": {
+    "total": 5, "matched": 4, "matched_pending": 0, "unregistered": 1,
+    "unregistered_out_amount": 12000, "unregistered_in_amount": 0, "unbacked": 0
+  },
+  "transactions": [
+    { "id": 2, "tran_date": "2026-03-10", "tran_time": "14:03:11", "description": "카드출금 OO문구점",
+      "direction": "OUT", "amount": 35000, "balance_after": 1215000, "status": "MATCHED", "entry_id": 2 },
+    { "id": 5, "tran_date": "2026-03-18", "tran_time": "08:55:19", "description": "카드출금 OO편의점",
+      "direction": "OUT", "amount": 12000, "balance_after": 1171000, "status": "UNREGISTERED", "entry_id": null }
+  ],
+  "unbacked_entries": []
+}
+```
+
+| 필드 | 설명 |
+| --- | --- |
+| `bank_balance` | 시간순 마지막 거래의 거래후잔액. 결산(`GET /settlement`)의 `balance_gap`이 최신 스냅샷의 이 값을 씁니다 |
+| `period_start`·`period_end` | 파일에 들어 있는 거래 날짜 범위 |
+| `transactions[].description` | 적요 + 거래점 (예: `카드출금 OO문구점`) |
+| `transactions[].status` | 아래 표. `superseded`면 `null` |
+| `unbacked_entries[]` | 원장엔 **확정**돼 있는데 이 파일(기간 안)에 대응 거래가 없는 항목 — 가짜 등록 의심. `entry_id`, `kind`, `amount`(순금액), `date`, `counterparty`, `purpose` |
+| `summary.unregistered_out_amount` | 미등록 출금 합계 — 장부에 없이 나간 돈 |
+| `summary` | `superseded`면 `null` |
+
+| `status` | 의미 |
+| --- | --- |
+| `MATCHED` | 확정 원장 항목과 짝 |
+| `MATCHED_PENDING` | 승인 대기 항목과 짝 — 확정 전이라 판단 보류 |
+| `UNREGISTERED` | 계좌에는 있는데 원장에 없음 (미등록 의심) |
+
+| 코드 | 경우 |
+| --- | --- |
+| `201` | 업로드·대조 완료 |
+| `400` | base64 아님, 빈 파일, `file_hash` 불일치, CSV 형식 오류(헤더 없음, 출금·입금 둘 다/둘 다 없음, 날짜·금액을 못 읽음 — `detail`에 몇 번째 거래인지 나옴) |
+| `404` | `term_id`의 학기가 없음 |
+| `409` | 같은 학기에 같은 파일(해시)이 이미 있음 → 원장을 고친 뒤엔 재대조(`/rematch`)를 쓰세요. 또는 같은 학기 대조가 동시에 진행됨(다시 시도) |
+| `413` | 파일이 2MB 초과 |
+| `422` | 필드 누락, `file_hash` 형식 오류 |
+| `503` | DB 오류 |
+
+### 2. 재대조 (`POST /bank/snapshots/{snapshot_id}/rematch`)
+- 미등록 건을 등록·승인한 뒤 **같은 파일로 다시 맞출 때** 씁니다 (같은 파일은 다시 올릴 수 없어 `409`). 총무만.
+- 응답은 1번과 같은 대조 결과(`200`).
+- `404` 스냅샷 없음, `409` 더 최근 업로드가 있음(최신 스냅샷에서 재대조) 또는 동시 진행, `503` DB 오류.
+
+### 3. 업로드 목록 (`GET /bank/snapshots?term_id=`)
+- `term_id` 필수. 최근 업로드가 먼저 옵니다.
+```json
+[
+  { "id": 2, "term_id": 1, "file_hash": "0x…", "bank_balance": 1168000,
+    "snapshot_at": "2026-11-07T06:00:00Z", "uploaded_by": 2, "superseded": false },
+  { "id": 1, "term_id": 1, "file_hash": "0x…", "bank_balance": 1171000,
+    "snapshot_at": "2026-11-07T05:00:00Z", "uploaded_by": 2, "superseded": true }
+]
+```
+
+### 4. 대조 결과 조회 (`GET /bank/snapshots/{snapshot_id}`)
+- 1번 응답과 같은 형태(`200`). 짝은 업로드(또는 재대조) 때 정한 것을 쓰고, 상태는 **조회 시점의 원장**으로 다시 매깁니다 — 업로드 뒤 짝 항목이 반려됐으면 `UNREGISTERED`로 보입니다. 새로 등록한 항목을 짝지으려면 재대조를 쓰세요.
+- 이전 스냅샷(`superseded: true`)은 거래 줄만 보이고 `summary`는 `null`, `status`는 모두 `null`입니다.
+- `404` 스냅샷 없음, `503` DB 오류.
+
+**한계** — 파일 해시의 온체인 기록은 컨트랙트가 정해지지 않아 아직 없습니다(`tx_hash` 비어 있음). 원본 파일은 저장하지 않고 해시만 저장합니다. 날짜는 같은 날만 짝으로 봅니다.
+
+---
+
 ## 검증
 
 ### 1. 장부 잔액 요약 (`GET /balance`)
@@ -625,6 +727,74 @@
 
 ---
 
+## 결산
+
+### 1. 학기 결산 (`GET /settlement/{term_id}`)
+- **설명**: 결산 화면(A11)의 요약 카드·예산 집행률·메타지표 (PRD §4.7, §7.4). **확정(`CONFIRMED`)된 항목만** 집계합니다. 초안·대기·반려·차단은 금액에 들어가지 않습니다.
+- **권한**: 임원(총무·감사·회장)만. 토큰이 없으면 `401`, 학생 토큰이면 `403`.
+- **쿼리**: `audit_at` (선택, ISO 8601) — 「감사 D-30 이내 정정」을 셀 감사일. 없으면 학기 종료일, 시간대가 없으면 KST로 봅니다.
+  - 예: `GET /settlement/1?audit_at=2026-12-10T00:00:00%2B09:00` (`+`는 URL에서 `%2B`로)
+
+**Response (`200 OK`)**
+```json
+{
+  "term_id": 1,
+  "term_code": 20262,
+  "term_name": "2026-2학기",
+  "income": 5000000,
+  "expense": 440000,
+  "ledger_balance": 4560000,
+  "bank_balance": 4500000,
+  "bank_snapshot_at": "2026-12-01T00:00:00Z",
+  "balance_gap": 60000,
+  "budgets": [
+    {
+      "budget_id": 1, "category": "행사비",
+      "initial_amount": 2000000, "planned_amount": 2500000, "version": 2,
+      "spent": 310000, "remaining": 2190000, "execution_rate": 0.124
+    }
+  ],
+  "metrics": {
+    "ocr_warning_approved": 1,
+    "category_warning_approved": 1,
+    "corrections": 2,
+    "corrections_by_reason": { "INPUT_ERROR": 1, "RECEIPT_RECHECK": 0, "REFUND": 1, "RECLASSIFY": 0, "OTHER": 0 },
+    "corrections_before_audit": 1,
+    "audit_at": "2026-12-20T00:00:00Z",
+    "budget_revisions": 2,
+    "budget_revisions_after_block": 1,
+    "revision_after_block_rate": 0.5
+  }
+}
+```
+
+| 필드 | 설명 |
+| --- | --- |
+| `income`·`expense` | 확정 수입·지출 합계. 정정(음수 포함)이 반영된 최종값 |
+| `ledger_balance` | 장부잔액 = `income` − `expense` (PRD §7.4) |
+| `bank_balance`·`bank_snapshot_at` | **가장 최근** 계좌 스냅샷(거래내역 업로드)의 통장 잔액과 시각. 스냅샷이 없으면 `null` |
+| `balance_gap` | 장부잔액 − 통장 잔액. 스냅샷이 없으면 `null`. **0이 아니면 장부와 계좌가 어긋난 것** (양수: 장부에 있는데 계좌에 없음) |
+| `budgets[]` | **체인에 발행된(`tx_issue` 있음) 예산만**, 버전이 있는 것만. `initial_amount`는 v1, `planned_amount`는 최신 버전(개정 반영), `spent`는 확정 지출, `execution_rate`는 `spent / planned_amount` (편성액 0이면 `null`) |
+| `ocr_warning_approved` | OCR 경고(`MISMATCH`·`DUPLICATE`·`UNREADABLE`) 상태로 확정된 건수 |
+| `category_warning_approved` | 용도 불일치 경고 상태로 확정된 건수 |
+| `corrections`·`corrections_by_reason` | 확정된 정정 건수와 사유별 분포. 사유 5종은 0이어도 항상 들어 있습니다 |
+| `corrections_before_audit` | 감사일 30일 전부터 감사일까지 등록된 확정 정정 건수 |
+| `budget_revisions`·`budget_revisions_after_block` | 승인된 예산 증액 횟수, 그중 차단(`BLOCKED`) 지출을 근거로 한 횟수 |
+| `revision_after_block_rate` | 초과 집행 이후 개정 비율. 증액이 0회면 `null` |
+
+- 이의 제기 건수는 v0.13에서 범위 밖이라 없습니다.
+- 시각은 시간대가 붙은 ISO 8601 문자열입니다. 표기(`Z`/`+09:00`)는 DB 설정에 따라 다를 수 있으니 문자열로 비교하지 말고 시각으로 파싱해 쓰세요.
+
+| 코드 | 경우 |
+| --- | --- |
+| `200` | 결산 |
+| `401` / `403` | 토큰 없음 / 학생 토큰 |
+| `404` | `term_id`의 학기가 없음 |
+| `422` | `audit_at`이 날짜 형식이 아님 |
+| `503` | DB 오류 |
+
+---
+
 ## 회원권
 
 ### 1. 내 회원권과 입장 QR (`GET /memberships/me`)
@@ -655,6 +825,90 @@
 | `401` | 토큰 없음·만료 |
 | `404` | `term_id`의 학기가 없음 |
 | `503` | 보유 여부를 확인하지 못함 (체인 장애, `MembershipSBT` 미배포, `STUDENT_WALLET_MNEMONIC` 미설정, DB 오류). **미보유가 아니므로 「납부 확인 필요」로 안내하지 않습니다** |
+
+---
+
+## 행사·입장
+
+PRD v0.15 §4.2 (QR 입장), §8 (`Event`, `CheckIn`). 세 API 모두 **임원(총무·감사·회장)만** 쓸 수 있습니다. 토큰이 없으면 `401`, 학생 토큰이면 `403`입니다.
+
+### 1. 행사 등록 (`POST /events`)
+
+**Request**
+```json
+{
+  "term_id": 2,
+  "name": "해오름제",
+  "held_at": "2026-11-20T18:00:00+09:00"
+}
+```
+- `term_id`: 이 학기 회원권을 가진 학생만 입장합니다.
+- `name`: 1~100자. 앞뒤 공백은 지워서 저장하고, 공백뿐이면 `422`입니다.
+
+**Response (`201 Created`)**
+```json
+{
+  "id": 1,
+  "term_id": 2,
+  "name": "해오름제",
+  "held_at": "2026-11-20T09:00:00Z",
+  "created_by": 3,
+  "created_at": "2026-11-07T05:00:00Z"
+}
+```
+- 시각은 시간대가 붙은 ISO 8601 문자열입니다. 표기(`Z`/`+09:00`)는 DB 설정에 따라 다를 수 있으니 문자열로 비교하지 말고 시각으로 파싱해 쓰세요.
+
+| 코드 | 경우 |
+| --- | --- |
+| `201` | 등록됨 |
+| `404` | `term_id`의 학기가 없음 |
+| `422` | 행사명이 비었거나 100자 초과, 필드 누락 |
+| `503` | DB 오류 |
+
+### 2. 행사 목록 (`GET /events?term_id=`)
+- `term_id`는 선택입니다. 주면 그 학기 행사만, 없으면 전체입니다. **최근 행사가 먼저** 옵니다 (`held_at` 내림차순).
+- 응답은 `POST /events` 응답 객체의 배열입니다.
+
+### 3. QR 스캔 입장 처리 (`POST /events/{event_id}/check-in`)
+- **설명**: 학생 QR을 스캔해 입장을 판정하고, 입장이면 기록을 남깁니다. **한 행사에 한 학생은 한 번만** 입장합니다 (DB 유일 제약 `uq_check_ins_event_user`).
+- **판정 결과는 모두 `200` + `result`** 입니다. 스캐너 화면이 결과마다 다른 안내를 띄우기 때문입니다. `400`/`404`는 요청 자체가 잘못된 경우만입니다.
+- **자격은 QR의 학기가 아니라 행사의 학기로 봅니다.** 지난 학기 QR 캡처를 보여 줘도 이번 학기 회원권이 없으면 `NOT_MEMBER`입니다.
+
+**Request**
+```json
+{ "qr_payload": "SCA:2026-2:U000001" }
+```
+- 형식: `SCA:<학기>:U<학생 ID 1~12자리>` (`GET /memberships/me`의 `qr_payload`와 같음). 앞뒤 공백·줄바꿈은 무시합니다. 뒤에 다른 값을 덧붙인 QR(예: `...:paid`)은 받지 않습니다.
+
+**Response (`200 OK`)**
+```json
+{
+  "result": "ADMITTED",
+  "event_id": 1,
+  "user_id": 1,
+  "student_no": "20240001",
+  "name": "김학생",
+  "checked_in_at": "2026-11-20T09:12:30Z"
+}
+```
+
+| `result` | 경우 | 기록 | `student_no`·`name` | `checked_in_at` |
+| --- | --- | --- | --- | --- |
+| `ADMITTED` | 이 학기 회원권 보유 → 입장 | 남김 | 있음 | 이번 입장 시각 |
+| `ALREADY_CHECKED_IN` | 이 행사에 이미 입장함. 스캐너 두 대가 동시에 찍어 늦은 쪽도 여기 | 안 남김 | 있음 | **처음** 입장한 시각 |
+| `NOT_MEMBER` | 이 학기 회원권 없음 (미납·환불 회수·다른 학기 회원권만 있음) | 안 남김 | 있음 | `null` |
+| `UNKNOWN_STUDENT` | QR의 ID가 없는 사용자이거나 학생이 아님 (임원 ID 포함) | 안 남김 | `null` | `null` |
+| `UNVERIFIABLE` | 회원권 확인 자체를 못 함 (체인 장애 등). **거부가 아니므로 「미납」으로 안내하지 않고 다시 스캔하게 합니다.** 복구 후 다시 찍으면 정상 판정됩니다 | 안 남김 | 있음 | `null` |
+
+- `student_no`·`name`은 스캐너가 **현장에서 본인 확인**에 씁니다. QR의 ID는 추측할 수 있어서(U000001 → U000002) 다른 사람 ID로 먼저 들어오는 것을 막는 수단입니다.
+
+| 코드 | 경우 |
+| --- | --- |
+| `200` | 판정 완료 (위 `result` 5가지) |
+| `400` | 학생 QR 형식이 아님 |
+| `404` | `event_id`의 행사가 없음 |
+| `422` | `qr_payload` 누락 또는 64자 초과 |
+| `503` | DB 오류 |
 
 ---
 
