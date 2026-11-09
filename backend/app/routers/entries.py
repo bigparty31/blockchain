@@ -106,6 +106,54 @@ async def _get_chain_registrant(entry_id: int, chain: ChainClient) -> str:
 DUPLICATE_TARGET_STATUSES = ("PENDING", "CONFIRMED")
 
 
+def _detect_duplicate_entry_id(
+    db: Session,
+    *,
+    receipt_hash: Optional[str],
+    ocr_approval_no: Optional[str],
+    ocr_paid_at: Optional[int],
+    amount: int,
+    corrects_entry_id: Optional[int] = None,
+    exclude_entry_id: Optional[int] = None,
+) -> Optional[int]:
+    """PENDING·CONFIRMED 내역 중 동일 결제정보(승인번호+결제일시+금액) 또는 동일 영수증 해시가 있는지 검사하여 기존 Entry ID를 반환합니다."""
+    dup_filters = [DBEntry.status.in_(DUPLICATE_TARGET_STATUSES)]
+    if exclude_entry_id is not None:
+        dup_filters.append(DBEntry.id != exclude_entry_id)
+    if corrects_entry_id is not None:
+        dup_filters.append(DBEntry.id != corrects_entry_id)
+
+    if ocr_approval_no and ocr_paid_at:
+        matched_ocr = (
+            db.query(DBEntry.id)
+            .filter(
+                DBEntry.ocr_approval_no == ocr_approval_no,
+                DBEntry.ocr_paid_at == ocr_paid_at,
+                DBEntry.amount == amount,
+                *dup_filters,
+            )
+            .order_by(DBEntry.id.asc())
+            .first()
+        )
+        if matched_ocr:
+            return matched_ocr.id
+
+    if receipt_hash:
+        matched_hash = (
+            db.query(DBEntry.id)
+            .filter(
+                DBEntry.receipt_hash == receipt_hash,
+                *dup_filters,
+            )
+            .order_by(DBEntry.id.asc())
+            .first()
+        )
+        if matched_hash:
+            return matched_hash.id
+
+    return None
+
+
 def _find_duplicate_of(entry: DBEntry, db: Optional[Session]) -> Optional[int]:
     """중복 경고(DUPLICATE) 상태인 내역의 원본 기존 Entry ID를 조회합니다."""
     if db is None:
@@ -114,38 +162,18 @@ def _find_duplicate_of(entry: DBEntry, db: Optional[Session]) -> Optional[int]:
     if ocr_val != OCRStatus.DUPLICATE.value:
         return None
 
-    dup_filters = [DBEntry.status.in_(DUPLICATE_TARGET_STATUSES), DBEntry.id != entry.id]
-    if entry.corrects_entry_id is not None:
-        dup_filters.append(DBEntry.id != entry.corrects_entry_id)
-
-    # 1. receipt_hash 가 있으면 동일 해시의 이전 유효 건 검색
-    if entry.receipt_hash:
-        matched = (
-            db.query(DBEntry.id)
-            .filter(DBEntry.receipt_hash == entry.receipt_hash, *dup_filters)
-            .order_by(DBEntry.id.asc())
-            .first()
+    try:
+        return _detect_duplicate_entry_id(
+            db,
+            receipt_hash=entry.receipt_hash,
+            ocr_approval_no=entry.ocr_approval_no,
+            ocr_paid_at=entry.ocr_paid_at,
+            amount=entry.amount,
+            corrects_entry_id=entry.corrects_entry_id,
+            exclude_entry_id=entry.id,
         )
-        if matched:
-            return matched.id
-
-    # 2. OCR 승인정보가 있으면 동일 결제 건 검색
-    if entry.ocr_approval_no and entry.ocr_paid_at:
-        matched = (
-            db.query(DBEntry.id)
-            .filter(
-                DBEntry.ocr_approval_no == entry.ocr_approval_no,
-                DBEntry.ocr_paid_at == entry.ocr_paid_at,
-                DBEntry.amount == entry.amount,
-                *dup_filters,
-            )
-            .order_by(DBEntry.id.asc())
-            .first()
-        )
-        if matched:
-            return matched.id
-
-    return None
+    except SQLAlchemyError:
+        return None
 
 
 def _to_schema(
@@ -161,9 +189,9 @@ def _to_schema(
     confirmed = entry.status == EntryStatus.CONFIRMED.value
     rejected = entry.status == EntryStatus.REJECTED.value
 
+    # 온체인 등록자(chain_registrant)만 반환한다. 체인 미조회·실패 시 DB 등록자 지갑으로 대체하지 않고 None(null)을 유지하여
+    # 앱이 서명 전 온체인 대조 불가 상태를 감지할 수 있게 한다 (#66 리뷰 피드백 3).
     registrant = chain_registrant
-    if not registrant and getattr(entry, "creator", None) and entry.creator.wallet_address:
-        registrant = entry.creator.wallet_address
 
     # duplicate_of 계산
     if duplicate_of is None and db is not None:
@@ -239,22 +267,20 @@ async def get_entries(
         )
 
     # RPC 호출 부하 및 앱 타임아웃(3초) 방지:
-    # 목록 조회에서는 승인 대기 중인 PENDING 건만 최대 1.5초 이내로 온체인 조회를 시도하고,
-    # 노드 응답 지연/오류 시 즉시 DB 등록자 지갑 주소로 대체 반환합니다.
-    # 앱은 서명 직전에 단건 상세 조회(GET /entries/{id})로 최신 온체인 등록자를 최종 확인합니다.
-    pending_entries = [e for e in db_entries if e.status == EntryStatus.PENDING.value]
+    # 목록 조회에서는 최대 1.5초 이내로 온체인 등록자 조회를 시도하고,
+    # 노드 응답 지연/오류 시 DB 값으로 위장하지 않고 registrant=null(None)로 반환하여 앱이 미검증 상태를 식별할 수 있게 합니다.
     chain_registrants: dict[int, str] = {}
 
-    if pending_entries:
+    if db_entries:
         try:
             chain = await _get_chain_client_safe(request)
             if chain is not None:
-                async def _fetch_pending():
-                    tasks = [chain.get_entry(e.id) for e in pending_entries]
+                async def _fetch_all():
+                    tasks = [chain.get_entry(e.id) for e in db_entries]
                     return await asyncio.gather(*tasks, return_exceptions=True)
 
-                fetched = await asyncio.wait_for(_fetch_pending(), timeout=1.5)
-                for e, res in zip(pending_entries, fetched):
+                fetched = await asyncio.wait_for(_fetch_all(), timeout=1.5)
+                for e, res in zip(db_entries, fetched):
                     if not isinstance(res, Exception) and res and res.registrant:
                         chain_registrants[e.id] = res.registrant
         except Exception:
@@ -463,58 +489,23 @@ async def create_entry(
     # 중복 비교 대상: PENDING·CONFIRMED만 대조 (초안 status NULL, REJECTED, BLOCKED 제외)
     # 정정 건(corrects_entry_id)인 경우 원본 건은 대조에서 제외 (리뷰어 피드백)
     effective_ocr_status = entry.ocr_status
-    is_duplicate = False
-    duplicate_of_id: Optional[int] = None
+    try:
+        duplicate_of_id = _detect_duplicate_entry_id(
+            db,
+            receipt_hash=entry.receipt_hash,
+            ocr_approval_no=entry.ocr_approval_no,
+            ocr_paid_at=entry.ocr_paid_at,
+            amount=entry.amount,
+            corrects_entry_id=entry.corrects_entry_id,
+        )
+    except SQLAlchemyError as e:
+        logger.exception("영수증 중복 조회 중 데이터베이스 오류: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 처리 중 오류가 발생했습니다.",
+        )
 
-    dup_filters = [DBEntry.status.in_(DUPLICATE_TARGET_STATUSES)]
-    if entry.corrects_entry_id is not None:
-        dup_filters.append(DBEntry.id != entry.corrects_entry_id)
-
-    if entry.ocr_approval_no and entry.ocr_paid_at:
-        try:
-            existing_ocr = (
-                db.query(DBEntry)
-                .filter(
-                    DBEntry.ocr_approval_no == entry.ocr_approval_no,
-                    DBEntry.ocr_paid_at == entry.ocr_paid_at,
-                    DBEntry.amount == entry.amount,
-                    *dup_filters,
-                )
-                .order_by(DBEntry.id.asc())
-                .first()
-            )
-            if existing_ocr:
-                is_duplicate = True
-                duplicate_of_id = existing_ocr.id
-        except SQLAlchemyError as e:
-            logger.exception("영수증 중복 조회 중 데이터베이스 오류: %s", e)
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="데이터베이스 처리 중 오류가 발생했습니다.",
-            )
-
-    if not is_duplicate and entry.receipt_hash:
-        try:
-            existing_hash = (
-                db.query(DBEntry)
-                .filter(
-                    DBEntry.receipt_hash == entry.receipt_hash,
-                    *dup_filters,
-                )
-                .order_by(DBEntry.id.asc())
-                .first()
-            )
-            if existing_hash:
-                is_duplicate = True
-                duplicate_of_id = existing_hash.id
-        except SQLAlchemyError as e:
-            logger.exception("영수증 해시 중복 조회 중 데이터베이스 오류: %s", e)
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="데이터베이스 처리 중 오류가 발생했습니다.",
-            )
-
-    if is_duplicate:
+    if duplicate_of_id is not None:
         effective_ocr_status = OCRStatus.DUPLICATE
 
     # 6. meta_hash 계산
@@ -691,6 +682,27 @@ async def submit_entry(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="서명자가 등록자와 일치하지 않습니다.",
+        )
+
+    # 6.5 초안 상태에서 동일 영수증으로 2건 이상 만든 뒤 순차 제출하는 경우를 잡기 위해,
+    # PENDING 전환 직전에 이미 PENDING·CONFIRMED 상태가 된 중복 건이 있는지 한 번 더 검사한다 (#66 리뷰 피드백 2).
+    try:
+        dup_id = _detect_duplicate_entry_id(
+            db,
+            receipt_hash=target.receipt_hash,
+            ocr_approval_no=target.ocr_approval_no,
+            ocr_paid_at=target.ocr_paid_at,
+            amount=target.amount,
+            corrects_entry_id=target.corrects_entry_id,
+            exclude_entry_id=target.id,
+        )
+        if dup_id is not None:
+            target.ocr_status = OCRStatus.DUPLICATE.value
+    except SQLAlchemyError as e:
+        logger.exception("서명 제출 시 영수증 중복 재검사 중 데이터베이스 오류: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 처리 중 오류가 발생했습니다.",
         )
 
     # 7. 체인 릴레이 호출 및 상태 갱신 (chain_tx 서비스 연동)
