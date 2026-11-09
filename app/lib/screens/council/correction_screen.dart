@@ -200,6 +200,10 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
 
   /// 정정 한 건의 초안. **원본의 종류·학기·거래처·사용일**을 그대로 쓰고(HASHING 샘플 3), 목적 칸에는 상세 사유를
   /// 적는다(PRD §4.4). [amount] 는 증감분, [budgetId] 는 정정이 쓰거나 돌려받을 예산이다 — 수입은 예산이 없다.
+  ///
+  /// **영수증**: 직접 붙인 사진이 먼저다. 안 붙였어도 예산을 쓰는 **양수 지출 정정**(증액, 재분류의 새 예산 쪽)은
+  /// 서버(#66)가 증빙을 요구하므로 원본의 해시를 그대로 싣는다 — 파일은 서버에 이미 있어 다시 올리지 않고,
+  /// 중복 판정에서는 원본이 빠진다. 감액(−)·수입은 증빙 없이도 된다.
   EntryDraft _draftFor(EntryModel original, {required int amount, required int? budgetId, String? receiptPath}) =>
       EntryDraft(
         kind: original.kind, // 다르면 체인이 CorrectionKindMismatch
@@ -209,7 +213,7 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
         purpose: _detailController.text,
         budgetId: original.kind == EntryKind.INCOME ? null : budgetId,
         occurredAt: original.occurredAt,
-        receiptHash: _receiptHash,
+        receiptHash: _receiptHash ?? (amount > 0 && original.kind == EntryKind.EXPENSE ? original.receiptHash : null),
         receiptPath: receiptPath,
         correctsEntryId: original.id,
         correctionReason: _selectedReason,
