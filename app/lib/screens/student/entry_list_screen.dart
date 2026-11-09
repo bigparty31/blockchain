@@ -262,38 +262,50 @@ class _EntryListScreenState extends State<EntryListScreen> {
       _Filter.unseen: '새 항목',
     };
 
+    // **가로로 스크롤되게 둔다.** 맨 `Row` 로 두면 칩이 화면을 넘는데, 넘친
+    // 쪽은 릴리스 빌드에서 그냥 잘린다 — 뱃지로 들어왔을 때 선택돼 있는
+    // 「새 항목」 칩이 바로 그 끝자리라, 잘리면 「전체」를 한 번 누른 뒤 새 항목만
+    // 보는 화면으로 돌아갈 방법이 없어진다(뱃지는 목록을 연 순간 지워진다).
+    //
+    // 실제로 360dp 기기에서 칩 5개가 넘친다(에뮬레이터 720x1600·density 320 에서
+    // 확인). 글자 크기를 키우면 칩 4개만으로도 넘치므로, 폭·글자 크기와 무관하게
+    // 닫으려면 개수를 줄이는 것이 아니라 스크롤이 맞다.
     return Container(
       color: Colors.white,
-      padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
-      child: Row(
-        children: _filters.map((f) {
-          final selected = _filter == f;
-          return Padding(
-            padding: const EdgeInsets.only(right: 8),
-            child: GestureDetector(
-              onTap: () => _selectFilter(f),
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 180),
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                decoration: BoxDecoration(
-                  color: selected ? AppTheme.primary : AppTheme.bgPage,
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(
-                    color: selected ? AppTheme.primary : AppTheme.divider,
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        child: Row(
+          children: _filters.map((f) {
+            final selected = _filter == f;
+            return Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: GestureDetector(
+                onTap: () => _selectFilter(f),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 180),
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: selected ? AppTheme.primary : AppTheme.bgPage,
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(
+                      color: selected ? AppTheme.primary : AppTheme.divider,
+                    ),
                   ),
-                ),
-                child: Text(
-                  labels[f]!,
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: selected ? FontWeight.bold : FontWeight.w500,
-                    color: selected ? Colors.white : AppTheme.textSub,
+                  child: Text(
+                    labels[f]!,
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: selected ? FontWeight.bold : FontWeight.w500,
+                      color: selected ? Colors.white : AppTheme.textSub,
+                    ),
                   ),
                 ),
               ),
-            ),
-          );
-        }).toList(),
+            );
+          }).toList(),
+        ),
       ),
     );
   }
@@ -397,30 +409,41 @@ class _EntryChainCard extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(width: 12),
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    children: [
-                      // 정정된 건은 원본 금액에 취소선을 긋고 최종값을 강조한다.
-                      // 원본은 이력에 그대로 남고, 합계에는 최종값만 반영된다.
-                      if (chain.hasCorrection)
-                        Text(
-                          Fmt.won(head.amount),
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: AppTheme.textSub.withOpacity(0.8),
-                            decoration: TextDecoration.lineThrough,
+                  // **금액은 줄이되 자르지 않는다.** 좁은 기기·큰 글자에서는
+                  // 금액 열이 남은 폭을 넘는다(320dp·150% 에서 1px). 말줄임으로
+                  // 두면 「₩5,000,0…」 처럼 **자릿수가 사라진 금액**이 보이는데,
+                  // 장부 화면에서 그것은 틀린 숫자를 보여주는 것과 같다.
+                  // [FittedBox] 는 글자를 작게 만들 뿐 자릿수를 지우지 않는다.
+                  Flexible(
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      alignment: Alignment.centerRight,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.end,
+                        children: [
+                          // 정정된 건은 원본 금액에 취소선을 긋고 최종값을 강조한다.
+                          // 원본은 이력에 그대로 남고, 합계에는 최종값만 반영된다.
+                          if (chain.hasCorrection)
+                            Text(
+                              Fmt.won(head.amount),
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: AppTheme.textSub.withOpacity(0.8),
+                                decoration: TextDecoration.lineThrough,
+                              ),
+                            ),
+                          Text(
+                            '${isIncome ? '+' : '-'}${Fmt.won(chain.finalAmount)}',
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                              color: amountColor,
+                              letterSpacing: -0.3,
+                            ),
                           ),
-                        ),
-                      Text(
-                        '${isIncome ? '+' : '-'}${Fmt.won(chain.finalAmount)}',
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                          color: amountColor,
-                          letterSpacing: -0.3,
-                        ),
+                        ],
                       ),
-                    ],
+                    ),
                   ),
                 ],
               ),
