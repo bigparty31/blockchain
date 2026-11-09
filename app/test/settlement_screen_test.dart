@@ -1,10 +1,15 @@
 import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:pdf/src/pdf/font/ttf_parser.dart';
 import 'package:student_council_app/core/enums.dart';
+import 'package:student_council_app/core/settlement_pdf.dart';
 import 'package:student_council_app/models/settlement_model.dart';
 import 'package:student_council_app/screens/council/settlement_screen.dart';
 import 'package:student_council_app/services/api_service.dart';
@@ -183,6 +188,145 @@ void main() {
       await tester.tap(find.text('다시 시도'));
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('settlement_summary')), findsOneWidget);
+    });
+  });
+
+  group('PDF', () {
+    /// 앱 에셋 폰트를 파일로 읽는다 (flutter test 는 app/ 에서 돈다).
+    SettlementPdfFonts fonts() {
+      pw.Font load(String path) => pw.Font.ttf(ByteData.sublistView(File(path).readAsBytesSync()));
+      return SettlementPdfFonts(
+        regular: load(SettlementPdfFonts.regularAsset),
+        bold: load(SettlementPdfFonts.boldAsset),
+      );
+    }
+
+    test('에셋 폰트에 한글 글리프가 있다 — 없으면 PDF 의 한글이 빈칸이 된다', () {
+      for (final path in [SettlementPdfFonts.regularAsset, SettlementPdfFonts.boldAsset]) {
+        final ttf = TtfParser(ByteData.sublistView(File(path).readAsBytesSync()));
+        for (final ch in '결산보고서장부잔액통장차액'.runes) {
+          expect(ttf.charToGlyphIndexMap[ch], isNotNull, reason: '$path 에 ${String.fromCharCode(ch)} 가 없다');
+        }
+      }
+    });
+
+    test('PDF 에 찍는 모든 글자가 폰트에 있다 — 없으면 그 자리가 깨진다 (예: 빼기 기호 U+2212)', () {
+      // 표 내용 (여러 경우) + settlement_pdf.dart 의 문자열 리터럴 (제목·각주·표 머리)
+      final texts = <String>[
+        for (final data in [settlement(), settlement(bank: null, gap: null, revisions: 0), settlement(gap: -20000), settlement(gap: 0)])
+          for (final row in [
+            ...SettlementPdf.summaryRows(SettlementModel.fromJson(data)),
+            ...SettlementPdf.metricRows(SettlementModel.fromJson(data).metrics),
+            ...SettlementPdf.budgetRows(SettlementModel.fromJson(data).budgets),
+          ])
+            ...row,
+        for (final line in File('lib/core/settlement_pdf.dart').readAsLinesSync())
+          if (!line.trimLeft().startsWith('//'))
+            for (final m in RegExp(r"'([^'\\]|\\.)*'").allMatches(line)) m.group(0)!,
+      ];
+      for (final path in [SettlementPdfFonts.regularAsset, SettlementPdfFonts.boldAsset]) {
+        final ttf = TtfParser(ByteData.sublistView(File(path).readAsBytesSync()));
+        final missing = <String>{
+          for (final t in texts)
+            for (final ch in t.runes)
+              if (ch > 0x20 && ttf.charToGlyphIndexMap[ch] == null)
+                'U+${ch.toRadixString(16).toUpperCase().padLeft(4, '0')} ${String.fromCharCode(ch)}',
+        };
+        expect(missing, isEmpty, reason: '$path 에 없는 글자');
+      }
+    });
+
+    test('결산 응답으로 PDF 를 만든다 (계좌 대조 전·개정 0회도)', () async {
+      for (final data in [settlement(), settlement(bank: null, gap: null, revisions: 0), settlement(gap: -20000)]) {
+        final bytes = await SettlementPdf.build(
+          SettlementModel.fromJson(data),
+          fonts: fonts(),
+          generatedAt: DateTime(2026, 12, 21, 10),
+        );
+        expect(String.fromCharCodes(bytes.take(5)), '%PDF-');
+        expect(String.fromCharCodes(bytes.skip(bytes.length - 6)).trim(), '%%EOF');
+      }
+    });
+
+    test('요약 표는 화면과 같은 숫자를 쓴다 — 차액은 부호로 방향, 스냅샷 없으면 「계좌 대조 전」', () {
+      final rows = SettlementPdf.summaryRows(SettlementModel.fromJson(settlement()));
+      expect(rows[2], ['장부 잔액 (수입 - 지출)', '₩ 4,560,000']);
+      expect(rows.last, ['차액 (장부 - 통장)', '+₩ 60,000']);
+      expect(SettlementPdf.summaryRows(SettlementModel.fromJson(settlement(gap: -20000))).last.last, '-₩ 20,000');
+      expect(SettlementPdf.summaryRows(SettlementModel.fromJson(settlement(gap: 0))).last.last, '일치');
+      final none = SettlementPdf.summaryRows(SettlementModel.fromJson(settlement(bank: null, gap: null)));
+      expect(none.skip(3).map((r) => r.last), ['계좌 대조 전', '계좌 대조 전']);
+    });
+
+    test('예산 표 — 개정된 예산은 개정 횟수(버전 − 1)를, 개정 없으면 아무것도 붙이지 않는다', () {
+      final rows = SettlementPdf.budgetRows(SettlementModel.fromJson(settlement()).budgets);
+      expect(rows[0], ['행사비', '₩ 2,000,000', '₩ 2,500,000 (개정 1회)', '₩ 310,000', '₩ 2,190,000', '12.4%']);
+      expect(rows[1][2], '₩ 1,000,000', reason: '운영비는 v1 — 최초 편성 그대로');
+    });
+
+    test('메타지표 표 — 0건 사유는 빼고, 이의 제기는 범위 밖으로 적는다', () {
+      final rows = SettlementPdf.metricRows(SettlementModel.fromJson(settlement()).metrics);
+      expect(rows[2], ['정정', '3건 (입력 오류 1, 환불 1, 기타 1)']);
+      expect(rows[4].last, '2회 / 1회 (50.0%)');
+      expect(rows.last, ['이의 제기 / 미답변', '이번 범위 밖']);
+    });
+
+    Future<void> openWith(
+      WidgetTester tester, {
+      required Future<Uint8List> Function(SettlementModel) build,
+      required Future<void> Function(Uint8List, String) share,
+    }) async {
+      await tester.pumpWidget(MaterialApp(home: SettlementScreen(buildPdf: build, sharePdf: share)));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('PDF 버튼은 보이는 결산으로 PDF 를 만들어 settlement_20262.pdf 로 공유한다', (tester) async {
+      SettlementService.client = server();
+      SettlementModel? built;
+      String? sharedName;
+      Uint8List? sharedBytes;
+      await openWith(
+        tester,
+        build: (s) async {
+          built = s;
+          return Uint8List.fromList([1, 2, 3]);
+        },
+        share: (bytes, name) async {
+          sharedBytes = bytes;
+          sharedName = name;
+        },
+      );
+      await tester.tap(find.byKey(const Key('settlement_pdf')));
+      await tester.pumpAndSettle();
+      expect(built?.ledgerBalance, 4560000);
+      expect(sharedBytes, [1, 2, 3]);
+      expect(sharedName, 'settlement_20262.pdf');
+    });
+
+    testWidgets('결산을 못 읽었으면 PDF 버튼이 없다 — 빈 보고서를 만들지 않는다', (tester) async {
+      SettlementService.client = server(body: {'detail': 'db'}, code: 503);
+      await openWith(tester, build: (_) async => fail('만들면 안 된다'), share: (_, __) async {});
+      expect(find.byKey(const Key('settlement_error')), findsOneWidget);
+      expect(find.byKey(const Key('settlement_pdf')), findsNothing);
+    });
+
+    testWidgets('PDF 를 못 만들면 알려 주고, 다시 누를 수 있다', (tester) async {
+      SettlementService.client = server();
+      var calls = 0;
+      await openWith(
+        tester,
+        build: (_) async {
+          calls++;
+          throw StateError('font');
+        },
+        share: (_, __) async => fail('공유하면 안 된다'),
+      );
+      await tester.tap(find.byKey(const Key('settlement_pdf')));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('PDF 를 만들지 못했어요'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('settlement_pdf')));
+      await tester.pumpAndSettle();
+      expect(calls, 2);
     });
   });
 }
