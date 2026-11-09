@@ -108,10 +108,16 @@ def clear(db: Session, student_no: str) -> None:
 
 
 def _lock(db: Session, student_no: str, at: int) -> None:
-    # 이미 걸린 잠금은 늘리지 않는다. 잠긴 동안 계속 두드려도 풀리는 시각은 그대로다
     t = LoginAttempt
     db.execute(
         update(t)
-        .where(t.student_no == student_no, or_(t.locked_until.is_(None), t.locked_until <= at))
+        .where(
+            t.student_no == student_no,
+            # 이미 걸린 잠금은 늘리지 않는다. 잠긴 동안 계속 두드려도 풀리는 시각은 그대로다
+            or_(t.locked_until.is_(None), t.locked_until <= at),
+            # 지금 행의 횟수로 판단한다. 예약 때 받은 횟수(Attempt.count)는 그사이 성공으로 기록이 지워지고
+            # 새로 센 행에는 맞지 않는다 — 성공 뒤 실패 2번에 잠그게 된다 (#89 codex 1차)
+            t.failed_count >= MAX_FAILURES,
+        )
         .values(locked_until=at + LOCK_SECONDS)
     )

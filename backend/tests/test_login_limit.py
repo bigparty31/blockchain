@@ -190,3 +190,33 @@ def test_db_error_is_503_not_a_free_pass(tmp_path):
         engine.dispose()
     # login_db 픽스처가 끝날 때 override 를 지운다
     assert res.status_code == 503
+
+
+# ---------------------------------------------------------------- 성공과 실패가 겹칠 때 (#89 codex 1차)
+
+
+def test_late_failure_from_before_a_success_does_not_lock_the_new_count(clock, login_db):
+    # 3회 실패 → A(4번째 예약)·B(5번째 예약)가 겹침 → A 성공으로 기록 삭제 → C 가 새로 1회 → 늦게 끝난 B 실패.
+    # B 는 예약 때 5회였지만 지금 행은 성공 뒤 새로 센 1회다. 성공 뒤 실패 2번(C·B)으로 잠그면 안 된다
+    fail(EXISTING, 3)
+    with sessionmaker(bind=login_db)() as db:
+        a = login_limit.reserve(db, EXISTING)
+        b = login_limit.reserve(db, EXISTING)
+        assert (a.count, b.count) == (4, 5)
+        login_limit.clear(db, EXISTING)  # A 성공
+        c = login_limit.reserve(db, EXISTING)
+        assert c.count == 1
+        login_limit.record_failure(db, b)  # B 실패 (늦게 끝남)
+
+    assert row(login_db, EXISTING).locked_until is None
+    assert login(EXISTING).status_code == 200
+
+
+def test_fifth_failure_still_locks_when_the_row_holds_it(clock, login_db):
+    # 위 조건 때문에 정상적인 5번째 실패가 안 잠기면 안 된다
+    fail(EXISTING, login_limit.MAX_FAILURES - 1)
+    with sessionmaker(bind=login_db)() as db:
+        fifth = login_limit.reserve(db, EXISTING)
+        assert fifth.count == login_limit.MAX_FAILURES
+        login_limit.record_failure(db, fifth)
+    assert row(login_db, EXISTING).locked_until == T0 + login_limit.LOCK_SECONDS
