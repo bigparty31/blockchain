@@ -4,7 +4,7 @@
  *   터미널 1:  npx hardhat node
  *   터미널 2:  npx hardhat run scripts/deploy.ts --network localhost
  *
- * 순서: RoleManager(회장, 총무, 감사1, 감사2) → BudgetToken → AccountingLedger → setLedger.
+ * 순서: RoleManager(회장, 총무, 감사1, 감사2) → BudgetToken → AccountingLedger → setLedger → MembershipSBT.
  * 네 임원은 생성자 인자다. 별도 롤 부여 단계가 없고, 끝난 뒤 배포자는 어떤 권한도 갖지 않는다.
  *
  * 계정 배치 (Hardhat 기본 니모닉의 순서. 개인키는 Hardhat 이 공개한 테스트 키라 파일에 두지 않는다):
@@ -27,7 +27,7 @@ import { network } from "hardhat";
 import { deployAll } from "./lib/deployAll.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const CONTRACTS = ["RoleManager", "BudgetToken", "AccountingLedger"] as const;
+const CONTRACTS = ["RoleManager", "BudgetToken", "AccountingLedger", "MembershipSBT"] as const;
 const ALLOWED_NETWORKS = ["localhost"];
 
 const conn = await network.getOrCreate();
@@ -87,11 +87,12 @@ assert((await d.budgetToken.ledger()) === d.addresses.AccountingLedger, "BudgetT
 assert((await d.budgetToken.roleManager()) === d.addresses.RoleManager, "BudgetToken.roleManager 불일치");
 assert((await d.ledger.roleManager()) === d.addresses.RoleManager, "AccountingLedger.roleManager 불일치");
 assert((await d.ledger.budgetToken()) === d.addresses.BudgetToken, "AccountingLedger.budgetToken 불일치");
+assert((await d.membershipSBT.roleManager()) === d.addresses.RoleManager, "MembershipSBT.roleManager 불일치");
 
-// EIP-712 도메인: 서명을 받는 세 컨트랙트 모두
+// EIP-712 도메인: 서명을 받는 네 컨트랙트 모두
 const eip712: Record<string, object> = {};
 for (const name of CONTRACTS) {
-  const contract = name === "RoleManager" ? d.roleManager : name === "BudgetToken" ? d.budgetToken : d.ledger;
+  const contract = { RoleManager: d.roleManager, BudgetToken: d.budgetToken, AccountingLedger: d.ledger, MembershipSBT: d.membershipSBT }[name];
   const onchain: string = await contract.DOMAIN_SEPARATOR();
   const expected = ethers.TypedDataEncoder.hashDomain({
     name,
@@ -138,6 +139,7 @@ const record = {
   roles,
   maxAmount: (await d.ledger.MAX_AMOUNT()).toString(),
   recoveryDelaySeconds: Number(await d.roleManager.RECOVERY_DELAY()),
+  maxBatchSize: Number(await d.membershipSBT.MAX_BATCH_SIZE()),
   accounts: {
     deployer: deployer.address,
     president: president.address,
