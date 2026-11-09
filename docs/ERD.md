@@ -577,6 +577,62 @@ erDiagram
 
 ---
 
+> §3.12·3.13(알림, #78)과 §3.14(로그인 시도, #89)는 해당 PR 자리다.
+
+### 3.15 `membership_mint_batches` (회원권 일괄 발행 요청)
+- **요구사항 매핑**: PRD v0.16 §4.2 (납부자 명단 → SBT 일괄 발행, 기기 서명 + 릴레이어), §7.2 (`mintBatchRelayed`), §5 A3
+- **설명**: 한 번 서명해 보내는 1~100명 묶음. 준비 때 서명할 값(학기 코드·`nonce`·수령자 순서)을 고정해 두고, 제출 때 그 값으로 `MintBatchRequest`를 다시 만들어 서명자를 확인한다. `nonce`는 서명자별이라 준비한 임원만 제출한다. 보내기 직전에 `tx_hash`를 조건부 UPDATE로 선점하고(`SUBMITTING`), 응답을 잃으면(`NO_RESPONSE`) 같은 서명을 다시 보내지 않고 이 hash로 결과를 확인한다 (`docs/API.md` 「회원권 2」).
+
+| 컬럼명 | 데이터 타입 | Null | 기본값 | 제약조건 / 설명 |
+| :--- | :--- | :---: | :---: | :--- |
+| `id` | `BIGSERIAL` | N | Auto | **PK** |
+| `term_id` | `BIGINT` | N | - | **FK** -> `terms(id)` ON DELETE RESTRICT, 발행 학기 |
+| `requested_by` | `BIGINT` | N | - | **FK** -> `users(id)` ON DELETE RESTRICT, 준비한 임원 (회장·감사) |
+| `signer_address` | `VARCHAR(42)` | N | - | 서명할 지갑 주소 (준비 때 `requested_by`의 `wallet_address`, 소문자) |
+| `nonce` | `BIGINT` | N | - | 준비 때 읽은 `MembershipSBT.nonces(signer)` |
+| `status` | `VARCHAR(20)` | N | `'PREPARED'` | `PREPARED`, `SUBMITTING`, `MINTED`, `REJECTED`, `NO_RESPONSE` |
+| `deadline` | `BIGINT` | Y | NULL | 제출한 서명의 유효 시한 (Unix 초) |
+| `signature` | `VARCHAR(132)` | Y | NULL | 제출한 서명 |
+| `tx_hash` | `VARCHAR(66)` | Y | NULL | 보낸(보내는 중인) 트랜잭션 hash. 보내기 직전에 선점 |
+| `reason` | `VARCHAR(40)` | Y | NULL | `REJECTED` 사유 (Solidity 에러 이름 또는 `Unknown`) |
+| `created_at` | `TIMESTAMPTZ` | N | `now()` | 준비 일시 |
+| `updated_at` | `TIMESTAMPTZ` | N | `now()` | 마지막 상태 변경 일시 |
+
+- **테이블 제약조건**:
+  - `CONSTRAINT ck_mint_batches_status CHECK (status IN ('PREPARED', 'SUBMITTING', 'MINTED', 'REJECTED', 'NO_RESPONSE'))`
+  - `CONSTRAINT ck_mint_batches_signature CHECK (status = 'PREPARED' OR signature IS NOT NULL)`
+  - `CONSTRAINT ck_mint_batches_tx CHECK (status NOT IN ('SUBMITTING', 'MINTED', 'NO_RESPONSE') OR tx_hash IS NOT NULL)`
+  - `CONSTRAINT ck_mint_batches_reason CHECK (status != 'REJECTED' OR reason IS NOT NULL)`
+  - `CONSTRAINT uq_mint_batches_tx_hash UNIQUE (tx_hash)`
+- **인덱스**:
+  - `idx_mint_batches_term ON membership_mint_batches (term_id)`
+
+### 3.16 `membership_mint_targets` (회원권 일괄 발행 대상)
+- **요구사항 매핑**: PRD v0.16 §4.2 (일부만 성공하면 학생별로 결과를 보여 준다)
+- **설명**: 묶음의 학생 한 명. `position` 순서가 서명한 `recipients` 배열의 순서다. 결과를 반영할 때 `memberships` 기록을 만들고 `membership_id`로 잇는다. 기록을 만들지 못하면(같은 `token_id`나 같은 학생·학기의 유효한 기록이 이미 있음 — 체인만 재배포한 환경) 그 학생만 `membership_id`가 NULL이다.
+
+| 컬럼명 | 데이터 타입 | Null | 기본값 | 제약조건 / 설명 |
+| :--- | :--- | :---: | :---: | :--- |
+| `id` | `BIGSERIAL` | N | Auto | **PK** |
+| `batch_id` | `BIGINT` | N | - | **FK** -> `membership_mint_batches(id)` ON DELETE CASCADE |
+| `position` | `INTEGER` | N | - | `recipients` 배열의 자리 (0~99) |
+| `user_id` | `BIGINT` | N | - | **FK** -> `users(id)` ON DELETE RESTRICT, 학생 |
+| `address` | `VARCHAR(42)` | N | - | 학생 지갑 주소 (EIP-55, 서버가 `wallet_index`로 파생) |
+| `status` | `VARCHAR(10)` | N | `'PENDING'` | `PENDING`, `MINTED`, `SKIPPED` (이미 유효해 컨트랙트가 건너뜀) |
+| `token_id` | `BIGINT` | Y | NULL | 발행된(또는 이미 있던) 회원권 tokenId. `SKIPPED`는 읽지 못하면 NULL |
+| `membership_id` | `BIGINT` | Y | NULL | **FK** -> `memberships(id)` ON DELETE SET NULL |
+
+- **테이블 제약조건**:
+  - `CONSTRAINT ck_mint_targets_status CHECK (status IN ('PENDING', 'MINTED', 'SKIPPED'))`
+  - `CONSTRAINT ck_mint_targets_position CHECK (position >= 0 AND position < 100)`
+  - `CONSTRAINT ck_mint_targets_token CHECK (status != 'MINTED' OR token_id IS NOT NULL)`
+  - `CONSTRAINT uq_mint_targets_batch_position UNIQUE (batch_id, position)`
+  - `CONSTRAINT uq_mint_targets_batch_user UNIQUE (batch_id, user_id)`
+- **인덱스**:
+  - `idx_mint_targets_user ON membership_mint_targets (user_id)`
+
+---
+
 ## 4. 요구사항명세서(Excel) 기능별 데이터 모델 매핑 추적표
 
 | 기능 코드 | 기능명 (Excel 명세서) | 관련 테이블 및 컬럼 | 데이터 모델 반영 내용 |
@@ -915,6 +971,52 @@ CREATE TABLE check_ins (
 );
 
 CREATE INDEX idx_check_ins_user_id ON check_ins (user_id);
+
+-- 15·16. 회원권 일괄 발행 (membership_mint_batches, membership_mint_targets)
+CREATE TABLE membership_mint_batches (
+    id BIGSERIAL PRIMARY KEY,
+    term_id BIGINT NOT NULL,
+    requested_by BIGINT NOT NULL,
+    signer_address VARCHAR(42) NOT NULL,
+    nonce BIGINT NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'PREPARED',
+    deadline BIGINT NULL,
+    signature VARCHAR(132) NULL,
+    tx_hash VARCHAR(66) NULL,
+    reason VARCHAR(40) NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_mint_batches_term FOREIGN KEY (term_id) REFERENCES terms(id) ON DELETE RESTRICT,
+    CONSTRAINT fk_mint_batches_requested_by FOREIGN KEY (requested_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CONSTRAINT ck_mint_batches_status CHECK (status IN ('PREPARED', 'SUBMITTING', 'MINTED', 'REJECTED', 'NO_RESPONSE')),
+    CONSTRAINT ck_mint_batches_signature CHECK (status = 'PREPARED' OR signature IS NOT NULL),
+    CONSTRAINT ck_mint_batches_tx CHECK (status NOT IN ('SUBMITTING', 'MINTED', 'NO_RESPONSE') OR tx_hash IS NOT NULL),
+    CONSTRAINT ck_mint_batches_reason CHECK (status != 'REJECTED' OR reason IS NOT NULL),
+    CONSTRAINT uq_mint_batches_tx_hash UNIQUE (tx_hash)
+);
+
+CREATE INDEX idx_mint_batches_term ON membership_mint_batches (term_id);
+
+CREATE TABLE membership_mint_targets (
+    id BIGSERIAL PRIMARY KEY,
+    batch_id BIGINT NOT NULL,
+    position INTEGER NOT NULL,
+    user_id BIGINT NOT NULL,
+    address VARCHAR(42) NOT NULL,
+    status VARCHAR(10) NOT NULL DEFAULT 'PENDING',
+    token_id BIGINT NULL,
+    membership_id BIGINT NULL,
+    CONSTRAINT fk_mint_targets_batch FOREIGN KEY (batch_id) REFERENCES membership_mint_batches(id) ON DELETE CASCADE,
+    CONSTRAINT fk_mint_targets_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT,
+    CONSTRAINT fk_mint_targets_membership FOREIGN KEY (membership_id) REFERENCES memberships(id) ON DELETE SET NULL,
+    CONSTRAINT ck_mint_targets_status CHECK (status IN ('PENDING', 'MINTED', 'SKIPPED')),
+    CONSTRAINT ck_mint_targets_position CHECK (position >= 0 AND position < 100),
+    CONSTRAINT ck_mint_targets_token CHECK (status != 'MINTED' OR token_id IS NOT NULL),
+    CONSTRAINT uq_mint_targets_batch_position UNIQUE (batch_id, position),
+    CONSTRAINT uq_mint_targets_batch_user UNIQUE (batch_id, user_id)
+);
+
+CREATE INDEX idx_mint_targets_user ON membership_mint_targets (user_id);
 
 COMMIT;
 ```
