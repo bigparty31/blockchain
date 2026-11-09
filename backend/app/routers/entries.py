@@ -122,6 +122,12 @@ def _detect_duplicate_entry_id(
         dup_filters.append(DBEntry.id != exclude_entry_id)
     if corrects_entry_id is not None:
         dup_filters.append(DBEntry.id != corrects_entry_id)
+        dup_filters.append(
+            or_(
+                DBEntry.corrects_entry_id.is_(None),
+                DBEntry.corrects_entry_id != corrects_entry_id,
+            )
+        )
 
     if ocr_approval_no and ocr_paid_at:
         matched_ocr = (
