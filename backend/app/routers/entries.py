@@ -6,7 +6,7 @@ import re
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
-from sqlalchemy import or_
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -146,38 +146,68 @@ def _calculate_net_amount(db: Session, target: DBEntry) -> int:
     return net
 
 
+_RECLASSIFY_CONFIRM_LOCKS: dict[int, asyncio.Lock] = {}
+
+
+def _get_reclassify_confirm_lock(target_entry_id: int) -> asyncio.Lock:
+    """동일 원본 항목에 대한 재분류(RECLASSIFY) 음수 정정 동시 확정을 직렬화하기 위한 Lock 반환."""
+    lock = _RECLASSIFY_CONFIRM_LOCKS.get(target_entry_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _RECLASSIFY_CONFIRM_LOCKS[target_entry_id] = lock
+    return lock
+
+
 def _validate_reclassify_negative_order(
     db: Session, target: DBEntry, negative_amount: int, exclude_entry_id: Optional[int] = None
 ) -> None:
-    """항목 재분류(RECLASSIFY) 확정 순서 강제: 새 예산에 대한 양수 정정이 먼저 확정(CONFIRMED)되어 있어야
+    """항목 재분류(RECLASSIFY) 확정 순서 및 한도 강제: 새 예산에 대한 양수 정정이 먼저 확정(CONFIRMED)되어 있어야
     원래 예산에 대한 음수(감액) 재분류 정정을 확정할 수 있습니다 (PRD v0.15 §4.4, B7).
     앱에서 양수·음수 2건을 연속으로 초안 등록할 수 있도록 등록 단계가 아닌 확정(confirm) 단계에서만 검사합니다.
+    동시 확정 경합을 막기 위해 원본 항목 행을 잠그고(FOR UPDATE), 이미 확정(CONFIRMED)된 음수뿐 아니라
+    확정 처리 중(PENDING 이면서 tx_confirm 선점·비반려)인 음수 정정도 예약액으로 합산합니다.
     """
+    locked_target = (
+        db.query(DBEntry)
+        .filter(DBEntry.id == target.id)
+        .with_for_update()
+        .first()
+    )
+    target_id = locked_target.id if locked_target is not None else target.id
+    target_budget_id = locked_target.budget_id if locked_target is not None else target.budget_id
+
     pos_rows = (
         db.query(DBEntry)
         .filter(
-            DBEntry.corrects_entry_id == target.id,
+            DBEntry.corrects_entry_id == target_id,
             DBEntry.status == EntryStatus.CONFIRMED.value,
             DBEntry.amount > 0,
             DBEntry.budget_id.isnot(None),
-            DBEntry.budget_id != target.budget_id,
+            DBEntry.budget_id != target_budget_id,
         )
         .all()
     )
     neg_query = db.query(DBEntry).filter(
-        DBEntry.corrects_entry_id == target.id,
-        DBEntry.status == EntryStatus.CONFIRMED.value,
+        DBEntry.corrects_entry_id == target_id,
         DBEntry.amount < 0,
         DBEntry.correction_reason == CorrectionReason.RECLASSIFY.value,
+        or_(
+            DBEntry.status == EntryStatus.CONFIRMED.value,
+            and_(
+                DBEntry.status == EntryStatus.PENDING.value,
+                DBEntry.tx_confirm.isnot(None),
+                DBEntry.rejected_by.is_(None),
+            ),
+        ),
     )
     if exclude_entry_id is not None:
         neg_query = neg_query.filter(DBEntry.id != exclude_entry_id)
     neg_rows = neg_query.all()
 
     confirmed_pos_sum = sum(int(r.amount) for r in pos_rows)
-    confirmed_neg_abs_sum = sum(abs(int(r.amount)) for r in neg_rows)
+    reserved_neg_abs_sum = sum(abs(int(r.amount)) for r in neg_rows)
 
-    if confirmed_pos_sum - confirmed_neg_abs_sum < abs(int(negative_amount)):
+    if confirmed_pos_sum - reserved_neg_abs_sum < abs(int(negative_amount)):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="항목 재분류(RECLASSIFY)는 새 예산에 대한 양수(증액) 정정이 먼저 확정(CONFIRMED)된 후에 원래 예산의 음수(감액) 정정을 진행할 수 있습니다.",
@@ -1177,15 +1207,18 @@ async def confirm_entry(
             detail="반려 처리 중인 내역은 확정할 수 없습니다.",
         )
 
-    # 항목 재분류(RECLASSIFY) 음수 정정 확정 시: 새 예산의 양수 정정이 먼저 CONFIRMED 되었는지 확인 (PRD v0.15 §4.4, B7)
-    if (
-        not target.tx_confirm
-        and target.corrects_entry_id is not None
+    # 항목 재분류(RECLASSIFY) 음수 정정 여부
+    is_reclassify_negative = bool(
+        target.corrects_entry_id is not None
         and target.amount < 0
         and target.correction_reason == CorrectionReason.RECLASSIFY.value
-    ):
+    )
+    reclassify_parent_id = int(target.corrects_entry_id) if is_reclassify_negative else None
+
+    # 항목 재분류(RECLASSIFY) 음수 정정 확정 시: 새 예산의 양수 정정이 먼저 CONFIRMED 되었는지 1차 확인 (PRD v0.15 §4.4, B7)
+    if is_reclassify_negative and not target.tx_confirm:
         try:
-            orig_target = db.query(DBEntry).filter(DBEntry.id == target.corrects_entry_id).first()
+            orig_target = db.query(DBEntry).filter(DBEntry.id == reclassify_parent_id).first()
             if orig_target:
                 _validate_reclassify_negative_order(db, orig_target, target.amount, exclude_entry_id=target.id)
         except SQLAlchemyError as e:
@@ -1283,17 +1316,30 @@ async def confirm_entry(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="서명자가 승인권자와 일치하지 않습니다.")
 
     # 체인 릴레이 호출 및 상태 갱신 (chain_tx 서비스 연동)
-    try:
-        db.commit()
-    except SQLAlchemyError as e:
-        logger.exception("체인 릴레이 전 데이터베이스 커밋 오류: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="데이터베이스 처리 중 오류가 발생했습니다.",
-        )
+    async def _commit_and_relay_confirm():
+        if is_reclassify_negative and reclassify_parent_id is not None:
+            try:
+                db.expire_all()
+                orig_target = db.query(DBEntry).filter(DBEntry.id == reclassify_parent_id).first()
+                if orig_target:
+                    _validate_reclassify_negative_order(db, orig_target, target_amount, exclude_entry_id=id)
+            except SQLAlchemyError as e:
+                logger.exception("재분류 순서 재확인 중 데이터베이스 오류: %s", e)
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="데이터베이스 처리 중 오류가 발생했습니다.",
+                )
 
-    try:
-        tx_res = await relay_confirm(
+        try:
+            db.commit()
+        except SQLAlchemyError as e:
+            logger.exception("체인 릴레이 전 데이터베이스 커밋 오류: %s", e)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="데이터베이스 처리 중 오류가 발생했습니다.",
+            )
+
+        return await relay_confirm(
             db=db,
             chain=chain,
             approval=approval,
@@ -1301,6 +1347,13 @@ async def confirm_entry(
             approver_id=user.id,
             warning_reason=clean_reason,
         )
+
+    try:
+        if is_reclassify_negative and reclassify_parent_id is not None:
+            async with _get_reclassify_confirm_lock(reclassify_parent_id):
+                tx_res = await _commit_and_relay_confirm()
+        else:
+            tx_res = await _commit_and_relay_confirm()
     except EntryConflict as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except ChainRevert as e:
