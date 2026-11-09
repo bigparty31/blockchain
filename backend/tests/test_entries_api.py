@@ -2013,6 +2013,53 @@ def test_duplicate_check_ignores_draft_entries(auth_header):
     assert detail2["duplicate_of"] == id1
 
 
+def test_duplicate_check_concurrent_submit(auth_header):
+    """같은 영수증의 초안 A·B를 동시에 제출(asyncio.gather)해도 나중 건이 DUPLICATE로 갱신되어 두 건 모두 MATCH로 남지 않음 검증 (#66 Codex 2차)"""
+    import asyncio
+    from app.schemas.entry import EntrySubmitRequest
+
+    now = int(time.time())
+    draft_ids = []
+    for idx in (1, 2):
+        res = client.post(
+            "/entries",
+            json={
+                "term_id": 1,
+                "kind": "EXPENSE",
+                "amount": 27000,
+                "counterparty": f"동시제출상점{idx}",
+                "purpose": f"동시 제출 초안 {idx}",
+                "budget_id": 2,
+                "occurred_at": 1788793200,
+                "receipt_hash": TEST_RECEIPT_HASH,
+                "ocr_status": "MATCH",
+            },
+            headers=auth_header(Role.TREASURER),
+        )
+        assert res.status_code == 201
+        draft_ids.append(res.json()["id"])
+
+    id_a, id_b = draft_ids
+    treasurer = next(u for u in users.SEED_USERS if u.role == Role.TREASURER)
+    submit_req = EntrySubmitRequest(deadline=now + 600, signature=fake_signature(TREASURER_WALLET))
+
+    async def _run_concurrent_submits():
+        with _test_session_factory() as db1, _test_session_factory() as db2:
+            return await asyncio.gather(
+                entries_router.submit_entry(id=id_a, req=submit_req, user=treasurer, db=db1, chain=_test_chain),
+                entries_router.submit_entry(id=id_b, req=submit_req, user=treasurer, db=db2, chain=_test_chain),
+            )
+
+    res_a, res_b = asyncio.run(_run_concurrent_submits())
+    assert res_a.status == "PENDING"
+    assert res_b.status == "PENDING"
+
+    detail_a = client.get(f"/entries/{id_a}").json()
+    detail_b = client.get(f"/entries/{id_b}").json()
+    statuses = {detail_a["ocr_status"], detail_b["ocr_status"]}
+    assert statuses == {"MATCH", "DUPLICATE"}
+
+
 def test_duplicate_check_ignores_correction_original_entry(auth_header):
     """정정 건이 원본 영수증을 그대로 다시 붙여도 원본 건(corrects_entry_id) 및 같은 원본을 고치는 다른 정정 건은 중복 대조에서 제외됨 (리뷰어 피드백)"""
     # e1은 시드 DB에서 CONFIRMED 상태인 확정 건
