@@ -23,6 +23,9 @@ dependencies:
   # String.trim() 은 BOM 처리가 Python 과 달라 쓰지 않는다.
   unorm_dart: ^0.3.0
   web3dart: ^3.0.3
+  # 결산 PDF 내보내기·공유(A11) — 11/9 팀장 승인
+  pdf: ^3.11.1
+  printing: ^5.13.4
 
 dev_dependencies:
   flutter_test:
@@ -31,3 +34,7 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    # 결산 PDF 한글 폰트. pdf 패키지 기본 폰트에는 한글이 없다. 나눔고딕(OFL) — 라이선스는 같은 폴더의 NanumGothic-OFL.txt
+    - assets/fonts/NanumGothic-Regular.ttf
+    - assets/fonts/NanumGothic-Bold.ttf

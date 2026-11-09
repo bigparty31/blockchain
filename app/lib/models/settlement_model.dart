@@ -1,3 +1,20 @@
+import '../core/enums.dart';
+
+/// 정정 사유 표시 이름 — `docs/enums.md` 기준. 앱 [CorrectionReason] 에 없는 `OTHER` 는 여기서 붙인다.
+/// 결산 화면과 결산 PDF 가 같이 쓴다.
+String correctionReasonLabel(String code) {
+  for (final r in CorrectionReason.values) {
+    if (r.code == code) return r.label;
+  }
+  return code == 'OTHER' ? '기타' : code;
+}
+
+/// 장부 잔액 − 통장 잔액([gap])이 무엇을 뜻하는지. 0 이면 null.
+String? balanceGapMeaning(int gap) {
+  if (gap == 0) return null;
+  return gap > 0 ? '장부에는 있는데 통장에 없는 돈이에요.' : '통장에는 있는데 장부에 없는 돈이에요.';
+}
+
 /// 학기 결산 — 백엔드 `SettlementResponse` 매핑 (docs/API.md 「결산」, PRD §4.7).
 ///
 /// **숫자는 기본값으로 메우지 않는다.** 결산에서 0 은 「정말 0건·0원」이라는 뜻이라, 응답이 깨졌을 때

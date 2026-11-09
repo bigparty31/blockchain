@@ -1,23 +1,44 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
+import 'package:printing/printing.dart';
 
 import '../../core/app_theme.dart';
-import '../../core/enums.dart';
 import '../../core/format.dart';
+import '../../core/settlement_pdf.dart';
 import '../../models/settlement_model.dart';
 import '../../services/api_service.dart';
 import '../../services/settlement_service.dart';
 
 /// 학기 결산 (A11, PRD §4.7) — 감사·회장.
 ///
-/// 폰에서는 **요약 카드 + 메타지표 카드**로 보여 준다 (PRD §3 모바일 대응 방침).
-/// 상세 PDF 내보내기는 패키지 추가가 필요해 아직 없다 (동결 이후라 팀 확인 뒤).
+/// 폰에서는 **요약 카드 + 메타지표 카드**로 보여 주고, 상세는 **PDF 로 내보내 공유**한다 (PRD §3 모바일 대응 방침).
+/// PDF 는 화면과 같은 응답([SettlementModel])으로만 만든다 — 숫자를 따로 계산하지 않는다.
 ///
 /// 읽지 못하면 숫자 대신 오류와 「다시 시도」를 보여 준다. 결산에 가짜 합계가 보이면 안 된다.
 class SettlementScreen extends StatefulWidget {
   /// 테스트에서 가짜 HTTP 와 함께 넣는다.
   final SettlementService? service;
 
-  const SettlementScreen({super.key, this.service});
+  /// 결산으로 PDF 바이트를 만든다. 테스트에서 갈아끼운다.
+  final Future<Uint8List> Function(SettlementModel) buildPdf;
+
+  /// 만든 PDF 를 기기 공유 시트로 넘긴다 (카톡·메일·파일 저장). 테스트에서 갈아끼운다.
+  final Future<void> Function(Uint8List bytes, String fileName) sharePdf;
+
+  const SettlementScreen({
+    super.key,
+    this.service,
+    this.buildPdf = _buildPdf,
+    this.sharePdf = _sharePdf,
+  });
+
+  static Future<Uint8List> _buildPdf(SettlementModel s) async =>
+      SettlementPdf.build(s, fonts: await SettlementPdfFonts.load(), generatedAt: DateTime.now());
+
+  static Future<void> _sharePdf(Uint8List bytes, String fileName) async {
+    await Printing.sharePdf(bytes: bytes, filename: fileName);
+  }
 
   @override
   State<SettlementScreen> createState() => _SettlementScreenState();
@@ -30,6 +51,9 @@ class _SettlementScreenState extends State<SettlementScreen> {
   String? _error;
   bool _loading = true;
   int _seq = 0;
+
+  /// PDF 를 만드는 중. 두 번 누르기를 막는다.
+  bool _exporting = false;
 
   @override
   void initState() {
@@ -60,11 +84,41 @@ class _SettlementScreenState extends State<SettlementScreen> {
     }
   }
 
+  /// 지금 보이는 결산을 PDF 로 만들어 공유한다. 결산을 못 읽었으면 버튼이 없다 — 빈 PDF 를 만들지 않는다.
+  Future<void> _exportPdf() async {
+    final data = _data;
+    if (data == null || _exporting) return;
+    setState(() => _exporting = true);
+    try {
+      final bytes = await widget.buildPdf(data);
+      await widget.sharePdf(bytes, SettlementPdf.fileName(data));
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('PDF 를 만들지 못했어요. 다시 시도해 주세요.')));
+      }
+    } finally {
+      if (mounted) setState(() => _exporting = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: AppTheme.bgPage,
-      appBar: AppBar(title: Text(_data == null ? '결산' : '결산 · ${_data!.termName}')),
+      appBar: AppBar(
+        title: Text(_data == null ? '결산' : '결산 · ${_data!.termName}'),
+        actions: [
+          if (_data != null)
+            IconButton(
+              key: const Key('settlement_pdf'),
+              tooltip: 'PDF 로 내보내기·공유',
+              onPressed: _exporting ? null : _exportPdf,
+              icon: _exporting
+                  ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.picture_as_pdf_rounded),
+            ),
+        ],
+      ),
       body: RefreshIndicator(onRefresh: _load, child: _body()),
     );
   }
@@ -211,7 +265,7 @@ class _SummaryCard extends StatelessWidget {
         Padding(
           padding: const EdgeInsets.only(top: 4),
           child: Text(
-            gap > 0 ? '장부에는 있는데 통장에 없는 돈이에요. 계좌 대조에서 확인해 주세요.' : '통장에는 있는데 장부에 없는 돈이에요. 계좌 대조에서 확인해 주세요.',
+            '${balanceGapMeaning(gap)} 계좌 대조에서 확인해 주세요.',
             key: const Key('settlement_gap_note'),
             style: const TextStyle(fontSize: 12, color: AppTheme.expense),
           ),
@@ -286,14 +340,6 @@ class _MetricsCard extends StatelessWidget {
   final SettlementMetrics m;
   const _MetricsCard(this.m);
 
-  /// 정정 사유 표시 이름 — `docs/enums.md` 기준. 앱 [CorrectionReason] 에 없는 `OTHER` 는 여기서 붙인다.
-  static String reasonLabel(String code) {
-    for (final r in CorrectionReason.values) {
-      if (r.code == code) return r.label;
-    }
-    return code == 'OTHER' ? '기타' : code;
-  }
-
   @override
   Widget build(BuildContext context) {
     final reasons = m.correctionsByReason.entries.where((e) => e.value > 0).toList();
@@ -313,7 +359,7 @@ class _MetricsCard extends StatelessWidget {
             Padding(
               padding: const EdgeInsets.only(bottom: 4),
               child: Text(
-                reasons.map((e) => '${reasonLabel(e.key)} ${e.value}').join(' · '),
+                reasons.map((e) => '${correctionReasonLabel(e.key)} ${e.value}').join(' · '),
                 key: const Key('settlement_reasons'),
                 style: const TextStyle(fontSize: 12, color: AppTheme.textSub),
               ),
