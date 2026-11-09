@@ -2014,34 +2014,60 @@ def test_duplicate_check_ignores_draft_entries(auth_header):
 
 
 def test_duplicate_check_ignores_correction_original_entry(auth_header):
-    """정정 건이 원본 영수증을 그대로 다시 붙여도 원본 건(corrects_entry_id)은 중복 대조에서 제외됨 (리뷰어 피드백 2)"""
+    """정정 건이 원본 영수증을 그대로 다시 붙여도 원본 건(corrects_entry_id) 및 같은 원본을 고치는 다른 정정 건은 중복 대조에서 제외됨 (리뷰어 피드백)"""
     # e1은 시드 DB에서 CONFIRMED 상태인 확정 건
     with _test_session_factory() as db:
         e1 = db.query(DBEntry).filter(DBEntry.id == 1).first()
         e1_hash = e1.receipt_hash
 
-    # e1의 정정 항목 등록 (동일 영수증 해시 재사용)
-    body = {
+    # 1. 원본 #1에 재분류 양수 정정(+5000, 원본 영수증)을 등록하고 PENDING으로 전환
+    pos_body = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 5000,
+        "counterparty": "한결문구",
+        "purpose": "재분류 양수 정정 (+)",
+        "budget_id": 1,
+        "occurred_at": 1788793200,
+        "corrects_entry_id": 1,
+        "correction_reason": "RECLASSIFY",
+        "receipt_hash": e1_hash,
+        "ocr_status": "MATCH",
+    }
+    res_pos = client.post("/entries", json=pos_body, headers=auth_header(Role.TREASURER))
+    assert res_pos.status_code == 201
+    assert res_pos.json()["duplicate_of"] is None
+    pos_id = res_pos.json()["id"]
+
+    with _test_session_factory() as db:
+        pos_row = db.query(DBEntry).filter(DBEntry.id == pos_id).first()
+        assert pos_row.ocr_status == "MATCH"
+        pos_row.status = "PENDING"
+        db.commit()
+
+    # 2. 같은 원본 #1에 재분류 음수 정정(-5000, 같은 원본 영수증) 등록 -> 양수 정정(pos_id)이 PENDING이어도 같은 원본 정정이므로 중복 아님!
+    neg_body = {
         "term_id": 1,
         "kind": "EXPENSE",
         "amount": -5000,
         "counterparty": "한결문구",
-        "purpose": "영수증 재확인 정정",
+        "purpose": "재분류 음수 정정 (-)",
         "budget_id": 2,
         "occurred_at": 1788793200,
         "corrects_entry_id": 1,
-        "correction_reason": "RECEIPT_RECHECK",
+        "correction_reason": "RECLASSIFY",
         "receipt_hash": e1_hash,
         "ocr_status": "MATCH",
     }
-    res = client.post("/entries", json=body, headers=auth_header(Role.TREASURER))
-    assert res.status_code == 201
-    entry_id = res.json()["id"]
+    res_neg = client.post("/entries", json=neg_body, headers=auth_header(Role.TREASURER))
+    assert res_neg.status_code == 201
+    assert res_neg.json()["duplicate_of"] is None
+    neg_id = res_neg.json()["id"]
 
     with _test_session_factory() as db:
-        row = db.query(DBEntry).filter(DBEntry.id == entry_id).first()
-        # 원본 건(e1)은 제외되었으므로 DUPLICATE가 되지 않고 MATCH 유지
-        assert row.ocr_status == "MATCH"
+        neg_row = db.query(DBEntry).filter(DBEntry.id == neg_id).first()
+        # 원본 건(e1)과 같은 원본의 정정 건(pos_id) 모두 제외되었으므로 DUPLICATE가 되지 않고 MATCH 유지
+        assert neg_row.ocr_status == "MATCH"
 
 
 def test_duplicate_sets_duplicate_of_in_response_and_query(auth_header):
