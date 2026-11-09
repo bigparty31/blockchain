@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
-from sqlalchemy import case, func
+from sqlalchemy import case, func, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -165,18 +165,20 @@ def revoke_device_token(
     user: User = Depends(council_only),
     db: Session = Depends(get_db),
 ):
-    """본인 토큰이 아니거나 없는 토큰이어도 200 이다 — 앱이 결과에 따라 할 일이 없다. 남의 토큰은 건드리지 않는다."""
+    """본인 토큰이 아니거나 없는 토큰이어도 200 이다 — 앱이 결과에 따라 할 일이 없다. 남의 토큰은 건드리지 않는다.
+
+    조회 후 저장으로 나누지 않고 조건부 UPDATE 한 번으로 한다. 나누면 그 사이 같은 기기에서 다른 임원이 토큰을 넘겨받았을 때
+    늦게 도착한 이 해제가 그 사람의 토큰을 해제한다.
+    """
     try:
-        row = (
-            db.query(DeviceToken)
-            .filter(DeviceToken.token == token, DeviceToken.user_id == user.id, DeviceToken.revoked_at.is_(None))
-            .first()
-        )
-        if row is None:
-            return DeviceTokenRevokeResponse(revoked=False)
-        row.revoked_at = datetime.now(timezone.utc)
+        revoked = db.execute(
+            update(DeviceToken)
+            .where(DeviceToken.token == token, DeviceToken.user_id == user.id, DeviceToken.revoked_at.is_(None))
+            .values(revoked_at=datetime.now(timezone.utc))
+            .execution_options(synchronize_session=False)
+        ).rowcount
         db.commit()
-        return DeviceTokenRevokeResponse(revoked=True)
+        return DeviceTokenRevokeResponse(revoked=revoked == 1)
     except SQLAlchemyError as e:
         db.rollback()
         raise _db_unavailable(e) from e

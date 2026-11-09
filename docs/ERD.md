@@ -605,6 +605,7 @@ erDiagram
   - `idx_notifications_user_open ON notifications (user_id, resolved_at, read_at)` (목록·안 읽은 수)
   - `idx_notifications_entry ON notifications (entry_id)`, `idx_notifications_revision ON notifications (budget_revision_request_id)` (닫기)
   - `idx_notifications_next_remind ON notifications (next_remind_at)` (재알림 작업)
+  - `uq_notifications_confirm_failed_unread ON notifications (entry_id, user_id) WHERE kind = 'ENTRY_CONFIRM_FAILED' AND read_at IS NULL` (UNIQUE, 같은 건의 안 읽은 확정 실패는 한 건 — 동시 기록 중복 방지)
 
 ---
 
@@ -996,6 +997,8 @@ CREATE INDEX idx_notifications_user_open ON notifications (user_id, resolved_at,
 CREATE INDEX idx_notifications_entry ON notifications (entry_id);
 CREATE INDEX idx_notifications_revision ON notifications (budget_revision_request_id);
 CREATE INDEX idx_notifications_next_remind ON notifications (next_remind_at);
+CREATE UNIQUE INDEX uq_notifications_confirm_failed_unread ON notifications (entry_id, user_id)
+    WHERE kind = 'ENTRY_CONFIRM_FAILED' AND read_at IS NULL;
 
 
 -- 임원 기기 FCM 토큰 (device_tokens)

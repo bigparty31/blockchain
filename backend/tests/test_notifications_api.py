@@ -197,6 +197,15 @@ def test_only_android_is_accepted(auth_header, platform):
     assert response.status_code == 400 and tokens() == []
 
 
+def test_late_revoke_does_not_touch_the_token_someone_took_over(auth_header):
+    # 감사가 로그아웃하는 사이 회장이 같은 기기로 로그인해 토큰을 넘겨받았다. 늦게 온 감사의 해제는 회장 토큰을 건드리지 않는다
+    register(auth_header, Role.AUDITOR)
+    register(auth_header, Role.PRESIDENT)
+    response = client.delete("/notifications/device-tokens/fcm-1", headers=auth_header(Role.AUDITOR))
+    assert response.json() == {"revoked": False}
+    assert tokens() == [(PRESIDENT, "fcm-1", True)]
+
+
 def test_revoking_is_200_whatever_happens(auth_header):
     register(auth_header, Role.AUDITOR, token="mine")
     register(auth_header, Role.PRESIDENT, token="theirs")

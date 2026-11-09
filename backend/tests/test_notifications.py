@@ -56,6 +56,15 @@ def test_migrated_db_accepts_every_kind_and_nothing_else(tmp_path):
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute("INSERT INTO device_tokens(user_id, platform, token) VALUES (2, 'ios', 't')")
     conn.execute("INSERT INTO device_tokens(user_id, platform, token) VALUES (2, 'android', 't')")
+    # 같은 건의 안 읽은 확정 실패는 받는 사람마다 한 건. 읽었거나 받는 사람이 다르면 들어간다
+    failed = "INSERT INTO notifications(user_id, kind, body, entry_id, read_at) VALUES (?, 'ENTRY_CONFIRM_FAILED', 'x', 7, ?)"
+    conn.execute(failed, (2, None))
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(failed, (2, None))
+    conn.execute(failed, (2, "2026-11-07 00:00:00"))
+    conn.execute(failed, (3, None))
+    conn.execute("INSERT INTO notifications(user_id, kind, body, entry_id) VALUES (2, 'ENTRY_REGISTERED', 'x', 7)")
+    conn.execute("INSERT INTO notifications(user_id, kind, body, entry_id) VALUES (2, 'ENTRY_REGISTERED', 'x', 7)")
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute("INSERT INTO device_tokens(user_id, platform, token) VALUES (3, 'android', 't')")
     row = conn.execute("SELECT remind_count, created_at IS NOT NULL, notified_at IS NOT NULL FROM notifications LIMIT 1").fetchone()
@@ -263,6 +272,30 @@ def test_confirm_failure_is_not_repeated_while_unread(engine):
         db.commit()
     notify(engine, K.ENTRY_CONFIRM_FAILED, entry_id=10)
     assert len(saved(engine, kind="ENTRY_CONFIRM_FAILED")) == 2
+
+
+def test_concurrent_confirm_failures_leave_one_unread(engine, monkeypatch):
+    # 두 실패 기록이 서로의 INSERT 를 보기 전에 '안 읽은 알림 없음'을 확인한 경우. DB 인덱스가 두 번째를 건너뛰게 한다
+    notify(engine, K.ENTRY_CONFIRM_FAILED, entry_id=10)
+    monkeypatch.setattr(notifications, "_unread_confirm_failed", lambda db, entry_id: set())
+    notify(engine, K.ENTRY_CONFIRM_FAILED, entry_id=10)  # IntegrityError 없이 건너뛴다
+    assert saved(engine, kind="ENTRY_CONFIRM_FAILED") == [(TREASURER, "ENTRY_CONFIRM_FAILED", False)]
+    with Session(engine) as db:
+        db.query(Notification).update({"read_at": NOW})
+        db.commit()
+    notify(engine, K.ENTRY_CONFIRM_FAILED, entry_id=10)  # 읽은 뒤의 실패는 새로 알린다
+    assert len(saved(engine, kind="ENTRY_CONFIRM_FAILED")) == 2
+
+
+def test_skipped_duplicate_does_not_undo_the_rest_of_the_transaction(engine, monkeypatch):
+    notify(engine, K.ENTRY_CONFIRM_FAILED, entry_id=10)
+    monkeypatch.setattr(notifications, "_unread_confirm_failed", lambda db, entry_id: set())
+    with Session(engine) as db:
+        create_notification(db, K.ENTRY_REGISTERED, entry_id=10)
+        create_notification(db, K.ENTRY_CONFIRM_FAILED, entry_id=10)
+        db.commit()
+    assert len(saved(engine, kind="ENTRY_CONFIRM_FAILED")) == 1
+    assert len(saved(engine, kind="ENTRY_REGISTERED")) == 3  # 같은 세션의 다른 알림은 그대로 남는다
 
 
 def test_nothing_is_written_until_the_caller_commits(engine):
