@@ -44,8 +44,10 @@ class EntryModel {
   /// 그때 학기 대조는 「모름」으로 남는다 — 승인·반려 서명은 학기 코드가 없으면 서명 전에 멈춘다.
   final int? termCode;
 
-  /// 등록자 지갑 주소 (#65). 체인을 읽었으면 체인의 registrant, 못 읽었으면 DB 등록자 지갑이다 — 검증용
-  /// 체인 값으로 쓰지 않는다(그건 `/entries/{id}/onchain`). 서명의 `entryCommit` 에만 쓴다. 옛 서버는 null.
+  /// 등록자 지갑 주소 (#65) — 서버가 체인에서 읽은 registrant 다. **체인을 못 읽었거나 기록이 없으면 null 이다**
+  /// (서버가 DB 등록자 지갑으로 메우지 않는다 — 앱이 체인 값으로 오인하지 않게). 옛 서버도 null.
+  /// 검증용 체인 값으로 쓰지 않는다(그건 `/entries/{id}/onchain`). 서명의 `entryCommit` 에만 쓴다.
+  /// null 이면 승인·반려는 `GET /users/wallets` 로 찾되, 주소가 정확히 하나일 때만 서명한다.
   final String? registrant;
 
   final int? correctsEntryId;
