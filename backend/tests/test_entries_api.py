@@ -2592,6 +2592,145 @@ def test_reclassify_order_positive_first_enforced(auth_header):
     assert res_revert_reclass.status_code == 201
 
 
+def test_reclassify_negative_concurrent_and_inflight_reservation(auth_header):
+    """원본 35,000원에 양수 재분류 +10,000원이 확정된 상태에서 음수 -10,000원 두 건이 처리 중이거나 동시에 확정될 때 한 건만 통과하고 나머지는 400으로 차단됨 검증"""
+    import asyncio
+    from fastapi import HTTPException
+    from app.schemas.entry import EntryConfirmRequest
+
+    now = int(time.time())
+
+    # 1. 온체인+DB에 원본 지출(35,000원, budget_id=2) 등록·제출·확정
+    res_orig = client.post(
+        "/entries",
+        json={
+            "term_id": 1,
+            "kind": "EXPENSE",
+            "amount": 35000,
+            "counterparty": "한결문구",
+            "purpose": "재분류 동시성 테스트 원본 지출",
+            "budget_id": 2,
+            "occurred_at": 1788793200,
+            "receipt_hash": TEST_RECEIPT_HASH,
+        },
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_orig.status_code == 201
+    orig_id = res_orig.json()["id"]
+    assert client.post(
+        f"/entries/{orig_id}/submit",
+        json={"deadline": now + 600, "signature": fake_signature(TREASURER_WALLET)},
+        headers=auth_header(Role.TREASURER),
+    ).status_code == 200
+    assert client.post(
+        f"/entries/{orig_id}/confirm",
+        json={"deadline": now + 600, "signature": fake_signature(AUDITOR_WALLET), "warning_reason": None},
+        headers=auth_header(Role.AUDITOR),
+    ).status_code == 200
+
+    # 2. 새 예산(budget_id=1)으로 양수 재분류(+10,000원) 등록·제출·확정
+    res_pos = client.post(
+        "/entries",
+        json={
+            "term_id": 1,
+            "kind": "EXPENSE",
+            "amount": 10000,
+            "counterparty": "한결문구",
+            "purpose": "운영비로 일부 재분류 (+10,000)",
+            "budget_id": 1,
+            "occurred_at": 1788793200,
+            "corrects_entry_id": orig_id,
+            "correction_reason": "RECLASSIFY",
+            "receipt_hash": TEST_RECEIPT_HASH,
+        },
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_pos.status_code == 201
+    pos_id = res_pos.json()["id"]
+    assert client.post(
+        f"/entries/{pos_id}/submit",
+        json={"deadline": now + 600, "signature": fake_signature(TREASURER_WALLET)},
+        headers=auth_header(Role.TREASURER),
+    ).status_code == 200
+    assert client.post(
+        f"/entries/{pos_id}/confirm",
+        json={"deadline": now + 600, "signature": fake_signature(AUDITOR_WALLET), "warning_reason": None},
+        headers=auth_header(Role.AUDITOR),
+    ).status_code == 200
+
+    # 3. 원래 예산(budget_id=2)에 음수 재분류(-10,000원) 두 건(neg1, neg2) 등록·제출
+    neg_ids = []
+    for idx in (1, 2):
+        res_neg = client.post(
+            "/entries",
+            json={
+                "term_id": 1,
+                "kind": "EXPENSE",
+                "amount": -10000,
+                "counterparty": "한결문구",
+                "purpose": f"원래 예산에서 재분류 감액 #{idx}",
+                "budget_id": 2,
+                "occurred_at": 1788793200,
+                "corrects_entry_id": orig_id,
+                "correction_reason": "RECLASSIFY",
+            },
+            headers=auth_header(Role.TREASURER),
+        )
+        assert res_neg.status_code == 201
+        nid = res_neg.json()["id"]
+        assert client.post(
+            f"/entries/{nid}/submit",
+            json={"deadline": now + 600, "signature": fake_signature(TREASURER_WALLET)},
+            headers=auth_header(Role.TREASURER),
+        ).status_code == 200
+        neg_ids.append(nid)
+
+    neg1_id, neg2_id = neg_ids
+
+    # 4. (예약 검증) neg1 이 확정 처리 중(PENDING + tx_confirm 선점)일 때 neg2 확정은 400으로 거부되어야 함
+    with _test_session_factory() as db:
+        neg1_row = db.query(DBEntry).filter(DBEntry.id == neg1_id).first()
+        neg1_row.tx_confirm = "0x" + "9" * 64
+        neg1_row.approved_by = 3
+        db.commit()
+
+    res_inflight_blocked = client.post(
+        f"/entries/{neg2_id}/confirm",
+        json={"deadline": now + 600, "signature": fake_signature(AUDITOR_WALLET), "warning_reason": None},
+        headers=auth_header(Role.AUDITOR),
+    )
+    assert res_inflight_blocked.status_code == 400
+    assert "양수(증액) 정정이 먼저 확정(CONFIRMED)" in res_inflight_blocked.json()["detail"]
+
+    # 선점 초기화 후 실제 동시 확정(asyncio.gather) 검증
+    with _test_session_factory() as db:
+        neg1_row = db.query(DBEntry).filter(DBEntry.id == neg1_id).first()
+        neg1_row.tx_confirm = None
+        neg1_row.approved_by = None
+        db.commit()
+
+    # 5. (동시 확정 검증) neg1 과 neg2 를 동시에 confirm_entry 호출 시 정확히 1건만 성공하고 1건은 400 HTTPException 발생
+    auditor = next(u for u in users.SEED_USERS if u.role == Role.AUDITOR)
+    req_obj = EntryConfirmRequest(deadline=now + 600, signature=fake_signature(AUDITOR_WALLET), warning_reason=None)
+
+    async def _run_concurrent_confirms():
+        with _test_session_factory() as db1, _test_session_factory() as db2:
+            return await asyncio.gather(
+                entries_router.confirm_entry(id=neg1_id, req=req_obj, user=auditor, db=db1, chain=_test_chain),
+                entries_router.confirm_entry(id=neg2_id, req=req_obj, user=auditor, db=db2, chain=_test_chain),
+                return_exceptions=True,
+            )
+
+    results = asyncio.run(_run_concurrent_confirms())
+    successes = [r for r in results if not isinstance(r, Exception)]
+    errors = [r for r in results if isinstance(r, HTTPException)]
+
+    assert len(successes) == 1
+    assert len(errors) == 1
+    assert errors[0].status_code == 400
+    assert "양수(증액) 정정이 먼저 확정(CONFIRMED)" in errors[0].detail
+
+
 def test_correction_reason_other_saves_detail_in_purpose(auth_header):
     """OTHER(기타) 정정 사유 선택 시 상세 사유를 purpose에 담아 정상 등록됨 검증 (PRD v0.15 §4.4)"""
     res = client.post(
