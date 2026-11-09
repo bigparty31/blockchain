@@ -170,31 +170,23 @@ def _validate_reclassify_negative_order(
     """항목 재분류(RECLASSIFY) 확정 순서 및 한도 강제: 새 예산에 대한 양수 정정이 먼저 확정(CONFIRMED)되어 있어야
     원래 예산에 대한 음수(감액) 재분류 정정을 확정할 수 있습니다 (PRD v0.15 §4.4, B7).
     앱에서 양수·음수 2건을 연속으로 초안 등록할 수 있도록 등록 단계가 아닌 확정(confirm) 단계에서만 검사합니다.
-    동시 확정 경합을 막기 위해 원본 항목 행을 잠그고(FOR UPDATE), 이미 확정(CONFIRMED)된 음수뿐 아니라
-    확정 처리 중(PENDING 이면서 tx_confirm 선점·비반려)인 음수 정정도 예약액으로 합산합니다.
+    이벤트 루프 차단을 막기 위해 이 함수에서는 행 잠금을 잡지 않으며(잠금·원자적 예약은 스레드 단일 트랜잭션인
+    chain_tx._Store.claim 에서 수행), 이미 확정(CONFIRMED)된 음수뿐 아니라 확정 처리 중(PENDING + tx_confirm 선점·비반려)인
+    음수 정정도 예약액으로 합산합니다.
     """
-    locked_target = (
-        db.query(DBEntry)
-        .filter(DBEntry.id == target.id)
-        .with_for_update()
-        .first()
-    )
-    target_id = locked_target.id if locked_target is not None else target.id
-    target_budget_id = locked_target.budget_id if locked_target is not None else target.budget_id
-
     pos_rows = (
         db.query(DBEntry)
         .filter(
-            DBEntry.corrects_entry_id == target_id,
+            DBEntry.corrects_entry_id == target.id,
             DBEntry.status == EntryStatus.CONFIRMED.value,
             DBEntry.amount > 0,
             DBEntry.budget_id.isnot(None),
-            DBEntry.budget_id != target_budget_id,
+            DBEntry.budget_id != target.budget_id,
         )
         .all()
     )
     neg_query = db.query(DBEntry).filter(
-        DBEntry.corrects_entry_id == target_id,
+        DBEntry.corrects_entry_id == target.id,
         DBEntry.amount < 0,
         DBEntry.correction_reason == CorrectionReason.RECLASSIFY.value,
         or_(
@@ -1303,6 +1295,20 @@ async def confirm_entry(
         or getattr(target, "corrects_id", None)
         or 0
     )
+    ocr_status_val = target.ocr_status.value if hasattr(target.ocr_status, "value") else target.ocr_status
+    has_ocr_warning = bool(ocr_status_val in WARNING_OCR_STATUSES)
+    had_warning = bool(target.category_warning or has_ocr_warning)
+
+    # RPC 대기 전에 읽기 트랜잭션을 종료하여 DB 연결/잠금이 이벤트 루프 대기 중에 유지되지 않도록 한다.
+    try:
+        db.commit()
+    except SQLAlchemyError as e:
+        db.rollback()
+        logger.exception("RPC 조회 전 데이터베이스 커밋 오류: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 처리 중 오류가 발생했습니다.",
+        )
 
     registrant_addr = await _get_chain_registrant(id, chain)
 
@@ -1316,12 +1322,6 @@ async def confirm_entry(
         corrects_id=target_corrects_id,
         registrant=registrant_addr,
     )
-
-    # 경고 승인 판정 (카테고리 불일치 경고 또는 OCR 불일치/미인식 건)
-    # PRD §8/§9 기준: MISMATCH, DUPLICATE, UNREADABLE 만 경고 대상이며, MATCH, NO_NUMBER, None 은 정상
-    ocr_status_val = target.ocr_status.value if hasattr(target.ocr_status, "value") else target.ocr_status
-    has_ocr_warning = bool(ocr_status_val in WARNING_OCR_STATUSES)
-    had_warning = bool(target.category_warning or has_ocr_warning)
 
     # 경고 항목인데 사유가 비어 있으면 선제 400 차단 (체인 ReasonRequired 방지)
     if had_warning and not (req.warning_reason and req.warning_reason.strip()):
