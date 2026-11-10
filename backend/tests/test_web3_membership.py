@@ -14,7 +14,14 @@ from app.chain.deployment import DEFAULT_PATH, DeployedContract, load_abi, load_
 from app.chain.web3_client import CONTRACTS, MEMBERSHIP_SBT, Web3ChainClient
 from chain_support import RELAYER_KEY
 
-DEPLOYMENT = load_deployment(DEFAULT_PATH)
+# 저장소의 배포 기록에 MembershipSBT 가 있든 없든 같은 상태에서 시험한다 — SBT 는 시험마다 직접 붙인다
+_REPO_DEPLOYMENT = load_deployment(DEFAULT_PATH)
+DEPLOYMENT = _REPO_DEPLOYMENT.model_copy(
+    update={
+        "contracts": {k: v for k, v in _REPO_DEPLOYMENT.contracts.items() if k != "MembershipSBT"},
+        "eip712": {k: v for k, v in _REPO_DEPLOYMENT.eip712.items() if k != "MembershipSBT"},
+    }
+)
 STUDENT = "0x" + "ab" * 20
 SBT_ADDRESS = "0x" + "cd" * 20
 
