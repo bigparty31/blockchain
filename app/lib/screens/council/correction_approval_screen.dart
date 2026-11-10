@@ -33,6 +33,10 @@ class CorrectionItem {
   /// 서버 건의 원본 응답 — 승인·반려 서명이 이 값으로 만들어진다. 목업은 null.
   final EntryModel? entry;
 
+  /// 재분류 감액(−)인데 같은 원본의 증액(+)이 아직 확정되지 않았다 — 서버가 확정 순서를 강제해 400 으로 돌려보낸다
+  /// (PRD §4.4, #81). 지문을 댄 뒤에 거부되지 않도록 서명을 받기 전에 막는다.
+  final bool awaitsPlusFirst;
+
   const CorrectionItem({
     required this.id,
     required this.createdBy,
@@ -46,6 +50,7 @@ class CorrectionItem {
     this.pairNote,
     this.note,
     this.entry,
+    this.awaitsPlusFirst = false,
   });
 
   int? get finalAmount => original == null ? null : original! + delta;
@@ -66,6 +71,7 @@ class CorrectionItem {
         pairNote: pairNote,
         note: note,
         entry: entry,
+        awaitsPlusFirst: awaitsPlusFirst,
       );
 }
 
@@ -128,8 +134,19 @@ List<CorrectionItem> correctionItemsFromEntries(List<EntryModel> entries, {List<
 
     // 재분류 짝 — 같은 원본의 다른 재분류 건.
     String? pairNote;
+    var awaitsPlusFirst = false;
     var status = statusOf(e.status);
     if (reason == CorrectionReason.RECLASSIFY && !orphan) {
+      // 감액(−)은 같은 원본에서 다른 예산으로 옮긴 증액(+)이 CONFIRMED 여야 확정된다.
+      if (e.amount < 0) {
+        awaitsPlusFirst = !entries.any((c) =>
+            c.id != e.id &&
+            isCorrection(c) &&
+            c.correctionReason == CorrectionReason.RECLASSIFY &&
+            c.amount > 0 &&
+            c.status == EntryStatus.CONFIRMED &&
+            identical(rootOf(c), root));
+      }
       final siblings = entries.where((c) =>
           c.id != e.id &&
           isCorrection(c) &&
@@ -162,6 +179,7 @@ List<CorrectionItem> correctionItemsFromEntries(List<EntryModel> entries, {List<
       pairNote: pairNote,
       note: e.purpose.isEmpty ? null : e.purpose,
       entry: e,
+      awaitsPlusFirst: awaitsPlusFirst,
     );
   }
 
@@ -325,6 +343,21 @@ class _CorrectionApprovalScreenState extends State<CorrectionApprovalScreen> {
   }
 
   Future<void> _approve(CorrectionItem e) async {
+    // 재분류는 증액(+)을 먼저 확정해야 감액(−)을 확정할 수 있다 — 서명을 받기 전에 알린다.
+    if (e.awaitsPlusFirst) {
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          title: const Text('먼저 확정할 건이 있어요', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+          content: const Text('재분류는 새 예산의 증액(+) 건을 먼저 확정한 뒤에 원래 예산의 감액(−) 건을 확정할 수 있어요. '
+              '증액 건을 먼저 승인해 주세요.'),
+          actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('확인'))],
+        ),
+      );
+      return;
+    }
+
     // 증액 정정이 잔량을 넘으면 확정이 되지 않는다 — 서명을 받기 전에 알린다 (대기 그대로).
     if (e.insufficient) {
       await showDialog<void>(
@@ -677,6 +710,11 @@ class _CorrectionApprovalScreenState extends State<CorrectionApprovalScreen> {
           if (e.pairNote != null) ...[
             const SizedBox(height: 8),
             Text('재분류 · ${e.pairNote}', style: const TextStyle(fontSize: 12, height: 1.4, color: AppTheme.info)),
+          ],
+          if (e.awaitsPlusFirst && !done) ...[
+            const SizedBox(height: 8),
+            const Text('증액(+) 건을 먼저 확정해야 이 감액(−) 건을 확정할 수 있어요',
+                style: TextStyle(fontSize: 12, height: 1.4, color: AppTheme.expense)),
           ],
           if (e.insufficient && !done) ...[
             const SizedBox(height: 8),
