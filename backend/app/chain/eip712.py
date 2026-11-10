@@ -25,7 +25,15 @@ from eth_keys.exceptions import BadSignature
 from eth_utils import keccak
 
 from app.chain.deployment import Eip712Domain
-from app.chain.models import KIND_ORDER, ConfirmApproval, RecordRequest, RejectDecision, check_signature
+from app.chain.models import (
+    KIND_ORDER,
+    ConfirmApproval,
+    IncreaseRequest,
+    IssueRequest,
+    RecordRequest,
+    RejectDecision,
+    check_signature,
+)
 
 # (이름, 타입). 이름·순서·타입이 IAccountingLedger 의 typehash 와 같아야 한다 — 하나라도 다르면 모든 서명이 다른 digest 가 된다.
 # 튜플이라 바꿀 수 없다. typed data 의 dict 는 부를 때마다 새로 만든다
@@ -59,7 +67,32 @@ REJECT_DECISION_FIELDS = (
     ("deadline", "uint256"),
 )
 
-SignedPayload = Union[RecordRequest, ConfirmApproval, RejectDecision]
+# IBudgetToken 의 typehash 순서 (docs/CONTRACTS.md EIP-712 표). 도메인은 배포 기록의 eip712["BudgetToken"] 이다
+ISSUE_REQUEST_FIELDS = (
+    ("budgetId", "uint256"),
+    ("term", "uint256"),
+    ("category", "bytes32"),
+    ("amount", "uint256"),
+    ("expiresAt", "uint256"),
+    ("deadline", "uint256"),
+)
+
+INCREASE_REQUEST_FIELDS = (
+    ("budgetId", "uint256"),
+    ("amount", "uint256"),
+    ("reasonHash", "bytes32"),
+    ("version", "uint256"),
+    ("deadline", "uint256"),
+)
+
+# docs/CONTRACTS.md category 표 그대로. 표가 바뀌면 같이 고친다 (tests/test_budget_relay.py 가 대조한다)
+APPROVED_CATEGORIES = frozenset(
+    {"학생회비", "지원금", "후원금", "이자수입", "행사비", "사업비", "운영비", "홍보비", "복지비", "회의비", "비품비", "예비비"}
+)
+
+SignedPayload = Union[RecordRequest, ConfirmApproval, RejectDecision, IssueRequest, IncreaseRequest]
+# BudgetToken 도메인으로 서명하는 구조체. 나머지는 AccountingLedger 도메인이다
+BUDGET_PAYLOADS = (IssueRequest, IncreaseRequest)
 
 
 def typed_data(primary_type: str, fields: tuple, domain: Eip712Domain, message: dict) -> dict:
@@ -132,8 +165,56 @@ def reject_decision_typed_data(decision: RejectDecision, domain: Eip712Domain) -
     )
 
 
+def category_hash(name: str) -> str:
+    """IssueRequest.category = keccak256(utf8(항목명)). 어긋나면 같은 항목이 다른 예산으로 갈라진다 (docs/CONTRACTS.md category).
+
+    표에 있는 이름만 받는다. 나쁜 문자를 골라 막으면 보이지 않는 문자(U+200B 등)가 통과해, 같아 보이는 이름이 다른 예산이 된다.
+    이름을 고쳐 주지 않는다 — 고쳐서 해시하면 앱이 서명한 값과 달라진다.
+    """
+    if name not in APPROVED_CATEGORIES:
+        raise ValueError("항목명이 승인된 표에 없다. docs/CONTRACTS.md category 표에 먼저 추가한다 (팀장 승인)")
+    return "0x" + keccak(text=name).hex()
+
+
+def issue_request_typed_data(request: IssueRequest, domain: Eip712Domain) -> dict:
+    """회장이 서명하는 IssueRequest. domain 은 배포 기록의 eip712["BudgetToken"]."""
+    return typed_data(
+        "IssueRequest",
+        ISSUE_REQUEST_FIELDS,
+        domain,
+        {
+            "budgetId": request.budget_id,
+            "term": request.term,
+            "category": request.category,
+            "amount": request.amount,
+            "expiresAt": request.expires_at,
+            "deadline": request.deadline,
+        },
+    )
+
+
+def increase_request_typed_data(request: IncreaseRequest, domain: Eip712Domain) -> dict:
+    """회장과 감사가 같은 값에 서명하는 IncreaseRequest. domain 은 배포 기록의 eip712["BudgetToken"]."""
+    return typed_data(
+        "IncreaseRequest",
+        INCREASE_REQUEST_FIELDS,
+        domain,
+        {
+            "budgetId": request.budget_id,
+            "amount": request.amount,
+            "reasonHash": request.reason_hash,
+            "version": request.version,
+            "deadline": request.deadline,
+        },
+    )
+
+
 def typed_data_for(payload: SignedPayload, domain: Eip712Domain) -> dict:
     """서명 대상 모델에 맞는 typed data. ChainClient.signer_of 구현이 쓴다."""
+    if isinstance(payload, IssueRequest):
+        return issue_request_typed_data(payload, domain)
+    if isinstance(payload, IncreaseRequest):
+        return increase_request_typed_data(payload, domain)
     if isinstance(payload, RecordRequest):
         return record_request_typed_data(payload, domain)
     if isinstance(payload, ConfirmApproval):

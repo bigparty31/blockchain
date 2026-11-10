@@ -1,19 +1,22 @@
-"""등록·확정을 체인에 보내는 동안의 DB 상태 — tx_pending 3상태 (CHAIN_CLIENT §3). 라우터가 부른다.
+"""등록·확정·반려를 체인에 보내는 동안의 DB 상태 — tx_pending 3상태 (CHAIN_CLIENT §3). 라우터가 부른다.
 
     ① 초안       status NULL · tx_pending NULL   제출할 수 있다
     ② 처리 중    status NULL · tx_pending 있음    보냈는데 결과를 모른다. 다시 보내지 않는다
     ③ 체인 기록  status 있음                      끝났다 (PENDING·BLOCKED)
 
 확정은 같은 규칙을 tx_confirm 으로 한다 — PENDING 이고 tx_confirm NULL → tx_confirm 있음(approved_by·경고 사유도 함께)
-→ CONFIRMED. tx_confirm 은 반려와 같이 쓰는 칸이라, approved_by 가 비어 있는 선점은 반려의 것으로 보고 건드리지 않는다.
+→ CONFIRMED. 반려도 같은 칸을 쓴다 — tx_confirm 있음(rejected_by·사유도 함께) → REJECTED. 칸이 하나라 한 항목에 확정과 반려가
+같이 나가지 않는다. 상대 단계의 선점(자기 첫 extra 칸이 비어 있다)은 읽지도 비우지도 않는다.
+T4 수정 요청(revision_requested_at)이 있으면 확정을 선점하지 않는다. 라우터 검사만으로는 수정 요청과 확정이 동시에 오면 둘 다 통과한다.
+반려는 막지 않는다 — 수정 요청은 반려를 거쳐 재등록된다 (PRD §4.3).
 
 - 선점: ChainClient 의 before_broadcast 콜백에서 조건부 UPDATE 를 하고 바로 commit 한다. 보내기 전에 ② 가 DB 에 남는다.
   선점하지 못하면(다른 요청이 먼저 잡음) EntryConflict 를 던지고, 그러면 ChainClient 는 보내지 않는다.
 - 콜백이 불린 뒤 ChainRevert·ChainSetupError 면 체인에 남은 것이 없으니 내 선점만 비운다 (칸에 내 hash 가 있을 때).
 - 콜백이 불린 뒤 ChainUnavailable 이면 ② 를 둔 채 저장한 hash 로 결과를 한 번 확인한다 (tx_result). 모르면 그대로 올린다.
 - 이미 ② 인 항목에 요청이 다시 오면 다시 보내지 않고 결과부터 확인한다. 실패로 끝났으면 ① 로 돌리고 이 요청의 서명으로
-  보낸다. 결과가 있으면 ③ 으로 맞추되, 그 선점이 이 요청과 같은 내용(확정이면 같은 승인자·사유)일 때만 성공으로 돌려준다.
-- 콜백 전에 ENTRY_ALREADY_EXISTS(등록)·INVALID_STATUS(확정)로 걸리면 다른 요청이 먼저 보냈을 수 있다.
+  보낸다. 결과가 있으면 ③ 으로 맞추되, 그 선점이 이 요청과 같은 내용(확정·반려면 같은 사람·사유)일 때만 성공으로 돌려준다.
+- 콜백 전에 ENTRY_ALREADY_EXISTS(등록)·INVALID_STATUS(확정·반려)로 걸리면 다른 요청이 먼저 보냈을 수 있다.
   DB 를 다시 읽어 그렇다면 409(EntryConflict)로 바꾼다.
 
 DB 는 단계(읽기·선점·반영·해제)마다 짧은 세션을 따로 열어 스레드에서 돌린다.
@@ -28,6 +31,7 @@ DB 는 단계(읽기·선점·반영·해제)마다 짧은 세션을 따로 열�
     EntryConflict(EntryInFlight·EntryAlreadyRecorded) → 409
     LookupError → 404, ValueError → 400 (상태가 맞지 않음, 사유와 서명된 해시 불일치, 기록할 수 없는 승인자, 값 형식)
     ChainRevert → 400 (사유는 e.reason), ChainSetupError → 503 (main.py 전역 처리기), ChainUnavailable → 503 (② 유지)
+    SQLAlchemyError → 503 (② 면 다시 요청해 결과를 맞춘다)
 """
 import asyncio
 import hashlib
@@ -47,6 +51,7 @@ from app.chain.models import (
     ChainUnavailable,
     ConfirmApproval,
     RecordRequest,
+    RejectDecision,
     RevertReason,
     TxResult,
     check_tx_hash,
@@ -81,7 +86,7 @@ class EntryAlreadyRecorded(EntryConflict):
 
 @dataclass(frozen=True)
 class _Step:
-    """선점하는 칸과 그 칸을 쓰는 상태. 등록은 tx_pending(status NULL 에서), 확정은 tx_confirm(status PENDING 에서)."""
+    """선점하는 칸과 그 칸을 쓰는 상태. 등록은 tx_pending(status NULL 에서), 확정·반려는 tx_confirm(status PENDING 에서)."""
 
     name: str
     column: str
@@ -90,6 +95,8 @@ class _Step:
     results: frozenset  # 이 단계의 트랜잭션이 낼 수 있는 결과 status
     competitor: RevertReason  # 콜백 전에 이 revert 면 다른 요청이 먼저 보냈을 수 있다
     extra: tuple = ()  # 선점할 때 함께 적고 비울 때 함께 비우는 칸. 첫 칸은 이 단계의 선점이면 반드시 채워진다
+    rival: str = ""  # 같은 칸을 쓰는 상대 단계의 이름
+    must_be_empty: tuple = ()  # 선점할 때 비어 있어야 하는 칸. 값이 있으면 보내지 않고 409 다
 
 
 _RECORD = _Step(
@@ -108,6 +115,18 @@ _CONFIRM = _Step(
     frozenset({CONFIRMED}),
     RevertReason.INVALID_STATUS,
     ("approved_by", "warning_ack_reason"),
+    "반려",
+    ("revision_requested_at",),
+)
+_REJECT = _Step(
+    "반려",
+    "tx_confirm",
+    PENDING,
+    frozenset({CONFIRMED, REJECTED}),
+    frozenset({REJECTED}),
+    RevertReason.INVALID_STATUS,
+    ("rejected_by", "reject_reason"),
+    "확정",
 )
 
 
@@ -118,9 +137,10 @@ class _Row:
     status: Optional[str]
     claim: Optional[str]  # 단계의 선점 칸 (tx_pending·tx_confirm)
     extra: tuple  # 단계의 extra 칸 값
+    barred: bool = False  # must_be_empty 칸에 값이 있다
 
     def claimed_by(self, step: _Step) -> bool:
-        """선점이 이 단계의 것인가. 확정의 선점은 approved_by 를 채운다 — 비어 있으면 같은 칸을 쓰는 반려의 것이다."""
+        """선점이 이 단계의 것인가. 확정은 approved_by, 반려는 rejected_by 를 채운다 — 비어 있으면 같은 칸을 쓰는 상대의 것이다."""
         return not step.extra or self.extra[0] is not None
 
 
@@ -149,6 +169,25 @@ async def relay_confirm(
     _check_warning_reason(approval, warning_reason)
     extra = {"approved_by": approver_id, "warning_ack_reason": warning_reason}
     return await _relay(_Store(db), chain, _CONFIRM, approval.id, extra, lambda claim: chain.confirm_entry(approval, signature, claim))
+
+
+async def relay_reject(
+    db: Session,
+    chain: ChainClient,
+    decision: RejectDecision,
+    signature: str,
+    rejecter_id: int,
+    reason: str,
+) -> TxResult:
+    """PENDING 항목을 반려한다. rejected_by·사유(reject_reason)는 선점할 때 함께 적고, 실패하면 함께 비운다.
+
+    reason 은 앱이 해시해 서명한 사유 원문(HASHING §3 정본)이다. 그 SHA256 이 decision.reason_hash 와 같아야 한다 —
+    다르면 체인에는 서명된 해시, DB 에는 다른 원문이 남아 학생 검증에서 위조로 보인다.
+    """
+    if not reason or _text_hash(reason) != decision.reason_hash:
+        raise ValueError("반려 사유 원문의 SHA256 이 서명된 reason_hash 와 다르다 (HASHING §3)")
+    extra = {"rejected_by": rejecter_id, "reject_reason": reason}
+    return await _relay(_Store(db), chain, _REJECT, decision.id, extra, lambda claim: chain.reject_entry(decision, signature, claim))
 
 
 def _check_warning_reason(approval: ConfirmApproval, reason: Optional[str]) -> None:
@@ -185,8 +224,8 @@ async def _relay(
         raise ValueError(f"{step.name}할 수 있는 상태가 아니다 (id={entry_id}, status={row.status})")
     if row.claim is not None:
         if not row.claimed_by(step):
-            # 같은 칸을 다른 단계(반려)가 쓰는 중이다. 그 결과·해제는 그 흐름이 한다
-            raise EntryInFlight(entry_id, f"다른 처리(반려)가 진행 중이다 (id={entry_id}, tx={row.claim})")
+            # 같은 칸을 상대 단계가 쓰는 중이다. 그 결과·해제는 그 흐름이 한다
+            raise EntryInFlight(entry_id, f"다른 처리({step.rival})가 진행 중이다 (id={entry_id}, tx={row.claim})")
         # ② — 다시 보내지 않고 그 트랜잭션의 결과부터 본다
         try:
             result = await _check(store, chain, step, entry_id, row.claim)
@@ -274,12 +313,17 @@ class _Store:
             try:
                 rows = db.execute(
                     update(Entry)
-                    .where(Entry.id == entry_id, _column(step).is_(None), _status_is(step.ready))
+                    .where(
+                        Entry.id == entry_id,
+                        _column(step).is_(None),
+                        _status_is(step.ready),
+                        *(getattr(Entry, name).is_(None) for name in step.must_be_empty),
+                    )
                     .values({step.column: tx_hash, **extra})
                     .execution_options(synchronize_session=False)
                 ).rowcount
             except IntegrityError as e:
-                # 등록자 = 승인자(ck_entries_maker_checker)·없는 사용자(FK). 보내지 않고 400 으로 끝낸다
+                # 등록자 = 승인·반려자(ck_entries_maker_checker·ck_entries_rejected_maker)·없는 사용자(FK). 보내지 않고 400 으로 끝낸다
                 raise ValueError(f"{step.name} 선점을 기록할 수 없다 (id={entry_id}): {e.orig}") from e
             if rows != 1:
                 # 읽은 뒤 다른 요청이 바꿨다. 지금 상태에 맞는 응답으로 (이미 기록됨·처리 중·상태가 맞지 않음)
@@ -288,7 +332,9 @@ class _Store:
                 _raise_taken(current, step, entry_id)
                 if current.status != step.ready:
                     raise ValueError(f"{step.name}할 수 있는 상태가 아니다 (id={entry_id}, status={current.status})")
-                raise EntryInFlight(entry_id, f"다른 요청이 먼저 {step.name}을 보냈다 (id={entry_id})")
+                if current.barred:
+                    raise EntryConflict(entry_id, f"수정 요청 중인 내역은 {step.name}할 수 없다 (id={entry_id})")
+                raise EntryInFlight(entry_id, f"다른 요청이 먼저 보냈다 (id={entry_id})")
 
         await self._run(work)
 
@@ -335,14 +381,19 @@ def _row(db: Session, step: _Step, entry_id: int) -> _Row:
     entry = db.get(Entry, entry_id)
     if entry is None:
         raise LookupError(f"항목이 없다 (id={entry_id})")
-    return _Row(entry.status, getattr(entry, step.column), tuple(getattr(entry, name) for name in step.extra))
+    return _Row(
+        entry.status,
+        getattr(entry, step.column),
+        tuple(getattr(entry, name) for name in step.extra),
+        any(getattr(entry, name) is not None for name in step.must_be_empty),
+    )
 
 
 def _raise_taken(row: _Row, step: _Step, entry_id: int) -> None:
     if row.status in step.done:
-        raise EntryAlreadyRecorded(entry_id, f"다른 요청이 먼저 {step.name}했다 (id={entry_id}, status={row.status})")
+        raise EntryAlreadyRecorded(entry_id, f"다른 요청이 먼저 처리했다 (id={entry_id}, status={row.status})")
     if row.claim is not None:
-        raise EntryInFlight(entry_id, f"다른 요청이 {step.name}을 처리 중이다 (id={entry_id})")
+        raise EntryInFlight(entry_id, f"다른 요청이 처리 중이다 (id={entry_id})")
 
 
 def _update(db: Session, step: _Step, entry_id: int, tx_hash: str, values: dict) -> int:

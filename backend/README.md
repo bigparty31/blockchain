@@ -32,6 +32,7 @@ python -m scripts.seed
 # python -m scripts.seed --with-demo-entries
 ```
 - **실제 Hardhat 체인 연동 시 주의**: `python -m scripts.seed`는 오프체인 DB에만 기본 예산(`id=1..3`)을 넣으며, `contracts/scripts/deploy.ts`는 온체인 `BudgetToken`을 발행하지 않습니다. 실제 노드와 함께 띄운 상태에서는 온체인 예산 발행(`BudgetToken.issue`) 전까지 `budget_id=1..3` 지출 제출이 체인에서 `BUDGET_NOT_FOUND`로 `BLOCKED` 처리됩니다.
+- **기존 시드 DB에서 마이그레이션(`8c6ab430f272`) 적용 시 초기화 필요**: 이미 이전 버전에서 시드(`scripts.seed`)를 실행한 DB는 기존 행사비 `version=2` 더미 행에 `revision_request_id`가 없어 `ck_budget_versions_revision_request_id` 제약 위반으로 `alembic upgrade head`가 실패합니다(시드된 상태에서 `downgrade` 후 재`upgrade` 시에도 `ck_budget_rev_approved_tx` 제약으로 동일하게 실패). 기존 DB를 초기화(SQLite는 `.db` 파일 삭제, PostgreSQL은 컨테이너 볼륨/스키마 초기화)한 뒤 `alembic upgrade head`와 `python -m scripts.seed`를 다시 실행해 주세요.
 
 ### 1.2 서버 실행
 ```powershell
