@@ -1,6 +1,9 @@
+import asyncio
+import inspect
 import logging
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -43,6 +46,7 @@ from app.schemas.entry import (
     EntrySubmitRequest,
     EntrySubmitResponse,
     OCRStatus,
+    OnChainEntryResponse,
 )
 from app.utils.hashing import (
     calculate_meta_hash,
@@ -94,12 +98,21 @@ async def _get_chain_registrant(entry_id: int, chain: ChainClient) -> str:
     return chain_entry.registrant
 
 
-def _to_schema(entry: DBEntry) -> EntryResponse:
+def _to_schema(
+    entry: DBEntry,
+    chain_registrant: Optional[str] = None,
+    block_number: Optional[int] = None,
+) -> EntryResponse:
     """DB Entry ORM 모델을 EntryResponse 스키마로 변환"""
     # 선점 때 미리 적은 값이다. 체인에서 끝나기 전에는 내보내지 않는다 (실패하면 비워진다). 앱의 단건 검증은 체인 approver 가
     # 비어 있는데 approved_by 만 있으면 위조로 판정한다 (entry_verifier.dart)
     confirmed = entry.status == EntryStatus.CONFIRMED.value
     rejected = entry.status == EntryStatus.REJECTED.value
+
+    # 온체인 등록자(chain_registrant)만 반환한다. 체인 미조회·실패 시 DB 등록자 지갑으로 대체하지 않고 None(null)을 유지하여
+    # 앱이 서명 전 온체인 대조 불가 상태를 감지할 수 있게 한다.
+    registrant = chain_registrant
+
     return EntryResponse(
         id=entry.id,
         term_id=entry.term_id,
@@ -127,20 +140,40 @@ def _to_schema(entry: DBEntry) -> EntryResponse:
         reject_reason=entry.reject_reason if rejected else None,
         tx_pending=entry.tx_pending,
         tx_confirm=entry.tx_confirm,
+        registrant=registrant,
+        block_number=block_number,
         corrects_entry_id=entry.corrects_entry_id,
         correction_reason=entry.correction_reason,
     )
 
 
+async def _get_chain_client_safe(request: Request) -> Optional[ChainClient]:
+    """보강 단계에서 체인 클라이언트를 안전하게 획득한다.
+
+    노드 미기동·설정 미비(ChainSetupError) 등 클라이언트 초기화 실패 시
+    503을 던지지 않고 None을 반환하여 DB 기본 데이터로 200 응답할 수 있도록 한다.
+    """
+    getter = request.app.dependency_overrides.get(get_chain_client, get_chain_client)
+    try:
+        res = getter()
+        if inspect.isawaitable(res):
+            res = await res
+        return res
+    except Exception:
+        return None
+
+
 @router.get("", response_model=List[EntryResponse], summary="수입·지출 내역 목록 조회")
 @router.get("/", response_model=List[EntryResponse], include_in_schema=False)
-async def get_entries(db: Session = Depends(get_db)):
+async def get_entries(
+    request: Request,
+    db: Session = Depends(get_db),
+):
     """모바일 앱 '내역 목록' 및 '대시보드'에서 호출하는 수입·지출 내역 목록 API입니다.
     체인에 기록된 건(status IS NOT NULL)만 반환하며, 기기 서명 미제출 초안은 제외됩니다.
     """
     try:
         db_entries = db.query(DBEntry).filter(DBEntry.status.isnot(None)).all()
-        return [_to_schema(e) for e in db_entries]
     except SQLAlchemyError as e:
         logger.exception("수입·지출 내역 목록 조회 중 데이터베이스 오류: %s", e)
         raise HTTPException(
@@ -148,9 +181,40 @@ async def get_entries(db: Session = Depends(get_db)):
             detail="데이터베이스 처리 중 오류가 발생했습니다.",
         )
 
+    # RPC 호출 부하 및 앱 타임아웃(3초) 방지:
+    # 목록 조회에서는 최대 1.5초 이내로 온체인 등록자 조회를 시도하고,
+    # 노드 응답 지연/오류 시 DB 값으로 위장하지 않고 registrant=null(None)로 반환하여 앱이 미검증 상태를 식별할 수 있게 합니다.
+    chain_registrants: dict[int, str] = {}
+
+    if db_entries:
+        try:
+            async def _fetch_all():
+                chain = await _get_chain_client_safe(request)
+                if chain is None:
+                    return
+                tasks = [chain.get_entry(e.id) for e in db_entries]
+                fetched = await asyncio.gather(*tasks, return_exceptions=True)
+                for e, res in zip(db_entries, fetched):
+                    if not isinstance(res, Exception) and res and res.registrant:
+                        chain_registrants[e.id] = res.registrant
+
+            await asyncio.wait_for(_fetch_all(), timeout=1.5)
+        except Exception:
+            pass
+
+    results = [
+        _to_schema(e, chain_registrant=chain_registrants.get(e.id))
+        for e in db_entries
+    ]
+    return results
+
 
 @router.get("/{id}", response_model=EntryResponse, summary="수입·지출 내역 단건 상세 조회")
-async def get_entry_by_id(id: int, db: Session = Depends(get_db)):
+async def get_entry_by_id(
+    id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
     """내역 ID로 특정 수입/지출 내역의 상세 정보를 조회합니다."""
     try:
         entry = db.query(DBEntry).filter(DBEntry.id == id, DBEntry.status.isnot(None)).first()
@@ -167,7 +231,92 @@ async def get_entry_by_id(id: int, db: Session = Depends(get_db)):
             detail=f"ID {id}에 해당하는 내역을 찾을 수 없습니다.",
         )
 
-    return _to_schema(entry)
+    chain_registrant = None
+    block_num = None
+    try:
+        async def _fetch_entry_chain_detail():
+            nonlocal chain_registrant, block_num
+            chain = await _get_chain_client_safe(request)
+            if chain is None:
+                return
+            chain_entry = await chain.get_entry(id)
+            if chain_entry and chain_entry.registrant:
+                chain_registrant = chain_entry.registrant
+            tx_hash = entry.tx_confirm or entry.tx_pending
+            if tx_hash:
+                tx_detail = await chain.entry_tx_detail(tx_hash, id)
+                if tx_detail:
+                    block_num = tx_detail.block_number
+
+        await asyncio.wait_for(_fetch_entry_chain_detail(), timeout=2.0)
+    except Exception:
+        pass
+
+    return _to_schema(entry, chain_registrant=chain_registrant, block_number=block_num)
+
+
+@router.get("/{id}/onchain", response_model=OnChainEntryResponse, summary="온체인 원장 항목 조회")
+async def get_onchain_entry(
+    id: int,
+    db: Session = Depends(get_db),
+    chain: ChainClient = Depends(get_chain_client),
+):
+    """체인에 기록된 항목(getEntry)과 트랜잭션 기록(entry_tx_detail)을 조회합니다.
+    체인에 없거나 미기록 상태면 404를 반환합니다.
+    """
+    try:
+        chain_entry = await chain.get_entry(id)
+    except (ChainUnavailable, ChainSetupError) as e:
+        logger.exception("온체인 항목(%d) 조회 중 체인 오류: %s", id, e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="블록체인 네트워크와 통신할 수 없습니다.",
+        )
+
+    if not chain_entry:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"체인에서 항목(id={id})을 찾을 수 없습니다.",
+        )
+
+    if (
+        chain_entry.amount == 0
+        and (not chain_entry.hash or chain_entry.hash == "0x" + "00" * 32)
+        and (not chain_entry.registrant or chain_entry.registrant == "0x" + "00" * 20)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"체인에서 항목(id={id})을 찾을 수 없습니다.",
+        )
+
+    tx_detail = None
+    try:
+        entry = db.query(DBEntry).filter(DBEntry.id == id).first()
+        if entry:
+            tx_hash = entry.tx_confirm or entry.tx_pending
+            if tx_hash:
+                tx_detail = await chain.entry_tx_detail(tx_hash, id)
+    except Exception as e:
+        logger.warning("체인 트랜잭션 상세 조회 실패: %s", e)
+
+    return OnChainEntryResponse(
+        id=chain_entry.id,
+        hash=chain_entry.hash,
+        amount=chain_entry.amount,
+        kind=EntryKind(chain_entry.kind.value if hasattr(chain_entry.kind, "value") else chain_entry.kind),
+        status=EntryStatus(chain_entry.status.value if hasattr(chain_entry.status, "value") else chain_entry.status),
+        term=chain_entry.term,
+        occurred_at=chain_entry.occurred_at,
+        budget_id=chain_entry.budget_id,
+        corrects_id=chain_entry.corrects_id,
+        registrant=chain_entry.registrant,
+        approver=chain_entry.approver,
+        had_warning=tx_detail.had_warning if tx_detail else None,
+        reason_hash=tx_detail.reason_hash if tx_detail else None,
+        block_number=tx_detail.block_number if tx_detail else None,
+        block_reason=BlockReason(tx_detail.block_reason.value if hasattr(tx_detail.block_reason, "value") else tx_detail.block_reason) if tx_detail and tx_detail.block_reason else None,
+        tx_hash=tx_detail.tx_hash if tx_detail else None,
+    )
 
 
 @router.post(
@@ -437,9 +586,13 @@ async def submit_entry(
     except EntryConflict as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except ChainRevert as e:
-        raise HTTPException(
+        reason_code = e.reason.value if hasattr(e.reason, "value") else str(e.reason)
+        return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"온체인 등록이 거부되었습니다 ({e.reason.value if hasattr(e.reason, 'value') else e.reason}).",
+            content={
+                "detail": f"온체인 등록이 거부되었습니다 ({reason_code}).",
+                "fail_reason": reason_code,
+            },
         )
     except ChainUnavailable:
         raise HTTPException(
@@ -627,9 +780,13 @@ async def confirm_entry(
     except EntryConflict as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except ChainRevert as e:
-        raise HTTPException(
+        reason_code = e.reason.value if hasattr(e.reason, "value") else str(e.reason)
+        return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"온체인 승인이 거부되었습니다 ({e.reason.value if hasattr(e.reason, 'value') else e.reason}).",
+            content={
+                "detail": f"온체인 승인이 거부되었습니다 ({reason_code}).",
+                "fail_reason": reason_code,
+            },
         )
     except ChainUnavailable:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="블록체인 네트워크와 통신할 수 없습니다.")
@@ -788,9 +945,13 @@ async def reject_entry(
     except EntryConflict as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except ChainRevert as e:
-        raise HTTPException(
+        reason_code = e.reason.value if hasattr(e.reason, "value") else str(e.reason)
+        return JSONResponse(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"온체인 반려가 거부되었습니다 ({e.reason.value if hasattr(e.reason, 'value') else e.reason}).",
+            content={
+                "detail": f"온체인 반려가 거부되었습니다 ({reason_code}).",
+                "fail_reason": reason_code,
+            },
         )
     except ChainUnavailable:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="블록체인 네트워크와 통신할 수 없습니다.")
