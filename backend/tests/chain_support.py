@@ -14,7 +14,7 @@ from eth_account import Account
 from eth_utils import keccak
 
 from app.chain.deployment import DEFAULT_PATH, Eip712Domain, domain_separator, load_abi, load_deployment
-from app.chain.eip712 import typed_data
+from app.chain.eip712 import ISSUE_REQUEST_FIELDS, typed_data
 from app.chain.models import ZERO_BYTES32, ChainEntry, ConfirmApproval
 from app.chain.revert import RevertDecoder
 from app.chain.web3_client import Web3ChainClient
@@ -157,17 +157,6 @@ def approval_for_id(entry: Optional[ChainEntry], entry_id: int, deadline: int, *
     return ConfirmApproval(**{**fields, **override})
 
 
-# IBudgetToken 의 IssueRequest typehash 순서 (docs/CONTRACTS.md EIP-712 표)
-_ISSUE_FIELDS = (
-    ("budgetId", "uint256"),
-    ("term", "uint256"),
-    ("category", "bytes32"),
-    ("amount", "uint256"),
-    ("expiresAt", "uint256"),
-    ("deadline", "uint256"),
-)
-
-
 def _budget_token(w3):
     deployment = load_deployment(DEFAULT_PATH)
     contract = deployment.contracts["BudgetToken"]
@@ -179,7 +168,7 @@ async def issue_budget(w3, budget_id: int, amount: int, term: int = 20262, days:
 
     공용 개발 노드에 예산을 남기면 "학기·항목당 예산 하나" 규칙 때문에 예산 편성 화면이 BudgetAlreadyIssued 로 막힌다.
     반대로 화면이 이미 발행한 예산과 겹치지 않게, budget_id 는 TEST_ID_BASE 구간을 쓰고 항목(category)은 앱이 쓰지 않는
-    테스트 전용 이름("테스트 예산 {budget_id}")으로 만든다. 백엔드에는 아직 예산 릴레이가 없어(이번 범위는 원장) 여기서 직접 보낸다.
+    테스트 전용 이름("테스트 예산 {budget_id}")으로 만든다. 원장 테스트의 준비 단계라 릴레이 구현과 무관하게 직접 보낸다.
     """
     deployment, contract = _budget_token(w3)
     now = await chain_now(w3)
@@ -191,7 +180,7 @@ async def issue_budget(w3, budget_id: int, amount: int, term: int = 20262, days:
         "expiresAt": now + days * 86400,
         "deadline": now + 600,
     }
-    signature = sign_typed_data(typed_data("IssueRequest", _ISSUE_FIELDS, deployment.eip712["BudgetToken"], message), PRESIDENT_KEY)
+    signature = sign_typed_data(typed_data("IssueRequest", ISSUE_REQUEST_FIELDS, deployment.eip712["BudgetToken"], message), PRESIDENT_KEY)
     call = contract.functions.issue(message, bytes.fromhex(signature[2:]))
     relayer = Account.from_key(RELAYER_KEY)
     try:
