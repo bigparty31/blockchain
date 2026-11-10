@@ -70,8 +70,11 @@ enum EntryStatus {
 enum CorrectionReason {
   INPUT_ERROR('INPUT_ERROR', '입력 오류'),
   RECEIPT_RECHECK('RECEIPT_RECHECK', '영수증 재확인'),
-  REFUND('REFUND', '환불'),
-  RECLASSIFY('RECLASSIFY', '재분류');
+  REFUND('REFUND', '반환'),
+  RECLASSIFY('RECLASSIFY', '재분류'),
+
+  /// 기타 — 상세 사유는 정정 항목의 `purpose` 에 적는다 (PRD §4.4, docs/enums.md).
+  OTHER('OTHER', '기타');
 
   final String code;
   final String label;
