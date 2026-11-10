@@ -43,7 +43,16 @@ class LoginFailure implements Exception {
 /// 연속 실패로 차단된 동안의 시도.
 class LoginLocked implements Exception {
   final Duration remaining;
-  const LoginLocked(this.remaining);
+
+  /// **서버가 잠근 것인지** (`429`), 앱이 센 5회로 잠긴 것인지.
+  ///
+  /// 화면 문구가 달라야 한다. 서버 잠금은 **학번 단위**라 내가 틀리지 않아도
+  /// 걸린다 — 남이 내 학번으로 다섯 번 틀리면 나는 맞는 비밀번호를 넣고도
+  /// 거절당한다. 그때 「비밀번호를 5회 연속 틀렸습니다」라고 말하면 사실이
+  /// 아니고, 사용자는 자기 비밀번호를 의심하며 계정을 되찾으려 든다.
+  final bool byServer;
+
+  const LoginLocked(this.remaining, {this.byServer = false});
 }
 
 /// 서버에 닿지 못했다 (무응답·5xx·형식 불명). 토스트로 알린다 (작성지침 ③ 실패 (3)).
@@ -87,6 +96,18 @@ class TokenWriteFailed implements Exception {
   const TokenWriteFailed();
   @override
   String toString() => 'TokenWriteFailed';
+}
+
+/// 보관소를 **읽지 못했다** — 「값이 없다」와 다른 신호다.
+///
+/// 평소에는 구분할 필요가 없어서 [TokenStore.read] 가 실패를 null 로 돌려주지만,
+/// [AuthService._persist] 에서는 이 둘이 **반대 결론**이 된다: 「없다」면 남의
+/// 토큰이 남을 일이 없으니 그냥 로그인하고, 「모른다」면 남았다고 보고 지워야
+/// 한다. 그래서 그 경로만 [TokenStore.readStrict] 로 읽고 이것을 받는다.
+class TokenReadFailed implements Exception {
+  const TokenReadFailed();
+  @override
+  String toString() => 'TokenReadFailed';
 }
 
 /// 서버 인증은 통과했지만 **기기 보관소를 안전한 상태로 만들지 못했다.**
@@ -148,7 +169,16 @@ class StoredSession {
 /// 토큰 보관소. 테스트에서 갈아끼운다 — [FlutterSecureStorage] 는 플랫폼 채널을
 /// 쓰므로 `flutter test` 에서 `MissingPluginException` 이 난다.
 abstract class TokenStore {
+  /// 읽기 실패를 **null 로 돌려준다** — 복원 경로는 둘을 구분할 필요가 없다
+  /// (어느 쪽이든 로그인 화면으로 간다).
   Future<StoredSession?> read();
+
+  /// 읽기 실패를 **던진다** ([TokenReadFailed]). null 은 「정말로 비어 있다」다.
+  ///
+  /// [AuthService._persist] 가 쓴다 — 그 경로에서는 「없다」와 「모른다」가
+  /// 반대 결론이라([TokenReadFailed]) 실패를 null 로 받으면 **남의 토큰이 남은
+  /// 채로 로그인이 확정된다.** 구현하는 쪽은 [read] 를 이것 위에 얹을 것.
+  Future<StoredSession?> readStrict();
 
   /// Throws [TokenWriteFailed] — 쓰지 못하면 **반드시 알린다**.
   Future<void> write(StoredSession session);
@@ -159,7 +189,9 @@ abstract class TokenStore {
 
 /// 기본 구현 — 기기 키스토어.
 ///
-/// 읽기 실패는 「토큰 없음」으로 다룬다 — 다시 로그인하면 된다.
+/// 읽기 실패는 [read] 에서 「토큰 없음」으로 다룬다 — 복원은 다시 로그인하면
+/// 된다. **다만 삼키는 것은 [read] 뿐이다**: 무엇이 남았는지가 결론을 가르는
+/// 곳은 [readStrict] 로 읽어 실패를 받는다 ([TokenReadFailed]).
 ///
 /// **쓰기·삭제 실패는 다르다.** 어느 쪽이든 기기에 남은 토큰이 다음 실행에서
 /// 되살아나므로, 호출자가 알아야 판단할 수 있다 ([TokenWriteFailed],
@@ -171,12 +203,28 @@ class SecureTokenStore implements TokenStore {
 
   const SecureTokenStore([this._storage = const FlutterSecureStorage()]);
 
+  /// **[readStrict] 위에 얹는다.** 따로 구현하면 한쪽만 고쳐져서, 「실패를
+  /// 삼키는 쪽」과 「던지는 쪽」이 서로 다른 저장소를 읽는 일이 생긴다.
   @override
   Future<StoredSession?> read() async {
     try {
-      return StoredSession.decode(await _storage.read(key: _key));
+      return await readStrict();
     } catch (_) {
       return null;
+    }
+  }
+
+  @override
+  Future<StoredSession?> readStrict() async {
+    try {
+      return StoredSession.decode(await _storage.read(key: _key));
+    } catch (_) {
+      // 키스토어가 잠깐 잠겨 있을 수 있어 한 번은 다시 해 본다 (쓰기·삭제와 같다).
+      try {
+        return StoredSession.decode(await _storage.read(key: _key));
+      } catch (_) {
+        throw const TokenReadFailed();
+      }
     }
   }
 
@@ -218,8 +266,17 @@ class SecureTokenStore implements TokenStore {
 /// 실제 차단은 서버가 해야 한다(계정·IP 단위). 여기 있는 것은 **화면의 약속을
 /// 지키는 것**까지다 — 잠겼다고 말했으면 앱을 다시 켜도 잠겨 있어야 한다.
 abstract class LoginLockStore {
-  Future<({int attempts, DateTime? lockedUntil})?> read();
-  Future<void> write({required int attempts, DateTime? lockedUntil});
+  Future<({int attempts, DateTime? lockedUntil, bool byServer})?> read();
+
+  /// [byServer] 는 **서버가 잠근 것**(`429`)인지. 화면 문구가 달라지므로
+  /// 잠금 시각과 함께 남긴다 — 앱을 다시 켜면 메모리에만 둔 것은 사라진다
+  /// ([LoginLocked.byServer]).
+  Future<void> write({
+    required int attempts,
+    DateTime? lockedUntil,
+    bool byServer = false,
+  });
+
   Future<void> clear();
 }
 
@@ -251,22 +308,25 @@ class SecureLoginLockStore implements LoginLockStore {
   const SecureLoginLockStore([this._storage = const FlutterSecureStorage()]);
 
   @override
-  Future<({int attempts, DateTime? lockedUntil})?> read() async {
+  Future<({int attempts, DateTime? lockedUntil, bool byServer})?> read() async {
     if (_unavailable) return null;
     try {
       final raw = await _storage.read(key: _key).timeout(_ioTimeout);
       if (raw == null || raw.isEmpty) return null;
 
-      // `attempts|lockedUntilMillis` — 뒤쪽은 비어 있을 수 있다.
-      final sep = raw.indexOf('|');
-      if (sep < 0) return null;
-      final attempts = int.tryParse(raw.substring(0, sep));
+      // `attempts|lockedUntilMillis|byServer` — 뒤 두 칸은 비어 있을 수 있다.
+      // **세 번째 칸이 없는 옛 형식도 읽는다** — 이미 잠겨 있는 기기의 기록을
+      // 못 읽으면 잠금이 그냥 풀린다. 없으면 「서버 잠금 아님」으로 본다.
+      final parts = raw.split('|');
+      if (parts.length < 2) return null;
+      final attempts = int.tryParse(parts[0]);
       if (attempts == null) return null;
 
-      final millis = int.tryParse(raw.substring(sep + 1));
+      final millis = int.tryParse(parts[1]);
       return (
         attempts: attempts,
         lockedUntil: millis == null ? null : DateTime.fromMillisecondsSinceEpoch(millis),
+        byServer: parts.length > 2 && parts[2] == 'S',
       );
     } catch (_) {
       _unavailable = true;
@@ -275,13 +335,18 @@ class SecureLoginLockStore implements LoginLockStore {
   }
 
   @override
-  Future<void> write({required int attempts, DateTime? lockedUntil}) async {
+  Future<void> write({
+    required int attempts,
+    DateTime? lockedUntil,
+    bool byServer = false,
+  }) async {
     if (_unavailable) return;
     try {
       await _storage
           .write(
             key: _key,
-            value: '$attempts|${lockedUntil?.millisecondsSinceEpoch ?? ''}',
+            value: '$attempts|${lockedUntil?.millisecondsSinceEpoch ?? ''}'
+                '|${byServer ? 'S' : ''}',
           )
           .timeout(_ioTimeout);
     } catch (_) {
@@ -305,23 +370,34 @@ class SecureLoginLockStore implements LoginLockStore {
 class MemoryLoginLockStore implements LoginLockStore {
   int attempts = 0;
   DateTime? lockedUntil;
+  bool byServer;
 
-  MemoryLoginLockStore({this.attempts = 0, this.lockedUntil});
+  MemoryLoginLockStore({
+    this.attempts = 0,
+    this.lockedUntil,
+    this.byServer = false,
+  });
 
   @override
-  Future<({int attempts, DateTime? lockedUntil})?> read() async =>
-      (attempts: attempts, lockedUntil: lockedUntil);
+  Future<({int attempts, DateTime? lockedUntil, bool byServer})?> read() async =>
+      (attempts: attempts, lockedUntil: lockedUntil, byServer: byServer);
 
   @override
-  Future<void> write({required int attempts, DateTime? lockedUntil}) async {
+  Future<void> write({
+    required int attempts,
+    DateTime? lockedUntil,
+    bool byServer = false,
+  }) async {
     this.attempts = attempts;
     this.lockedUntil = lockedUntil;
+    this.byServer = byServer;
   }
 
   @override
   Future<void> clear() async {
     attempts = 0;
     lockedUntil = null;
+    byServer = false;
   }
 }
 
@@ -342,11 +418,22 @@ class MemoryTokenStore implements TokenStore {
   bool failOnWrite = false;
 
   /// 읽기가 실패하는 기기를 흉내 낸다 (무엇이 남았는지 모르는 경로 테스트용).
+  ///
+  /// **[read] 는 던지지 않고 null 을 돌려준다 — 실기기와 같게.**
+  /// [SecureTokenStore.read] 가 실패를 삼키므로, 테스트 저장소가 던져 버리면
+  /// 「읽기 실패를 「남은 것 없음」으로 읽는」 회귀를 잡지 못한다. 실제로 3차
+  /// 리뷰에서 그 차이로 Medium 이 통과했다 (`_persist` 가 [read] 를 쓰고 있었다).
   bool failOnRead = false;
 
   @override
   Future<StoredSession?> read() async {
-    if (failOnRead) throw Exception('read failed');
+    if (failOnRead) return null;
+    return value;
+  }
+
+  @override
+  Future<StoredSession?> readStrict() async {
+    if (failOnRead) throw const TokenReadFailed();
     return value;
   }
 
@@ -389,6 +476,17 @@ class AuthService {
   static const maxAttempts = 5;
   static const lockDuration = Duration(seconds: 60);
 
+  /// `429` 에 `Retry-After` 가 없을 때 쓸 값. 백엔드 #89 의 잠금 길이와 맞췄다.
+  /// 짧게 잡으면 그 뒤에 또 429 가 떨어지므로, 모를 때는 길게 잡는다.
+  static const serverLockFallback = Duration(minutes: 15);
+
+  /// `Retry-After`(초) 를 남은 시간으로. 없거나 0 이하면 null — 「0초 남음」을
+  /// 보여주면 바로 다시 눌러 또 거절당한다.
+  static Duration? _retryAfter(http.Response res) {
+    final seconds = int.tryParse(res.headers['retry-after']?.trim() ?? '');
+    return (seconds != null && seconds > 0) ? Duration(seconds: seconds) : null;
+  }
+
   Session? get session => _session;
   Session? _session;
 
@@ -404,6 +502,10 @@ class AuthService {
 
   int _failedAttempts = 0;
   DateTime? _lockedUntil;
+
+  /// 지금 잠금이 **서버가 건 것**인지 ([LoginLocked.byServer]).
+  bool get lockByServer => _lockByServer;
+  bool _lockByServer = false;
 
   /// 기기에 남은 잠금을 읽는 **진행 중인 작업**. 끝났으면 완료된 Future 다.
   ///
@@ -429,6 +531,7 @@ class AuthService {
     if (left <= Duration.zero) {
       _lockedUntil = null;
       _failedAttempts = 0;
+      _lockByServer = false;
       return null;
     }
     return left;
@@ -468,7 +571,7 @@ class AuthService {
     await loadLock();
 
     final locked = lockRemaining;
-    if (locked != null) throw LoginLocked(locked);
+    if (locked != null) throw LoginLocked(locked, byServer: _lockByServer);
 
     final http.Response res;
     try {
@@ -489,9 +592,38 @@ class AuthService {
       _failedAttempts++;
       final nowLocked = _failedAttempts >= maxAttempts;
       if (nowLocked) _lockedUntil = DateTime.now().add(lockDuration);
-      await lockStore.write(attempts: _failedAttempts, lockedUntil: _lockedUntil);
+      // 이쪽은 **이 기기에서 실제로 틀린 횟수**로 잠긴 것이다 — 서버 잠금과
+      // 문구가 달라야 하므로 구분해 남긴다.
+      _lockByServer = false;
+      await lockStore.write(
+        attempts: _failedAttempts,
+        lockedUntil: _lockedUntil,
+        byServer: false,
+      );
       throw LoginFailure(locked: nowLocked);
     }
+    // **서버가 잠갔다** (`429`, 백엔드 #89). 앱 잠금(60초)보다 서버 잠금이
+    // 길어서 앱 쪽이 먼저 풀리는데, 그때 다시 누르면 또 429 가 떨어진다.
+    // 서버가 준 남은 시간으로 갈아끼워 두 잠금을 맞춘다.
+    //
+    // 실패로 세지 않는다 — 잠긴 동안은 맞는 비밀번호도 429 다.
+    //
+    // **서버 잠금이라는 사실도 함께 남긴다.** 서버 잠금은 학번 단위라 내가
+    // 틀리지 않아도 걸리는데, 앱이 센 5회와 뭉뚱그리면 화면이 「비밀번호를 5회
+    // 틀렸다」고 거짓말한다 ([LoginLocked.byServer]).
+    if (res.statusCode == 429) {
+      final remaining = _retryAfter(res) ?? serverLockFallback;
+      _failedAttempts = maxAttempts;
+      _lockedUntil = DateTime.now().add(remaining);
+      _lockByServer = true;
+      await lockStore.write(
+        attempts: _failedAttempts,
+        lockedUntil: _lockedUntil,
+        byServer: true,
+      );
+      throw LoginLocked(remaining, byServer: true);
+    }
+
     if (res.statusCode != 200) throw const LoginUnavailable();
 
     final Map<String, dynamic> body;
@@ -531,6 +663,7 @@ class AuthService {
     // 키스토어가 고장난 기기에서 로그인을 다섯 번 시도한 사용자가 잠긴다.
     _failedAttempts = 0;
     _lockedUntil = null;
+    _lockByServer = false;
     await lockStore.clear();
 
     // 역할도 함께 저장한다 — 다음 실행의 [restore] 가 주소를 고를 근거다.
@@ -572,7 +705,11 @@ class AuthService {
     StoredSession? left;
     var known = true;
     try {
-      left = await store.read();
+      // **[TokenStore.readStrict] 로 읽는다.** `read` 는 실패를 null 로 돌려주므로
+      // ([SecureTokenStore.read]) 그걸로 읽으면 읽기 실패가 아래 「남은 것이
+      // 없다」 분기로 떨어진다 — 키스토어가 잠겨 쓰기·읽기가 같이 실패하는 기기에서
+      // A 의 토큰을 지우지 않고 B 의 로그인을 확정하게 된다. 막으려던 경로 그대로다.
+      left = await store.readStrict();
     } catch (_) {
       // 무엇이 남았는지 모른다. 모를 때는 **남았다고 보고** 지우는 쪽으로 간다 —
       // 틀렸으면 재로그인 한 번이고, 반대로 틀리면 남의 세션이 열린다.
@@ -681,6 +818,15 @@ class AuthService {
   /// import 한다 — 반대로 부르면 순환 import 다). `main.dart` 가 연결한다.
   void Function()? onSessionCleared;
 
+  /// 세션이 **생겼을 때.** 로그인과 앱 시작 복원 두 경로에서 모두 불린다.
+  ///
+  /// 푸시 토픽 구독이 여기 붙는다 (PRD §4.8 — 「앱이 로그인할 때 토픽을
+  /// 구독한다」). 로그인 쪽에만 붙이면 **앱을 껐다 켠 사람은 구독이 안 된
+  /// 채로 남는다** — 세션은 복원되므로 다시 로그인할 일이 없어서, 그 기기는
+  /// 영영 푸시를 못 받는다. [onSessionCleared] 와 같은 이유로 여기서
+  /// 직접 부르지 않고 `main.dart` 가 연결한다.
+  void Function(Session)? onSessionStarted;
+
   /// 로그아웃. 토큰을 지우고 세션을 비운다.
   ///
   /// Throws [TokenClearFailed] — 기기에서 토큰을 지우지 못한 경우. **세션은
@@ -712,6 +858,7 @@ class AuthService {
     _sessionGeneration++;
     ApiConfig.activeRole = session?.role;
     if (had && session == null) onSessionCleared?.call();
+    if (session != null) onSessionStarted?.call(session);
   }
 
   /// 다른 서비스가 `401` 을 받았을 때 부른다. 세션을 비우고 [onUnauthorized] 를 알린다.
@@ -749,7 +896,7 @@ class AuthService {
   Future<void> loadLock() => _lockLoading ??= _loadLockOnce();
 
   Future<void> _loadLockOnce() async {
-    final ({int attempts, DateTime? lockedUntil})? stored;
+    final ({int attempts, DateTime? lockedUntil, bool byServer})? stored;
     try {
       stored = await lockStore.read();
     } catch (_) {
@@ -778,7 +925,11 @@ class AuthService {
 
     // 메모리 쪽이 더 많이 센 경우(이번 실행에서 실패한 뒤)는 그것을 지킨다.
     if (stored.attempts > _failedAttempts) _failedAttempts = stored.attempts;
-    if (until != null) _lockedUntil = until;
+    if (until != null) {
+      _lockedUntil = until;
+      // 앱을 다시 켜도 「서버가 잠갔다」를 기억해야 문구가 맞는다.
+      _lockByServer = stored.byServer;
+    }
   }
 
   /// 차단·실패 횟수를 **메모리와 보관소 양쪽에서** 되돌린다. 테스트에서 쓴다.
@@ -788,6 +939,7 @@ class AuthService {
   Future<void> resetAttempts() async {
     _failedAttempts = 0;
     _lockedUntil = null;
+    _lockByServer = false;
     _lockLoading = null;
     await lockStore.clear();
   }

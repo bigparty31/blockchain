@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "557911235240",
+    "project_id": "blockchain-6a550",
+    "storage_bucket": "blockchain-6a550.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:557911235240:android:8b497b52f5f5b4a661009d",
+        "android_client_info": {
+          "package_name": "com.bigparty31.student_council_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBu8glF_YRNBNdhwZHnyVbWTs3cw1BFMDw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
