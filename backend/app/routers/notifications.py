@@ -163,6 +163,15 @@ def _register(db: Session, user_id: int, req: DeviceTokenRequest) -> DeviceToken
         db.commit()
         return DeviceTokenResponse(id=row.id, registered_at=_unix(now))
     else:
+        # 같은 사람의 재등록. 읽을 때 활성이어도 그 사이 본인 로그아웃(해제)이 먼저 커밋됐을 수 있다 — 저장 없이 성공을 돌려주면
+        # 토큰이 해제된 채 남아 푸시가 안 간다 (#78 codex 3차). 등록 시각은 그대로 두고 revoked_at 만 명시적으로 비운다
+        db.execute(
+            update(DeviceToken)
+            .where(DeviceToken.id == row.id, DeviceToken.user_id == user_id)
+            .values(revoked_at=None)
+            .execution_options(synchronize_session=False)
+        )
+        db.commit()
         return DeviceTokenResponse(id=row.id, registered_at=_unix(row.registered_at))
     db.commit()
     return DeviceTokenResponse(id=row.id, registered_at=_unix(row.registered_at))
