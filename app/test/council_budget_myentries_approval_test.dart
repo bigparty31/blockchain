@@ -381,9 +381,9 @@ void main() {
       expect(find.textContaining('사업비 +22,000 확정 · 운영비 −22,000 대기'), findsOneWidget);
     });
 
-    testWidgets('정정 사유 라벨은 docs/enums.md 를 그대로 쓴다 (REFUND = 환불)', (tester) async {
+    testWidgets('정정 사유 라벨은 docs/enums.md 를 그대로 쓴다 (REFUND = 반환)', (tester) async {
       await pump(tester, screen());
-      expect(find.textContaining('환불 · 행사비'), findsOneWidget);
+      expect(find.textContaining('반환 · 행사비'), findsOneWidget);
     });
 
     testWidgets('반려는 사유가 있어야 한다', (tester) async {
