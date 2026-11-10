@@ -777,7 +777,15 @@ class AuthService {
       return _session;
     } on _Unauthorized {
       // 서버가 이 토큰을 거부했다 — 지운다. 지우지 못하면 알리되, 세션은 비운다.
+      //
+      // **정리 콜백을 직접 부른다.** [_setSession] 은 「있던 세션이 비워질 때」만
+      // [onSessionCleared] 를 부르는데, 앱 시작 복원에서는 메모리 세션이 애초에
+      // 없어서(`had == false`) 그 조건에 걸리지 않는다. 그러면 `main.dart` 의
+      // FCM 토픽 해제에 도달하지 못해, **로그인 화면에 있는데도 이전 사용자의
+      // 학기 알림이 계속 오는** 상태가 된다 — 토픽은 기기 단위라서 그렇다.
+      final hadSession = _session != null;
       _setSession(null);
+      if (!hadSession) onSessionCleared?.call();
       try {
         await store.clear();
       } on TokenClearFailed {

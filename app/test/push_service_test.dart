@@ -144,6 +144,46 @@ void main() {
       expect(fake.unsubscribed, ['students_20262']);
     });
 
+    /// 4차 리뷰 Low — 구독이 날아가는 중에 로그아웃하면, 해제가 비운 상태를
+    /// **뒤늦게 끝난 구독이 되살린다.** 기기는 끊겼는데 메모리만 구독 중이라고
+    /// 믿게 되고, 다음 학생이 로그인하면 「같은 토픽」이라며 재구독을 건너뛰어
+    /// 푸시가 한 건도 오지 않는다. 화면에는 아무 증상이 없다.
+    test('구독 중에 로그아웃해도 구독 상태가 남지 않는다', () async {
+      await PushService().init();
+      fake.subscribeGate = Completer<void>();
+
+      final subscribing = PushService().subscribeStudentTopic(20262);
+      final unsubscribing = PushService().unsubscribe(termCode: 20262);
+
+      fake.subscribeGate!.complete(); // 붙잡아 둔 구독을 끝낸다
+      await subscribing;
+      await unsubscribing;
+
+      expect(
+        PushService().subscribedTopic,
+        isNull,
+        reason: '로그아웃이 마지막 의도인데 구독이 상태를 되살렸다 — 다음 로그인에서 재구독을 건너뛴다',
+      );
+      expect(fake.unsubscribed, contains('students_20262'));
+    });
+
+    /// 위 상태가 남으면 실제로 다음 로그인이 조용히 깨진다. 거기까지 못 박는다.
+    test('그 뒤 같은 학기로 다시 로그인하면 재구독된다', () async {
+      await PushService().init();
+      fake.subscribeGate = Completer<void>();
+      final subscribing = PushService().subscribeStudentTopic(20262);
+      final unsubscribing = PushService().unsubscribe(termCode: 20262);
+      fake.subscribeGate!.complete();
+      await subscribing;
+      await unsubscribing;
+
+      fake.subscribed.clear();
+      await PushService().subscribeStudentTopic(20262); // 다음 사람 로그인
+
+      expect(fake.subscribed, ['students_20262'], reason: '재구독을 건너뛰면 푸시가 오지 않는다');
+      expect(PushService().subscribedTopic, 'students_20262');
+    });
+
     test('학기 코드가 없고 구독 기록도 없으면 아무것도 하지 않는다', () async {
       await PushService().init();
 
@@ -248,6 +288,10 @@ class _FakeBackend implements PushBackend {
   /// 대화상자에 답하지 않은 상태를 흉내 낸다.
   Completer<bool>? permissionGate;
 
+  /// 완료될 때까지 [subscribeToTopic] 이 끝나지 않는다 — 구독이 날아가는
+  /// 중에 로그아웃이 끼어드는 상황을 만든다.
+  Completer<void>? subscribeGate;
+
   /// **초기화 전에는 FCM 호출이 거부된다** — 실제 동작이 그렇다
   /// (`No Firebase App '[DEFAULT]' has been created`). 이것을 흉내 내지 않으면
   /// 「초기화를 기다리지 않는」 회귀가 테스트를 통과한다.
@@ -284,6 +328,7 @@ class _FakeBackend implements PushBackend {
   @override
   Future<void> subscribeToTopic(String topic) async {
     if (!_initialized) throw Exception("No Firebase App '[DEFAULT]'");
+    if (subscribeGate != null) await subscribeGate!.future;
     if (failTopic) throw Exception('네트워크 실패');
     subscribed.add(topic);
   }

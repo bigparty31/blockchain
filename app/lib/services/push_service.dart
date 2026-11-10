@@ -36,7 +36,16 @@ class PushService {
 
   bool _ready = false;
   String? _token;
+
+  /// 기기가 **지금 구독돼 있다고 보는** 토픽.
   String? _topic;
+
+  /// 마지막으로 요청된 **의도**. 구독이면 토픽 이름, 해제면 null.
+  /// 실제 상태([_topic])와 다르면 [_syncTopic] 이 맞춘다.
+  String? _desiredTopic;
+
+  /// 토픽 작업을 한 줄로 세우는 큐 ([_enqueueTopicSync]).
+  Future<void> _topicQueue = Future<void>.value();
 
   /// [init] 이 이미 돌았는지. **[available] 과 따로 둔다** — 권한을 거부하면
   /// [available] 이 false 인데, 그것으로 중복을 막으면 앱을 띄울 때마다 거부한
@@ -138,17 +147,9 @@ class PushService {
   /// 거부당한다. 그 예외를 삼키고 끝내면 `_topic` 이 null 로 남고 **다시 부를
   /// 사람이 없다** — 로그인은 이미 끝났으므로 그 기기는 그 세션 내내 구독이 안 된
   /// 상태로 있고, 푸시가 한 건도 오지 않는다.
-  Future<void> subscribeStudentTopic(int termCode) async {
-    final next = topicFor(termCode);
-    if (_topic == next) return;
-    try {
-      await _ensureApp();
-      if (_topic != null) await backend.unsubscribeFromTopic(_topic!);
-      await backend.subscribeToTopic(next);
-      _topic = next;
-    } catch (e) {
-      debugPrint('토픽 구독 실패 ($next): $e');
-    }
+  Future<void> subscribeStudentTopic(int termCode) {
+    _desiredTopic = topicFor(termCode);
+    return _enqueueTopicSync();
   }
 
   /// **로그아웃할 때 부른다.** 끊지 않으면 공용 기기에서 다음 사람이 이전
@@ -160,15 +161,49 @@ class PushService {
   /// 켜진 뒤 세션이 끊기는 경로(저장된 토큰이 거부돼 `restore` 가 세션을 비우는
   /// 경우)에서는 `_topic` 이 null 이다. 그대로 돌아가면 **기기는 계속 구독된
   /// 채로 남는다** — 이 메서드가 막겠다고 한 상황 그대로다.
-  Future<void> unsubscribe({int? termCode}) async {
-    final current = _topic ?? (termCode == null ? null : topicFor(termCode));
-    if (current == null) return;
-    _topic = null;
+  Future<void> unsubscribe({int? termCode}) {
+    _desiredTopic = null;
+    // 이번 실행에서 구독한 적이 없어도 **기기에는 남아 있다.** 그 사실을
+    // [_topic] 에 적어 두어야 아래 맞추기가 해제할 대상을 안다.
+    if (_topic == null && termCode != null) _topic = topicFor(termCode);
+    return _enqueueTopicSync();
+  }
+
+  /// 구독·해제를 **한 줄로 세운다.**
+  ///
+  /// 둘이 겹치면 늦게 끝난 쪽이 [_topic] 을 덮는다 — 구독 중에 로그아웃하면
+  /// 해제가 비운 값을 뒤늦게 끝난 구독이 되살려서, 기기는 끊겼는데 메모리는
+  /// 구독 중이라고 믿는다. 그 상태로 다음 학생이 로그인하면 「같은 토픽」이라며
+  /// 재구독을 건너뛰어 **푸시가 한 건도 오지 않는다.**
+  Future<void> _enqueueTopicSync() {
+    final queued = _topicQueue.then((_) => _syncTopic());
+    // 실패한 Future 를 큐에 남기면 뒤따르는 작업이 전부 같은 예외로 끊긴다.
+    _topicQueue = queued.catchError((_) {});
+    return queued;
+  }
+
+  /// 지금 상태([_topic])를 마지막 의도([_desiredTopic])에 맞춘다.
+  Future<void> _syncTopic() async {
+    final want = _desiredTopic;
+    if (_topic == want) return;
+
     try {
       await _ensureApp();
-      await backend.unsubscribeFromTopic(current);
+
+      final current = _topic;
+      if (current != null) {
+        // **실패해도 비운다.** 끊기지 않았을 수도 있지만, 구독 중이라고 믿으면
+        // 다음 로그인에서 재구독을 건너뛴다 — 안 오는 쪽이 더 나쁘다.
+        _topic = null;
+        await backend.unsubscribeFromTopic(current);
+      }
+      if (want != null) {
+        // 구독은 **성공한 뒤에만** 적는다. 실패를 적어 두면 재시도 길이 막힌다.
+        await backend.subscribeToTopic(want);
+        _topic = want;
+      }
     } catch (e) {
-      debugPrint('토픽 해제 실패 ($current): $e');
+      debugPrint('토픽 맞추기 실패 (목표: ${want ?? '해제'}): $e');
     }
   }
 
@@ -184,6 +219,8 @@ class PushService {
     _ready = false;
     _token = null;
     _topic = null;
+    _desiredTopic = null;
+    _topicQueue = Future<void>.value();
     onOpened = null;
     onForegroundMessage = null;
   }
