@@ -374,6 +374,9 @@
 ### 1. 수입·지출 목록 조회 (`GET /entries`)
 - **설명**: 장부 내역 목록을 최신순으로 조회합니다. (필터 쿼리: `kind`, `status`)
 - **타임스탬프**: `occurred_at`은 사용일 KST 00:00:00 기준 Unix 초(정수)입니다.
+- **등록자 지갑 주소**: `registrant` 필드에 온체인 등록자 지갑 주소(`0x...`)가 실려 내려옵니다. 체인을 읽지 못하거나 미기록 상태일 때는 DB 등록자 지갑으로 대체하지 않고 `null`로 두어, 앱이 서명 전에 온체인 등록자 확인 불가 상태를 감지하고 서명을 막을 수 있습니다.
+- **블록 번호**: 목록 조회 시에는 블록체인 RPC 부하 및 호출 비용 절감을 위해 `block_number`가 항상 `null`로 반환됩니다. 확정·반려 트랜잭션의 블록 번호는 단건 상세 조회(`GET /entries/{id}`) 또는 온체인 원장 조회(`GET /entries/{id}/onchain`)에서 확인하실 수 있습니다.
+- **조회 성능 및 RPC 보호**: 감사·회장 홈 폴링(15초) 및 앱 3초 타임아웃 방지를 위해, 목록 조회에서는 최대 1.5초 이내로 온체인 등록자 조회를 시도하고 초과·실패 시 `registrant: null`로 즉시 응답합니다. (앱은 서명 직전 단건 상세 조회 `GET /entries/{id}`로 온체인 값을 최종 확인합니다)
 - **초안(`DRAFT`) 제외 기준**:
   - 온체인 트랜잭션이 아직 발생하지 않은 미완성 초안(`status IS NULL`)은 **학생 앱과 총무 일반 장부 목록에서 모두 제외**됩니다.
   - **학생 앱**: 온체인에 등록 완료된 `CONFIRMED` 및 `PENDING` 건만 조회 가능합니다.
@@ -385,37 +388,56 @@
   {
     "id": 1,
     "term_id": 1,
+    "term_code": 20261,
     "kind": "EXPENSE",
     "amount": 35000,
     "counterparty": "한결문구",
     "purpose": "신입생 환영회 명찰 및 필기구 구매",
     "occurred_at": 1788793200,
     "status": "CONFIRMED",
-    "receipt_path": "/receipts/sample_01.jpg"
+    "receipt_path": "/receipts/sample_01.jpg",
+    "registrant": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+    "block_number": null
   },
   {
     "id": 2,
     "term_id": 1,
+    "term_code": 20261,
     "kind": "EXPENSE",
     "amount": 120000,
     "counterparty": "청년피자",
     "purpose": "개강총회 다과 주문",
     "occurred_at": 1788706800,
     "status": "PENDING",
-    "receipt_path": "/receipts/sample_02.jpg"
-  },
-  {
-    "id": 3,
-    "term_id": 1,
-    "kind": "INCOME",
-    "amount": 5000000,
-    "counterparty": "컴퓨터공학과 학생회비 일괄 납부",
-    "purpose": "2026-2학기 학과 학생회비 수납",
-    "occurred_at": 1788620400,
-    "status": "CONFIRMED",
-    "receipt_path": null
+    "receipt_path": "/receipts/sample_02.jpg",
+    "registrant": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+    "block_number": null
   }
 ]
+```
+
+### 1.1 수입·지출 내역 단건 상세 조회 (`GET /entries/{id}`)
+- **설명**: 내역 ID로 특정 수입/지출 내역의 상세 정보를 조회합니다.
+- **등록자 및 블록 번호**:
+  - `registrant`: 온체인 등록자 지갑 주소(`0x...`)가 실려 내려옵니다 (미기록 또는 체인 조회 실패 시 DB 값으로 대체하지 않고 `null` 반환).
+  - `block_number`: 확정/반려 트랜잭션이 안착된 블록 번호가 실려 내려옵니다 (`tx_confirm` 또는 `tx_pending` 기준 receipt 조회, 체인 미안착 시 `null`).
+
+**Response (`200 OK`)**
+```json
+{
+  "id": 1,
+  "term_id": 1,
+  "term_code": 20261,
+  "kind": "EXPENSE",
+  "amount": 35000,
+  "counterparty": "한결문구",
+  "purpose": "신입생 환영회 명찰 및 필기구 구매",
+  "occurred_at": 1788793200,
+  "status": "CONFIRMED",
+  "receipt_path": "/receipts/sample_01.jpg",
+  "registrant": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+  "block_number": 102
+}
 ```
 
 ### 2. 지출 및 수입 신규 등록 흐름 (2단계 등록 프로세스)
@@ -558,13 +580,55 @@
 
 | 코드 | 경우 |
 | --- | --- |
-| `400` | `PENDING`이 아님, 사유 없음, 서명 형식 오류, 서명자 불일치, 체인이 거부함 |
+| `400` | `PENDING`이 아님, 사유 없음, 서명 형식 오류, 서명자 불일치, 체인이 거부함 (`fail_reason` 코드 동봉) |
 | `403` | 감사·회장이 아님, 본인이 등록한 항목 |
 | `404` | 없는 항목 |
 | `409` | 확정이 처리 중, 다른 요청이 먼저 처리함 또는 처리 중. 잠시 뒤 다시 조회합니다 |
 | `503` | 노드·DB 오류. 트랜잭션이 들어갔는지 모르면 같은 요청을 다시 보내 결과를 확인합니다 |
 
 확정(`POST /entries/{id}/confirm`)도 반려가 처리 중이면 같은 방식으로 `409`입니다.
+
+#### 온체인 거부 시 `fail_reason` 코드 (400 Bad Request)
+체인이 확정(`confirm`)·반려(`reject`)·등록(`submit`)을 거부(`ChainRevert`)하면, `detail` 문구와 함께 최상위에 기계 판독용 `fail_reason` 코드가 함께 반환됩니다.
+앱은 문자열 파싱 없이 `fail_reason` 코드로 분기할 수 있습니다.
+- 예산 관련 거부 코드: `InsufficientBudget`(예산 잔량 부족), `BudgetExpired`(집행 기간 만료), `BudgetNotFound`(예산 미존재)
+- 서명/상태 거부 코드: `InvalidStatus`(이미 처리됨), `SignatureExpired`(서명 유효시한 만료), `SelfApproval`(자기 승인/반려), `EntryCommitMismatch` 등
+
+**온체인 승인 거부 응답 예시 (`400 Bad Request`)**
+```json
+{
+  "detail": "온체인 승인이 거부되었습니다 (InsufficientBudget).",
+  "fail_reason": "InsufficientBudget"
+}
+```
+
+---
+
+### 5. 온체인 원장 항목 조회 (`GET /entries/{id}/onchain`)
+- **설명**: 스마트 컨트랙트 원장(`getEntry`) 및 블록체인 트랜잭션 기록(`entry_tx_detail`)을 직접 조회합니다. 모바일 앱의 1단계/2단계 검증(등록자 지갑 주소 대조, 해시 대조, 블록 번호 대조)에 사용됩니다.
+- **체인 미등록 항목**: 체인에 아직 올라가지 않았거나 없는 건은 `404 Not Found`를 반환합니다.
+
+**Response (`200 OK`)**
+```json
+{
+  "id": 1,
+  "hash": "0x3b8d...",
+  "amount": 35000,
+  "kind": "EXPENSE",
+  "status": "CONFIRMED",
+  "term": 20261,
+  "occurred_at": 1788793200,
+  "budget_id": 1,
+  "corrects_id": 0,
+  "registrant": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+  "approver": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+  "had_warning": false,
+  "reason_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+  "block_number": 102,
+  "block_reason": null,
+  "tx_hash": "0x2222222222222222222222222222222222222222222222222222222222222222"
+}
+```
 
 ---
 
