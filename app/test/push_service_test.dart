@@ -153,11 +153,15 @@ void main() {
       fake.subscribeGate = Completer<void>();
 
       final subscribing = PushService().subscribeStudentTopic(20262);
+      await fake.subscribeStarted.future; // **구독이 실제로 시작될 때까지** 기다린다
+
       final unsubscribing = PushService().unsubscribe(termCode: 20262);
 
       fake.subscribeGate!.complete(); // 붙잡아 둔 구독을 끝낸다
       await subscribing;
       await unsubscribing;
+
+      expect(fake.subscribed, ['students_20262'], reason: '구독이 시작도 안 했으면 겹침을 시험한 것이 아니다');
 
       expect(
         PushService().subscribedTopic,
@@ -172,6 +176,7 @@ void main() {
       await PushService().init();
       fake.subscribeGate = Completer<void>();
       final subscribing = PushService().subscribeStudentTopic(20262);
+      await fake.subscribeStarted.future;
       final unsubscribing = PushService().unsubscribe(termCode: 20262);
       fake.subscribeGate!.complete();
       await subscribing;
@@ -292,6 +297,13 @@ class _FakeBackend implements PushBackend {
   /// 중에 로그아웃이 끼어드는 상황을 만든다.
   Completer<void>? subscribeGate;
 
+  /// **구독에 실제로 진입했음**을 알린다 (게이트에 걸리기 직전).
+  ///
+  /// 이것을 기다리지 않고 바로 로그아웃하면, 큐의 `.then` 이 아직 돌지 않아
+  /// 구독이 시작조차 하지 않는다 — 겹치는 상황이 아니라 「구독을 건너뛴」
+  /// 상황을 시험하게 된다 (6차 리뷰 Low 지적).
+  final subscribeStarted = Completer<void>();
+
   /// **초기화 전에는 FCM 호출이 거부된다** — 실제 동작이 그렇다
   /// (`No Firebase App '[DEFAULT]' has been created`). 이것을 흉내 내지 않으면
   /// 「초기화를 기다리지 않는」 회귀가 테스트를 통과한다.
@@ -328,6 +340,7 @@ class _FakeBackend implements PushBackend {
   @override
   Future<void> subscribeToTopic(String topic) async {
     if (!_initialized) throw Exception("No Firebase App '[DEFAULT]'");
+    if (!subscribeStarted.isCompleted) subscribeStarted.complete();
     if (subscribeGate != null) await subscribeGate!.future;
     if (failTopic) throw Exception('네트워크 실패');
     subscribed.add(topic);

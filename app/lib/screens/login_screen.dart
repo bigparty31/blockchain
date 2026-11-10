@@ -74,10 +74,10 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
     _auth.loadLock().then((_) {
       if (!mounted) return;
       setState(() {});
-      if (_auth.lockRemaining != null) _startLockTicker();
+      if (_lockLeft != null) _startLockTicker();
     });
 
-    if (_auth.lockRemaining != null) _startLockTicker();
+    if (_lockLeft != null) _startLockTicker();
 
     // 기기에 토큰이 남은 사실을 **여기서도 알린다.**
     //
@@ -119,9 +119,15 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
     if (mounted) setState(() {});
   }
 
+  /// **입력된 학번에 걸린** 잠금만 본다.
+  ///
+  /// 서버 잠금(`429`)은 학번 단위라, 기기 전체로 보면 A 가 잠긴 기기에서
+  /// B 가 로그인하지 못한다 ([AuthService.lockRemainingFor]).
+  Duration? get _lockLeft => _auth.lockRemainingFor(_studentNoController.text.trim());
+
   bool get _canSubmit =>
       !_busy &&
-      _auth.lockRemaining == null &&
+      _lockLeft == null &&
       _studentNoController.text.trim().isNotEmpty &&
       _pwController.text.isNotEmpty;
 
@@ -129,7 +135,7 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
     _lockTicker?.cancel();
     _lockTicker = Timer.periodic(const Duration(seconds: 1), (t) {
       if (!mounted) return t.cancel();
-      if (_auth.lockRemaining == null) t.cancel();
+      if (_lockLeft == null) t.cancel();
       setState(() {});
     });
   }
@@ -231,7 +237,7 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
     Duration? remaining,
     bool byServer = false,
   }) {
-    final left = remaining ?? _auth.lockRemaining ?? AuthService.lockDuration;
+    final left = remaining ?? _lockLeft ?? AuthService.lockDuration;
     return showDialog<void>(
       context: context,
       barrierDismissible: true,
@@ -293,7 +299,7 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
 
   @override
   Widget build(BuildContext context) {
-    final lockLeft = _auth.lockRemaining;
+    final lockLeft = _lockLeft;
 
     return Scaffold(
       backgroundColor: AppTheme.bgPage,

@@ -266,15 +266,21 @@ class SecureTokenStore implements TokenStore {
 /// 실제 차단은 서버가 해야 한다(계정·IP 단위). 여기 있는 것은 **화면의 약속을
 /// 지키는 것**까지다 — 잠겼다고 말했으면 앱을 다시 켜도 잠겨 있어야 한다.
 abstract class LoginLockStore {
-  Future<({int attempts, DateTime? lockedUntil, bool byServer})?> read();
+  Future<({int attempts, DateTime? lockedUntil, bool byServer, String? studentNo})?> read();
 
   /// [byServer] 는 **서버가 잠근 것**(`429`)인지. 화면 문구가 달라지므로
   /// 잠금 시각과 함께 남긴다 — 앱을 다시 켜면 메모리에만 둔 것은 사라진다
   /// ([LoginLocked.byServer]).
+  ///
+  /// [studentNo] 는 **그 서버 잠금이 걸린 학번**이다. 서버 잠금은 학번 단위라
+  /// (백엔드 #89) 다른 학번까지 막으면 안 된다 — 같이 적어 두지 않으면 앱이
+  /// 기기 전체를 잠가, A 가 잠긴 기기에서 B 가 로그인하지 못한다.
+  /// 앱이 센 5회 잠금은 기기 단위이므로 null 이다.
   Future<void> write({
     required int attempts,
     DateTime? lockedUntil,
     bool byServer = false,
+    String? studentNo,
   });
 
   Future<void> clear();
@@ -308,25 +314,28 @@ class SecureLoginLockStore implements LoginLockStore {
   const SecureLoginLockStore([this._storage = const FlutterSecureStorage()]);
 
   @override
-  Future<({int attempts, DateTime? lockedUntil, bool byServer})?> read() async {
+  Future<({int attempts, DateTime? lockedUntil, bool byServer, String? studentNo})?>
+      read() async {
     if (_unavailable) return null;
     try {
       final raw = await _storage.read(key: _key).timeout(_ioTimeout);
       if (raw == null || raw.isEmpty) return null;
 
-      // `attempts|lockedUntilMillis|byServer` — 뒤 두 칸은 비어 있을 수 있다.
-      // **세 번째 칸이 없는 옛 형식도 읽는다** — 이미 잠겨 있는 기기의 기록을
-      // 못 읽으면 잠금이 그냥 풀린다. 없으면 「서버 잠금 아님」으로 본다.
+      // `attempts|lockedUntilMillis|byServer|studentNo` — 뒤 세 칸은 비어 있을
+      // 수 있다. **칸이 모자란 옛 형식도 읽는다** — 이미 잠겨 있는 기기의 기록을
+      // 못 읽으면 잠금이 그냥 풀린다. 없으면 「서버 잠금 아님」·「학번 모름」이다.
       final parts = raw.split('|');
       if (parts.length < 2) return null;
       final attempts = int.tryParse(parts[0]);
       if (attempts == null) return null;
 
       final millis = int.tryParse(parts[1]);
+      final studentNo = parts.length > 3 && parts[3].isNotEmpty ? parts[3] : null;
       return (
         attempts: attempts,
         lockedUntil: millis == null ? null : DateTime.fromMillisecondsSinceEpoch(millis),
         byServer: parts.length > 2 && parts[2] == 'S',
+        studentNo: studentNo,
       );
     } catch (_) {
       _unavailable = true;
@@ -339,6 +348,7 @@ class SecureLoginLockStore implements LoginLockStore {
     required int attempts,
     DateTime? lockedUntil,
     bool byServer = false,
+    String? studentNo,
   }) async {
     if (_unavailable) return;
     try {
@@ -346,7 +356,7 @@ class SecureLoginLockStore implements LoginLockStore {
           .write(
             key: _key,
             value: '$attempts|${lockedUntil?.millisecondsSinceEpoch ?? ''}'
-                '|${byServer ? 'S' : ''}',
+                '|${byServer ? 'S' : ''}|${studentNo ?? ''}',
           )
           .timeout(_ioTimeout);
     } catch (_) {
@@ -371,26 +381,35 @@ class MemoryLoginLockStore implements LoginLockStore {
   int attempts = 0;
   DateTime? lockedUntil;
   bool byServer;
+  String? studentNo;
 
   MemoryLoginLockStore({
     this.attempts = 0,
     this.lockedUntil,
     this.byServer = false,
+    this.studentNo,
   });
 
   @override
-  Future<({int attempts, DateTime? lockedUntil, bool byServer})?> read() async =>
-      (attempts: attempts, lockedUntil: lockedUntil, byServer: byServer);
+  Future<({int attempts, DateTime? lockedUntil, bool byServer, String? studentNo})?>
+      read() async => (
+            attempts: attempts,
+            lockedUntil: lockedUntil,
+            byServer: byServer,
+            studentNo: studentNo,
+          );
 
   @override
   Future<void> write({
     required int attempts,
     DateTime? lockedUntil,
     bool byServer = false,
+    String? studentNo,
   }) async {
     this.attempts = attempts;
     this.lockedUntil = lockedUntil;
     this.byServer = byServer;
+    this.studentNo = studentNo;
   }
 
   @override
@@ -398,6 +417,7 @@ class MemoryLoginLockStore implements LoginLockStore {
     attempts = 0;
     lockedUntil = null;
     byServer = false;
+    studentNo = null;
   }
 }
 
@@ -507,6 +527,9 @@ class AuthService {
   bool get lockByServer => _lockByServer;
   bool _lockByServer = false;
 
+  /// 서버 잠금이 걸린 학번. 앱이 센 5회 잠금(기기 단위)이면 null.
+  String? _lockStudentNo;
+
   /// 기기에 남은 잠금을 읽는 **진행 중인 작업**. 끝났으면 완료된 Future 다.
   ///
   /// 「읽었는지」를 `bool` 로 두면 안 된다. 깃발은 `await` **전에** 세워야 두 번째
@@ -532,8 +555,25 @@ class AuthService {
       _lockedUntil = null;
       _failedAttempts = 0;
       _lockByServer = false;
+      _lockStudentNo = null;
       return null;
     }
+    return left;
+  }
+
+  /// **이 학번에** 적용되는 남은 차단 시간. 차단 중이 아니면 null.
+  ///
+  /// 서버 잠금(`429`)은 **학번 단위**다 (백엔드 #89). 그것을 기기 전체에
+  /// 적용하면 A 가 잠긴 기기에서 **B 가 로그인하지 못한다** — 공용 기기나
+  /// 발표용 기기에서 한 사람의 잠금이 모두를 막는다. 앱이 센 5회 잠금은
+  /// 반대로 기기 단위가 맞으므로(앱 데이터를 지우면 풀리는 편의 장치다)
+  /// 학번을 가리지 않는다.
+  Duration? lockRemainingFor(String studentNo) {
+    final left = lockRemaining;
+    if (left == null) return null;
+
+    final lockedFor = _lockStudentNo;
+    if (_lockByServer && lockedFor != null && lockedFor != studentNo) return null;
     return left;
   }
 
@@ -570,7 +610,7 @@ class AuthService {
     // 잠금이 풀려서, 5회 제한이 사실상 없는 것과 같다 ([LoginLockStore]).
     await loadLock();
 
-    final locked = lockRemaining;
+    final locked = lockRemainingFor(studentNo);
     if (locked != null) throw LoginLocked(locked, byServer: _lockByServer);
 
     final http.Response res;
@@ -595,6 +635,7 @@ class AuthService {
       // 이쪽은 **이 기기에서 실제로 틀린 횟수**로 잠긴 것이다 — 서버 잠금과
       // 문구가 달라야 하므로 구분해 남긴다.
       _lockByServer = false;
+      _lockStudentNo = null; // 앱이 센 5회는 기기 단위다
       await lockStore.write(
         attempts: _failedAttempts,
         lockedUntil: _lockedUntil,
@@ -616,10 +657,12 @@ class AuthService {
       _failedAttempts = maxAttempts;
       _lockedUntil = DateTime.now().add(remaining);
       _lockByServer = true;
+      _lockStudentNo = studentNo;
       await lockStore.write(
         attempts: _failedAttempts,
         lockedUntil: _lockedUntil,
         byServer: true,
+        studentNo: studentNo,
       );
       throw LoginLocked(remaining, byServer: true);
     }
@@ -664,6 +707,7 @@ class AuthService {
     _failedAttempts = 0;
     _lockedUntil = null;
     _lockByServer = false;
+    _lockStudentNo = null;
     await lockStore.clear();
 
     // 역할도 함께 저장한다 — 다음 실행의 [restore] 가 주소를 고를 근거다.
@@ -904,7 +948,7 @@ class AuthService {
   Future<void> loadLock() => _lockLoading ??= _loadLockOnce();
 
   Future<void> _loadLockOnce() async {
-    final ({int attempts, DateTime? lockedUntil, bool byServer})? stored;
+    final ({int attempts, DateTime? lockedUntil, bool byServer, String? studentNo})? stored;
     try {
       stored = await lockStore.read();
     } catch (_) {
@@ -935,8 +979,10 @@ class AuthService {
     if (stored.attempts > _failedAttempts) _failedAttempts = stored.attempts;
     if (until != null) {
       _lockedUntil = until;
-      // 앱을 다시 켜도 「서버가 잠갔다」를 기억해야 문구가 맞는다.
+      // 앱을 다시 켜도 「서버가 잠갔다」와 **그 학번**을 기억해야 한다.
+      // 학번을 잃으면 다른 학번까지 막는다 ([lockRemainingFor]).
       _lockByServer = stored.byServer;
+      _lockStudentNo = stored.studentNo;
     }
   }
 
@@ -948,6 +994,7 @@ class AuthService {
     _failedAttempts = 0;
     _lockedUntil = null;
     _lockByServer = false;
+    _lockStudentNo = null;
     _lockLoading = null;
     await lockStore.clear();
   }

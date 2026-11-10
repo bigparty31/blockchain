@@ -724,14 +724,21 @@ class _SlowLockStore implements LoginLockStore {
   int attempts;
   DateTime? lockedUntil;
   bool byServer;
+  String? studentNo;
 
   _SlowLockStore(this.delay, {required this.attempts, this.lockedUntil})
       : byServer = false;
 
   @override
-  Future<({int attempts, DateTime? lockedUntil, bool byServer})?> read() async {
+  Future<({int attempts, DateTime? lockedUntil, bool byServer, String? studentNo})?>
+      read() async {
     await Future<void>.delayed(delay);
-    return (attempts: attempts, lockedUntil: lockedUntil, byServer: byServer);
+    return (
+      attempts: attempts,
+      lockedUntil: lockedUntil,
+      byServer: byServer,
+      studentNo: studentNo,
+    );
   }
 
   @override
@@ -739,10 +746,12 @@ class _SlowLockStore implements LoginLockStore {
     required int attempts,
     DateTime? lockedUntil,
     bool byServer = false,
+    String? studentNo,
   }) async {
     this.attempts = attempts;
     this.lockedUntil = lockedUntil;
     this.byServer = byServer;
+    this.studentNo = studentNo;
   }
 
   @override
@@ -750,5 +759,6 @@ class _SlowLockStore implements LoginLockStore {
     attempts = 0;
     lockedUntil = null;
     byServer = false;
+    studentNo = null;
   }
 }
