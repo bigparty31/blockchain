@@ -1,3 +1,5 @@
+import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -113,6 +115,42 @@ void main() {
     final sig = SigningService.encodeSignature(web3.sign(d, pk));
     expect(SigningService.recoverSigner(d, sig), a.toLowerCase());
     expect(DeviceKey.addressOf(pk), a.toLowerCase());
+  });
+
+  test('fixture 에 SBT 벡터가 있으면 앱이 같은 다이제스트·서명을 낸다 (#96 컨트랙트 벡터)', () {
+    final json = jsonDecode(File('../backend/tests/fixtures/eip712_vectors.json').readAsStringSync()) as Map<String, dynamic>;
+    final fixture = json['sbtVectors'] as List?;
+    if (fixture == null) {
+      markTestSkipped('이 브랜치의 fixture 에는 SBT 벡터(#96)가 아직 없다');
+      return;
+    }
+    final fixtureDomain = Eip712Domain.fromJson(Map<String, Object?>.from(json['sbtDomain'] as Map));
+    expect(fixtureDomain.separatorMatches, isTrue);
+    // Hardhat 공개 테스트 키 — 서명자 주소 → 개인키.
+    const keys = {
+      '0x70997970c51812dc3a010c7d01b50e0d17dc79c8': '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d', // #1 회장
+      '0x90f79bf6eb2c4f870365e785982e1f101e93b906': '0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6', // #3 감사
+    };
+    expect(fixture, isNotEmpty);
+    for (final v in fixture.cast<Map<String, dynamic>>()) {
+      final name = v['name'] as String;
+      final m = Map<String, dynamic>.from(v['message'] as Map);
+      final message = v['primaryType'] == 'MintBatchRequest'
+          ? SbtTypes.mintBatchRequest(
+              recipients: (m['recipients'] as List).cast<String>(), term: m['term'] as int, nonce: m['nonce'] as int, deadline: m['deadline'] as int)
+          : SbtTypes.burnRequest(
+              holder: m['holder'] as String,
+              term: m['term'] as int,
+              reason: SbtTypes.burnReasonCodes.entries.firstWhere((e) => e.value == m['reason']).key,
+              nonce: m['nonce'] as int,
+              deadline: m['deadline'] as int);
+      final d = Eip712.digest(fixtureDomain, message);
+      expect(Eip712.toHex(d), v['digest'], reason: name);
+      final signer = (v['signer'] as String).toLowerCase();
+      final sig = SigningService.encodeSignature(web3.sign(d, Eip712.hexToBytes(keys[signer]!)));
+      expect(sig, v['signature'], reason: name);
+      expect(SigningService.recoverSigner(d, v['signature'] as String), signer, reason: name);
+    }
   });
 
   group('보내기 전 검사 — 컨트랙트가 revert 할 요청은 서명하게 두지 않는다', () {
