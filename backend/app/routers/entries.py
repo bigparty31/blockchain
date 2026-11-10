@@ -24,6 +24,7 @@ from app.services.chain_tx import (
     EntryConflict,
     relay_confirm,
     relay_record,
+    relay_reject,
 )
 from app.database import get_db
 from app.models import Budget as DBBudget, Entry as DBEntry, Term as DBTerm, User as DBUser
@@ -95,9 +96,14 @@ async def _get_chain_registrant(entry_id: int, chain: ChainClient) -> str:
 
 def _to_schema(entry: DBEntry) -> EntryResponse:
     """DB Entry ORM 모델을 EntryResponse 스키마로 변환"""
+    # 선점 때 미리 적은 값이다. 체인에서 끝나기 전에는 내보내지 않는다 (실패하면 비워진다). 앱의 단건 검증은 체인 approver 가
+    # 비어 있는데 approved_by 만 있으면 위조로 판정한다 (entry_verifier.dart)
+    confirmed = entry.status == EntryStatus.CONFIRMED.value
+    rejected = entry.status == EntryStatus.REJECTED.value
     return EntryResponse(
         id=entry.id,
         term_id=entry.term_id,
+        term_code=entry.term.term_code if getattr(entry, "term", None) else None,
         kind=EntryKind(entry.kind),
         amount=entry.amount,
         counterparty=entry.counterparty,
@@ -113,12 +119,12 @@ def _to_schema(entry: DBEntry) -> EntryResponse:
         ocr_paid_at=entry.ocr_paid_at,
         ocr_status=OCRStatus(entry.ocr_status) if entry.ocr_status else None,
         category_warning=entry.category_warning,
-        warning_ack_reason=entry.warning_ack_reason,
+        warning_ack_reason=entry.warning_ack_reason if confirmed else None,
         status=EntryStatus(entry.status) if entry.status else None,
         created_by=entry.created_by,
-        approved_by=entry.approved_by,
-        rejected_by=entry.rejected_by,
-        reject_reason=entry.reject_reason,
+        approved_by=entry.approved_by if confirmed else None,
+        rejected_by=entry.rejected_by if rejected else None,
+        reject_reason=entry.reject_reason if rejected else None,
         tx_pending=entry.tx_pending,
         tx_confirm=entry.tx_confirm,
         corrects_entry_id=entry.corrects_entry_id,
@@ -141,6 +147,27 @@ async def get_entries(db: Session = Depends(get_db)):
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="데이터베이스 처리 중 오류가 발생했습니다.",
         )
+
+
+@router.get("/{id}", response_model=EntryResponse, summary="수입·지출 내역 단건 상세 조회")
+async def get_entry_by_id(id: int, db: Session = Depends(get_db)):
+    """내역 ID로 특정 수입/지출 내역의 상세 정보를 조회합니다."""
+    try:
+        entry = db.query(DBEntry).filter(DBEntry.id == id, DBEntry.status.isnot(None)).first()
+    except SQLAlchemyError as e:
+        logger.exception("수입·지출 내역 단건 조회 중 데이터베이스 오류: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 처리 중 오류가 발생했습니다.",
+        )
+
+    if not entry:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"ID {id}에 해당하는 내역을 찾을 수 없습니다.",
+        )
+
+    return _to_schema(entry)
 
 
 @router.post(
@@ -484,6 +511,13 @@ async def confirm_entry(
             detail="PENDING 상태의 항목만 확정할 수 있습니다.",
         )
 
+    # 반려가 선점 중이면 체인을 읽기 전에 409 (노드가 죽은 ② 에서도 503 이 아니다). 내 확정의 재시도는 relay_confirm 이 결과를 확인한다
+    if target.tx_confirm and target.rejected_by is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="반려 처리 중인 내역은 확정할 수 없습니다.",
+        )
+
     # 학기 코드 조회
     db_term = None
     try:
@@ -603,6 +637,12 @@ async def confirm_entry(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except LookupError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except SQLAlchemyError as e:
+        logger.exception("체인 릴레이 중 데이터베이스 오류: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 처리 중 오류가 발생했습니다. 다시 요청하면 결과를 확인합니다.",
+        )
 
     return EntryConfirmResponse(
         id=id,
@@ -653,8 +693,8 @@ async def reject_entry(
             detail="PENDING 상태의 항목만 반려할 수 있습니다.",
         )
 
-    # 확정 선점(tx_confirm)이 있으면 409 선제 차단 (relay_reject 도입 전 임시 방어)
-    if target.tx_confirm:
+    # 확정이 선점 중이면 체인을 읽기 전에 409 (노드가 죽은 ② 에서도 503 이 아니다). 내 반려의 재시도는 relay_reject 가 결과를 확인한다
+    if target.tx_confirm and target.approved_by is not None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="확정 처리 중인 내역은 반려할 수 없습니다.",
@@ -726,9 +766,27 @@ async def reject_entry(
     if not user.wallet_address or recovered.lower() != user.wallet_address.lower():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="서명자가 반려권자와 일치하지 않습니다.")
 
-    # 체인 릴레이
+    # 체인 릴레이 (선점·상태 저장은 relay_reject 가 한다). 체인을 기다리는 동안 이 세션의 트랜잭션을 열어 두지 않는다
     try:
-        await chain.reject_entry(decision, req.signature)
+        db.commit()
+    except SQLAlchemyError as e:
+        logger.exception("체인 릴레이 전 데이터베이스 커밋 오류: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 처리 중 오류가 발생했습니다.",
+        )
+
+    try:
+        await relay_reject(
+            db=db,
+            chain=chain,
+            decision=decision,
+            signature=req.signature,
+            rejecter_id=user.id,
+            reason=canon_reason,
+        )
+    except EntryConflict as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except ChainRevert as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -738,19 +796,13 @@ async def reject_entry(
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="블록체인 네트워크와 통신할 수 없습니다.")
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-
-    # 상태 갱신 (DB 전용)
-    try:
-        target.status = EntryStatus.REJECTED.value
-        target.rejected_by = user.id
-        target.reject_reason = canon_reason
-        db.commit()
+    except LookupError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except SQLAlchemyError as e:
-        db.rollback()
-        logger.exception("내역 반려 상태 저장 중 데이터베이스 오류: %s", e)
+        logger.exception("체인 릴레이 중 데이터베이스 오류: %s", e)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="데이터베이스 처리 중 오류가 발생했습니다.",
+            detail="데이터베이스 처리 중 오류가 발생했습니다. 다시 요청하면 결과를 확인합니다.",
         )
 
     return EntryRejectResponse(
