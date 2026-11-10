@@ -9,11 +9,22 @@ TRIM_TEXT = " \t\n"  # U+0020, U+0009, U+000A
 
 # 금지 문자: 제어문자 U+0000 ~ U+001F, NBSP(U+00A0), ZWSP(U+200B), 전각공백(U+3000), BOM(U+FEFF)
 _DISALLOWED_PATTERN = re.compile(r"[\x00-\x1f\u00a0\u200b\u3000\ufeff]")
+# 여러 줄 텍스트 금지 문자: 탭(U+0009)·LF(U+000A) 제외한 제어문자 및 비가시 공백류 (docs/HASHING.md §3)
+_DISALLOWED_MULTILINE_PATTERN = re.compile(r"[\x00-\x08\x0b-\x1f\u00a0\u200b\u3000\ufeff]")
 
 
 def validate_text_for_hash(s: str, field_name: str) -> None:
     """단일 줄 텍스트(counterparty, purpose)의 금지 제어문자 및 공백류 검사 (docs/HASHING.md §1.1, §5)"""
     if _DISALLOWED_PATTERN.search(s):
+        raise ValueError(f"{field_name}에 허용되지 않는 제어문자 또는 공백 문자가 포함되어 있습니다.")
+
+
+def validate_multiline_text_for_hash(s: str, field_name: str) -> None:
+    """여러 줄 텍스트(사유 등)의 금지 제어문자 및 공백류 검사 (docs/HASHING.md §3).
+    개행을 LF로 통일한 뒤 U+0009(탭)·U+000A(LF) 외 제어문자와 보이지 않는 공백류를 거부한다.
+    """
+    normalized_newlines = s.replace("\r\n", "\n").replace("\r", "\n")
+    if _DISALLOWED_MULTILINE_PATTERN.search(normalized_newlines):
         raise ValueError(f"{field_name}에 허용되지 않는 제어문자 또는 공백 문자가 포함되어 있습니다.")
 
 

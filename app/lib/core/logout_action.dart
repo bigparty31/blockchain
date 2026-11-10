@@ -80,6 +80,11 @@ Future<void> confirmAndLogout(BuildContext context) async {
     await AuthService().logout();
   } on TokenClearFailed {
     cleared = false;
+    // **깃발을 여기서 내린다.** 아래에서 우리가 직접 알리는데, 깃발을 세워
+    // 두면 뒤따라 서는 로그인 화면이 `initState` 에서 같은 경고를 한 번 더
+    // 띄운다 ([AuthService.consumeTokenClearFailed]). 같은 말을 두 번 하면
+    // 사용자는 두 번 실패한 것으로 읽는다.
+    AuthService().consumeTokenClearFailed();
   }
 
   // 쌓인 화면을 모두 버린다 — 뒤로 가서 로그아웃 전 화면으로 돌아갈 수 없게 한다

@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../core/app_theme.dart';
 import '../core/enums.dart';
+import '../core/format.dart';
 import '../core/role_home.dart';
 import '../services/auth_service.dart';
 
@@ -185,7 +186,11 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
     }
     if (failure is LoginLocked) {
       _startLockTicker();
-      await _showFailureDialog(locked: true, remaining: failure.remaining);
+      await _showFailureDialog(
+        locked: true,
+        remaining: failure.remaining,
+        byServer: failure.byServer,
+      );
       return;
     }
 
@@ -218,7 +223,14 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
   }
 
   /// 실패 팝업 ④. 바깥을 눌러도 닫힌다.
-  Future<void> _showFailureDialog({required bool locked, Duration? remaining}) {
+  /// [byServer] 면 **서버가 건 잠금**이다 (`429`). 이때 「비밀번호를 5회
+  /// 틀렸습니다」라고 말하면 안 된다 — 서버 잠금은 학번 단위라 남이 내 학번으로
+  /// 틀려도 걸리고, 그 사람은 자기 비밀번호를 의심하게 된다.
+  Future<void> _showFailureDialog({
+    required bool locked,
+    Duration? remaining,
+    bool byServer = false,
+  }) {
     final left = remaining ?? _auth.lockRemaining ?? AuthService.lockDuration;
     return showDialog<void>(
       context: context,
@@ -233,8 +245,11 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
         title: Text(locked ? '로그인이 일시 차단되었습니다' : '로그인할 수 없습니다'),
         content: Text(
           locked
-              ? '비밀번호를 ${AuthService.maxAttempts}회 연속 틀렸습니다.\n'
-                  '${left.inSeconds}초 후에 다시 시도해 주세요.'
+              ? byServer
+                  ? '로그인 시도가 많아 서버가 이 학번을 잠시 잠갔습니다.\n'
+                      '${Fmt.duration(left)} 후에 다시 시도해 주세요.'
+                  : '비밀번호를 ${AuthService.maxAttempts}회 연속 틀렸습니다.\n'
+                      '${Fmt.duration(left)} 후에 다시 시도해 주세요.'
               // 학번이 없는 것인지 비밀번호가 틀린 것인지 구분하지 않는다.
               // 구분하면 학번만 넣어보며 등록된 사람을 알아낼 수 있다.
               : '학번 또는 비밀번호가 올바르지 않습니다.',
@@ -468,7 +483,11 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
-                      '연속 실패로 차단되었습니다. ${lockLeft.inSeconds}초 후 다시 시도해 주세요.',
+                      _auth.lockByServer
+                          ? '서버가 이 학번의 로그인을 잠시 막았습니다. '
+                              '${Fmt.duration(lockLeft)} 후 다시 시도해 주세요.'
+                          : '연속 실패로 차단되었습니다. '
+                              '${Fmt.duration(lockLeft)} 후 다시 시도해 주세요.',
                       style: const TextStyle(color: AppTheme.expense, fontSize: 12),
                     ),
                   ),
