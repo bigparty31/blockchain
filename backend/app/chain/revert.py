@@ -9,6 +9,7 @@ RevertReason 의 값은 Solidity 에러 이름이다 (CHAIN_CLIENT §4). 원장�
 BudgetToken 에러는 spend·refund 가 내는 것만 이름으로 분류한다(_BUDGET_TOKEN_REASONS). TermRequired()·ReasonRequired()
 처럼 원장 에러와 이름이 같아도 예산 발행·증액에서만 나는 것은 원장 호출에서 날 수 없어, 이름으로 붙이면 잘못 분류한다.
 selector 가 원장 에러와 같으면(같은 시그니처) 원장 쪽을 쓴다.
+BudgetToken 을 직접 부르는 발행·증액은 budget_revert_decoder 를 쓴다. BudgetRevertReason 으로 분류하고 원장 ABI 는 보지 않는다.
 
 어느 ABI 에도 없는 selector, RevertReason 에 없는 에러(생성자 전용 등), 빈 데이터, Panic, Error(string) 은
 RevertReason.UNKNOWN 이다. revert 인 것은 확실하니 ChainRevert 로 두고 원인만 모른다고 알린다.
@@ -26,7 +27,7 @@ from eth_utils import function_signature_to_4byte_selector, to_checksum_address
 from eth_utils.abi import abi_to_signature, collapse_if_tuple, filter_abi_by_type
 from web3.exceptions import ContractLogicError, Web3RPCError
 
-from app.chain.models import KIND_ORDER, STATUS_ORDER, ChainRevert, RevertReason
+from app.chain.models import KIND_ORDER, STATUS_ORDER, BudgetRevertReason, ChainRevert, RevertReason
 
 # Solidity 가 내장으로 쓰는 두 에러. 원장 ABI 에는 없다
 _ERROR_STRING = function_signature_to_4byte_selector("Error(string)")
@@ -44,6 +45,7 @@ _ENUMS = {"enum IAccountingLedger.Status": STATUS_ORDER, "enum IAccountingLedger
 _RPC_REVERTED = 3
 
 _KNOWN = {reason.value: reason for reason in RevertReason if reason is not RevertReason.UNKNOWN}
+_KNOWN_BUDGET = {reason.value: reason for reason in BudgetRevertReason}
 # 원장이 부르는 BudgetToken.spend·refund 가 내는 에러 (IBudgetToken). 이것만 BudgetToken ABI 에서 이름으로 분류한다
 _BUDGET_TOKEN_REASONS = {
     RevertReason.INSUFFICIENT_BUDGET,
@@ -70,7 +72,7 @@ def _show(value, item: dict) -> str:
 @dataclass(frozen=True)
 class _Error:
     name: str
-    reason: Optional[RevertReason]
+    reason: Optional[Union[RevertReason, BudgetRevertReason]]
     inputs: tuple
     source: str = "원장"
 
@@ -114,11 +116,12 @@ def _to_bytes(data: Union[str, bytes, None]) -> Optional[bytes]:
 class RevertDecoder:
     """원장 ABI(와 BudgetToken ABI)로 만든 revert 해석기. 네트워크를 쓰지 않는다."""
 
-    def __init__(self, abi: list, budget_token_abi: Optional[list] = None):
+    def __init__(self, abi: list, budget_token_abi: Optional[list] = None, known: Optional[dict] = None, source: str = "원장"):
         self._errors: dict[bytes, _Error] = {}
+        self._known = _KNOWN if known is None else known
         for item in filter_abi_by_type("error", abi):
             selector = function_signature_to_4byte_selector(abi_to_signature(item))
-            self._errors[selector] = _Error(item["name"], _KNOWN.get(item["name"]), tuple(item.get("inputs", ())))
+            self._errors[selector] = _Error(item["name"], self._known.get(item["name"]), tuple(item.get("inputs", ())), source)
         for item in filter_abi_by_type("error", budget_token_abi or []):
             selector = function_signature_to_4byte_selector(abi_to_signature(item))
             if selector in self._errors:
@@ -134,7 +137,7 @@ class RevertDecoder:
     def missing_reasons(self) -> list:
         """ABI 에 없는 RevertReason. 비어 있지 않으면 컨트랙트 에러 이름·시그니처가 백엔드와 달라졌다."""
         present = {e.reason for e in self._errors.values()}
-        return [reason for reason in _KNOWN.values() if reason not in present]
+        return [reason for reason in self._known.values() if reason not in present]
 
     def decode(self, data: Union[str, bytes, None]) -> ChainRevert:
         raw = _to_bytes(data)
@@ -187,3 +190,8 @@ class RevertDecoder:
             # 데이터가 없으면 노드가 붙인 설명이 유일한 단서다 (Hardhat: "couldn't infer the reason")
             return ChainRevert(RevertReason.UNKNOWN, f"revert 데이터 없음 — {message}")
         return self.decode(data)
+
+
+def budget_revert_decoder(budget_token_abi: list) -> RevertDecoder:
+    """BudgetToken 을 직접 부를 때의 해석기. 이름이 BudgetRevertReason 에 없는 에러는 UNKNOWN 이다."""
+    return RevertDecoder(budget_token_abi, known=_KNOWN_BUDGET, source="BudgetToken")

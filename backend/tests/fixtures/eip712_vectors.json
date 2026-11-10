@@ -105,5 +105,57 @@
       "signature": "0x664b9d3a104da74b654de4f37d2b99f7fa987973dfc54c6e55e72800b7df3797533e470f5cd6e924830d3e9be0236f217f2daa232c9bb87aad07f45a8933c1781c",
       "signer": "0x90F79bf6EB2c4f870365E785982E1f101E93b906"
     }
+  ],
+  "budgetDomain": {
+    "name": "BudgetToken",
+    "version": "1",
+    "chainId": 31337,
+    "verifyingContract": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
+    "domainSeparator": "0x1f2905a02b6b82de113d21bf22f98674232314b3d02d77ab6f4bdf7e0c252699"
+  },
+  "budgetVectors": [
+    {
+      "name": "issue_budget",
+      "primaryType": "IssueRequest",
+      "message": {
+        "budgetId": 1,
+        "term": 20262,
+        "category": "0x813d3904998cb03bb83478bc9ef8d8773f1ea9f2eefdb23e69b21648ce468b32",
+        "amount": 2000000,
+        "expiresAt": 1797177600,
+        "deadline": 1790700000
+      },
+      "digest": "0xe69f6024fa903e5813cec5cd174c7755aadb49cf22cec4b1e84ed7e9ef02d97e",
+      "signature": "0x13515aa7a0df3a3134e5ecccebbdf09ecf092d08ecee1392b0b5f4c1a1976837451cb90653ef7d1215d127860892123b79c33699763e9664110e20274419de6c1c",
+      "signer": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+    },
+    {
+      "name": "increase_president",
+      "primaryType": "IncreaseRequest",
+      "message": {
+        "budgetId": 1,
+        "amount": 500000,
+        "reasonHash": "0xb9efac70e1e438ed7712086ad27f19d0a013c811e512c1d238a669b26e75c570",
+        "version": 1,
+        "deadline": 1790700000
+      },
+      "digest": "0xda299823017fbe77baf15d86b5c9f9295ac08f69342a7603ec39ac4d1334eff6",
+      "signature": "0x579cf718fa14a4b4cc4b0f8c156ff78525b29cfe92c25b8e16e92b752bcdb3346eee8b0603ae993352b641b37dcd0d9200452f3a09a3d11f81e90c83dd9f9c0c1c",
+      "signer": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+    },
+    {
+      "name": "increase_auditor",
+      "primaryType": "IncreaseRequest",
+      "message": {
+        "budgetId": 1,
+        "amount": 500000,
+        "reasonHash": "0xb9efac70e1e438ed7712086ad27f19d0a013c811e512c1d238a669b26e75c570",
+        "version": 1,
+        "deadline": 1790700000
+      },
+      "digest": "0xda299823017fbe77baf15d86b5c9f9295ac08f69342a7603ec39ac4d1334eff6",
+      "signature": "0x3ff4ba3ccb72ba19c3325456e24c4d18b89fd72530c661c7e10efda7c82619bc29cdf89742ef5695c204b89a64be9ca559b4de449364d20e04d7fe207842c20c1c",
+      "signer": "0x90F79bf6EB2c4f870365E785982E1f101E93b906"
+    }
   ]
 }
