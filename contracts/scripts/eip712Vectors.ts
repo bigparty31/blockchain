@@ -30,6 +30,7 @@ function account(index: number): HDNodeWallet {
 
 const treasurer = account(2);
 const auditor = account(3);
+const president = account(1);
 
 // test/helpers/fixture.ts LEDGER_TYPES 와 같다 (docs/CONTRACTS.md EIP-712 표)
 const TYPES = {
@@ -56,6 +57,25 @@ const TYPES = {
     { name: "id", type: "uint256" },
     { name: "entryCommit", type: "bytes32" },
     { name: "reasonHash", type: "bytes32" },
+    { name: "deadline", type: "uint256" },
+  ],
+} as const;
+
+// IBudgetToken 의 typehash 순서 (docs/CONTRACTS.md EIP-712 표). 도메인이 원장과 달라 벡터를 따로 둔다
+const BUDGET_TYPES = {
+  IssueRequest: [
+    { name: "budgetId", type: "uint256" },
+    { name: "term", type: "uint256" },
+    { name: "category", type: "bytes32" },
+    { name: "amount", type: "uint256" },
+    { name: "expiresAt", type: "uint256" },
+    { name: "deadline", type: "uint256" },
+  ],
+  IncreaseRequest: [
+    { name: "budgetId", type: "uint256" },
+    { name: "amount", type: "uint256" },
+    { name: "reasonHash", type: "bytes32" },
+    { name: "version", type: "uint256" },
     { name: "deadline", type: "uint256" },
   ],
 } as const;
@@ -194,12 +214,50 @@ for (const c of cases) {
   });
 }
 
+const b = deployment.eip712.BudgetToken;
+const budgetDomain = { name: b.name, version: b.version, chainId: BigInt(b.chainId), verifyingContract: b.verifyingContract };
+
+if (TypedDataEncoder.hashDomain(budgetDomain) !== b.domainSeparator.toLowerCase()) {
+  throw new Error("배포 기록의 BudgetToken domainSeparator 가 도메인 네 필드로 계산한 값과 다르다");
+}
+
+const CATEGORY = keccak256(toUtf8Bytes("행사비")); // docs/CONTRACTS.md category 표
+const EXPIRES_AT = 1797177600n;
+const increase = { budgetId: 1n, amount: 500000n, reasonHash: sha256(toUtf8Bytes("vector:increase-reason")), version: 1n, deadline: DEADLINE };
+
+const budgetCases: { name: string; primaryType: keyof typeof BUDGET_TYPES; signer: HDNodeWallet; message: Record<string, unknown> }[] = [
+  {
+    name: "issue_budget",
+    primaryType: "IssueRequest",
+    signer: president,
+    message: { budgetId: 1n, term: TERM, category: CATEGORY, amount: 2000000n, expiresAt: EXPIRES_AT, deadline: DEADLINE },
+  },
+  // 증액은 회장과 감사가 같은 값에 서명한다 — digest 가 같고 서명만 다르다
+  { name: "increase_president", primaryType: "IncreaseRequest", signer: president, message: increase },
+  { name: "increase_auditor", primaryType: "IncreaseRequest", signer: auditor, message: increase },
+];
+
+const budgetVectors = [];
+for (const c of budgetCases) {
+  const types = { [c.primaryType]: [...BUDGET_TYPES[c.primaryType]] };
+  budgetVectors.push({
+    name: c.name,
+    primaryType: c.primaryType,
+    message: plain(c.message),
+    digest: TypedDataEncoder.hash(budgetDomain, types, c.message),
+    signature: await c.signer.signTypedData(budgetDomain, types, c.message),
+    signer: c.signer.address,
+  });
+}
+
 const out = {
   generatedBy: `contracts/scripts/eip712Vectors.ts (ethers ${version})`,
   domain: { ...domain, chainId: Number(domain.chainId), domainSeparator: d.domainSeparator.toLowerCase() },
   vectors,
+  budgetDomain: { ...budgetDomain, chainId: Number(budgetDomain.chainId), domainSeparator: b.domainSeparator.toLowerCase() },
+  budgetVectors,
 };
 
 await mkdir(path.dirname(OUT), { recursive: true });
 await writeFile(OUT, JSON.stringify(out, null, 2) + "\n");
-console.log(`${vectors.length}개 벡터 → ${path.relative(path.resolve(ROOT, ".."), OUT)}`);
+console.log(`${vectors.length}+${budgetVectors.length}개 벡터 → ${path.relative(path.resolve(ROOT, ".."), OUT)}`);
