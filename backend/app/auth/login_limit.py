@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from sqlalchemy import case, or_, update
+from sqlalchemy.exc import NoResultFound
 from sqlalchemy.orm import Session
 
 from app.models import LoginAttempt
@@ -23,6 +24,8 @@ MAX_FAILURES = 5
 LOCK_SECONDS = 15 * 60
 # 마지막 시도에서 이만큼 지나면 횟수를 처음부터 센다. 몇 주에 걸친 오타 4번이 쌓여 잠기지 않게 한다
 RESET_SECONDS = 15 * 60
+# 행을 만든 직후 같은 학번의 성공이 지우면 다시 만든다. 그래도 매번 지워지면 DB 오류로 끝낸다
+_RESERVE_ATTEMPTS = 3
 
 
 def now() -> int:
@@ -61,23 +64,31 @@ def reserve(db: Session, student_no: str) -> Attempt:
     커밋까지 한다 — bcrypt 를 도는 동안 행을 잡고 있지 않는다.
     """
     at = now()
-    _insert_ignore(db, student_no, at)
-
     t = LoginAttempt
     locked = t.locked_until > at
     # 잠금이 끝났거나 마지막 시도가 오래됐으면 처음부터. locked_until 이 NULL 이면 비교가 NULL 이라 조건이 거짓이 된다
     stale = or_(t.locked_until <= at, t.last_attempt_at <= at - RESET_SECONDS)
-    # SET 의 오른쪽은 모두 갱신 전 값을 읽는다 (Postgres·SQLite 공통)
-    row = db.execute(
-        update(t)
-        .where(t.student_no == student_no)
-        .values(
-            failed_count=case((locked, t.failed_count), (stale, 1), else_=t.failed_count + 1),
-            last_attempt_at=case((locked, t.last_attempt_at), else_=at),
-            locked_until=case((locked, t.locked_until), (stale, None), else_=t.locked_until),
-        )
-        .returning(t.failed_count, t.locked_until)
-    ).one()
+
+    # 행을 만든 뒤 갱신하기 전에 같은 학번의 성공(clear)이 행을 지울 수 있다. 그러면 갱신할 행이 없으니 다시 만든다 (#89 codex 2차)
+    row = None
+    for _ in range(_RESERVE_ATTEMPTS):
+        _insert_ignore(db, student_no, at)
+        # SET 의 오른쪽은 모두 갱신 전 값을 읽는다 (Postgres·SQLite 공통)
+        row = db.execute(
+            update(t)
+            .where(t.student_no == student_no)
+            .values(
+                failed_count=case((locked, t.failed_count), (stale, 1), else_=t.failed_count + 1),
+                last_attempt_at=case((locked, t.last_attempt_at), else_=at),
+                locked_until=case((locked, t.locked_until), (stale, None), else_=t.locked_until),
+            )
+            .returning(t.failed_count, t.locked_until)
+        ).first()
+        if row is not None:
+            break
+    if row is None:
+        # 매번 지워졌다. 비밀번호를 검사하지 않고 끝낸다 — 부른 쪽이 DB 오류(503)로 다룬다
+        raise NoResultFound(f"로그인 시도 기록을 {_RESERVE_ATTEMPTS}번 만들었지만 매번 사라졌다 (student_no={student_no})")
     count, locked_until = row
 
     if locked_until is not None and locked_until > at:

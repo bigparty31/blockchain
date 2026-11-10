@@ -220,3 +220,32 @@ def test_fifth_failure_still_locks_when_the_row_holds_it(clock, login_db):
         assert fifth.count == login_limit.MAX_FAILURES
         login_limit.record_failure(db, fifth)
     assert row(login_db, EXISTING).locked_until == T0 + login_limit.LOCK_SECONDS
+
+
+def _vanish_after_insert(monkeypatch, times):
+    """_insert_ignore 직후 처음 times 번은 행을 지운다 — 그 사이 같은 학번의 성공(clear)이 커밋된 것과 같다."""
+    real = login_limit._insert_ignore
+    left = [times]
+
+    def insert_then_vanish(db, student_no, at):
+        real(db, student_no, at)
+        if left[0] > 0:
+            left[0] -= 1
+            db.query(LoginAttempt).filter(LoginAttempt.student_no == student_no).delete(synchronize_session=False)
+
+    monkeypatch.setattr(login_limit, "_insert_ignore", insert_then_vanish)
+    return left
+
+
+def test_row_cleared_between_insert_and_update_is_recreated(clock, login_db, monkeypatch):
+    # 행을 만든 뒤 갱신하기 전에 성공한 로그인이 행을 지워도, 비밀번호를 검사하기 전에 503 이 나지 않는다 (#89 codex 2차)
+    fail(EXISTING, 2)
+    left = _vanish_after_insert(monkeypatch, 1)
+    assert login(EXISTING).status_code == 200
+    assert left == [0]
+
+
+def test_row_cleared_every_time_is_a_db_error_not_a_password_check(clock, login_db, monkeypatch):
+    # 매번 사라지면 횟수를 셀 수 없다. 비밀번호를 검사하지 않고 DB 오류(503)로 끝낸다
+    _vanish_after_insert(monkeypatch, login_limit._RESERVE_ATTEMPTS)
+    assert login(EXISTING).status_code == 503
