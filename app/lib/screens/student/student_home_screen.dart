@@ -32,6 +32,11 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
   SnapshotModel? _snapshot;
   int _unseen = 0;
 
+  /// 미확인 뱃지가 세고 있는 **기준 id**. 뱃지를 눌러 목록을 열 때 같이 넘긴다.
+  /// 목록이 열리면서 저장된 기준이 최신 id 로 덮어써지므로, 넘길 값은
+  /// 덮어쓰기 전인 여기서 들고 있어야 한다 ([EntryListScreen.unseenAfterEntryId]).
+  int _lastSeen = 0;
+
   /// 통장 스냅샷만 못 읽었는지.
   ///
   /// **카드를 그냥 숨기면 안 된다.** 실서버에서는 `fetchLatestSnapshot` 이
@@ -79,6 +84,7 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
         _snapshot = snapshot;
         // 실서버에서 못 읽으면 null 이다 (데모 모드에서는 예시 스냅샷이 온다).
         _snapshotUnavailable = snapshot == null;
+        _lastSeen = lastSeen;
         _unseen = EntryMerge.unseenCount(entries, lastSeen);
         _loadFailed = false;
       });
@@ -92,6 +98,7 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
           _snapshot = null;
           // 화면 전체가 「불러올 수 없습니다」로 바뀌므로 스냅샷만 따로 말하지 않는다.
           _snapshotUnavailable = false;
+          _lastSeen = 0;
           _unseen = 0;
           _loadFailed = true;
         });
@@ -110,10 +117,21 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
   int get _totalIncome => EntryMerge.totalIncome(_entries);
   int get _totalExpense => EntryMerge.totalExpense(_entries);
 
+  /// 내역 목록을 연다. **미확인 뱃지가 떠 있으면 그 건들만 추려서 연다**
+  /// (스토리보드 2 ⑤).
+  ///
+  /// 전체를 열면 안 되는 이유 — 목록을 여는 순간 뱃지가 지워진다. 학생이
+  /// 「뭐가 새로 올라왔지」 하고 눌렀는데 전체 목록이 뜨면 어느 것이 새 건지
+  /// 모르는 채로 **다시 찾을 방법이 사라진다.** 지출 확정을 학생에게 알리는
+  /// 것이 S12 의 목적인데 그 경로가 거기서 끊긴다.
   Future<void> _openEntries() async {
     await Navigator.push(
       context,
-      MaterialPageRoute(builder: (_) => const EntryListScreen()),
+      MaterialPageRoute(
+        builder: (_) => EntryListScreen(
+          unseenAfterEntryId: _unseen > 0 ? _lastSeen : null,
+        ),
+      ),
     );
     if (mounted) _load(); // 목록에서 읽음 처리했을 수 있으니 뱃지 갱신
   }

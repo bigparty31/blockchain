@@ -509,6 +509,55 @@ void main() {
       expect(AuthService().sessionNotPersisted, isTrue);
     });
 
+    // 3차 리뷰 Medium — 테스트 저장소가 읽기 실패를 **던져서** 통과했던 경로.
+    // 실기기(`SecureTokenStore.read`)는 실패를 null 로 돌려주므로, `_persist` 가
+    // `read` 를 쓰면 읽기 실패가 「남은 것이 없다」로 판정돼 A 의 토큰을 지우지
+    // 않고 B 의 로그인이 확정된다. 그래서 두 가지를 같이 못 박는다.
+    test('읽기 실패를 null 로 돌려주는 기기에서도 남은 토큰을 지운다', () async {
+      final store = withPreviousUser()
+        ..failOnWrite = true
+        ..failOnRead = true;
+
+      // 실기기와 같은 모양이어야 이 테스트가 뜻을 가진다.
+      expect(
+        await store.read(),
+        isNull,
+        reason: 'SecureTokenStore.read 는 실패를 삼킨다 — 테스트 저장소도 같아야 회귀가 잡힌다',
+      );
+      await expectLater(() => store.readStrict(), throwsA(isA<TokenReadFailed>()));
+
+      await loginStudent();
+
+      expect(
+        store.value,
+        isNull,
+        reason: '읽기 실패를 「남은 것 없음」으로 읽으면 A 의 토큰이 남은 채 B 로 로그인된다',
+      );
+      expect(AuthService().session?.token, 'token-abc');
+      expect(AuthService().sessionNotPersisted, isTrue);
+    });
+
+    test('정말로 비어 있을 때와 못 읽을 때를 가른다', () async {
+      // 비어 있다 → 지울 것이 없고, 남의 세션이 열릴 일도 없다.
+      final empty = MemoryTokenStore()..failOnWrite = true;
+      AuthService.store = empty;
+      await loginStudent();
+      expect(AuthService().session?.token, 'token-abc');
+
+      // 다음 경우를 깨끗한 상태에서 보려면 세션을 비워 둬야 한다.
+      await AuthService().logout();
+      expect(AuthService().session, isNull);
+
+      // 못 읽는다 + 지우지도 못한다 → 남의 토큰이 남을 수 있으므로 세션을 만들지 않는다.
+      final unknown = withPreviousUser()
+        ..failOnWrite = true
+        ..failOnRead = true
+        ..failOnClear = true;
+      await expectLater(() => loginStudent(), throwsA(isA<SessionStoreUnsafe>()));
+      expect(AuthService().session, isNull);
+      expect(unknown.value?.token, 'token-of-A');
+    });
+
     test('저장이 되면 깃발이 내려간다', () async {
       final store = withPreviousUser();
 
@@ -642,24 +691,32 @@ class _SlowLockStore implements LoginLockStore {
   final Duration delay;
   int attempts;
   DateTime? lockedUntil;
+  bool byServer;
 
-  _SlowLockStore(this.delay, {required this.attempts, this.lockedUntil});
+  _SlowLockStore(this.delay, {required this.attempts, this.lockedUntil})
+      : byServer = false;
 
   @override
-  Future<({int attempts, DateTime? lockedUntil})?> read() async {
+  Future<({int attempts, DateTime? lockedUntil, bool byServer})?> read() async {
     await Future<void>.delayed(delay);
-    return (attempts: attempts, lockedUntil: lockedUntil);
+    return (attempts: attempts, lockedUntil: lockedUntil, byServer: byServer);
   }
 
   @override
-  Future<void> write({required int attempts, DateTime? lockedUntil}) async {
+  Future<void> write({
+    required int attempts,
+    DateTime? lockedUntil,
+    bool byServer = false,
+  }) async {
     this.attempts = attempts;
     this.lockedUntil = lockedUntil;
+    this.byServer = byServer;
   }
 
   @override
   Future<void> clear() async {
     attempts = 0;
     lockedUntil = null;
+    byServer = false;
   }
 }
