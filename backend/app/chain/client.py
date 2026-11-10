@@ -1,8 +1,8 @@
 """백엔드가 블록체인을 부르는 입구.
 
 모양만 정한다. 실제 구현(릴레이어)을 붙이기 전까지는 fake.py 를 쓴다.
-범위는 AccountingLedger 의 등록·확정·반려와 조회뿐이다. 예산(BudgetToken)·롤(RoleManager)도 서명 + 릴레이어 방식이라
-나중에 같은 방식으로 더한다. 이의·SBT 는 아직 컨트랙트가 없다.
+범위는 AccountingLedger 의 등록·확정·반려와 조회, BudgetToken 의 발행·증액과 조회다. 예산 회수·롤(RoleManager)도 서명 + 릴레이어
+방식이라 나중에 같은 방식으로 더한다.
 
 서명은 여기서 만들지 않는다. 임원 기기가 서명한 값을 받아 릴레이만 한다 (PRD §9.2).
 모든 쓰기 메서드는 트랜잭션이 블록에 들어갈 때까지 기다린 뒤 최종 상태를 돌려준다.
@@ -10,7 +10,18 @@
 """
 from typing import Awaitable, Callable, Optional, Protocol, Union
 
-from app.chain.models import ChainEntry, ConfirmApproval, RecordRequest, RejectDecision, TxResult
+from app.chain.models import (
+    BudgetTxResult,
+    ChainBudget,
+    ChainEntry,
+    EntryTxDetail,
+    ConfirmApproval,
+    IncreaseRequest,
+    IssueRequest,
+    RecordRequest,
+    RejectDecision,
+    TxResult,
+)
 
 # 트랜잭션에 서명해 hash 가 정해진 뒤, 체인에 보내기 직전에 그 hash 로 불린다 (쓰기 메서드의 before_broadcast).
 # 서비스는 여기서 DB 의 tx_pending(확정·반려는 tx_confirm)을 조건부 UPDATE 로 선점한다 — 처리 중 상태를 보내기 전에 남겨,
@@ -24,8 +35,12 @@ BeforeBroadcast = Callable[[str], Awaitable[None]]
 
 
 class ChainClient(Protocol):
-    def signer_of(self, payload: Union[RecordRequest, ConfirmApproval, RejectDecision], signature: str) -> str:
+    def signer_of(
+        self, payload: Union[RecordRequest, ConfirmApproval, RejectDecision, IssueRequest, IncreaseRequest], signature: str
+    ) -> str:
         """payload 에 대한 signature 의 서명자 주소 (EIP-55 체크섬). 체인에 보내지 않는다.
+
+        도메인은 payload 로 정해진다 — 발행·증액은 BudgetToken, 나머지는 AccountingLedger.
 
         서비스는 릴레이 전에 이 주소를 기대 지갑(등록은 created_by 의 지갑, 확정·반려는 요청한 감사·회장의 지갑)과
         소문자로 맞춰 비교하고, 다르면 체인에 보내지 않고 400 으로 끝낸다. 컨트랙트는 다른 값에 대한 서명을
@@ -110,10 +125,78 @@ class ChainClient(Protocol):
         """
         ...
 
+    async def entry_tx_detail(self, tx_hash: str, entry_id: int) -> Optional[EntryTxDetail]:
+        """그 트랜잭션이 항목에 남긴 기록을 receipt 로 읽는다. 블록 번호와 사유 해시가 있다. None 은 아직 블록에 없다는 뜻이다.
+
+        이벤트를 블록 범위로 훑지 않는다. RPC 의 조회 범위 제한에 걸리지 않게, DB 에 저장한 hash(tx_pending·tx_confirm)로 읽는다.
+
+        Raises:
+            tx_result 와 같다.
+        """
+        ...
+
     async def get_entry(self, entry_id: int) -> Optional[ChainEntry]:
         """AccountingLedger.getEntry. 온체인에 없으면 None.
 
         getEntry 는 없는 id 에도 0 으로 채운 구조체를 돌려주고, status 0 은 PENDING 이다.
         그대로 옮기면 없는 항목이 PENDING 으로 보이므로 실제 구현은 exists(id) 를 먼저 확인한다.
         """
+        ...
+
+    async def issue_budget(
+        self, request: IssueRequest, signature: str, before_broadcast: Optional[BeforeBroadcast] = None
+    ) -> BudgetTxResult:
+        """BudgetToken.issue 를 릴레이한다. signature 는 회장 서명. before_broadcast 는 record_pending 과 같다.
+
+        Raises:
+            ValueError: record_pending 과 같다.
+            ChainRevert: 사유는 BudgetRevertReason. BUDGET_ALREADY_EXISTS(같은 id)·BUDGET_ALREADY_ISSUED(같은 학기·항목)·
+                         BUDGET_EXPIRED·SIGNATURE_EXPIRED 등. 앱이 다른 값에 서명하면 NOT_PRESIDENT 로 온다.
+            ChainUnavailable: 들어갔는지 모른다. 콜백이 불렸으면 그 hash 로 budget_tx_result 를, 아니면 get_budget 을 본다.
+            ChainSetupError: record_pending 과 같다.
+        """
+        ...
+
+    async def increase_budget(
+        self,
+        request: IncreaseRequest,
+        requester_signature: str,
+        approver_signature: str,
+        before_broadcast: Optional[BeforeBroadcast] = None,
+    ) -> BudgetTxResult:
+        """BudgetToken.increase 를 릴레이한다. 회장(요청)과 감사(승인)가 같은 값에 서명한다.
+
+        Raises:
+            ValueError: 어느 서명이든 형식이 틀렸다.
+            ChainRevert: 사유는 BudgetRevertReason. VERSION_MISMATCH(다른 증액이 먼저 들어감·서명 재사용)·SIGNATURE_EXPIRED·
+                         BUDGET_EXPIRED·AMOUNT_OUT_OF_RANGE 등. 앱이 다른 값에 서명하면 NOT_PRESIDENT·NOT_AUDITOR 로 온다.
+            ChainUnavailable: 콜백이 불렸으면 그 hash 로 budget_tx_result 를 본다. version 만 보고 판단하지 않는다 —
+                              올라갔어도 다른 증액 때문일 수 있다. 확인 없이 재서명하면 이중 증액이 된다
+                              (컨트랙트는 시한을 version 보다 먼저 봐서, 시한이 지난 재시도는 SIGNATURE_EXPIRED 다).
+        """
+        ...
+
+    async def budget_tx_result(self, tx_hash: str, budget_id: int) -> Optional[BudgetTxResult]:
+        """발행·증액 트랜잭션의 결과를 receipt 로 다시 읽는다. tx_result 의 예산판이다. None 은 아직 블록에 없다는 뜻이다."""
+        ...
+
+    async def get_budget(self, budget_id: int) -> Optional[ChainBudget]:
+        """BudgetToken.getBudget. 최신 블록 기준이고 온체인에 없으면 None. 대기열의 트랜잭션은 보이지 않는다."""
+        ...
+
+    async def budget_id_of(self, term: int, category: str) -> int:
+        """BudgetToken.budgetIdOf. 그 학기·항목의 예산 id. 최신 블록 기준이고 없으면 0."""
+        ...
+
+    async def has_valid_membership(self, account: str, term: int) -> bool:
+        """MembershipSBT.hasValidMembership. 그 학기(term = 학기 코드 YYYYS)의 소각되지 않은 회원권이 있으면 True.
+
+        Raises:
+            ChainUnavailable: 노드에 닿지 못했다. 미보유가 아니라 '모름'이다.
+            ChainSetupError: 배포 기록에 MembershipSBT 가 없다 (아직 배포 전).
+        """
+        ...
+
+    async def membership_token_of(self, account: str, term: int) -> int:
+        """MembershipSBT.tokenOf. 그 학기의 유효한 tokenId. 없거나 소각됐으면 0. 예외는 has_valid_membership 과 같다."""
         ...

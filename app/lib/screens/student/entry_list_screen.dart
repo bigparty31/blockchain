@@ -16,13 +16,21 @@ import 'widgets/student_badges.dart';
 /// 배지를 갱신한다. 다 끝나기 전에 초록을 보여주면 확인하지 못한 것을
 /// 확인했다고 말하는 셈이 된다.
 class EntryListScreen extends StatefulWidget {
-  const EntryListScreen({super.key});
+  /// 미확인 뱃지(S12)를 눌러 들어왔을 때, **그 뱃지가 세고 있던 기준 id**.
+  /// 이 id 보다 큰 항목이 「새로 올라온 것」이다. 뱃지 없이 들어왔으면 null.
+  ///
+  /// 호출자가 넘겨야 하는 이유 — 목록을 여는 순간 [StudentApiService.markEntriesSeen]
+  /// 이 기준을 최신 id 로 덮어쓴다. 여기서 직접 읽으면 **이미 덮어쓴 뒤라 항상
+  /// 0건**이 된다. 그래서 덮어쓰기 전의 값을 대시보드에서 들고 온다.
+  final int? unseenAfterEntryId;
+
+  const EntryListScreen({super.key, this.unseenAfterEntryId});
 
   @override
   State<EntryListScreen> createState() => _EntryListScreenState();
 }
 
-enum _Filter { all, income, expense, flagged }
+enum _Filter { all, income, expense, flagged, unseen }
 
 class _EntryListScreenState extends State<EntryListScreen> {
   final _api = StudentApiService();
@@ -30,7 +38,18 @@ class _EntryListScreenState extends State<EntryListScreen> {
   bool _loading = true;
   List<EntryChain> _chains = [];
   final Map<int, VerificationReport> _reports = {};
-  _Filter _filter = _Filter.all;
+  late _Filter _filter =
+      widget.unseenAfterEntryId == null ? _Filter.all : _Filter.unseen;
+
+  /// 「미확인」 칩을 띄울지. **뱃지를 눌러 들어왔을 때만 띄운다.**
+  /// 상시 노출하면 목록을 한 번 연 뒤로는 영원히 0건인 탭이 남는다 —
+  /// 미확인은 「목록을 열면 사라지는」 상태라서 탭으로 둘 성질이 아니다.
+  bool get _showUnseenChip => widget.unseenAfterEntryId != null;
+
+  List<_Filter> get _filters => [
+        for (final f in _Filter.values)
+          if (f != _Filter.unseen || _showUnseenChip) f,
+      ];
 
   /// 필터를 바꿀 때 목록 맨 위로 되돌리기 위한 것 (스토리보드 3 ①).
   final _scroll = ScrollController();
@@ -159,6 +178,16 @@ class _EntryListScreenState extends State<EntryListScreen> {
         return _chains.where((c) => c.original.kind == EntryKind.INCOME).toList();
       case _Filter.expense:
         return _chains.where((c) => c.original.kind == EntryKind.EXPENSE).toList();
+      case _Filter.unseen:
+        // 마지막으로 목록을 연 뒤에 새로 생긴 것.
+        //
+        // **체인 안의 어느 항목이든 새것이면 보인다.** 원본만 보면, 오래된
+        // 지출에 정정이 새로 붙은 건이 「새 소식 없음」으로 빠진다 — 금액이
+        // 바뀐 것이야말로 학생이 봐야 할 변화다.
+        final after = widget.unseenAfterEntryId ?? 0;
+        return _chains
+            .where((c) => c.allEntries.any((e) => e.id > after))
+            .toList();
       case _Filter.flagged:
         // 학생이 눈여겨봐야 할 건 — 검증 실패 또는 경고 승인.
         // 정정 항목이 어긋난 체인도 여기 걸려야 한다. 원본만 보면
@@ -230,40 +259,53 @@ class _EntryListScreenState extends State<EntryListScreen> {
       _Filter.income: '수입',
       _Filter.expense: '지출',
       _Filter.flagged: '확인 필요',
+      _Filter.unseen: '새 항목',
     };
 
+    // **가로로 스크롤되게 둔다.** 맨 `Row` 로 두면 칩이 화면을 넘는데, 넘친
+    // 쪽은 릴리스 빌드에서 그냥 잘린다 — 뱃지로 들어왔을 때 선택돼 있는
+    // 「새 항목」 칩이 바로 그 끝자리라, 잘리면 「전체」를 한 번 누른 뒤 새 항목만
+    // 보는 화면으로 돌아갈 방법이 없어진다(뱃지는 목록을 연 순간 지워진다).
+    //
+    // 실제로 360dp 기기에서 칩 5개가 넘친다(에뮬레이터 720x1600·density 320 에서
+    // 확인). 글자 크기를 키우면 칩 4개만으로도 넘치므로, 폭·글자 크기와 무관하게
+    // 닫으려면 개수를 줄이는 것이 아니라 스크롤이 맞다.
     return Container(
       color: Colors.white,
-      padding: const EdgeInsets.fromLTRB(20, 12, 20, 12),
-      child: Row(
-        children: _Filter.values.map((f) {
-          final selected = _filter == f;
-          return Padding(
-            padding: const EdgeInsets.only(right: 8),
-            child: GestureDetector(
-              onTap: () => _selectFilter(f),
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 180),
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                decoration: BoxDecoration(
-                  color: selected ? AppTheme.primary : AppTheme.bgPage,
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(
-                    color: selected ? AppTheme.primary : AppTheme.divider,
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        child: Row(
+          children: _filters.map((f) {
+            final selected = _filter == f;
+            return Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: GestureDetector(
+                onTap: () => _selectFilter(f),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 180),
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: selected ? AppTheme.primary : AppTheme.bgPage,
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(
+                      color: selected ? AppTheme.primary : AppTheme.divider,
+                    ),
                   ),
-                ),
-                child: Text(
-                  labels[f]!,
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: selected ? FontWeight.bold : FontWeight.w500,
-                    color: selected ? Colors.white : AppTheme.textSub,
+                  child: Text(
+                    labels[f]!,
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: selected ? FontWeight.bold : FontWeight.w500,
+                      color: selected ? Colors.white : AppTheme.textSub,
+                    ),
                   ),
                 ),
               ),
-            ),
-          );
-        }).toList(),
+            );
+          }).toList(),
+        ),
       ),
     );
   }
@@ -274,12 +316,25 @@ class _EntryListScreenState extends State<EntryListScreen> {
         const SizedBox(height: 120),
         Icon(Icons.inbox_rounded, size: 56, color: AppTheme.textSub.withOpacity(0.4)),
         const SizedBox(height: 12),
-        const Center(
+        Center(
           child: Text(
-            '해당하는 내역이 없습니다',
-            style: TextStyle(color: AppTheme.textSub, fontSize: 14),
+            _filter == _Filter.unseen
+                ? '새로 올라온 항목이 없습니다'
+                : '해당하는 내역이 없습니다',
+            style: const TextStyle(color: AppTheme.textSub, fontSize: 14),
           ),
         ),
+        // 미확인으로 들어왔는데 비어 있으면 빠져나갈 길을 준다. 칩이 위에
+        // 있긴 하지만, 빈 화면을 보고 「내역이 없는 앱」으로 읽고 닫는 쪽이 많다.
+        if (_filter == _Filter.unseen) ...[
+          const SizedBox(height: 14),
+          Center(
+            child: TextButton(
+              onPressed: () => _selectFilter(_Filter.all),
+              child: const Text('전체 내역 보기'),
+            ),
+          ),
+        ],
       ],
     );
   }
@@ -354,30 +409,41 @@ class _EntryChainCard extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(width: 12),
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    children: [
-                      // 정정된 건은 원본 금액에 취소선을 긋고 최종값을 강조한다.
-                      // 원본은 이력에 그대로 남고, 합계에는 최종값만 반영된다.
-                      if (chain.hasCorrection)
-                        Text(
-                          Fmt.won(head.amount),
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: AppTheme.textSub.withOpacity(0.8),
-                            decoration: TextDecoration.lineThrough,
+                  // **금액은 줄이되 자르지 않는다.** 좁은 기기·큰 글자에서는
+                  // 금액 열이 남은 폭을 넘는다(320dp·150% 에서 1px). 말줄임으로
+                  // 두면 「₩5,000,0…」 처럼 **자릿수가 사라진 금액**이 보이는데,
+                  // 장부 화면에서 그것은 틀린 숫자를 보여주는 것과 같다.
+                  // [FittedBox] 는 글자를 작게 만들 뿐 자릿수를 지우지 않는다.
+                  Flexible(
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      alignment: Alignment.centerRight,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.end,
+                        children: [
+                          // 정정된 건은 원본 금액에 취소선을 긋고 최종값을 강조한다.
+                          // 원본은 이력에 그대로 남고, 합계에는 최종값만 반영된다.
+                          if (chain.hasCorrection)
+                            Text(
+                              Fmt.won(head.amount),
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: AppTheme.textSub.withOpacity(0.8),
+                                decoration: TextDecoration.lineThrough,
+                              ),
+                            ),
+                          Text(
+                            '${isIncome ? '+' : '-'}${Fmt.won(chain.finalAmount)}',
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                              color: amountColor,
+                              letterSpacing: -0.3,
+                            ),
                           ),
-                        ),
-                      Text(
-                        '${isIncome ? '+' : '-'}${Fmt.won(chain.finalAmount)}',
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                          color: amountColor,
-                          letterSpacing: -0.3,
-                        ),
+                        ],
                       ),
-                    ],
+                    ),
                   ),
                 ],
               ),
