@@ -4,6 +4,7 @@ import 'package:student_council_app/core/enums.dart';
 import 'package:student_council_app/screens/council/approval_list_screen.dart';
 import 'package:student_council_app/screens/council/budget_revision_screen.dart';
 import 'package:student_council_app/screens/council/correction_approval_screen.dart';
+import 'package:student_council_app/screens/council/correction_screen.dart';
 import 'package:student_council_app/screens/council/expense_create_screen.dart';
 import 'package:student_council_app/screens/council/my_entries_screen.dart';
 import 'package:student_council_app/models/entry_model.dart';
@@ -282,6 +283,26 @@ void main() {
       expect(find.text('반려된 #4 을 고쳐 새로 등록해요'), findsOneWidget);
       expect(find.widgetWithText(TextFormField, '목적4'), findsOneWidget);
       expect(find.widgetWithText(TextFormField, '50000'), findsOneWidget);
+    });
+
+    testWidgets('반려·차단된 정정 건은 일반 등록이 아니라 정정 화면으로 다시 간다 — 정정 대상을 잃고 새 지출로 올라가지 않게 (#72 리뷰)', (tester) async {
+      final entries = [
+        entry(1, EntryStatus.CONFIRMED),
+        entry(9, EntryStatus.REJECTED, correctsEntryId: 1, amount: 4000, rejectReason: '금액이 달라요'),
+        entry(10, EntryStatus.BLOCKED, correctsEntryId: 1, amount: 3000000),
+      ];
+      await open(tester, entries: entries);
+      for (final filter in ['반려 1', '차단 1']) {
+        await tester.tap(find.text(filter));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text(filter == '반려 1' ? '고쳐서 다시 제출' : '증액 승인 뒤 다시 등록'));
+        await tester.pumpAndSettle();
+        expect(find.byType(CorrectionScreen), findsOneWidget, reason: filter);
+        expect(find.byType(ExpenseCreateScreen), findsNothing, reason: filter);
+        expect(find.byKey(const Key('resubmit_banner')), findsNothing, reason: filter);
+        await tester.pageBack();
+        await tester.pumpAndSettle();
+      }
     });
 
     testWidgets('차단 건은 근거 번호와 함께 예산 개정 요청을 열고, 다시 등록도 할 수 있다', (tester) async {
