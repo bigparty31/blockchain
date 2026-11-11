@@ -4,6 +4,7 @@ from app.chain.deployment import load_deployment
 from app.schemas.chain import DomainsResponse
 
 router = APIRouter(prefix="/chain", tags=["Chain"])
+query_router = router
 
 
 @router.get("/domains", response_model=DomainsResponse, summary="EIP-712 서명 도메인 (컨트랙트별)")

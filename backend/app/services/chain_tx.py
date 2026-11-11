@@ -44,7 +44,7 @@ import logging
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional, TypeVar
 
-from sqlalchemy import update
+from sqlalchemy import and_, or_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
@@ -328,6 +328,57 @@ class _Store:
 
     async def claim(self, step: _Step, entry_id: int, tx_hash: str, extra: dict) -> None:
         def work(db: Session) -> None:
+            if step is _CONFIRM:
+                target_entry = db.get(Entry, entry_id)
+                if (
+                    target_entry is not None
+                    and target_entry.corrects_entry_id is not None
+                    and target_entry.amount < 0
+                    and target_entry.correction_reason == "RECLASSIFY"
+                ):
+                    parent = (
+                        db.query(Entry)
+                        .filter(Entry.id == target_entry.corrects_entry_id)
+                        .with_for_update()
+                        .first()
+                    )
+                    if parent is not None:
+                        pos_rows = (
+                            db.query(Entry)
+                            .filter(
+                                Entry.corrects_entry_id == parent.id,
+                                Entry.status == CONFIRMED,
+                                Entry.amount > 0,
+                                Entry.budget_id.isnot(None),
+                                Entry.budget_id != parent.budget_id,
+                            )
+                            .all()
+                        )
+                        neg_rows = (
+                            db.query(Entry)
+                            .filter(
+                                Entry.corrects_entry_id == parent.id,
+                                Entry.id != entry_id,
+                                Entry.amount < 0,
+                                Entry.correction_reason == "RECLASSIFY",
+                                or_(
+                                    Entry.status == CONFIRMED,
+                                    and_(
+                                        Entry.status == PENDING,
+                                        Entry.tx_confirm.isnot(None),
+                                        Entry.rejected_by.is_(None),
+                                    ),
+                                ),
+                            )
+                            .all()
+                        )
+                        confirmed_pos_sum = sum(int(r.amount) for r in pos_rows)
+                        reserved_neg_abs_sum = sum(abs(int(r.amount)) for r in neg_rows)
+                        if confirmed_pos_sum - reserved_neg_abs_sum < abs(int(target_entry.amount)):
+                            raise ValueError(
+                                "항목 재분류(RECLASSIFY)는 새 예산에 대한 양수(증액) 정정이 먼저 확정(CONFIRMED)된 후에 원래 예산의 음수(감액) 정정을 진행할 수 있습니다."
+                            )
+
             try:
                 rows = db.execute(
                     update(Entry)

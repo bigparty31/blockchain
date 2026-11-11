@@ -4,6 +4,7 @@ import '../../core/enums.dart';
 import '../../core/format.dart';
 import '../../core/hashing.dart';
 import '../../models/entry_model.dart';
+import '../../services/auth_service.dart';
 import '../../services/student_api_service.dart';
 
 /// 이의 제기 (S8)
@@ -108,6 +109,13 @@ class _ObjectionScreenState extends State<ObjectionScreen> {
           behavior: SnackBarBehavior.floating,
         ),
       );
+      return;
+    } on SessionExpired {
+      // 세션이 끊겼다. `main.dart` 가 로그인 화면으로 보내므로 여기서는
+      // **접수됐다고 말하지 않는 것**과 버튼을 되살리는 것만 한다. 잡지 않으면
+      // `_submitting` 이 true 로 남아 버튼이 영영 잠긴다.
+      if (!mounted) return;
+      setState(() => _submitting = false);
       return;
     }
     if (!mounted) return;

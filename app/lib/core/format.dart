@@ -56,4 +56,18 @@ class Fmt {
 
   /// `0.023` → `2.3%`
   static String percent(double rate) => '${(rate * 100).toStringAsFixed(1)}%';
+
+  /// 남은 시간. `45초` · `1분 30초` · `15분`
+  ///
+  /// **초로만 적으면 안 된다.** 로그인 차단은 앱 자체 잠금이 60초지만 서버
+  /// 잠금은 분 단위라(백엔드 #89), 그대로 적으면 「900초 후에 다시 시도해
+  /// 주세요」가 된다 — 읽는 사람이 암산을 해야 한다.
+  static String duration(Duration d) {
+    final total = d.inSeconds < 0 ? 0 : d.inSeconds;
+    final minutes = total ~/ 60;
+    final seconds = total % 60;
+    if (minutes == 0) return '$seconds초';
+    if (seconds == 0) return '$minutes분';
+    return '$minutes분 $seconds초';
+  }
 }
