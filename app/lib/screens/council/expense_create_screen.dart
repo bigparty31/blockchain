@@ -116,6 +116,11 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
   Future<void> _attachReceipt() async {
     final bytes = await (widget.pickReceipt ?? pickReceiptBytes)(context);
     if (bytes == null || !mounted) return;
+    final problem = receiptFormatProblem(bytes);
+    if (problem != null) {
+      _snack(problem);
+      return;
+    }
     setState(() {
       _receiptBytes = bytes;
       _receiptHash = Hashing.fileHash(bytes);

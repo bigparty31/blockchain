@@ -145,8 +145,43 @@ void main() {
     expect(receiptFilename([0x89, 0x50, 0x4E, 0x47, 0x0D]), 'receipt.png');
     expect(receiptFilename('%PDF-1.7'.codeUnits), 'receipt.pdf');
     expect(receiptFilename([...'RIFF'.codeUnits, 0, 0, 0, 0, ...'WEBP'.codeUnits]), 'receipt.webp');
-    expect(receiptFilename([0, 0, 0, 0x18, ...'ftypheic'.codeUnits]), 'receipt.heic');
     expect(receiptFilename([1, 2]), 'receipt.jpg');
+  });
+
+  group('HEIC 사진 — 서버가 받지 않는 형식이라 고를 때 막는다 (#71 리뷰)', () {
+    final heic = [0, 0, 0, 0x18, ...'ftypheic'.codeUnits];
+    final heif = [0, 0, 0, 0x18, ...'ftypmif1'.codeUnits];
+
+    test('HEIC·HEIF 는 안내 문구가 나오고, JPEG·PNG·WebP·PDF 는 문제가 없다', () {
+      expect(receiptFormatProblem(heic), contains('HEIC'));
+      expect(receiptFormatProblem(heif), contains('HEIC'));
+      expect(receiptFormatProblem([0xFF, 0xD8, 0xFF, 0xE0]), isNull);
+      expect(receiptFormatProblem([0x89, 0x50, 0x4E, 0x47]), isNull);
+      expect(receiptFormatProblem('%PDF-1.7'.codeUnits), isNull);
+      expect(receiptFormatProblem([...'RIFF'.codeUnits, 0, 0, 0, 0, ...'WEBP'.codeUnits]), isNull);
+    });
+
+    test('이름을 만들 때도 HEIC 는 서버가 거부할 .heic 를 만들지 않고 던진다', () {
+      expect(() => receiptFilename(heic), throwsArgumentError);
+      expect(() => receiptFilename(heif), throwsArgumentError);
+    });
+
+    testWidgets('지출 등록에서 HEIC 를 고르면 첨부하지 않고 안내한다 — 영수증이 없어 제출도 못 한다', (tester) async {
+      final registrar = FakeRegistrar();
+      await pump(tester, ExpenseCreateScreen(registrar: registrar, pickReceipt: (_) async => heic));
+      await tapText(tester, '영수증 촬영 또는 사진 첨부');
+      expect(find.textContaining('HEIC'), findsOneWidget);
+      await fillExpense(tester);
+      await tapText(tester, '제출하기');
+      expect(registrar.drafts, isEmpty);
+    });
+
+    testWidgets('수입 등록에서도 HEIC 는 첨부하지 않고 안내한다', (tester) async {
+      final registrar = FakeRegistrar();
+      await pump(tester, IncomeCreateScreen(registrar: registrar, pickReceipt: (_) async => heic));
+      await tapText(tester, '영수증 첨부 (선택)');
+      expect(find.textContaining('HEIC'), findsOneWidget);
+    });
   });
 
   group('현재 학기', () {
