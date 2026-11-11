@@ -69,16 +69,24 @@ class _SigningKeyScreenState extends State<SigningKeyScreen> {
   }
 
   /// 개발 빌드 — 공개 Hardhat 키로 바꾼다. 개발 스택에서만 의미가 있다.
+  ///
+  /// 이미 키가 있으면 먼저 묻는다 — 진짜 키를 쓰던 기기에서 잘못 누르면 되돌릴 방법이 `rotateKey`(회장+감사 2인 서명)뿐이다.
+  /// 지우지 않고 덮어쓴다 — 지우고 쓰면 그 사이에 실패했을 때 키가 없는 상태로 남는다.
   Future<void> _importDev(DevKey key) async {
+    if (_address != null && !await _confirmReplace()) return;
+    if (!mounted) return;
     setState(() {
       _busy = true;
       _error = null;
     });
     String? error;
     try {
-      await DeviceKey.delete();
       await DeviceKey.importDevKey(key.privateKey);
     } on StateError catch (e) {
+      error = e.message;
+    } on ArgumentError catch (e) {
+      error = '${e.message}';
+    } on FormatException catch (e) {
       error = e.message;
     }
     if (!mounted) return;
@@ -87,6 +95,22 @@ class _SigningKeyScreenState extends State<SigningKeyScreen> {
       _error = error;
     });
     await _load();
+  }
+
+  Future<bool> _confirmReplace() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text('서명 키를 바꿀까요?', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+        content: const Text('이 기기에 있는 서명 키가 개발용 키로 바뀌고, 지금 키는 되돌릴 수 없어요.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('취소')),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('바꾸기')),
+        ],
+      ),
+    );
+    return ok ?? false;
   }
 
   @override
