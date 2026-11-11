@@ -24,6 +24,8 @@ from app.routers.budgets import (
 )
 from app.routers.terms import query_router as terms_query_router
 from app.routers.memberships import query_router as memberships_query_router
+# 회원권 일괄 발행은 회장·감사 전용이고 릴레이어 키로 체인에 쓴다. 학생 서버에는 붙이지 않는다 (PRD §9.1)
+from app.routers.membership_mint import router as membership_mint_command_router
 from app.routers.chain import query_router as chain_query_router
 from app.routers.budget_revisions import command_router as budget_revisions_command_router
 from app.routers.receipts import (
@@ -58,6 +60,7 @@ COUNCIL_COMMAND_ROUTERS: List[APIRouter] = [
     entries_command_router,
     budgets_command_router,
     budget_revisions_command_router,
+    membership_mint_command_router,
     receipts_command_router,
     ocr_command_router,
     settlement_command_router,
@@ -77,6 +80,7 @@ COUNCIL_ALL_ROUTERS: List[APIRouter] = [
     budgets_query_router,
     terms_query_router,
     memberships_query_router,
+    membership_mint_command_router,
     chain_query_router,
     budget_revisions_command_router,
     receipts_command_router,

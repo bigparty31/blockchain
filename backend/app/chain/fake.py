@@ -31,9 +31,17 @@ from app.chain.models import (
     UINT64_MAX,
     ZERO_ADDRESS,
     ZERO_BYTES32,
+    BURN_REASON_ORDER,
+    MAX_MINT_BATCH,
     BlockReason,
     BudgetRevertReason,
     BudgetTxResult,
+    BurnRequest,
+    BurnResult,
+    MembershipRevertReason,
+    MintBatchRequest,
+    MintBatchResult,
+    MintedMembership,
     ChainBudget,
     ChainEntry,
     EntryTxDetail,
@@ -51,13 +59,24 @@ from app.chain.models import (
 )
 from app.schemas.entry import EntryKind, EntryStatus
 
-WRITE_METHODS = ("record_pending", "confirm_entry", "reject_entry", "issue_budget", "increase_budget")
+WRITE_METHODS = (
+    "record_pending",
+    "confirm_entry",
+    "reject_entry",
+    "issue_budget",
+    "increase_budget",
+    "mint_memberships",
+    "burn_membership_relayed",
+)
 
 _BUDGET_METHODS = ("issue_budget", "increase_budget")
+_MEMBERSHIP_METHODS = ("mint_memberships", "burn_membership_relayed")
+_ZERO_TERM = 0
 UINT32_MAX = 2**32 - 1  # Budget.term 의 저장 폭
 
-# 검사를 통과한 쓰기의 (항목 id, 결과, 상태 변경). 상태는 before_broadcast 가 끝난 뒤에 바꾼다
-Prepared = Tuple[int, Union[TxResult, BudgetTxResult], Callable[[], None]]
+# 검사를 통과한 쓰기의 (항목 id, 결과, 상태 변경). 상태는 before_broadcast 가 끝난 뒤에 바꾼다. 회원권은 id 자리가 0 이다
+Result = Union[TxResult, BudgetTxResult, MintBatchResult, BurnResult]
+Prepared = Tuple[int, Result, Callable[[], None]]
 
 
 def fake_signature(address: str) -> str:
@@ -83,13 +102,14 @@ class FakeChainClient:
         self._budgets: dict[int, ChainBudget] = {}
         self._memberships: dict[tuple[str, int], int] = {}  # (주소 소문자, 학기 코드) → 유효한 tokenId
         self._membership_count = 0
+        self._sbt_nonces: dict[str, int] = {}  # 서명자 주소 소문자 → nonces(signer). 발행·소각이 공유한다
         self._tx_count = 0
         # tx hash 에 섞는 인스턴스별 값. 서버를 다시 켜 새 가짜가 생겨도 DB 에 남은 옛 hash 와 겹치지 않는다 (tx_result)
         self._tx_salt = secrets.token_hex(8)
-        self._landed: dict[str, tuple[int, TxResult]] = {}  # 블록에 들어간 트랜잭션 hash → (id, 결과). tx_result 가 읽는다
+        self._landed: dict[str, tuple[int, Result]] = {}  # 블록에 들어간 트랜잭션 hash → (id, 결과). tx_result 가 읽는다
         self._blocks: dict[str, int] = {}  # 트랜잭션 hash → 블록 번호. 들어간 순서대로 하나씩 오른다 (entry_tx_detail)
         self._reasons: dict[str, tuple[Optional[str], bool]] = {}  # 트랜잭션 hash → (사유 해시, 경고 승인 여부)
-        self._fail: dict[str, Union[RevertReason, BudgetRevertReason]] = {}
+        self._fail: dict[str, Union[RevertReason, BudgetRevertReason, MembershipRevertReason]] = {}
         self._unavailable: dict[str, tuple[bool, bool]] = {}  # method → (sent, landed)
         self._send_lock: Optional[asyncio.Lock] = None
         self._lock_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -98,7 +118,7 @@ class FakeChainClient:
 
     # ------------------------------------------------------------ 시나리오 지정
 
-    def fail_next(self, method: str, reason: Union[RevertReason, BudgetRevertReason]) -> None:
+    def fail_next(self, method: str, reason: Union[RevertReason, BudgetRevertReason, MembershipRevertReason]) -> None:
         """다음 한 번의 method 호출을 reason 으로 revert 시킨다. 상태는 바뀌지 않는다."""
         _check_method(method)
         self._fail[method] = reason
@@ -127,7 +147,11 @@ class FakeChainClient:
     # ------------------------------------------------------------ ChainClient
 
     def signer_of(
-        self, payload: Union[RecordRequest, ConfirmApproval, RejectDecision, IssueRequest, IncreaseRequest], signature: str
+        self,
+        payload: Union[
+            RecordRequest, ConfirmApproval, RejectDecision, IssueRequest, IncreaseRequest, MintBatchRequest, BurnRequest
+        ],
+        signature: str,
     ) -> str:
         """fake_signature 가 담은 주소. payload 는 보지 않는다 — 가짜 서명은 값에 묶여 있지 않다."""
         return _signer(check_signature(signature))
@@ -215,7 +239,9 @@ class FakeChainClient:
         return 0
 
     # ------------------------------------------------------------ 회원권 (MembershipSBT)
-    # 발행·소각 릴레이는 아직 없어서, 테스트가 grant_membership·burn_membership 으로 체인 상태를 만든다
+    # 릴레이(mint_memberships·burn_membership_relayed)는 IMembershipSBT 를 흉내 낸다. 서명자가 회장·감사인지는 롤을 몰라
+    # fail_next(NOT_APPROVER)로만 난다. 테스트는 grant_membership·burn_membership 으로 서명 없이 체인 상태를 만들 수도 있다
+    # (nonce 는 오르지 않는다)
 
     def grant_membership(self, account: str, term: int) -> int:
         """(account, term) 에 회원권을 발행한 것으로 둔다. 이미 유효하면 그 tokenId 를 돌려준다 (컨트랙트의 건너뛰기와 같다)."""
@@ -234,6 +260,30 @@ class FakeChainClient:
 
     async def membership_token_of(self, account: str, term: int) -> int:
         return self._memberships.get((check_address(account).lower(), term), 0)
+
+    async def membership_nonce(self, signer: str) -> int:
+        return self._sbt_nonces.get(check_address(signer).lower(), 0)
+
+    async def mint_memberships(
+        self, request: MintBatchRequest, signature: str, before_broadcast: Optional[BeforeBroadcast] = None
+    ) -> MintBatchResult:
+        signature = check_signature(signature)
+        return await self._send("mint_memberships", lambda tx: self._mint(request, signature, tx), before_broadcast)
+
+    async def mint_tx_result(self, tx_hash: str) -> Optional[MintBatchResult]:
+        landed = self._landed.get(check_tx_hash(tx_hash))
+        if landed is None:
+            return None
+        result = landed[1]
+        if not isinstance(result, MintBatchResult):
+            raise ChainUnavailable(f"결과 이벤트를 찾지 못했다 — 회원권 발행 트랜잭션이 아니다 (tx={tx_hash})")
+        return result
+
+    async def burn_membership_relayed(
+        self, request: BurnRequest, signature: str, before_broadcast: Optional[BeforeBroadcast] = None
+    ) -> BurnResult:
+        signature = check_signature(signature)
+        return await self._send("burn_membership_relayed", lambda tx: self._burn(request, signature, tx), before_broadcast)
 
     # ------------------------------------------------------------ 컨트랙트 흉내
 
@@ -430,9 +480,70 @@ class FakeChainClient:
 
     # ------------------------------------------------------------ 내부
 
+    def _check_sbt_nonce(self, signer: str, nonce: int) -> None:
+        expected = self._sbt_nonces.get(signer.lower(), 0)
+        if nonce != expected:
+            raise ChainRevert(MembershipRevertReason.INVALID_NONCE, f"expected={expected} actual={nonce}")
+
+    def _mint(self, r: MintBatchRequest, signature: str, tx_hash: str) -> Prepared:
+        # IMembershipSBT.mintBatchRelayed. 배치 전체 revert 값은 모델이 막지만 model_copy 로 건너뛴 시험을 위해 다시 본다
+        self._precheck("mint_memberships", r.deadline)
+        signer = _signer(signature)
+        self._check_sbt_nonce(signer, r.nonce)
+        if not r.recipients:
+            raise ChainRevert(MembershipRevertReason.EMPTY_BATCH)
+        if len(r.recipients) > MAX_MINT_BATCH:
+            raise ChainRevert(MembershipRevertReason.BATCH_TOO_LARGE, f"size={len(r.recipients)}")
+        if r.term == _ZERO_TERM:
+            raise ChainRevert(MembershipRevertReason.TERM_REQUIRED)
+        if any(a.lower() == ZERO_ADDRESS for a in r.recipients):
+            raise ChainRevert(MembershipRevertReason.ZERO_ADDRESS)
+        minted, skipped, seen = [], [], set()
+        next_id = self._membership_count
+        for address in r.recipients:
+            key = (address.lower(), r.term)
+            if key in self._memberships or key in seen:
+                skipped.append(to_checksum_address(address))  # 같은 배치의 중복도 건너뛴다
+                continue
+            seen.add(key)
+            next_id += 1
+            minted.append(MintedMembership(address=to_checksum_address(address), token_id=next_id))
+        result = MintBatchResult(tx_hash=tx_hash, signer=signer, minted=tuple(minted), skipped=tuple(skipped))
+
+        def commit() -> None:
+            for m in minted:
+                self._memberships[(m.address.lower(), r.term)] = m.token_id
+            self._membership_count = next_id
+            self._sbt_nonces[signer.lower()] = r.nonce + 1  # 전부 건너뛰어도 nonce 는 쓴다
+
+        return 0, result, commit
+
+    def _burn(self, r: BurnRequest, signature: str, tx_hash: str) -> Prepared:
+        # IMembershipSBT.burnRelayed
+        self._precheck("burn_membership_relayed", r.deadline)
+        signer = _signer(signature)
+        self._check_sbt_nonce(signer, r.nonce)
+        if r.term == _ZERO_TERM:
+            raise ChainRevert(MembershipRevertReason.TERM_REQUIRED)
+        if r.holder.lower() == ZERO_ADDRESS:
+            raise ChainRevert(MembershipRevertReason.ZERO_ADDRESS)
+        if r.reason not in BURN_REASON_ORDER:
+            raise ChainRevert(MembershipRevertReason.INVALID_BURN_REASON, f"reason={r.reason}")
+        key = (r.holder.lower(), r.term)
+        token_id = self._memberships.get(key)
+        if token_id is None:
+            raise ChainRevert(MembershipRevertReason.NO_MEMBERSHIP, f"holder={r.holder} term={r.term}")
+        result = BurnResult(tx_hash=tx_hash, holder=to_checksum_address(r.holder), token_id=token_id, reason=r.reason, signer=signer)
+
+        def commit() -> None:
+            del self._memberships[key]  # tokenOf 를 비워 같은 학기 재발행을 허용한다
+            self._sbt_nonces[signer.lower()] = r.nonce + 1
+
+        return 0, result, commit
+
     async def _send(
         self, method: str, prepare: Callable[[str], Prepared], before_broadcast: Optional[BeforeBroadcast]
-    ) -> Union[TxResult, BudgetTxResult]:
+    ) -> Result:
         """검사 → before_broadcast → 상태 변경. 실제 구현의 시뮬레이션 → 콜백 → 전송 순서와 같다.
 
         실제 구현은 릴레이어 lock 안에서 시뮬레이션부터 receipt 까지 하므로, 같은 id 를 동시에 보내면 두 번째는
@@ -453,7 +564,7 @@ class FakeChainClient:
 
     async def _send_locked(
         self, method: str, prepare: Callable[[str], Prepared], before_broadcast: Optional[BeforeBroadcast]
-    ) -> Union[TxResult, BudgetTxResult]:
+    ) -> Result:
         scenario = self._unavailable.get(method)
         if scenario is not None and not scenario[0]:
             del self._unavailable[method]
@@ -471,7 +582,7 @@ class FakeChainClient:
         self._land(tx_hash, entry_id, result, commit)
         return result
 
-    def _land(self, tx_hash: str, entry_id: int, result: Union[TxResult, BudgetTxResult], commit: Callable[[], None]) -> None:
+    def _land(self, tx_hash: str, entry_id: int, result: Result, commit: Callable[[], None]) -> None:
         """블록에 들어갔다 — 상태를 바꾸고 결과를 hash 로 남긴다 (tx_result)."""
         commit()
         self._landed[tx_hash] = (entry_id, result)
@@ -490,7 +601,11 @@ class FakeChainClient:
             raise ChainRevert(forced, "fail_next 로 지정")
         # 컨트랙트는 초 단위 정수 block.timestamp > deadline 로 본다. 소수점 시각과 비교하면 같은 초가 만료로 잡힌다
         if deadline < int(self._clock()):
-            expired = BudgetRevertReason if method in _BUDGET_METHODS else RevertReason
+            expired = (
+                BudgetRevertReason
+                if method in _BUDGET_METHODS
+                else MembershipRevertReason if method in _MEMBERSHIP_METHODS else RevertReason
+            )
             raise ChainRevert(expired.SIGNATURE_EXPIRED, f"deadline={deadline}")
 
     def _pending_entry(self, entry_id: int) -> ChainEntry:
