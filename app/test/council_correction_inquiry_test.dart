@@ -63,6 +63,21 @@ void main() {
       expect(tester.widget<TextField>(textField).controller!.text, isNot(contains('\n')));
     });
 
+    testWidgets('HEIC 사진은 서버가 받지 않으므로 고르는 자리에서 안내하고 첨부하지 않는다 (#71 리뷰)', (tester) async {
+      tester.view.physicalSize = const Size(411, 2800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+      final heic = [0, 0, 0, 0x18, ...'ftypheic'.codeUnits];
+      await tester.pumpWidget(MaterialApp(home: CorrectionScreen(registrar: FakeRegistrar(), pickReceipt: (_) async => heic)));
+      await tester.pumpAndSettle();
+      final attach = find.text('수정 증빙 자료 재첨부 (영수증, 선택)');
+      await tester.ensureVisible(attach);
+      await tester.tap(attach);
+      await tester.pumpAndSettle();
+      expect(find.textContaining('HEIC'), findsOneWidget);
+      expect(find.text('수정 증빙 자료 재첨부 (영수증, 선택)'), findsOneWidget, reason: '첨부되지 않았다');
+    });
+
     // 서버가 없어 ApiService 가 더미(#1 확정 지출 35,000원, #2 대기, #3 확정 수입)로 폴백한다.
     Future<void> lookup(WidgetTester tester, String id) async {
       await tester.enterText(find.widgetWithText(TextFormField, '정정 대상 내역 ID (Entry ID) *'), id);
