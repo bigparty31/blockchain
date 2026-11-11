@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timezone
 import inspect
 import logging
 import re
@@ -31,6 +32,7 @@ from app.services.chain_tx import (
     relay_record,
     relay_reject,
 )
+from app.services.notifications import NotificationKind, create_notification
 from app.database import get_db
 from app.models import Budget as DBBudget, Entry as DBEntry, Term as DBTerm, User as DBUser
 from app.routers.receipts import receipt_file_exists, resolve_receipt_path
@@ -210,6 +212,25 @@ def _to_schema(
     # 앱이 서명 전 온체인 대조 불가 상태를 감지할 수 있게 한다 (#66 리뷰 피드백 3).
     registrant = chain_registrant
 
+    creator_name = None
+    if getattr(entry, "creator", None) and entry.creator.name:
+        creator_name = entry.creator.name
+    elif db is not None and getattr(entry, "created_by", None):
+        try:
+            u = db.query(DBUser.name).filter(DBUser.id == entry.created_by).first()
+            if u:
+                creator_name = u[0]
+        except SQLAlchemyError:
+            pass
+
+    # block_reason enum 파싱
+    block_reason_enum = None
+    if getattr(entry, "block_reason", None):
+        try:
+            b_val = entry.block_reason.value if hasattr(entry, "block_reason") and hasattr(entry.block_reason, "value") else str(entry.block_reason)
+            block_reason_enum = BlockReason(b_val)
+        except (ValueError, KeyError):
+            pass
     # duplicate_of 계산
     if duplicate_of is None and db is not None:
         duplicate_of = _find_duplicate_of(entry, db)
@@ -236,7 +257,9 @@ def _to_schema(
         category_warning=entry.category_warning,
         warning_ack_reason=entry.warning_ack_reason if confirmed else None,
         status=EntryStatus(entry.status) if entry.status else None,
+        block_reason=block_reason_enum,
         created_by=entry.created_by,
+        creator_name=creator_name,
         approved_by=entry.approved_by if confirmed else None,
         rejected_by=entry.rejected_by if rejected else None,
         reject_reason=entry.reject_reason if rejected else None,
@@ -246,7 +269,21 @@ def _to_schema(
         block_number=block_number,
         corrects_entry_id=entry.corrects_entry_id,
         correction_reason=entry.correction_reason,
+        revision_requested_at=_to_unix_seconds_utc(getattr(entry, "revision_requested_at", None)),
     )
+
+
+def _to_unix_seconds_utc(value) -> Optional[int]:
+    """DB 시각을 Unix 초로 바꾼다. SQLite 는 시간대 없는(naive) datetime 을 돌려주므로 UTC 로 간주한다.
+    naive 값에 .timestamp() 를 바로 쓰면 서버 로컬 시간대(KST 등)로 해석되어 9시간 어긋난다 (budgets._to_unix_seconds 와 동일 규칙).
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return int(value.timestamp())
+    return int(value)
 
 
 async def _get_chain_client_safe(request: Request) -> Optional[ChainClient]:
@@ -309,6 +346,28 @@ async def get_entries(
         for e in db_entries
     ]
     return results
+
+
+@router.get("/drafts", response_model=List[EntryResponse], summary="본인 작성 미제출 초안 목록 조회 (T5)")
+async def get_my_drafts(
+    user: User = Depends(treasurer_only),
+    db: Session = Depends(get_db),
+):
+    """총무 본인이 작성하였으나 아직 블록체인 기기 서명을 제출하지 않은 초안(status IS NULL) 목록을 조회합니다."""
+    try:
+        drafts = (
+            db.query(DBEntry)
+            .filter(DBEntry.created_by == user.id, DBEntry.status.is_(None))
+            .order_by(DBEntry.occurred_at.desc(), DBEntry.id.desc())
+            .all()
+        )
+    except SQLAlchemyError as e:
+        logger.exception("초안 목록 조회 중 데이터베이스 오류: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 처리 중 오류가 발생했습니다.",
+        )
+    return [_to_schema(e, db=db) for e in drafts]
 
 
 @router.get("/{id}", response_model=EntryResponse, summary="수입·지출 내역 단건 상세 조회")
@@ -806,6 +865,126 @@ async def submit_entry(
         tx_pending=tx_hash,
         block_reason=b_reason,
         message=msg,
+    )
+
+
+@router.post(
+    "/{id}/request-revision",
+    response_model=EntryResponse,
+    summary="수입·지출 내역 수정 요청 (T4)",
+)
+async def request_entry_revision(
+    id: int,
+    user: User = Depends(treasurer_only),
+    db: Session = Depends(get_db),
+):
+    """총무 본인이 등록한 승인 대기(PENDING) 내역에 대해 수정 요청을 등록합니다 (PRD §4.3).
+    - 총무 본인 건만 가능 (타 사용자 403)
+    - PENDING 상태만 가능 (그 외 400)
+    - 확정 선점 중(tx_confirm 존재)이면 409 차단 (확정되면 정정으로 가야 함)
+    - 이미 요청된 건은 200 반환 (Idempotent)
+    - 요청 시 revision_requested_at 기록 및 감사·회장 대상 알림 생성
+    """
+    try:
+        entry = db.query(DBEntry).filter(DBEntry.id == id).first()
+    except SQLAlchemyError as e:
+        logger.exception("수정 요청 중 항목(%d) 조회 오류: %s", id, e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 처리 중 오류가 발생했습니다.",
+        )
+
+    if not entry:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"항목(id={id})을 찾을 수 없습니다.",
+        )
+
+    # 1. 작성자 본인 확인 (다른 총무/사용자 403 차단)
+    if entry.created_by != user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="본인이 등록한 내역만 수정 요청할 수 있습니다.",
+        )
+
+    # 2. 조건부 UPDATE: PENDING 상태, tx_confirm IS NULL, revision_requested_at IS NULL (PRD §4.3, #40 확정 경쟁 방지)
+    now = datetime.now(timezone.utc)
+    try:
+        updated = (
+            db.query(DBEntry)
+            .filter(
+                DBEntry.id == id,
+                DBEntry.status == EntryStatus.PENDING.value,
+                DBEntry.tx_confirm.is_(None),
+                DBEntry.revision_requested_at.is_(None),
+            )
+            .update(
+                {"revision_requested_at": now},
+                synchronize_session=False,
+            )
+        )
+    except SQLAlchemyError as e:
+        db.rollback()
+        logger.exception("수정 요청 조건부 갱신 중 데이터베이스 오류: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 처리 중 오류가 발생했습니다.",
+        )
+
+    if updated == 1:
+        # 1행: 선점 성공 -> 알림 생성 후 commit
+        try:
+            create_notification(db, NotificationKind.ENTRY_EDIT_REQUESTED, entry_id=entry.id)
+            db.commit()
+            db.refresh(entry)
+        except SQLAlchemyError as e:
+            db.rollback()
+            logger.exception("수정 요청 저장 중 데이터베이스 오류: %s", e)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="데이터베이스 처리 중 오류가 발생했습니다.",
+            )
+        return _to_schema(entry, db=db)
+
+    # 0행: 선점 실패 -> 다시 읽어서 세부 원인에 따라 응답 분기
+    db.rollback()
+    try:
+        refreshed = db.query(DBEntry).filter(DBEntry.id == id).first()
+    except SQLAlchemyError as e:
+        logger.exception("수정 요청 재조회 중 데이터베이스 오류: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 처리 중 오류가 발생했습니다.",
+        )
+
+    if not refreshed:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"항목(id={id})을 찾을 수 없습니다.",
+        )
+
+    # (1) 상태가 PENDING이 아님 (수정 요청 후 이미 REJECTED·CONFIRMED 등으로 전환된 건 포함): 400 차단
+    if refreshed.status != EntryStatus.PENDING.value and refreshed.status != EntryStatus.PENDING:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"승인 대기(PENDING) 상태의 내역만 수정 요청할 수 있습니다 (현재: {refreshed.status or 'DRAFT'}).",
+        )
+
+    # (2) 여전히 PENDING 상태이면서 이미 수정 요청된 건: 200 반환 (멱등성)
+    if refreshed.revision_requested_at is not None:
+        return _to_schema(refreshed, db=db)
+
+    # (3) 확정(또는 반려)이 먼저 선점(tx_confirm 존재): 409 차단 (확정되면 정정으로 가야 함)
+    if refreshed.tx_confirm:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="확정 처리 중인 내역은 수정 요청할 수 없습니다.",
+        )
+
+    # (4) 기타 경합 fallback
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="동시 요청 경합으로 인해 수정 요청 처리에 실패했습니다. 다시 시도해 주세요.",
     )
 
 

@@ -68,7 +68,9 @@ class EntryResponse(BaseModel):
     category_warning: bool = Field(False, description="예산 카테고리 불일치 경고 여부")
     warning_ack_reason: Optional[str] = Field(None, description="경고 무시 승인 사유")
     status: Optional[EntryStatus] = Field(None, description="장부 상태 (초안은 null, 온체인은 PENDING | CONFIRMED | REJECTED | BLOCKED)")
+    block_reason: Optional[BlockReason] = Field(None, description="차단 사유 (BLOCKED 시)")
     created_by: int = Field(..., description="등록자 User ID (총무)")
+    creator_name: Optional[str] = Field(None, description="등록자 이름 (총무 실명)")
     approved_by: Optional[int] = Field(None, description="승인자 User ID (감사·회장). CONFIRMED 일 때만 값이 있다")
     rejected_by: Optional[int] = Field(None, description="반려자 User ID (감사/회장)")
     reject_reason: Optional[str] = Field(None, description="반려 사유")
@@ -78,6 +80,7 @@ class EntryResponse(BaseModel):
     block_number: Optional[int] = Field(None, description="확정/반려 트랜잭션 블록 번호")
     corrects_entry_id: Optional[int] = Field(None, description="정정 대상 원본 Entry ID")
     correction_reason: Optional[CorrectionReason] = Field(None, description="정정 사유 유형")
+    revision_requested_at: Optional[int] = Field(None, description="수정 요청 일시 (Unix 초 단위)")
 
 
 class EntryCreate(BaseModel):

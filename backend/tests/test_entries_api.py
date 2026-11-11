@@ -1693,6 +1693,249 @@ def test_correction_expense_optional_receipt_hash(auth_header):
     assert "영수증(receipt_hash)은 필수" in res_pos.json()["detail"]
 
 
+# ---------------------------------------------------------------- T4 수정 요청 & T5 초안 목록 테스트
+
+
+def test_get_my_drafts_endpoint(auth_header):
+    """GET /entries/drafts: 총무 본인의 미제출 초안만 조회되고 서명 제출 후 목록에서 제외됨 검증 (T5)"""
+    # 1. 초안 2건 생성
+    body1 = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 10000,
+        "counterparty": "초안상점1",
+        "purpose": "초안1",
+        "budget_id": 2,
+        "occurred_at": 1788793200,
+        "receipt_hash": TEST_RECEIPT_HASH,
+        "receipt_path": TEST_RECEIPT_PATH,
+    }
+    body2 = {
+        "term_id": 1,
+        "kind": "INCOME",
+        "amount": 50000,
+        "counterparty": "초안입금처",
+        "purpose": "초안2",
+        "budget_id": None,
+        "occurred_at": 1788793200,
+    }
+    id1 = client.post("/entries", json=body1, headers=auth_header(Role.TREASURER)).json()["id"]
+    id2 = client.post("/entries", json=body2, headers=auth_header(Role.TREASURER)).json()["id"]
+
+    # 2. GET /entries/drafts 목록 조회
+    res_drafts = client.get("/entries/drafts", headers=auth_header(Role.TREASURER))
+    assert res_drafts.status_code == 200
+    drafts = res_drafts.json()
+    draft_ids = [d["id"] for d in drafts]
+    assert id1 in draft_ids
+    assert id2 in draft_ids
+    for d in drafts:
+        assert d["status"] is None  # 초안은 status null
+
+    # 3. 비총무 권한 호출 시 403 차단
+    res_forbidden = client.get("/entries/drafts", headers=auth_header(Role.STUDENT))
+    assert res_forbidden.status_code == 403
+
+    # 4. id1을 submit하면 초안 목록에서 사라짐
+    submit_body = {
+        "deadline": int(time.time()) + 600,
+        "signature": fake_signature(TREASURER_WALLET),
+    }
+    res_submit = client.post(f"/entries/{id1}/submit", json=submit_body, headers=auth_header(Role.TREASURER))
+    assert res_submit.status_code == 200
+
+    res_after = client.get("/entries/drafts", headers=auth_header(Role.TREASURER))
+    after_ids = [d["id"] for d in res_after.json()]
+    assert id1 not in after_ids
+    assert id2 in after_ids
+
+
+def test_request_entry_revision_success(auth_header, monkeypatch):
+    """POST /entries/{id}/request-revision: PENDING 상태의 본인 등록 건에 대해 정상 수정 요청 및 알림 생성 검증 (T4)"""
+    entry_id = _pending_entry(auth_header)
+    notified = []
+
+    def mock_create_notification(db, kind, **kwargs):
+        notified.append((kind, kwargs))
+
+    monkeypatch.setattr(entries_router, "create_notification", mock_create_notification)
+
+    # 1. 수정 요청 호출
+    before = int(time.time())
+    res = client.post(f"/entries/{entry_id}/request-revision", headers=auth_header(Role.TREASURER))
+    after = int(time.time())
+    assert res.status_code == 200
+    data = res.json()
+    assert data["id"] == entry_id
+    assert data["revision_requested_at"] is not None
+    assert isinstance(data["revision_requested_at"], int)
+    # SQLite 가 돌려주는 시간대 없는 값을 서버 로컬 시간대(KST 등)로 해석하면 9시간 어긋난다 (#76 Codex 4차)
+    assert before - 1 <= data["revision_requested_at"] <= after + 1
+
+    # 목록·상세 조회도 같은 값이어야 한다
+    detail = client.get(f"/entries/{entry_id}").json()
+    assert detail["revision_requested_at"] == data["revision_requested_at"]
+
+    # 알림 발송 검증
+    assert len(notified) == 1
+    assert notified[0][0] == entries_router.NotificationKind.ENTRY_EDIT_REQUESTED
+    assert notified[0][1]["entry_id"] == entry_id
+
+    # DB 저장 확인
+    with _test_session_factory() as db:
+        row = db.query(DBEntry).filter(DBEntry.id == entry_id).first()
+        assert row.revision_requested_at is not None
+
+    # 2. 동일 건 재요청 시 200 멱등성 검증
+    res_repeat = client.post(f"/entries/{entry_id}/request-revision", headers=auth_header(Role.TREASURER))
+    assert res_repeat.status_code == 200
+    assert res_repeat.json()["revision_requested_at"] == data["revision_requested_at"]
+
+
+def test_request_entry_revision_forbidden_for_other_treasurer(second_treasurer, auth_header):
+    """다른 총무가 등록한 건에 대해 수정 요청 시 403 Forbidden 차단 검증"""
+    entry_id = _pending_entry(auth_header)  # 시드 총무가 작성한 건
+    res = client.post(f"/entries/{entry_id}/request-revision", headers=second_treasurer.headers)
+    assert res.status_code == 403
+    assert "본인이 등록한 내역만" in res.json()["detail"]
+
+
+def test_request_entry_revision_not_pending_fails(auth_header):
+    """PENDING이 아닌 상태(CONFIRMED, 초안 등)의 내역에 수정 요청 시 400 Bad Request 차단 검증"""
+    # 1. 시드 id=1 (CONFIRMED)
+    res_confirmed = client.post("/entries/1/request-revision", headers=auth_header(Role.TREASURER))
+    assert res_confirmed.status_code == 400
+    assert "승인 대기(PENDING) 상태의 내역만" in res_confirmed.json()["detail"]
+
+    # 2. 미제출 초안 건
+    draft_res = client.post("/entries", json=DRAFT_BODY, headers=auth_header(Role.TREASURER))
+    draft_id = draft_res.json()["id"]
+    res_draft = client.post(f"/entries/{draft_id}/request-revision", headers=auth_header(Role.TREASURER))
+    assert res_draft.status_code == 400
+    assert "승인 대기(PENDING) 상태의 내역만" in res_draft.json()["detail"]
+
+    # 3. 수정 요청(revision_requested_at 기록) 후 반려(REJECTED)된 건에 다시 수정 요청 시 200이 아니라 400 차단
+    rev_entry_id = _pending_entry(auth_header)
+    assert client.post(f"/entries/{rev_entry_id}/request-revision", headers=auth_header(Role.TREASURER)).status_code == 200
+    with _test_session_factory() as db:
+        row = db.query(DBEntry).filter(DBEntry.id == rev_entry_id).first()
+        row.status = "REJECTED"
+        row.rejected_by = 3
+        row.reject_reason = "수정 요청에 따른 반려"
+        db.commit()
+    res_rejected_after_rev = client.post(
+        f"/entries/{rev_entry_id}/request-revision",
+        headers=auth_header(Role.TREASURER),
+    )
+    assert res_rejected_after_rev.status_code == 400
+    assert "승인 대기(PENDING) 상태의 내역만" in res_rejected_after_rev.json()["detail"]
+
+
+def test_request_entry_revision_conflict_when_confirm_in_flight(auth_header):
+    """확정 처리가 선점 중(tx_confirm 존재)인 경우 409 Conflict 차단 검증"""
+    entry_id = _pending_entry(auth_header)
+    with _test_session_factory() as db:
+        row = db.query(DBEntry).filter(DBEntry.id == entry_id).first()
+        row.tx_confirm = "0x" + "7" * 64
+        row.approved_by = 3
+        db.commit()
+
+    res = client.post(f"/entries/{entry_id}/request-revision", headers=auth_header(Role.TREASURER))
+    assert res.status_code == 409
+    assert "확정 처리 중인 내역은 수정 요청할 수 없습니다." in res.json()["detail"]
+
+
+def test_request_entry_revision_race_confirm_wins_returns_409(auth_header):
+    """확정이 먼저 조건부 선점(tx_confirm 기록)했을 때 수정 요청의 조건부 UPDATE가 0행이 되고 재조회 후 409 Conflict 반환 검증"""
+    entry_id = _pending_entry(auth_header)
+
+    # 확정 프로세스가 tx_confirm 선점
+    with _test_session_factory() as db:
+        row = db.query(DBEntry).filter(DBEntry.id == entry_id).first()
+        row.tx_confirm = "0x" + "c" * 64
+        row.approved_by = 3
+        db.commit()
+
+    # 수정 요청 시도: 조건부 UPDATE (revision_requested_at IS NULL AND tx_confirm IS NULL) 0행 매칭
+    # 재조회 시 tx_confirm 존재 확인 -> 409 Conflict 반환
+    res = client.post(f"/entries/{entry_id}/request-revision", headers=auth_header(Role.TREASURER))
+    assert res.status_code == 409
+    assert "확정 처리 중인 내역은 수정 요청할 수 없습니다." in res.json()["detail"]
+
+    # 검증: 확정 선점된 건에 revision_requested_at이 남지 않아야 함 (PR #40 / PRD §4.3 정합성)
+    with _test_session_factory() as db:
+        row = db.query(DBEntry).filter(DBEntry.id == entry_id).first()
+        assert row.revision_requested_at is None
+        assert row.tx_confirm == "0x" + "c" * 64
+
+
+# ---------------------------------------------------------------- 응답 필드 보강 (duplicate_of, block_reason, creator_name)
+
+
+def test_entry_response_supplementary_fields(auth_header):
+    """EntryResponse 보강 필드(duplicate_of, block_reason, creator_name) 반환 검증"""
+    # 1. 첫 번째 지출 내역 생성 및 PENDING 제출 (원본)
+    body1 = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 20000,
+        "counterparty": "원본상점",
+        "purpose": "물품구매1",
+        "budget_id": 2,
+        "occurred_at": 1788793200,
+        "receipt_hash": TEST_RECEIPT_HASH,
+        "receipt_path": TEST_RECEIPT_PATH,
+    }
+    res1 = client.post("/entries", json=body1, headers=auth_header(Role.TREASURER))
+    assert res1.status_code == 201
+    orig_id = res1.json()["id"]
+
+    with _test_session_factory() as db:
+        row = db.query(DBEntry).filter(DBEntry.id == orig_id).first()
+        row.status = "PENDING"
+        db.commit()
+
+    # 2. 동일한 영수증으로 두 번째 지출 내역 생성 (중복 발생 -> DUPLICATE)
+    body2 = {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": 20000,
+        "counterparty": "중복상점",
+        "purpose": "물품구매2",
+        "budget_id": 2,
+        "occurred_at": 1788793200,
+        "receipt_hash": TEST_RECEIPT_HASH,
+        "receipt_path": TEST_RECEIPT_PATH,
+    }
+    res2 = client.post("/entries", json=body2, headers=auth_header(Role.TREASURER))
+    assert res2.status_code == 201
+    dup_id = res2.json()["id"]
+
+    # 3. GET /entries/drafts 로 초안 목록 조회 시 duplicate_of 및 creator_name 검증
+    drafts_res = client.get("/entries/drafts", headers=auth_header(Role.TREASURER))
+    assert drafts_res.status_code == 200
+    drafts = {d["id"]: d for d in drafts_res.json()}
+
+    # 중복 건은 duplicate_of 가 원본 건 id(orig_id)를 가리킴
+    assert drafts[dup_id]["ocr_status"] == "DUPLICATE"
+    assert drafts[dup_id]["duplicate_of"] == orig_id
+    assert drafts[dup_id]["creator_name"] == "김총무"
+
+    # 4. 차단(BLOCKED) 건의 block_reason 반환 검증
+    with _test_session_factory() as db:
+        row = db.query(DBEntry).filter(DBEntry.id == orig_id).first()
+        row.status = "BLOCKED"
+        row.block_reason = "BUDGET_EXCEEDED"
+        db.commit()
+
+    detail_res = client.get(f"/entries/{orig_id}")
+    assert detail_res.status_code == 200
+    detail_data = detail_res.json()
+    assert detail_data["status"] == "BLOCKED"
+    assert detail_data["block_reason"] == "BUDGET_EXCEEDED"
+    assert detail_data["creator_name"] == "김총무"
+
+
 def test_arbitrary_server_file_path_without_uploaded_hash_returns_400(auth_header):
     """서버의 아무 파일(app/main.py 등) 경로를 지정해도 미업로드 해시이면 400 Bad Request 차단 (리뷰어 피드백 1)"""
     body = {

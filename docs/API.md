@@ -418,9 +418,13 @@
 
 ### 1.1 수입·지출 내역 단건 상세 조회 (`GET /entries/{id}`)
 - **설명**: 내역 ID로 특정 수입/지출 내역의 상세 정보를 조회합니다.
-- **등록자 및 블록 번호**:
+- **등록자 및 추가 필드**:
   - `registrant`: 온체인 등록자 지갑 주소(`0x...`)가 실려 내려옵니다 (미기록 또는 체인 조회 실패 시 DB 값으로 대체하지 않고 `null` 반환).
+  - `creator_name`: 등록자 이름(총무 실명, 예: `"김총무"`)이 실려 내려옵니다.
   - `block_number`: 확정/반려 트랜잭션이 안착된 블록 번호가 실려 내려옵니다 (`tx_confirm` 또는 `tx_pending` 기준 receipt 조회, 체인 미안착 시 `null`).
+  - `block_reason`: 예산 초과 등으로 지출이 차단(`BLOCKED`)된 경우 그 사유(`BUDGET_EXCEEDED`, `BUDGET_EXPIRED`, `BUDGET_NOT_FOUND`)가 실려 내려옵니다 (정상 등록 시 `null`).
+  - `duplicate_of`: 영수증 중복 경고(`ocr_status == "DUPLICATE"`) 발생 시, 겹치는 기존 원본 Entry ID가 실려 내려옵니다 (정상 시 `null`).
+  - `revision_requested_at`: 총무가 수정 요청을 제출한 일시(Unix 초)가 실려 내려옵니다 (미요청 시 `null`). 승인 화면에서 이 값이 존재하면 확정 버튼을 숨기고 반려만 노출해야 합니다.
 
 **Response (`200 OK`)**
 ```json
@@ -434,10 +438,44 @@
   "purpose": "신입생 환영회 명찰 및 필기구 구매",
   "occurred_at": 1788793200,
   "status": "CONFIRMED",
+  "block_reason": null,
   "receipt_path": "/receipts/sample_01.jpg",
+  "created_by": 2,
+  "creator_name": "김총무",
   "registrant": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
-  "block_number": 102
+  "block_number": 102,
+  "duplicate_of": null,
+  "revision_requested_at": null
 }
+```
+
+### 1.2 [T5] 본인 작성 미제출 초안 목록 조회 (`GET /entries/drafts`)
+- **설명**: 총무 본인이 작성하였으나 아직 블록체인 기기 서명을 제출하지 않은 초안(`status IS NULL`) 목록을 조회합니다. 앱이 종료되거나 이탈한 후에도 미제출 초안을 다시 불러와 서명을 이어갈 수 있습니다.
+- **권한**: 총무(`TREASURER`) 전용. (학생·감사·회장은 `403 Forbidden`)
+
+**Response (`200 OK`)**
+```json
+[
+  {
+    "id": 5,
+    "term_id": 1,
+    "term_code": 20261,
+    "kind": "EXPENSE",
+    "amount": 45000,
+    "counterparty": "알파문구",
+    "purpose": "중간고사 간식 박스 테이프 구매",
+    "occurred_at": 1788793200,
+    "status": null,
+    "block_reason": null,
+    "created_by": 2,
+    "creator_name": "김총무",
+    "tx_pending": null,
+    "receipt_path": "/receipts/sample_01.jpg",
+    "receipt_hash": "0x11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff",
+    "duplicate_of": null,
+    "revision_requested_at": null
+  }
+]
 ```
 
 ### 2. 지출 및 수입 신규 등록 흐름 (2단계 등록 프로세스)
@@ -565,7 +603,38 @@
 
 ---
 
-#### 2.3 초안 수명주기 및 예외 처리 정책 (모바일 앱 등록 화면 가이드)
+#### 2.3 [T4] 수입·지출 내역 수정 요청 (`POST /entries/{id}/request-revision`)
+- **설명**: 총무가 이미 온체인에 등록되어 승인 대기 중인 `PENDING` 내역에 대해 수정 요청을 등록합니다 (PRD §4.3).
+- **효과**:
+  - `revision_requested_at` 일시가 기록되며 감사·회장에게 알림(`ENTRY_EDIT_REQUESTED`)이 발행됩니다.
+  - 이 값이 존재하는 내역은 승인권자의 확정 버튼이 숨겨지고 반려만 가능해지며, 온체인 확정 시도 시 차단됩니다 (#40 연계).
+- **권한 및 검증**:
+  - 총무(`TREASURER`) 본인이 등록한 건만 가능 (`created_by == user.id`, 타 총무/사용자는 `403 Forbidden`).
+  - `PENDING` 상태만 가능 (초안, 확정, 반려 건은 `400 Bad Request`).
+  - 확정이 선점 중(`tx_confirm` 존재)이면 `409 Conflict` (확정이 먼저 처리되면 총무는 정정 등록으로 진행해야 함).
+  - 이미 수정 요청된 건에 재요청 시 `200 OK` 및 동일한 `EntryResponse` 반환 (멱등성 보장).
+
+**Request**
+- URL: `POST /entries/{id}/request-revision`
+- Header: `Authorization: Bearer <총무 토큰>`
+- Body: 없음
+
+**Response (`200 OK`)**
+- `EntryResponse` 반환 (`revision_requested_at` 필드가 채워짐)
+
+| 코드 | 경우 (`POST /entries/{id}/request-revision`) |
+| --- | --- |
+| `200` | 수정 요청 등록 완료 또는 이미 요청된 건의 멱등 응답 |
+| `400` | `PENDING` 상태가 아님 (이미 확정/반려되었거나 미제출 초안) |
+| `401` | 로그인 토큰 없음 |
+| `403` | 총무(`TREASURER`)가 아니거나 본인이 작성한 내역이 아님 |
+| `404` | 항목(`id`)을 찾을 수 없음 |
+| `409` | 확정 처리(`tx_confirm`)가 선점 진행 중인 내역 |
+| `503` | 데이터베이스 오류 |
+
+---
+
+#### 2.4 초안 수명주기 및 예외 처리 정책 (모바일 앱 등록 화면 가이드)
 총무가 1단계로 ID를 발급받은 뒤 모바일 앱 기기 서명(2단계) 단계에서 이탈하거나 오류가 발생한 경우의 처리 정책입니다:
 
 1. **서명 실패/이탈 시 재시도 (`Retry`) 허용**:
