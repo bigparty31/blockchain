@@ -1,10 +1,14 @@
 /**
- * 컨트랙트 4단계 배포 순서를 한 곳에 둔다. 배포 스크립트와 테스트 픽스처가 같은 함수를 쓴다.
+ * 컨트랙트 5단계 배포 순서를 한 곳에 둔다. 배포 스크립트와 테스트 픽스처가 같은 함수를 쓴다.
  *
  *   RoleManager(president, treasurer, auditor1, auditor2)
  *   → BudgetToken(roleManager)
  *   → AccountingLedger(roleManager, budgetToken)
  *   → BudgetToken.setLedger(ledger)   // 배포자가 1회 호출, 이후 잠김
+ *   → MembershipSBT(roleManager)
+ *
+ * MembershipSBT 를 맨 뒤에 두는 이유: 배포 주소는 배포자 nonce 로 정해진다. 앞의 세 컨트랙트와 setLedger 의
+ * 순서를 그대로 두어야 그 주소와 EIP-712 도메인(앱·서버 벡터에 박힌 값)이 바뀌지 않는다.
  *
  * 네 임원(회장·총무·감사 2명)은 생성자 인자로 들어가므로 별도 롤 부여 단계가 없다.
  * 배포자는 setLedger 를 부른 뒤 어떤 권한도 남지 않는다 (docs/CONTRACTS.md "생성자·배포 순서").
@@ -27,8 +31,15 @@ export interface Deployment {
   roleManager: any;
   budgetToken: any;
   ledger: any;
-  addresses: { RoleManager: string; BudgetToken: string; AccountingLedger: string };
-  blocks: { RoleManager: number; BudgetToken: number; AccountingLedger: number; setLedger: number };
+  membershipSBT: any;
+  addresses: { RoleManager: string; BudgetToken: string; AccountingLedger: string; MembershipSBT: string };
+  blocks: {
+    RoleManager: number;
+    BudgetToken: number;
+    AccountingLedger: number;
+    setLedger: number;
+    MembershipSBT: number;
+  };
 }
 
 async function deployedBlock(contract: any): Promise<number> {
@@ -66,20 +77,26 @@ export async function deployAll(
   const setTx = await budgetToken.connect(signer).setLedger(await ledger.getAddress());
   const setReceipt = await setTx.wait();
 
+  const membershipSBT = await ethers.deployContract("MembershipSBT", [await roleManager.getAddress()], signer);
+  await membershipSBT.waitForDeployment();
+
   return {
     roleManager,
     budgetToken,
     ledger,
+    membershipSBT,
     addresses: {
       RoleManager: await roleManager.getAddress(),
       BudgetToken: await budgetToken.getAddress(),
       AccountingLedger: await ledger.getAddress(),
+      MembershipSBT: await membershipSBT.getAddress(),
     },
     blocks: {
       RoleManager: await deployedBlock(roleManager),
       BudgetToken: await deployedBlock(budgetToken),
       AccountingLedger: await deployedBlock(ledger),
       setLedger: setReceipt.blockNumber,
+      MembershipSBT: await deployedBlock(membershipSBT),
     },
   };
 }

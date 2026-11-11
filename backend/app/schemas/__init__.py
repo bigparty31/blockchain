@@ -14,6 +14,7 @@ from app.schemas.budget import (
     BudgetIssueResponse,
 )
 from app.schemas.term import TermResponse
+from app.schemas.receipt import ReceiptUploadResponse
 from app.schemas.budget_revision import (
     BudgetRevisionRequestCreate,
     BudgetRevisionSignRequest,
@@ -35,6 +36,7 @@ __all__ = [
     "BudgetIssueSubmit",
     "BudgetIssueResponse",
     "TermResponse",
+    "ReceiptUploadResponse",
     "BudgetRevisionRequestCreate",
     "BudgetRevisionSignRequest",
     "BudgetRevisionRejectRequest",
