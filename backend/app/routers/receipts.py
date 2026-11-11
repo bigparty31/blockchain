@@ -14,7 +14,9 @@ from app.schemas.receipt import ReceiptUploadResponse
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/receipts", tags=["Receipts"])
+query_router = APIRouter(prefix="/receipts", tags=["Receipts"])
+command_router = APIRouter(prefix="/receipts", tags=["Receipts"])
+router = APIRouter()
 
 treasurer_only = require_roles(Role.TREASURER)
 
@@ -79,13 +81,13 @@ def resolve_receipt_path(receipt_hash: Optional[str]) -> Optional[str]:
     return None
 
 
-@router.post(
+@command_router.post(
     "",
     response_model=ReceiptUploadResponse,
     status_code=status.HTTP_201_CREATED,
     summary="영수증 파일 업로드",
 )
-@router.post(
+@command_router.post(
     "/",
     response_model=ReceiptUploadResponse,
     status_code=status.HTTP_201_CREATED,
@@ -162,7 +164,7 @@ async def upload_receipt(
     )
 
 
-@router.get("/{filename}", summary="영수증 이미지 다운로드/열람")
+@query_router.get("/{filename}", summary="영수증 이미지 다운로드/열람")
 async def get_receipt_file(filename: str):
     """영수증 이미지 파일을 반환합니다 (모바일 앱 영수증 이미지 열람 S3)."""
     safe_name = os.path.basename(filename)
@@ -183,3 +185,7 @@ async def get_receipt_file(filename: str):
 
     media_type = MEDIA_TYPES.get(ext, "application/octet-stream")
     return FileResponse(file_path, media_type=media_type)
+
+
+router.include_router(command_router)
+router.include_router(query_router)
