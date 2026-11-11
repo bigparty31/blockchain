@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'core/entry_merge.dart';
 import 'core/enums.dart';
 import 'models/entry_model.dart';
+import 'services/auth_service.dart';
 import 'screens/council/approval_list_screen.dart';
 import 'screens/council/correction_screen.dart';
 import 'screens/council/council_home_screen.dart';
@@ -42,29 +43,33 @@ class AppRoutes {
   static const studentSbt = '/student/sbt';
 
   // ── 총무·감사 (screens/council/) ────────────────────────────
-  /// 총무·감사 홈. 인자: [UserRole] (없으면 총무)
+  // 아래 임원 화면은 **로그인한 역할로만 열린다** ([AppRouter.onGenerateRoute]).
+  // 라우트 인자로 받은 역할은 권한으로 믿지 않는다.
+
+  /// 총무·감사·회장 홈. 인자: [UserRole] (선택 — 주면 로그인한 역할과 같아야 한다)
   static const councilHome = '/council';
 
-  /// 지출 등록. 인자 없음
+  /// 지출 등록 (총무). 인자 없음
   static const councilExpense = '/council/expense';
 
-  /// 수입 등록. 인자 없음
+  /// 수입 등록 (총무). 인자 없음
   static const councilIncome = '/council/income';
 
-  /// 승인 목록. 인자 없음
+  /// 승인 목록 (감사·회장). 인자 없음
   static const councilApprovals = '/council/approvals';
 
-  /// 정정 신청. 인자 없음
+  /// 정정 신청 (총무). 인자 없음
   static const councilCorrections = '/council/corrections';
 
-  /// 학생 이의 답변. 인자 없음
+  /// 학생 이의 답변 (감사·회장). 인자 없음
   static const councilInquiries = '/council/inquiries';
 
-  /// 카메라·생체인증 실기 테스트. 인자 없음
+  /// 카메라·생체인증 실기 테스트 (임원). 인자 없음
   static const councilHardwareTest = '/council/hardware-test';
 
   // ── 회장 (screens/president/) ───────────────────────────────
-  /// 예산 편성. 인자: [UserRole] (회장이 아니면 화면이 안내만 보여준다)
+  /// 예산 편성 (임원). 인자: [UserRole] — 로그인한 역할과 같아야 한다.
+  /// 회장이 아니면 화면이 안내만 보여준다.
   static const presidentBudgetPlan = '/president/budget';
 }
 
@@ -93,30 +98,78 @@ class AppRouter {
       case AppRoutes.studentSbt:
         return _page(settings, (_) => const MySbtScreen());
 
-      // 총무·감사
+      // 총무·감사·회장 — 권한은 로그인 세션으로 정한다
       case AppRoutes.councilHome:
         if (args != null && args is! UserRole) return _badArguments(settings, 'UserRole');
-        final role = args as UserRole? ?? UserRole.TREASURER;
+        final role = _sessionRole;
+        // 인자는 「이 역할의 홈」이라는 요청일 뿐이다. 로그인한 역할과 다르면 열지 않는다.
+        if (role == null || !_officers.contains(role) || (args != null && args != role)) {
+          return _forbidden(settings);
+        }
         return _page(settings, (_) => CouncilHomeScreen(role: role));
       case AppRoutes.councilExpense:
-        return _page(settings, (_) => const ExpenseCreateScreen());
+        return _guarded(settings, _treasurer, (_) => const ExpenseCreateScreen());
       case AppRoutes.councilIncome:
-        return _page(settings, (_) => const IncomeCreateScreen());
+        return _guarded(settings, _treasurer, (_) => const IncomeCreateScreen());
       case AppRoutes.councilApprovals:
-        return _page(settings, (_) => const ApprovalListScreen());
+        return _guarded(settings, _approvers, (_) => const ApprovalListScreen());
       case AppRoutes.councilCorrections:
-        return _page(settings, (_) => const CorrectionScreen());
+        return _guarded(settings, _treasurer, (_) => const CorrectionScreen());
       case AppRoutes.councilInquiries:
-        return _page(settings, (_) => const InquiryResponseScreen());
+        return _guarded(settings, _approvers, (_) => const InquiryResponseScreen());
       case AppRoutes.councilHardwareTest:
-        return _page(settings, (_) => const HardwareTestScreen());
+        return _guarded(settings, _officers, (_) => const HardwareTestScreen());
 
       // 회장
       case AppRoutes.presidentBudgetPlan:
         if (args is! UserRole) return _badArguments(settings, 'UserRole');
-        return _page(settings, (_) => BudgetPlanScreen(role: args));
+        final role = _sessionRole;
+        if (role == null || !_officers.contains(role) || args != role) return _forbidden(settings);
+        return _page(settings, (_) => BudgetPlanScreen(role: role));
     }
     return null;
+  }
+
+  /// 지금 로그인한 역할. **임원 화면의 권한 근거는 이것뿐이다.**
+  ///
+  /// 라우트 인자로 받은 역할을 믿으면 학생이나 로그인하지 않은 상태에서도
+  /// `pushNamed(AppRoutes.councilApprovals)` 한 줄로 임원 화면이 열린다.
+  /// 쓰기 API 는 서버가 역할을 다시 확인하지만, 목업 화면은 로컬에서 성공 처리를 한다.
+  static UserRole? get _sessionRole => AuthService().session?.role;
+
+  static const _officers = {UserRole.TREASURER, UserRole.AUDITOR, UserRole.PRESIDENT};
+  static const _treasurer = {UserRole.TREASURER};
+  static const _approvers = {UserRole.AUDITOR, UserRole.PRESIDENT};
+
+  /// [allowed] 역할로 로그인했을 때만 [builder] 화면을 연다. 아니면 [_forbidden].
+  static MaterialPageRoute<dynamic> _guarded(
+    RouteSettings settings,
+    Set<UserRole> allowed,
+    WidgetBuilder builder,
+  ) {
+    final role = _sessionRole;
+    if (role == null || !allowed.contains(role)) return _forbidden(settings);
+    return _page(settings, builder);
+  }
+
+  /// 로그인한 역할로는 열 수 없는 화면. 조용히 다른 화면으로 바꾸지 않고 이유를 적는다.
+  static MaterialPageRoute<dynamic> _forbidden(RouteSettings settings) {
+    return _page(
+      settings,
+      (_) => Scaffold(
+        key: const Key('route_forbidden'),
+        appBar: AppBar(title: const Text('화면을 열 수 없어요')),
+        body: const Center(
+          child: Padding(
+            padding: EdgeInsets.all(24),
+            child: Text(
+              '이 화면을 열 권한이 없어요.\n로그인한 계정의 역할로는 열 수 없는 화면입니다.',
+              textAlign: TextAlign.center,
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   static MaterialPageRoute<dynamic> _page(RouteSettings settings, WidgetBuilder builder) {

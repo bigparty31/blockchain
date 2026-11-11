@@ -17,6 +17,8 @@ import 'package:student_council_app/screens/student/my_sbt_screen.dart';
 import 'package:student_council_app/screens/student/objection_screen.dart';
 import 'package:student_council_app/screens/student/student_home_screen.dart';
 
+import 'support/session.dart';
+
 /// 라우트 이름을 미리 등록해 두는 공용 파일(`router.dart`)이 약속대로 동작하는지 본다.
 ///
 /// 화면을 실제로 그리지 않고 라우트가 만드는 위젯의 종류만 확인한다
@@ -49,17 +51,11 @@ void main() {
     return (route! as MaterialPageRoute<dynamic>).builder(context);
   }
 
-  group('인자가 필요 없는 화면', () {
+  group('인자가 필요 없는 화면 (학생)', () {
     final cases = <String, Type>{
       AppRoutes.studentHome: StudentHomeScreen,
       AppRoutes.studentEntries: EntryListScreen,
       AppRoutes.studentSbt: MySbtScreen,
-      AppRoutes.councilExpense: ExpenseCreateScreen,
-      AppRoutes.councilIncome: IncomeCreateScreen,
-      AppRoutes.councilApprovals: ApprovalListScreen,
-      AppRoutes.councilCorrections: CorrectionScreen,
-      AppRoutes.councilInquiries: InquiryResponseScreen,
-      AppRoutes.councilHardwareTest: HardwareTestScreen,
     };
 
     for (final e in cases.entries) {
@@ -84,12 +80,61 @@ void main() {
       expect((widget as ObjectionScreen).entry, same(entry));
     });
 
-    testWidgets('총무 홈은 역할을 받고, 없으면 총무다', (tester) async {
-      final auditor = await buildOf(tester, AppRoutes.councilHome, UserRole.AUDITOR);
-      expect((auditor as CouncilHomeScreen).role, UserRole.AUDITOR);
+  });
 
-      final byDefault = await buildOf(tester, AppRoutes.councilHome);
-      expect((byDefault as CouncilHomeScreen).role, UserRole.TREASURER);
+  /// **임원 화면의 권한은 로그인 세션으로 정한다.** 라우트 인자로 받은 역할은 믿지 않는다 —
+  /// 믿으면 학생·미로그인 상태에서도 `pushNamed` 한 줄로 임원 화면이 열린다.
+  group('임원 화면 — 로그인한 역할로만 열린다', () {
+    tearDown(signOutForTest);
+
+    Future<void> expectForbidden(WidgetTester tester, Widget widget, String reason) async {
+      await tester.pumpWidget(MaterialApp(home: widget));
+      expect(find.textContaining('이 화면을 열 권한이 없어요.'), findsOneWidget, reason: reason);
+    }
+
+    /// 경로 → (화면, 열 수 있는 역할)
+    final cases = <String, (Type, Set<UserRole>)>{
+      AppRoutes.councilExpense: (ExpenseCreateScreen, {UserRole.TREASURER}),
+      AppRoutes.councilIncome: (IncomeCreateScreen, {UserRole.TREASURER}),
+      AppRoutes.councilCorrections: (CorrectionScreen, {UserRole.TREASURER}),
+      AppRoutes.councilApprovals: (ApprovalListScreen, {UserRole.AUDITOR, UserRole.PRESIDENT}),
+      AppRoutes.councilInquiries: (InquiryResponseScreen, {UserRole.AUDITOR, UserRole.PRESIDENT}),
+      AppRoutes.councilHardwareTest: (HardwareTestScreen, {UserRole.TREASURER, UserRole.AUDITOR, UserRole.PRESIDENT}),
+    };
+
+    for (final e in cases.entries) {
+      testWidgets('${e.key} → ${e.value.$1} (${e.value.$2.map((r) => r.code).join('·')} 만)', (tester) async {
+        for (final role in [null, ...UserRole.values]) {
+          if (role == null) {
+            await signOutForTest();
+          } else {
+            await signInAs(role);
+          }
+          final widget = await buildOf(tester, e.key);
+          final who = role?.code ?? '로그인 안 함';
+          if (e.value.$2.contains(role)) {
+            expect(widget.runtimeType, e.value.$1, reason: who);
+          } else {
+            await expectForbidden(tester, widget, who);
+          }
+        }
+      });
+    }
+
+    testWidgets('홈은 로그인한 역할로 열린다 — 인자로 다른 역할을 주장할 수 없다', (tester) async {
+      await signInAs(UserRole.AUDITOR);
+      expect(((await buildOf(tester, AppRoutes.councilHome)) as CouncilHomeScreen).role, UserRole.AUDITOR);
+      expect(
+        ((await buildOf(tester, AppRoutes.councilHome, UserRole.AUDITOR)) as CouncilHomeScreen).role,
+        UserRole.AUDITOR,
+      );
+      await expectForbidden(tester, await buildOf(tester, AppRoutes.councilHome, UserRole.PRESIDENT), '감사가 회장 홈 요청');
+
+      await signInAs(UserRole.STUDENT);
+      await expectForbidden(tester, await buildOf(tester, AppRoutes.councilHome, UserRole.TREASURER), '학생');
+
+      await signOutForTest();
+      await expectForbidden(tester, await buildOf(tester, AppRoutes.councilHome), '로그인 안 함');
     });
   });
 
