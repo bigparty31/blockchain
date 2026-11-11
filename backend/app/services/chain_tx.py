@@ -25,6 +25,11 @@ DB 는 단계(읽기·선점·반영·해제)마다 짧은 세션을 따로 열�
 - 동기 DB 대기가 이벤트 루프를 막지 않는다. 선점은 릴레이어 lock 을 쥔 채 일어나므로 특히 중요하다
 - 체인을 기다리는 동안 열린 DB 트랜잭션이 없다
 서명자 대조(signer_of)·권한·입력 검증은 라우터가 먼저 한다. 여기는 상태 전이만 한다.
+
+알림 (docs/NOTIFICATION_API.md) — 상태 반영(③)과 같은 세션·같은 commit 으로 기록한다 (PRD §4.8). 반영 UPDATE 가 1행일 때만
+기록하므로 재제출로 같은 결과를 다시 받아도 한 번만 남는다. 등록은 PENDING 이면 ENTRY_REGISTERED, BLOCKED 면 ENTRY_BLOCKED 만,
+확정·반려는 그 항목의 재알림 대상을 먼저 닫고 결과를 알린다. 확정이 InsufficientBudget·BudgetExpired 로 거부되면 상태 전이가
+없으니 자체 세션으로 ENTRY_CONFIRM_FAILED 만 기록한다 (총무가 반려 후 재등록이나 증액으로 조치할 수 있는 실패만).
 ② 가 오래 남는 경우(노드가 트랜잭션을 잃음)의 정리는 이번 범위가 아니다 — receipt 가 없다고 안 들어간다고 단정할 수 없다.
 
 라우터에서의 예외 → HTTP:
@@ -35,6 +40,7 @@ DB 는 단계(읽기·선점·반영·해제)마다 짧은 세션을 따로 열�
 """
 import asyncio
 import hashlib
+import logging
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Optional, TypeVar
 
@@ -58,6 +64,9 @@ from app.chain.models import (
 )
 from app.models import Entry
 from app.schemas.entry import EntryStatus
+from app.services.notifications import NotificationKind, create_notification, resolve_notifications
+
+logger = logging.getLogger(__name__)
 
 # DB 의 status 칸 값 (문자열)
 PENDING = EntryStatus.PENDING.value
@@ -66,6 +75,9 @@ REJECTED = EntryStatus.REJECTED.value
 BLOCKED = EntryStatus.BLOCKED.value
 
 T = TypeVar("T")
+
+# 확정이 이 사유로 거부되면 총무에게 알린다. 항목은 PENDING 으로 남고 총무가 반려 후 재등록·증액 요청으로 조치할 수 있다 (§4.1)
+_CONFIRM_FAILURE_NOTICES = frozenset({RevertReason.INSUFFICIENT_BUDGET, RevertReason.BUDGET_EXPIRED})
 
 
 class EntryConflict(Exception):
@@ -168,7 +180,13 @@ async def relay_confirm(
     """
     _check_warning_reason(approval, warning_reason)
     extra = {"approved_by": approver_id, "warning_ack_reason": warning_reason}
-    return await _relay(_Store(db), chain, _CONFIRM, approval.id, extra, lambda claim: chain.confirm_entry(approval, signature, claim))
+    store = _Store(db)
+    try:
+        return await _relay(store, chain, _CONFIRM, approval.id, extra, lambda claim: chain.confirm_entry(approval, signature, claim))
+    except ChainRevert as e:
+        if e.reason in _CONFIRM_FAILURE_NOTICES:
+            await store.notify_confirm_failed(approval.id)
+        raise
 
 
 async def relay_reject(
@@ -397,6 +415,7 @@ class _Store:
 
         def work(db: Session) -> None:
             if _update(db, step, entry_id, tx_hash, values) == 1:
+                _notify_settled(db, step, entry_id, result)
                 return
             current = _row(db, step, entry_id)
             if (current.status, current.claim) != (result.status.value, tx_hash):
@@ -409,6 +428,17 @@ class _Store:
         """② → ①. 칸에 이 hash 가 있을 때만 비운다 — 남의 선점은 건드리지 않는다."""
         values = {step.column: None, **{name: None for name in step.extra}}
         await self._run(lambda db: _update(db, step, entry_id, tx_hash, values))
+
+    async def notify_confirm_failed(self, entry_id: int) -> None:
+        """확정 실패 알림을 자체 세션으로 기록한다. 기록에 실패해도 원래의 거부(ChainRevert)를 가리지 않게 로그만 남긴다."""
+
+        def work(db: Session) -> None:
+            create_notification(db, NotificationKind.ENTRY_CONFIRM_FAILED, entry_id=entry_id)
+
+        try:
+            await self._run(work)
+        except Exception:
+            logger.exception("확정 실패 알림을 기록하지 못했다 (entry_id=%s)", entry_id)
 
     async def raise_if_taken(self, step: _Step, entry_id: int) -> None:
         """콜백 전에 걸린 revert 가 다른 요청 때문이면 409 로 바꾼다. 아니면 그대로 둔다 (원래 revert 가 올라간다)."""
@@ -426,6 +456,16 @@ class _Store:
             except BaseException:
                 db.rollback()
                 raise
+
+
+def _notify_settled(db: Session, step: _Step, entry_id: int, result: TxResult) -> None:
+    """상태가 이 요청으로 바뀐 직후, 같은 세션에서 알림을 기록한다. 호출한 쪽(_run)이 함께 commit 한다."""
+    if step is _RECORD:
+        kind = NotificationKind.ENTRY_BLOCKED if result.status is EntryStatus.BLOCKED else NotificationKind.ENTRY_REGISTERED
+    else:
+        resolve_notifications(db, entry_id=entry_id)  # 승인 요청·수정 요청을 먼저 닫는다
+        kind = NotificationKind.ENTRY_CONFIRMED if step is _CONFIRM else NotificationKind.ENTRY_REJECTED
+    create_notification(db, kind, entry_id=entry_id)
 
 
 def _row(db: Session, step: _Step, entry_id: int) -> _Row:
