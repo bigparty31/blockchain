@@ -147,6 +147,11 @@ def test_council_api_contains_all_routes():
         ("POST", "/bank/snapshots/{snapshot_id}/rematch"),
         ("GET", "/bank/snapshots"),
         ("GET", "/bank/snapshots/{snapshot_id}"),
+        ("GET", "/notifications"),
+        ("GET", "/notifications/unread-count"),
+        ("POST", "/notifications/{id}/read"),
+        ("POST", "/notifications/device-tokens"),
+        ("DELETE", "/notifications/device-tokens/{token}"),
     ]
 
     for req in required_commands:

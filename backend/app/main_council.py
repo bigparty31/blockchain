@@ -50,6 +50,8 @@ app = FastAPI(
   - `POST /budget-revisions/{id}/approve`: 증액 감사 승인 (감사)
   - `POST /receipts`: 영수증 파일 업로드
   - `GET /users/wallets`: 임원 지갑 매핑 조회
+  - `GET /notifications`, `GET /notifications/unread-count`, `POST /notifications/{id}/read`: 임원 알림함
+  - `POST /notifications/device-tokens`, `DELETE /notifications/device-tokens/{token}`: 임원 기기 FCM 토큰 등록·해제
     """,
 )
 
