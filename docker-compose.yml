@@ -45,7 +45,9 @@ services:
       DATABASE_URL: postgresql+psycopg://council:${POSTGRES_PASSWORD}@db:5432/council
       JWT_SECRET: ${JWT_SECRET:?.env 에 JWT_SECRET 이 필요합니다}
       CHAIN_RPC_URL: http://chain:8545
+      # 두 값은 scripts/dev-stack-reset.sh 가 .env 에 채운다. 비어 있으면 체인 쓰기·회원권이 503 이다 (docs/SERVER_ENV.md)
       RELAYER_PRIVATE_KEY: ${RELAYER_PRIVATE_KEY:-}
+      STUDENT_WALLET_MNEMONIC: ${STUDENT_WALLET_MNEMONIC:-}
       DEPLOYMENTS_FILE: /deployments/localhost.json
       RECEIPTS_STORAGE_DIR: /app/uploads/receipts
     volumes:
