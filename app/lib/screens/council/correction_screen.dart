@@ -227,6 +227,11 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
   Future<void> _attachReceipt() async {
     final bytes = await (widget.pickReceipt ?? pickReceiptBytes)(context);
     if (bytes == null || !mounted) return;
+    final problem = receiptFormatProblem(bytes); // HEIC 는 서버가 받지 않는다 (#71 리뷰)
+    if (problem != null) {
+      _snack(problem);
+      return;
+    }
     setState(() {
       _receiptBytes = bytes;
       _receiptHash = Hashing.fileHash(bytes);
