@@ -329,9 +329,16 @@ class _MyEntriesScreenState extends State<MyEntriesScreen> {
     if (_fromServer) _load();
   }
 
-  Widget _resubmitScreen(EntryModel e) => e.kind == EntryKind.INCOME
-      ? IncomeCreateScreen(resubmitOf: e, registrar: widget.registrar)
-      : ExpenseCreateScreen(resubmitOf: e, registrar: widget.registrar);
+  /// 반려·차단된 건을 다시 올리는 화면. **정정 건은 정정 화면으로** 보낸다 — 일반 등록 화면에는 정정 대상·사유가 없어서
+  /// 양수 정정이 독립된 새 지출로 올라가고(지출 중복), 음수는 금액 검증에 막힌다 (#72 리뷰).
+  /// 정정 화면은 원본 번호만 받는다. 입력했던 값은 다시 적어야 한다.
+  Widget _resubmitScreen(EntryModel e) {
+    final target = e.correctsEntryId;
+    if (target != null) return CorrectionScreen(initialTargetId: target, registrar: widget.registrar);
+    return e.kind == EntryKind.INCOME
+        ? IncomeCreateScreen(resubmitOf: e, registrar: widget.registrar)
+        : ExpenseCreateScreen(resubmitOf: e, registrar: widget.registrar);
+  }
 
   /// 목업 카드의 행동 — 서버 항목이 없어 화면만 연다.
   _Action _mockAction(MyEntryItem e) {
