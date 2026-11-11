@@ -1015,6 +1015,140 @@ PRD v0.15 §4.6. 총무가 은행에서 내려받은 거래내역 CSV를 올리�
 | `404` | `term_id`의 학기가 없음 |
 | `503` | 보유 여부를 확인하지 못함 (체인 장애, `MembershipSBT` 미배포, `STUDENT_WALLET_MNEMONIC` 미설정, DB 오류). **미보유가 아니므로 「납부 확인 필요」로 안내하지 않습니다** |
 
+### 2. 회원권 일괄 발행 (`POST /memberships/mint-batches`, `POST /memberships/mint-batches/{id}/submit`, `GET /memberships/mint-batches/{id}`)
+- **설명**: 임원 화면 A3. 납부자 명단(학번)으로 그 학기 회원권(SBT)을 한 번에 발행합니다. 회장 또는 감사가 기기에서 EIP-712 `MintBatchRequest`에 서명하고 서버가 릴레이합니다 (PRD §4.2, §7.2, §9.2). 서버 혼자서는 발행하지 않습니다.
+- **권한**: 회장(`PRESIDENT`)·감사(`AUDITOR`). 제출은 준비한 임원 본인만 할 수 있습니다 — nonce가 서명자마다 따로라서 다른 사람의 서명으로는 낼 수 없습니다.
+- **2단계 흐름** (예산 최초 편성과 같은 구조):
+  1. **준비 (`POST /memberships/mint-batches`)**: 학기와 학번 목록(1~100개)을 보내면, 서버가 학번을 학생 지갑 주소로 바꾸고 이미 보유한 학생 등을 뺀 뒤 서명할 값(`term_code`, `nonce`, `recipients`)을 돌려줍니다.
+  2. **서명**: 앱이 `GET /chain/domains`의 `MembershipSBT` 도메인으로 `MintBatchRequest(recipients, term_code, nonce, deadline)`에 서명합니다. **`recipients`는 받은 순서 그대로** 써야 합니다 (배열 해시가 순서에 따라 달라집니다).
+  3. **제출 (`POST /memberships/mint-batches/{id}/submit`)**: `deadline`과 `signature`를 보내면 서버가 서명자를 확인하고 체인에 보냅니다. 학생별 결과(새로 발행 / 이미 보유로 건너뜀)를 돌려줍니다.
+- **100명 넘는 명단**은 앱이 100명씩 나눠 **한 묶음씩** 준비 → 서명 → 제출합니다. 같은 서명자의 nonce는 성공할 때마다 1씩 올라서, 여러 묶음을 미리 서명해 두면 앞 묶음이 실패했을 때 뒤 묶음 서명이 모두 무효가 됩니다.
+- **화면에 보이는 것과 서명하는 것**: 승인자는 학번·이름을 보고, 서명은 서버가 준 주소에 합니다. 학번↔주소 매핑은 서버에만 있어서 승인자가 주소를 확인할 방법은 없습니다. 발행 뒤 학생이 자기 화면(`GET /memberships/me`)에서 보유를 확인하는 것이 그 대응입니다 (PRD §13).
+
+**Request (`POST /memberships/mint-batches` - 1단계 준비)**
+```json
+{
+  "term_id": 2,
+  "student_nos": ["20231234", "20231235", "20231236", "20990000"]
+}
+```
+- `student_nos`: 1~100개. 앞뒤 공백은 지웁니다.
+
+**Response (`201 Created` - 1단계 준비)**
+```json
+{
+  "id": 7,
+  "term_id": 2,
+  "term_code": 20262,
+  "status": "PREPARED",
+  "signer_address": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+  "nonce": 3,
+  "recipients": [
+    "0x1aB2...",
+    "0x3cD4..."
+  ],
+  "deadline": null,
+  "tx_hash": null,
+  "reason": null,
+  "targets": [
+    { "student_no": "20231234", "user_id": 11, "name": "김학생", "address": "0x1aB2...", "status": "PENDING", "token_id": null, "membership_id": null },
+    { "student_no": "20231235", "user_id": 12, "name": "이학생", "address": "0x3cD4...", "status": "PENDING", "token_id": null, "membership_id": null }
+  ],
+  "excluded": [
+    { "student_no": "20231236", "user_id": 13, "name": "박학생", "status": "ALREADY_MEMBER" },
+    { "student_no": "20990000", "user_id": null, "name": null, "status": "NOT_FOUND" }
+  ],
+  "created_at": 1794700800,
+  "message": "2명에게 발행할 준비가 되었습니다. 기기에서 서명해 제출해 주세요."
+}
+```
+- `signer_address`: 로그인한 임원의 지갑 주소입니다. 이 주소로 서명해야 합니다.
+- `nonce`: 체인의 `MembershipSBT.nonces(signer_address)`를 준비할 때 읽은 값입니다.
+- `recipients`: 서명할 주소 배열입니다. `targets`와 순서가 같습니다.
+- `excluded`의 `status`:
+
+| 값 | 뜻 |
+| --- | --- |
+| `ALREADY_MEMBER` | 그 학기 회원권을 이미 보유 (체인 `hasValidMembership` 기준). 서버에 그 회원권의 DB 기록이 없으면 이때 체인 `tokenOf`로 채웁니다 (발행할 학생이 0명이라 `400`이어도 채웁니다) |
+| `NOT_FOUND` | 등록된 학번이 아님 |
+| `NOT_STUDENT` | 임원 계정 (회원권을 받을 수 없음) |
+| `DUPLICATE` | 명단에 같은 학번이 두 번 이상 있음 (첫 번째만 남김) |
+| `DB_MISMATCH` | DB와 체인의 회원권 기록이 다름 — DB에는 유효한 회원권이 있는데 체인에는 없음. 운영자 확인이 필요해 발행하지 않음 |
+
+- `excluded`는 준비 응답에만 있고 명단 순서대로입니다. 서버는 `targets`만 저장합니다.
+- 끝난 학기에도 준비할 수 있습니다 (학기가 있는지만 봅니다). `deadline`의 상한은 서버가 보지 않습니다 — 지난 `deadline`은 체인이 `SignatureExpired`로 거부합니다.
+
+**Request (`POST /memberships/mint-batches/{id}/submit` - 2단계 서명 제출)**
+```json
+{
+  "deadline": 1794704400,
+  "signature": "0x..."
+}
+```
+
+**Response (`200 OK` - 2단계 결과)**
+```json
+{
+  "id": 7,
+  "term_id": 2,
+  "term_code": 20262,
+  "status": "MINTED",
+  "signer_address": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+  "nonce": 3,
+  "recipients": ["0x1aB2...", "0x3cD4..."],
+  "deadline": 1794704400,
+  "tx_hash": "0x...",
+  "reason": null,
+  "targets": [
+    { "student_no": "20231234", "user_id": 11, "name": "김학생", "address": "0x1aB2...", "status": "MINTED", "token_id": 41, "membership_id": 88 },
+    { "student_no": "20231235", "user_id": 12, "name": "이학생", "address": "0x3cD4...", "status": "SKIPPED", "token_id": 17, "membership_id": 52 }
+  ],
+  "excluded": [],
+  "created_at": 1794700800,
+  "message": "1명에게 발행했고 1명은 이미 보유해 건너뛰었습니다."
+}
+```
+
+요청 `status`:
+
+| 값 | 뜻 | 앱이 할 일 |
+| --- | --- | --- |
+| `PREPARED` | 준비됨, 아직 보내지 않음 | 서명해 제출 |
+| `SUBMITTING` | 다른 제출이 지금 체인에 보내는 중 | 잠시 뒤 `GET`으로 확인 |
+| `MINTED` | 체인에 들어감. 학생별 결과는 `targets` | 끝 |
+| `REJECTED` | 체인이 거부함. 사유는 `reason`(Solidity 에러 이름) | 아래 표 |
+| `NO_RESPONSE` | 보냈지만 결과를 모름 | **같은 서명을 다시 보내지 않는다.** `GET`으로 확인 |
+
+대상 `status`: `PENDING`(아직 결과 없음) · `MINTED`(새로 발행, `token_id` 있음) · `SKIPPED`(제출 사이에 이미 보유해 컨트랙트가 건너뜀, `token_id`는 그 회원권).
+
+`membership_id`는 서버 DB의 회원권 기록(`GET /memberships/me`의 `id`)입니다. 발행되면(`MINTED`) 서버가 기록을 만들고, 건너뛴 학생(`SKIPPED`)도 기록이 없으면 만듭니다. 체인에는 들어갔는데 DB 기록을 만들지 못하면(예: 체인을 재배포해 같은 `token_id`가 DB에 이미 있음) `null`이고, 다른 학생의 결과에는 영향이 없습니다. 이 경우 체인 기록이 기준이므로 회원권은 유효하지만 운영자 확인이 필요합니다.
+
+`REJECTED`의 `reason`과 대응:
+
+| `reason` | 뜻 | 대응 |
+| --- | --- | --- |
+| `SignatureExpired` | `deadline`이 지남 | 새 `deadline`으로 다시 서명해 같은 `id`로 제출 |
+| `InvalidNonce` | 그사이 같은 서명자의 다른 발행이 먼저 들어감 | 다시 준비 (`POST /memberships/mint-batches`) |
+| `NotApprover` | 서명자가 체인에서 회장·감사가 아님 | 롤 확인 |
+| `InvalidSignature` | 서명이 깨짐 | 다시 서명 |
+| 그 밖 (`EmptyBatch`, `BatchTooLarge`, `ZeroAddress`, `TermRequired`) | 서버 준비 단계에서 걸러야 하는 값 | 서버 오류로 보고 |
+
+- `REJECTED`는 같은 `id`로 다시 제출할 수 있습니다. 제출할 때 체인의 nonce가 준비 때 값과 다르면 보내지 않고 `409`입니다.
+
+**Response (`GET /memberships/mint-batches/{id}`)**: 위와 같은 모양입니다 (`excluded`는 빈 배열). `NO_RESPONSE`·`SUBMITTING`이면 저장된 `tx_hash`로 체인 결과를 다시 확인해 반영한 뒤 돌려줍니다.
+
+| 코드 | 경우 |
+| --- | --- |
+| `201` | 준비 완료 |
+| `200` | 제출 결과(`MINTED` \| `REJECTED` \| `NO_RESPONSE`), 조회 |
+| `400` | 서명 형식 오류, 서명자가 `signer_address`와 다름, 발행할 학생이 0명(본문 `detail.excluded`에 학생별 사유), 로그인한 임원의 지갑 주소가 등록되지 않음 |
+| `401` | 토큰 없음·만료 |
+| `403` | 회장·감사가 아님, 다른 임원이 준비한 요청을 제출 |
+| `404` | 학기(`term_id`) 또는 요청(`id`)이 없음 |
+| `409` | 체인의 nonce가 준비 때와 다름(다시 준비), 이미 `MINTED`, 다른 제출이 처리 중(`SUBMITTING`·`NO_RESPONSE`) |
+| `422` | 본문 형식 오류 (`student_nos` 0개·101개 이상, `deadline` 음수 등) |
+| `503` | 체인에 닿지 못함, `MembershipSBT` 미배포, 릴레이어 전송 불가, `STUDENT_WALLET_MNEMONIC` 미설정, DB 오류 |
+
 ---
 
 ## 행사·입장
@@ -1113,6 +1247,9 @@ PRD v0.15 §4.2 (QR 입장), §8 (`Event`, `CheckIn`). 세 API 모두 **임원(�
 | 등록 `RecordRequest`, 승인 `ConfirmApproval`, 반려 `RejectDecision` | `AccountingLedger` |
 | 예산 발행 `IssueRequest`, 증액 `IncreaseRequest`, 회수 `ReclaimRequest` | `BudgetToken` |
 | 롤 변경 `RoleChange`, 회장 복구 `PresidentRecovery`·`RecoveryCancel` | `RoleManager` |
+| SBT 발행 `MintBatchRequest`, 회수 `BurnRequest` | `MembershipSBT` |
+
+- `MembershipSBT`는 배포 기록에 있을 때만 `domains`에 들어갑니다. 아직 배포 전이라 없어도 `503`이 아니고 나머지 세 도메인은 그대로 내려갑니다. 앱은 키가 없으면 「회원권 발행을 아직 쓸 수 없음」으로 안내합니다. 있으면 다른 도메인과 같은 검사(아래 `503` 조건)를 거칩니다.
 
 - **검산**: `domainSeparator`는 컨트랙트의 `DOMAIN_SEPARATOR()`입니다. 앱이 나머지 네 필드로 계산한 도메인 해시와 비교하면, 체인 id나 주소를 잘못 쓴 것을 서명 전에 잡을 수 있습니다.
 - 키 이름은 EIP-712 도메인 필드 그대로(`chainId`, `verifyingContract`)라 서명 라이브러리에 바로 넘길 수 있습니다. `domainSeparator`는 도메인 필드가 아니니 넘기기 전에 뺍니다.
@@ -1147,7 +1284,7 @@ PRD v0.15 §4.2 (QR 입장), §8 (`Event`, `CheckIn`). 세 API 모두 **임원(�
 }
 ```
 
-**배포 기록이 없거나 앞뒤가 맞지 않을 때 (`503 Service Unavailable`)** — 서명 도메인(`AccountingLedger`·`BudgetToken`·`RoleManager`) 중 하나라도 없거나, 도메인의 `chainId`·`verifyingContract`가 같은 파일의 체인·주소와 다르거나, `domainSeparator`가 네 필드로 계산한 값과 다르면 반쯤 갱신되거나 잘못된 기록으로 보고 내려주지 않습니다. 틀린 `domainSeparator`를 내려주면 앱의 검산이 모든 서명을 막기 때문입니다.
+**배포 기록이 없거나 앞뒤가 맞지 않을 때 (`503 Service Unavailable`)** — 필수 서명 도메인(`AccountingLedger`·`BudgetToken`·`RoleManager`) 중 하나라도 없거나, 배포 기록에 있는 도메인(`MembershipSBT` 포함)의 `chainId`·`verifyingContract`가 같은 파일의 체인·주소와 다르거나, `domainSeparator`가 네 필드로 계산한 값과 다르면 반쯤 갱신되거나 잘못된 기록으로 보고 내려주지 않습니다. 틀린 `domainSeparator`를 내려주면 앱의 검산이 모든 서명을 막기 때문입니다.
 ```json
 { "detail": "배포 기록이 없습니다 (localhost.json). 컨트랙트를 배포했는지 확인하세요" }
 ```

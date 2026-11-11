@@ -48,6 +48,7 @@ app = FastAPI(
   - `POST /budget-revisions`: 증액 신청 (총무)
   - `POST /budget-revisions/{id}/sign`: 증액 회장 서명 (회장)
   - `POST /budget-revisions/{id}/approve`: 증액 감사 승인 (감사)
+  - `POST /memberships/mint-batches`, `POST /memberships/mint-batches/{batch_id}/submit`, `GET /memberships/mint-batches/{batch_id}`: 회원권(SBT) 일괄 발행 준비·서명 제출·조회 (회장·감사)
   - `POST /receipts`: 영수증 파일 업로드
   - `GET /users/wallets`: 임원 지갑 매핑 조회
     """,
