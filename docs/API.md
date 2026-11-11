@@ -441,16 +441,54 @@
 ```
 
 ### 2. 지출 및 수입 신규 등록 흐름 (2단계 등록 프로세스)
-지출/수입 등록은 블록체인 EIP-712 기기 서명 검증을 위해 **2단계**로 진행됩니다:
-1. **1단계 (초안 등록 및 검증)**: 클라이언트가 거래 내역을 전송하여 서버에 초안을 생성하고 고유 id를 발급받습니다.
-2. **2단계 (앱 서명 및 체인 제출)**: 모바일 앱에서 기기 서명(EIP-712 `RecordRequest`)을 완료하여 서버/릴레이어에 제출하면 스마트 컨트랙트 트랜잭션이 발행되고 `PENDING` 상태로 전환됩니다.
+지출/수입 등록은 영수증 업로드 및 블록체인 EIP-712 기기 서명 검증을 위해 아래 절차로 진행됩니다:
+1. **[사전 단계] 영수증 파일 업로드 (`POST /receipts`)**: 총무가 영수증 이미지를 업로드하고, 서버에서 바이트를 보존해 산출한 `receipt_hash`와 `receipt_path`를 획득합니다.
+2. **1단계 (초안 등록 및 검증, `POST /entries`)**: 클라이언트가 영수증 해시와 거래 내역을 전송하여 서버에 초안을 생성하고 고유 id를 발급받습니다.
+3. **2단계 (앱 서명 및 체인 제출, `POST /entries/{id}/submit`)**: 모바일 앱에서 기기 서명(EIP-712 `RecordRequest`)을 완료하여 서버/릴레이어에 제출하면 스마트 컨트랙트 트랜잭션이 발행되고 `PENDING` 상태로 전환됩니다.
+
+---
+
+#### 2.0 [사전] 영수증 파일 업로드 (`POST /receipts`, `GET /receipts/{filename}`)
+- **설명**: 총무가 촬영하거나 선택한 영수증 이미지를 서버에 업로드합니다 (`multipart/form-data`). 서버는 파일의 원본 바이트를 보존하여 SHA-256 해시를 계산하고 파일명에 반영해 저장합니다.
+- **권한**: 업로드(`POST /receipts`)는 총무(`TREASURER`) 전용이며, **영수증 원본 열람/다운로드(`GET /receipts/{filename}`)는 학생 앱의 영수증 확인 및 해시 대조 검증(S3, S7)을 위해 인증 없이 공개**됩니다 (`GET /entries`의 `receipt_path`와 동일한 공개 범위).
+- **조회/열람**: 업로드된 파일은 `GET /receipts/{filename}`으로 언제든 원본 이미지를 다운로드하거나 모바일 앱 화면에서 열람(S3)할 수 있습니다.
+
+**Request (`POST /receipts`)**
+- Header: `Content-Type: multipart/form-data`
+- Body: `file: <바이너리 이미지 파일>`
+
+**Response (`201 Created`)**
+```json
+{
+  "receipt_hash": "0xdef4567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+  "receipt_path": "/receipts/def4567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef.jpg",
+  "filename": "receipt_20261106.jpg",
+  "size": 245120
+}
+```
+
+| 코드 | 경우 (`POST /receipts`, `GET /receipts/{filename}`) |
+| --- | --- |
+| `201` | 영수증 업로드 성공 및 해시 발급 완료 |
+| `200` | `GET /receipts/{filename}` 파일 다운로드 성공 |
+| `400` | 빈 파일이거나 파일 파라미터 누락 |
+| `403` | 총무(`TREASURER`)가 아님 |
+| `404` | `GET /receipts/{filename}` 파일 미존재 |
 
 ---
 
 #### 2.1 [1단계] 초안 등록 및 검증 (`POST /entries`)
 - **설명**: 총무가 영수증 해시와 거래 내역을 입력하여 초안을 생성합니다. 블록체인 기록 전이므로 온체인 상태가 아니며, 고유 `id`만 발급됩니다.
 - **권한**: 총무(`TREASURER`)만. 컨트랙트도 등록자를 총무로 제한합니다(`NotRegistrant`). 학생·감사·회장은 `403`, 토큰이 없으면 `401` (인증 §3).
-- **등록자**: `created_by`에는 토큰의 사용자 id가 기록됩니다.
+- **영수증 필수 및 검증 (PRD §4.3, B2, B3)**:
+  - **지출(`EXPENSE`)**: 일반 지출 및 양수(증액·재분류) 정정 지출은 `receipt_hash`가 필수입니다 (누락 시 `400 Bad Request`). 단, 음수(감액·환불) 정정 지출은 영수증이 선택값입니다 (`docs/HASHING.md` §2 샘플 3).
+  - **수입(`INCOME`)**: `receipt_hash`는 선택값입니다.
+  - **해시 형식 검증**: `receipt_hash`는 `0x`로 시작하는 64자리 소문자 16진수(`^0x[0-9a-f]{64}$`)여야 합니다 (대문자, 0x 누락, 길이 불일치 시 `400 Bad Request`).
+  - **파일 존재 검증**: 사전에 `POST /receipts`로 업로드되지 않았거나 서버에 존재하지 않는 파일의 해시는 `400 Bad Request`로 거부됩니다.
+- **영수증 중복 검증 (PRD §6, §8, B4)**:
+  - 기존 승인번호+결제일시+금액 또는 영수증 해시가 이미 등록되어 있는 경우, `409 Conflict`로 차단하지 않고 **정상 등록하되 `ocr_status = "DUPLICATE"` 경고 상태로 등록**합니다. (감사 승인 시 소명 사유가 강제됩니다)
+  - 단, 미제출 초안(`status IS NULL`), 반려(`REJECTED`), 예산초과 차단(`BLOCKED`) 내역 및 정정 시 원본(`corrects_entry_id`)은 중복 대조 대상에서 제외됩니다.
+  - **2단계 제출(`POST /entries/{id}/submit`) 시 재검사**: 같은 영수증으로 초안을 두 번 만든 뒤 순차 제출하는 경우를 잡기 위해, `POST /entries/{id}/submit`(`entries.py` `submit_entry` 단계 6.5)에서도 `PENDING` 전환 직전에 이미 `PENDING`·`CONFIRMED`가 된 동일 영수증이 있는지 한 번 더 검사하여 `ocr_status = "DUPLICATE"`로 갱신합니다.
 
 **Request**
 ```json
@@ -462,7 +500,8 @@
   "purpose": "개강총회 다과 주문",
   "budget_id": 1,
   "occurred_at": 1788706800,
-  "receipt_hash": "0xdef4567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+  "receipt_hash": "0xdef4567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+  "receipt_path": "/receipts/def4567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef.jpg"
 }
 ```
 
@@ -476,6 +515,15 @@
   "message": "지출 초안이 등록되었으며, 기기 서명 제출 대기 상태입니다."
 }
 ```
+
+| 코드 | 경우 (`POST /entries`) |
+| --- | --- |
+| `201` | 초안 ID 채번 완료 |
+| `400` | 지출 시 `receipt_hash` 누락, 해시 형식 불일치(대문자·길이 오류), 서버 미존재 영수증, 거래처/목적 제어문자 포함 또는 빈 문자열, `occurred_at` 자정 시각 불일치, 수입 내역에 예산 배정 시도 |
+| `401` | 로그인 토큰 없음 |
+| `403` | 총무(`TREASURER`)가 아님 |
+| `422` | 요청 본문 유효성 검증 실패 (문자열 길이 초과 등) |
+| `503` | 데이터베이스 오류 |
 
 ---
 
