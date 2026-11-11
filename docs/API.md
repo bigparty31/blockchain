@@ -527,6 +527,13 @@
   - 기존 승인번호+결제일시+금액 또는 영수증 해시가 이미 등록되어 있는 경우, `409 Conflict`로 차단하지 않고 **정상 등록하되 `ocr_status = "DUPLICATE"` 경고 상태로 등록**합니다. (감사 승인 시 소명 사유가 강제됩니다)
   - 단, 미제출 초안(`status IS NULL`), 반려(`REJECTED`), 예산초과 차단(`BLOCKED`) 내역 및 정정 시 원본(`corrects_entry_id`)은 중복 대조 대상에서 제외됩니다.
   - **2단계 제출(`POST /entries/{id}/submit`) 시 재검사**: 같은 영수증으로 초안을 두 번 만든 뒤 순차 제출하는 경우를 잡기 위해, `POST /entries/{id}/submit`(`entries.py` `submit_entry` 단계 6.5)에서도 `PENDING` 전환 직전에 이미 `PENDING`·`CONFIRMED`가 된 동일 영수증이 있는지 한 번 더 검사하여 `ocr_status = "DUPLICATE"`로 갱신합니다.
+- **정정 규칙 검증 (PRD §4.4, `docs/CONTRACTS.md` '정정', B7)**:
+  - `amount == 0`인 경우 일반·정정 모두 `400 Bad Request`(`ZeroAmount`)로 거부됩니다.
+  - 일반 내역(`corrects_entry_id = null`)은 양수 금액만 허용되며 `correction_reason`을 지정할 수 없습니다. 정정 내역(`corrects_entry_id != null`)은 `correction_reason`(`INPUT_ERROR | RECEIPT_RECHECK | REFUND | RECLASSIFY | OTHER`, `OTHER`는 상세 사유를 `purpose`에 작성)이 필수입니다.
+  - 정정 대상(`corrects_entry_id`)이 없으면 `404 Not Found`, 확정(`CONFIRMED`) 상태가 아니면 `400`(`CorrectionTargetNotConfirmed`), 원본이나 다른 예산으로 재분류된 양수 지출 정정이 아니면 `400`(`InvalidCorrectionTarget`)으로 차단됩니다.
+  - 정정의 `kind`와 `term_id`는 정정 대상과 같아야 합니다(`CorrectionKindMismatch` / `TermMismatch`).
+  - 감액(음수) 정정은 대상과 같은 `budget_id`여야 하며(`CorrectionBudgetMismatch`), 대상의 현재 확정 순금액(`netAmount`)을 초과하여 감액할 수 없습니다(`CorrectionExceedsOriginal`).
+  - **항목 재분류(`RECLASSIFY`) 확정 순서 강제**: 앱에서 양수(증액) 정정과 음수(감액) 정정 2건을 연속으로 등록(`POST /entries`)할 수 있도록 등록 단계에서는 차단하지 않으며, 확정(`POST /entries/{id}/confirm`) 단계에서 새 예산에 대한 양수 재분류 정정이 먼저 확정(`CONFIRMED`)되었는지 검사합니다 (미확정 상태에서 음수 정정을 먼저 확정하려 하면 `400 Bad Request`).
 
 **Request**
 ```json
@@ -556,10 +563,11 @@
 
 | 코드 | 경우 (`POST /entries`) |
 | --- | --- |
-| `201` | 초안 ID 채번 완료 |
-| `400` | 지출 시 `receipt_hash` 누락, 해시 형식 불일치(대문자·길이 오류), 서버 미존재 영수증, 거래처/목적 제어문자 포함 또는 빈 문자열, `occurred_at` 자정 시각 불일치, 수입 내역에 예산 배정 시도 |
+| `201` | 초안 ID 채번 완료 (`duplicate_of` 포함) |
+| `400` | 지출 시 `receipt_hash` 누락, 해시 형식 불일치(대문자·길이 오류), 서버 미존재 영수증, 거래처/목적 제어문자 포함 또는 빈 문자열, `occurred_at` 자정 시각 불일치, 수입 내역에 예산 배정 시도, 금액 0(`ZeroAmount`), 정정 규칙 위반(`CorrectionTargetNotConfirmed`, `InvalidCorrectionTarget`, `CorrectionKindMismatch`, `TermMismatch`, `CorrectionBudgetMismatch`, `CorrectionExceedsOriginal`, 재분류 양수 정정에 동일 예산 지정) |
 | `401` | 로그인 토큰 없음 |
 | `403` | 총무(`TREASURER`)가 아님 |
+| `404` | 정정 대상 내역(`corrects_entry_id`)을 찾을 수 없음 |
 | `422` | 요청 본문 유효성 검증 실패 (문자열 길이 초과 등) |
 | `503` | 데이터베이스 오류 |
 
