@@ -178,7 +178,9 @@ class EntryRegistrationService implements EntryRegistrar {
   /// ① 초안 저장. 발급된 id 를 돌려준다. 체인에는 아무것도 올라가지 않는다.
   @override
   Future<int> saveDraft(EntryDraft draft) async {
-    final body = await postSigned(client, ApiConfig.entries, draft.toCreateJson(), what: '초안 저장', timeout: _readTimeout);
+    // 쓰기 요청이라 제출과 같은 시간을 기다린다 — 서버는 초안을 만들었는데 응답만 5초 안에 못 받으면 id 를 잃고
+    // 다시 누를 때 두 번째 초안이 생긴다 (서버 중복 검사는 ocr_approval_no 기준이라 여기서는 막지 못한다).
+    final body = await postSigned(client, ApiConfig.entries, draft.toCreateJson(), what: '초안 저장', timeout: postTimeout);
     final id = body['id'];
     if (id is! int) {
       throw const EntryDecisionException(
