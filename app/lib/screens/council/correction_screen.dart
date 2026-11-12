@@ -182,16 +182,25 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
       _looking = false;
       _target = error == null ? found : null;
       _targetError = error;
-      // 조회 전에 고른 새 예산이 이 내역의 원래 예산이면 후보에서 빠진다. 선택을 남겨 두면
-      // 드롭다운 값이 후보에 없어 화면이 깨지고(디버그 assertion), 같은 예산으로 옮기는 재분류가 된다.
-      if (_target != null && _newBudgetId == _target!.original.budgetId) _newBudgetId = null;
+      // 조회 전에 고른 새 예산이 후보에서 빠질 수 있다 — 이 내역의 원래 예산이거나 다른 학기의 예산이면.
+      // 선택을 남겨 두면 드롭다운 값이 후보에 없어 화면이 깨지고(디버그 assertion), 같은 예산이나 다른 학기로 옮기는 재분류가 된다.
+      if (_target != null && !_isCandidate(_newBudgetId)) _newBudgetId = null;
     });
   }
 
-  /// 재분류의 새 예산 검사 — 제출 때 다시 본다. 고르지 않았거나 원래 예산과 같으면 안 된다.
+  /// [id] 가 지금 정정 대상 기준의 재분류 후보(같은 학기의 다른 예산)인지. 예산 목록을 못 읽었으면 판단하지 않는다.
+  bool _isCandidate(int? id) {
+    if (id == null) return false;
+    if (_budgets.isEmpty) return id != _target?.original.budgetId;
+    return reclassifyCandidates(_budgets, termId: _target?.original.termId, fromBudgetId: _target?.original.budgetId)
+        .any((b) => b.id == id);
+  }
+
+  /// 재분류의 새 예산 검사 — 제출 때 다시 본다. 고르지 않았거나 원래 예산과 같거나 다른 학기면 안 된다.
   String? _newBudgetError() {
     if (_newBudgetId == null) return '옮겨 갈 예산 항목을 골라 주세요';
     if (_newBudgetId == _target?.original.budgetId) return '원래 예산과 다른 항목을 골라 주세요';
+    if (!_isCandidate(_newBudgetId)) return '정정 대상과 같은 학기의 예산 항목을 골라 주세요';
     return null;
   }
 
@@ -269,18 +278,22 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
     if (!valid) return;
     final target = _target!;
     final original = target.original;
+    final correctedAmount = _correctedAmount; // 결과 안내에도 제출한 값을 쓴다
+    final reclassify = _isReclassify;
+    // 입력은 여기서 한 번만 읽는다 — 업로드·저장을 기다리는 사이 바꿔도(금액을 비워도) 보낸 값이 같고, 다시 읽다 던지지 않는다 (#72 리뷰).
+    // 재분류는 새 예산에 증액(+)을 먼저, 원래 예산에 감액(−)을 나중에 올린다 (PRD §4.4, 확정 순서는 서버가 강제)
+    final base = reclassify
+        ? [
+            _draftFor(original, amount: target.finalAmount, budgetId: _newBudgetId),
+            _draftFor(original, amount: -target.finalAmount, budgetId: original.budgetId),
+          ]
+        : [_draftFor(original, amount: _delta!, budgetId: original.budgetId)];
     setState(() => _submitting = true);
 
     String? failure;
     try {
       final path = await _ensureUploaded();
-      // 재분류는 새 예산에 증액(+)을 먼저, 원래 예산에 감액(−)을 나중에 올린다 (PRD §4.4, 확정 순서는 서버가 강제)
-      final drafts = _isReclassify
-          ? [
-              _draftFor(original, amount: target.finalAmount, budgetId: _newBudgetId, receiptPath: path),
-              _draftFor(original, amount: -target.finalAmount, budgetId: original.budgetId, receiptPath: path),
-            ]
-          : [_draftFor(original, amount: _delta!, budgetId: original.budgetId, receiptPath: path)];
+      final drafts = [for (final d in base) d.withReceiptPath(path)];
       for (final draft in drafts) {
         if (_registered.any((r) => r.draft == draft)) continue;
         final r = await _register(draft);
@@ -290,6 +303,9 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
       }
     } on EntryDecisionException catch (e) {
       failure = e.message;
+    } catch (_) {
+      // 예상 못 한 실패도 「제출 중」에 갇히지 않게 푼다 — 서버에는 이미 기록됐을 수 있어 확인을 권한다
+      failure = '등록을 마치지 못했어요. 내 등록 현황에서 확인한 뒤 다시 시도해 주세요.';
     }
     if (!mounted) return;
     setState(() => _submitting = false);
@@ -300,7 +316,7 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
           : '$done 은 등록됐어요. 나머지는 등록하지 못했어요: $failure 다시 제출하면 나머지만 올려요.');
       return;
     }
-    await _showResult(target);
+    await _showResult(target, correctedAmount: correctedAmount, reclassify: reclassify);
   }
 
   void _snack(String text) {
@@ -308,10 +324,9 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
   }
 
   /// 등록 결과 — 건마다 번호와 체인 상태(`PENDING`·`BLOCKED`).
-  Future<void> _showResult(EntryChain target) async {
+  Future<void> _showResult(EntryChain target, {required int? correctedAmount, required bool reclassify}) async {
     final registered = List.of(_registered);
     final blocked = registered.any((r) => r.outcome.status == EntryStatus.BLOCKED);
-    final reclassify = _isReclassify;
     String statusOf(_Registered r) =>
         r.outcome.status == EntryStatus.BLOCKED ? '차단 (${r.outcome.blockReason?.code ?? '-'})' : '승인 대기';
     await showDialog<void>(
@@ -354,7 +369,7 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
                     if (!reclassify) ...[
                       _InfoRow(
                         label: '금액 변경',
-                        value: '${Fmt.won(target.finalAmount)} → ${Fmt.won(_correctedAmount!)}',
+                        value: '${Fmt.won(target.finalAmount)} → ${Fmt.won(correctedAmount!)}',
                       ),
                       _InfoRow(label: '기록되는 정정 금액', value: _signed(registered.first.draft.amount)),
                       _InfoRow(label: '정정 번호', value: '#${registered.first.id} · ${statusOf(registered.first)}'),

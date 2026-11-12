@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -291,6 +292,23 @@ void main() {
       final body = latin1.decode(req.bodyBytes);
       expect(body, contains('name="file"; filename="receipt.jpg"'));
       expect(body, contains(latin1.decode(receiptBytes)), reason: '재인코딩 없이 원본 바이트 그대로');
+    });
+
+    // 60초 제한이 `client.send()` 에만 걸려 있으면, 헤더만 오고 본문이 끝나지 않을 때 화면이 「제출 중」에 갇힌다 (#71 리뷰).
+    testWidgets('응답 헤더만 오고 본문이 끝나지 않아도 60초 뒤에는 결과를 모른다고 끝낸다', (tester) async {
+      EntryRegistrationService.client =
+          MockClient.streaming((req, body) async => http.StreamedResponse(StreamController<List<int>>().stream, 201));
+      Object? error;
+      var done = false;
+      service().uploadReceipt(receiptBytes, filename: 'receipt.jpg').then((_) {
+        done = true;
+      }, onError: (Object e) {
+        error = e;
+        done = true;
+      });
+      await tester.pump(const Duration(seconds: 61));
+      expect(done, isTrue, reason: '본문이 끝나지 않아도 제한 시간이 지나면 끝나야 한다');
+      expect(error, isA<EntryDecisionException>().having((e) => e.failure, 'failure', EntryDecisionFailure.unknownOutcome));
     });
 
     test('서버가 계산한 해시가 원본과 다르면 멈춘다 — 다른 파일이 저장됐다', () async {

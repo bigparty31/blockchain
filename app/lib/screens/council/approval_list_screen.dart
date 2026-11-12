@@ -267,43 +267,15 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
     }
   }
 
-  /// 승인하기 직전의 대조. 목록을 본 뒤 서버의 파일이 바뀌었을 수 있어 캐시를 쓰지 않고 다시 받는다.
-  /// 진행해도 되면 true.
-  Future<bool> _freshReceiptCheck(EntryModel e) async {
-    final verdict = await _safeVerify(e);
-    if (!mounted) return false;
-    setState(() => _receiptChecks[e.id] = verdict.check);
-    switch (verdict.check) {
-      case ReceiptCheck.matched:
-        return true;
-      case ReceiptCheck.mismatched:
-        await showDialog<void>(
-          context: context,
-          builder: (ctx) => AlertDialog(
-            key: const Key('receipt_blocks_approval'),
-            title: const Text('영수증이 등록 때와 달라요'),
-            content: const Text('서버에 있는 영수증 파일의 해시가 등록 때 기록된 값과 달라 승인할 수 없어요. '
-                '올린 뒤 파일이 바뀌었을 수 있으니, 반려하거나 등록한 총무에게 확인해 주세요.'),
-            actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('닫기'))],
-          ),
-        );
-        return false;
-      case ReceiptCheck.unavailable:
-        final go = await showDialog<bool>(
-          context: context,
-          builder: (ctx) => AlertDialog(
-            key: const Key('receipt_unavailable_confirm'),
-            title: const Text('영수증을 받지 못했어요'),
-            content: const Text('원본을 받지 못해 영수증 해시를 대조하지 못했어요. 대조 없이 승인하려면 계속해 주세요.'),
-            actions: [
-              TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('취소')),
-              TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('그래도 승인')),
-            ],
-          ),
-        );
-        return go == true && mounted;
-    }
-  }
+  /// 승인하기 직전의 대조 — 안내는 [receiptAllowsApproval] 이 한다. 결과는 카드에도 반영한다.
+  Future<bool> _freshReceiptCheck(EntryModel e) => receiptAllowsApproval(
+        context,
+        _registrar,
+        e,
+        onChecked: (check) {
+          if (mounted) setState(() => _receiptChecks[e.id] = check);
+        },
+      );
 
   @override
   void initState() {
