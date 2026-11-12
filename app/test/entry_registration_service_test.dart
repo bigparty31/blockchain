@@ -135,6 +135,27 @@ void main() {
     expect(outcome.blockReason, BlockReason.BUDGET_EXCEEDED);
   });
 
+  test('모르는 차단 사유는 「잔량 부족」으로 지어내지 않고 결과를 알 수 없다고 한다 (#69 리뷰)', () async {
+    onSubmit = () => json({'id': 11, 'status': 'BLOCKED', 'block_reason': 'BUDGET_FROZEN', 'message': '차단'});
+    await expectLater(
+      service().submit(11, expense()),
+      throwsA(isA<EntryDecisionException>().having((e) => e.failure, 'failure', EntryDecisionFailure.unknownOutcome)),
+    );
+  });
+
+  testWidgets('초안 저장은 제출처럼 쓰기 시간(45초)을 기다린다 — 5초에 끊으면 응답이 유실될 때 초안이 둘 생긴다 (#69 리뷰)', (tester) async {
+    EntryRegistrationService.client = MockClient((req) async {
+      await Future<void>.delayed(const Duration(seconds: 10)); // 느린 서버
+      return onDraft();
+    });
+    int? id;
+    Object? error;
+    service().saveDraft(expense()).then((v) => id = v, onError: (Object e) => error = e);
+    await tester.pump(const Duration(seconds: 11));
+    expect(error, isNull, reason: '10초 걸려도 45초 안이면 응답을 받는다');
+    expect(id, 11);
+  });
+
   test('BLOCKED 인데 차단 사유가 없으면 결과를 모른다고 한다 — 사유를 지어내지 않는다', () async {
     onSubmit = () => json({'id': 11, 'status': 'BLOCKED', 'message': '차단'});
     await expectLater(
