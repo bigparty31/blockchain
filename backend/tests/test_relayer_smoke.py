@@ -29,7 +29,6 @@ from chain_support import (
     TREASURER_KEY,
     deployment_variant,
     in_snapshot,
-    rpc,
 )
 from scripts import relayer_smoke
 from scripts.relayer_smoke import (
@@ -50,8 +49,8 @@ def isolated(clean_chain_env):
     reset_chain_client()
 
 
-def smoke_and_count(signing_key: str, approver_key: str = AUDITOR_KEY):
-    """스냅샷 안에서 판정하고 (보고서, 릴레이어가 보낸 트랜잭션 수) 를 돌려준다."""
+def smoke_and_count(signing_key: str, approver_key: str = AUDITOR_KEY, **keys):
+    """스냅샷 안에서 판정하고 (보고서, 릴레이어가 보낸 트랜잭션 수) 를 돌려준다. keys 는 president_key·auditor_key."""
 
     async def run():
         client = await Web3ChainClient.connect(RPC_URL, RELAYER_KEY, DEFAULT_PATH)
@@ -59,7 +58,7 @@ def smoke_and_count(signing_key: str, approver_key: str = AUDITOR_KEY):
 
         async def body():
             before = await chain.nonce(RELAYER)
-            report = await run_smoke(client, chain, signing_key, approver_key, smoke_base_id(time.time_ns()))
+            report = await run_smoke(client, chain, signing_key, approver_key, smoke_base_id(time.time_ns()), **keys)
             return report, await chain.nonce(RELAYER) - before
 
         try:
@@ -71,19 +70,24 @@ def smoke_and_count(signing_key: str, approver_key: str = AUDITOR_KEY):
     return asyncio.run(run())
 
 
-def smoke(signing_key: str, approver_key: str = AUDITOR_KEY):
-    return smoke_and_count(signing_key, approver_key)[0]
+def smoke(signing_key: str, approver_key: str = AUDITOR_KEY, **keys):
+    return smoke_and_count(signing_key, approver_key, **keys)[0]
+
+
+ENTRY_TITLES = ("[수입]", "[지출]")
+PASSED = "관문 2 통과: 서명 → 릴레이 → 체인 기록 (수입 확정 1건, 지출 BLOCKED 1건, 반려 1건, 예산 발행 → 지출 확정 → BLOCKED → 증액 → 재등록 확정)"
 
 
 @pytest.mark.chain
 def test_smoke_passes_on_the_local_chain(node):
     report, sent = smoke_and_count(TREASURER_KEY)
     assert report.passed, report.render()
-    assert [len(case.checks) for case in report.cases] == [9, 4]  # 수입은 재전송 확인과 확정(4개)까지
-    assert sent == 3  # 수입 등록, 지출 등록(BLOCKED 도 기록), 수입 확정
-    assert report.render().endswith(
-        "관문 2·확정 통과: 서명 → 릴레이 → 체인 기록 (수입 PENDING → CONFIRMED 1건, 지출 BLOCKED 1건)"
-    )
+    # 수입(재전송 확인·확정 4개까지), 지출 BLOCKED, 반려(4개), 예산 발행, 예산 안 지출(확정·잔량), 초과 BLOCKED, 증액, 재등록(확정·잔량)
+    assert [len(case.checks) for case in report.cases] == [9, 4, 8, 4, 9, 4, 6, 9]
+    # 수입 등록·확정, 지출 등록(BLOCKED 도 기록), 반려 등록·반려, 예산 발행, 지출 등록·확정, 초과 등록, 증액, 재등록·확정.
+    # 같은 요청·같은 증액의 재전송은 시뮬레이션에서 걸려 보내지 않는다
+    assert sent == 12
+    assert report.render().endswith(PASSED)
 
 
 @pytest.mark.chain
@@ -108,23 +112,29 @@ def test_approver_without_the_role_is_caught_before_confirming(node):
     # 승인 API 처럼 확정 서명자를 체인의 감사·회장 롤과 대조한다. 총무가 확정 서명을 하면 ❌ 이고 확정은 보내지 않는다
     report, sent = smoke_and_count(TREASURER_KEY, approver_key=TREASURER_KEY)
     assert not report.passed
-    income = report.cases[0]
+    income, _, rejected, issued, spent = report.cases
     assert all(c.ok for c in income.checks[:5]) and len(income.checks) == 6
     assert "감사·회장이 아니라 보내지 않았다" in income.checks[5].detail
-    assert sent == 2  # 등록 두 건만
+    # 반려도 같은 기준이다. 예산 경로는 첫 지출의 확정이 막힌 곳에서 멈춘다 — 잔량이 어긋난 채 다음 단계로 가지 않는다
+    assert rejected.checks[-1].label == "반려 서명 → 서명자가 체인의 감사·회장" and not rejected.checks[-1].ok
+    assert issued.ok and not spent.ok and "감사·회장이 아니라 보내지 않았다" in spent.checks[-1].detail
+    assert sent == 5  # 등록 네 건(수입·지출·반려 대상·예산 안 지출)과 예산 발행만
     assert report.render().endswith("관문 2 실패: ❌ 단계를 확인한다")
 
 
 @pytest.mark.chain
 def test_signer_without_the_treasurer_role_is_caught_before_sending(node):
     # 서명자는 서명한 키가 아니라 체인의 총무 롤과 대조한다. 총무가 아니면 ❌ 이고 보내지 않는다 (등록 API 와 같다)
-    before = rpc("eth_getTransactionCount", [RELAYER, "latest"])
-    report = smoke(RELAYER_KEY)
+    report, sent = smoke_and_count(RELAYER_KEY)
     assert not report.passed
-    for case in report.cases:
+    entries = [case for case in report.cases if case.title.startswith(ENTRY_TITLES)]
+    assert len(entries) == 4  # 수입·지출·반려 대상, 그리고 예산 경로의 첫 지출에서 멈췄다
+    for case in entries:
         assert len(case.checks) == 1 and not case.checks[0].ok
         assert "서명자가 체인의 총무" in case.checks[0].label and "총무가 아니라 보내지 않았다" in case.checks[0].detail
-    assert rpc("eth_getTransactionCount", [RELAYER, "latest"]) == before  # 스냅샷과 별개로, 아예 보내지 않았다
+    # 예산 발행은 회장 서명이라 나간다. 총무 서명이 틀린 등록은 하나도 보내지 않았다
+    assert [case.title.startswith("[예산 발행]") and case.ok for case in report.cases].count(True) == 1
+    assert sent == 1
     assert report.render().endswith("관문 2 실패: ❌ 단계를 확인한다")
 
 
@@ -205,6 +215,12 @@ def _stub_chain(approver: bool = True):
         async def is_approver(self, address):
             return approver
 
+        async def is_president(self, address):
+            return True
+
+        async def is_auditor(self, address):
+            return True
+
         async def nonce(self, address):
             return 0
 
@@ -265,21 +281,22 @@ def test_a_failing_step_is_reported_and_the_run_continues():
 
     client = Client()
     report = run_stub(client)
-    assert len(report.cases) == 2 and not report.passed
+    assert not report.passed
     failed = [c for case in report.cases for c in case.checks if not c.ok]
     assert all(c.label == "체인에서 다시 읽음" and "ChainUnavailable" in c.detail for c in failed[:1])
     assert any(c.label == "체인에서 다시 읽음" for c in report.cases[1].checks)  # 지출 항목도 실행됐다
     assert client.confirm_calls == 0  # 다시 읽지 못한 항목은 확정하지 않는다
     # deadline 은 실제 시각이 아니라 체인 시각(다음 블록) 기준이다 — 컨트랙트는 block.timestamp 로 만료를 본다
-    assert deadlines == [1_800_000_000 + relayer_smoke.DEADLINE_SECONDS] * 2
+    assert len(deadlines) >= 2 and set(deadlines) == {1_800_000_000 + relayer_smoke.DEADLINE_SECONDS}
 
 
 def test_a_failing_confirmation_is_reported_and_the_run_continues():
     # 확정 릴레이에서 노드가 끊겨도 ❌ 로 남기고 지출 항목을 계속한다
     report = run_stub(_RecordingClient(confirm_error=ChainUnavailable("확정 중 노드가 끊김")))
-    failed = [c for case in report.cases for c in case.checks if not c.ok]
+    income, expense = report.cases[:2]
+    failed = [c for case in (income, expense) for c in case.checks if not c.ok]
     assert [c.label for c in failed] == ["확정 릴레이"] and "ChainUnavailable" in failed[0].detail
-    assert len(report.cases) == 2 and report.cases[1].checks[-1].ok  # 지출 항목도 끝까지 실행됐다
+    assert expense.checks[-1].ok  # 지출 항목도 끝까지 실행됐다
 
 
 def test_confirmation_is_skipped_when_registration_did_not_match():
@@ -334,3 +351,59 @@ def test_main_reports_setup_failures_and_closes_connections(monkeypatch, fails_a
         assert asyncio.run(relayer_smoke.main()) == 1
     assert "관문 2 실패: 판정 중 오류 (ChainUnavailable" in out.getvalue()
     assert closed == (["client"] if fails_at == "chain_view" else ["view", "client"])
+
+
+# ---------------------------------------------------------------- 반려·예산 경로
+
+
+@pytest.mark.chain
+def test_rejection_and_budget_path_are_judged_on_the_local_chain(node):
+    report = smoke(TREASURER_KEY)
+    assert report.passed, report.render()
+    rejected, issued, spent, over, increased, again = report.cases[2:]
+    assert rejected.title.endswith("감사 반려")
+    assert rejected.checks[-1].label == "체인에서 다시 읽음 → REJECTED, 반려자 = 서명자, 사유 해시 일치"
+    assert issued.title.startswith("[예산 발행]") and "스모크 예산" in issued.title
+    # 지출 벡터 35,000원: 발행 52,500 → 확정 뒤 17,500 → 35,000 은 BLOCKED → 17,500 증액 → 35,000 → 재등록 확정 뒤 0
+    assert [c.label for c in issued.checks + spent.checks + increased.checks + again.checks if c.label.startswith("예산 잔량")] == [
+        "예산 잔량 → 52,500원",
+        "예산 잔량 → 17,500원",
+        "예산 잔량 → 35,000원",
+        "예산 잔량 → 0원",
+    ]
+    assert over.checks[1].label == "릴레이 → BLOCKED(BUDGET_EXCEEDED)"
+    assert increased.checks[-1].label == "같은 증액 재전송 → VersionMismatch (nonce 그대로)"
+
+
+@pytest.mark.chain
+def test_increase_approver_must_be_an_auditor(node):
+    # 증액 승인은 감사만 한다 (PRD §4.1). 회장이 승인 서명을 하면 ❌ 이고 증액을 보내지 않으며 재등록으로 가지 않는다
+    report, sent = smoke_and_count(TREASURER_KEY, auditor_key=PRESIDENT_KEY)
+    assert not report.passed
+    increased = report.cases[-1]
+    assert increased.title.startswith("[예산 증액]")
+    assert increased.checks[-1].label == "증액 승인 서명 → 서명자가 체인의 감사" and not increased.checks[-1].ok
+    assert increased.checks[-1].detail.endswith("는 감사가 아니라 보내지 않았다")
+    assert sent == 9  # 증액·재등록 없이 그 앞까지
+
+
+def test_budget_path_stops_at_the_first_failing_step():
+    # 예산 발행이 실패하면 그 예산으로 지출을 등록하지 않는다 — BUDGET_NOT_FOUND 같은 여파의 실패가 원인을 가린다
+    recorded = []
+
+    class Client(_RecordingClient):
+        async def record_pending(self, request, signature, before_broadcast=None):
+            recorded.append(request.budget_id)
+            return await super().record_pending(request, signature, before_broadcast)
+
+        async def reject_entry(self, decision, signature, before_broadcast=None):
+            raise ChainUnavailable("반려 중 노드가 끊김")
+
+        async def issue_budget(self, request, signature, before_broadcast=None):
+            raise ChainUnavailable("발행 중 노드가 끊김")
+
+    report = run_stub(Client())
+    issued = report.cases[-1]
+    assert issued.title.startswith("[예산 발행]") and issued.checks[-1].label == "발행 릴레이"
+    assert "ChainUnavailable" in issued.checks[-1].detail
+    assert recorded and set(recorded) == {0}  # 수입(재전송 포함)·지출·반려 대상만. 예산을 단 등록은 없다
