@@ -155,14 +155,23 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
       _targetError = error;
       // 조회 전에 고른 새 예산이 이 내역의 원래 예산이면 후보에서 빠진다. 선택을 남겨 두면
       // 드롭다운 값이 후보에 없어 화면이 깨지고(디버그 assertion), 같은 예산으로 옮기는 재분류가 된다.
-      if (_target != null && _newBudgetId == _target!.original.budgetId) _newBudgetId = null;
+      if (_target != null && !_isCandidate(_newBudgetId)) _newBudgetId = null;
     });
+  }
+
+  /// [id] 가 지금 정정 대상 기준의 재분류 후보(같은 학기의 다른 예산)인지. 예산 목록을 못 읽었으면 판단하지 않는다.
+  bool _isCandidate(int? id) {
+    if (id == null) return false;
+    if (_budgets.isEmpty) return id != _target?.original.budgetId;
+    return reclassifyCandidates(_budgets, termId: _target?.original.termId, fromBudgetId: _target?.original.budgetId)
+        .any((b) => b.id == id);
   }
 
   /// 재분류의 새 예산 검사 — 제출 때 다시 본다. 고르지 않았거나 원래 예산과 같으면 안 된다.
   String? _newBudgetError() {
     if (_newBudgetId == null) return '옮겨 갈 예산 항목을 골라 주세요';
     if (_newBudgetId == _target?.original.budgetId) return '원래 예산과 다른 항목을 골라 주세요';
+    if (!_isCandidate(_newBudgetId)) return '정정 대상과 같은 학기의 예산 항목을 골라 주세요';
     return null;
   }
 
