@@ -128,6 +128,21 @@ class ApiService {
     ];
   }
 
+  /// GET /budget-revisions?status_filter=PENDING — 회장 서명을 기다리는 예산 증액 요청 건수 (학생회 임원 전용).
+  ///
+  /// **시연용 더미가 없다.** 못 읽거나 모르면 null 이다 — 0 건으로 내리지도, 있는 것처럼 꾸미지도 않는다.
+  /// 401 이면 [_get] 이 이미 로그인 화면으로 보냈다. 한 건이 이상해도 건수 전체를 잃지 않게 목록 길이만 센다.
+  Future<int?> fetchRevisionSignWaitingCount() async {
+    try {
+      final response = await _get('${ApiConfig.baseUrl}/budget-revisions?status_filter=PENDING', '증액 요청 건수');
+      if (response.statusCode != 200) return null;
+      final data = jsonDecode(utf8.decode(response.bodyBytes));
+      return data is List ? data.length : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// 3. GET /entries (수입·지출 내역 목록 조회)
   Future<List<EntryModel>> fetchEntries() async {
     try {
@@ -192,6 +207,32 @@ class ApiService {
         createdBy: 2,
       ),
     ];
+  }
+
+  /// 지금 학기의 DB id (`GET /terms`) — 시작·종료 사이인 학기, 없으면 가장 최근(id 가 큰) 학기.
+  /// 수입 등록이 쓴다 (지출은 고른 예산의 학기를 쓴다 — 다르면 체인이 `TermMismatch`).
+  Future<int> fetchCurrentTermId({DateTime? now}) async {
+    try {
+      final response = await _get('${ApiConfig.baseUrl}/terms', '학기');
+      if (response.statusCode == 200) {
+        final terms = (jsonDecode(utf8.decode(response.bodyBytes)) as List).cast<Map<String, dynamic>>();
+        if (terms.isNotEmpty) {
+          final t = now ?? DateTime.now();
+          for (final term in terms) {
+            final start = DateTime.parse(term['started_at'] as String);
+            final end = DateTime.parse(term['ended_at'] as String);
+            if (!t.isBefore(start) && !t.isAfter(end)) return term['id'] as int;
+          }
+          return terms.map((e) => e['id'] as int).reduce((a, b) => a > b ? a : b);
+        }
+      }
+    } on ApiUnavailable {
+      rethrow;
+    } catch (_) {}
+
+    // 서버 미구동 시 fallback — 시연용 예산·내역과 같은 학기 1. 개발 빌드에서만
+    _demoOrThrow('학기');
+    return 1;
   }
 
   /// 4. 승인 대기(`PENDING`) 건수. 총무·감사 홈의 배지가 쓴다.

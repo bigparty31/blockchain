@@ -1,13 +1,28 @@
 import 'package:flutter/material.dart';
 import '../../core/app_theme.dart';
+import '../../core/enums.dart';
 import '../../core/hashing.dart';
+import '../../models/entry_model.dart';
+import '../../services/api_service.dart';
+import '../../services/entry_registration_service.dart';
 import 'input_rules.dart';
+import 'receipt_picker.dart';
 import 'registration_result.dart';
+import 'resubmit.dart';
 
 /// [이승호 담당: app/lib/screens/council/]
 /// 2. 수입 등록 화면
 class IncomeCreateScreen extends StatefulWidget {
-  const IncomeCreateScreen({super.key});
+  /// 초안 저장·서명 제출. 주지 않으면 서버 ([EntryRegistrationService]).
+  final EntryRegistrar? registrar;
+
+  /// 영수증 원본 바이트를 고른다. 주지 않으면 카메라·갤러리 ([pickReceiptBytes]).
+  final ReceiptPicker? pickReceipt;
+
+  /// 반려된 수입을 고쳐 새로 등록할 때 그 건 ([canResubmit]). 이전 값으로 채워 연다 (PRD §4.3 T4 3단계).
+  final EntryModel? resubmitOf;
+
+  const IncomeCreateScreen({super.key, this.registrar, this.pickReceipt, this.resubmitOf});
 
   @override
   State<IncomeCreateScreen> createState() => _IncomeCreateScreenState();
@@ -19,11 +34,110 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
   final _amountController = TextEditingController();
   final _memoController = TextEditingController();
 
-  DateTime _selectedDate = DateTime.now();
+  DateTime _selectedDate = kstToday();
   String _incomeType = '학생회비 수납';
 
-  /// 영수증(입금 확인서 등) 첨부 여부. 수입은 영수증이 선택이다 (지출은 필수). 목업이라 파일은 고르지 않는다.
-  bool _hasReceipt = false;
+  /// 영수증(입금 확인서 등) 원본 바이트의 해시. 수입은 영수증이 선택이다 (지출은 필수).
+  String? _receiptHash;
+  bool get _hasReceipt => _receiptHash != null;
+
+  /// 고른 영수증 원본 바이트와, 서버에 올린 결과. 같은 사진은 한 번만 올린다.
+  List<int>? _receiptBytes;
+  ReceiptUpload? _upload;
+
+  bool _submitting = false;
+
+  late final EntryRegistrar _registrar = widget.registrar ?? EntryRegistrationService();
+
+  /// 저장한 초안 번호와 그때의 입력 — 제출이 실패하면 다시 제출할 때 같은 번호를 쓴다 (API §2.3).
+  int? _draftId;
+  EntryDraft? _savedDraft;
+
+  /// 지금 학기 (`GET /terms`). 수입은 예산이 없어 학기를 따로 읽는다.
+  int? _termId;
+  String? _termError;
+
+  /// 다시 등록할 때 이전 영수증을 쓰지 못한 이유.
+  String? _receiptNote;
+
+  @override
+  void initState() {
+    super.initState();
+    final source = widget.resubmitOf;
+    if (source == null) {
+      _loadTerm();
+    } else {
+      _prefill(source);
+    }
+  }
+
+  /// 이전 건의 값으로 채운다. 학기는 이전 건의 학기 그대로, 분류는 이전 수입 사유 그대로 둔다
+  /// (목록에 없는 사유면 「기타」 칸이 골라진 채 이전 문구가 기록된다). 메모는 장부에 없어서 비워 둔다.
+  void _prefill(EntryModel e) {
+    _termId = e.termId;
+    _sourceController.text = e.counterparty;
+    _amountController.text = '${e.amount}';
+    _incomeType = e.purpose;
+    _selectedDate = pickerDateOf(e.occurredAt);
+    if (e.receiptHash == null) return;
+    restoreReceipt(_registrar, e).then((restored) {
+      if (!mounted || _receiptHash != null) return;
+      setState(() {
+        if (restored == null) {
+          _receiptNote = '이전 영수증을 불러오지 못했어요. 필요하면 다시 첨부해 주세요.';
+          return;
+        }
+        _receiptBytes = restored.$1;
+        _receiptHash = restored.$2.hash;
+        _upload = restored.$2;
+      });
+    });
+  }
+
+  Future<void> _loadTerm() async {
+    try {
+      final id = await ApiService().fetchCurrentTermId();
+      if (mounted) setState(() => _termId = id);
+    } on ApiUnavailable catch (e) {
+      if (mounted) setState(() => _termError = e.message);
+    }
+  }
+
+  /// 첨부돼 있으면 해제, 아니면 고른다 — 원본 바이트를 그대로 해시한다 (HASHING §4).
+  Future<void> _toggleReceipt() async {
+    // 제출 중에는 바꾸지 못한다 — 올리던 사진의 경로가 다른 사진의 해시와 섞이지 않게 (#71 리뷰)
+    if (_submitting) {
+      _snack('제출 중에는 영수증을 바꿀 수 없어요.');
+      return;
+    }
+    if (_hasReceipt) {
+      setState(() {
+        _receiptHash = null;
+        _receiptBytes = null;
+        _upload = null;
+      });
+      return;
+    }
+    final bytes = await (widget.pickReceipt ?? pickReceiptBytes)(context);
+    if (bytes == null || !mounted || _submitting) return;
+    final problem = receiptFormatProblem(bytes);
+    if (problem != null) {
+      _snack(problem);
+      return;
+    }
+    setState(() {
+      _receiptBytes = bytes;
+      _receiptHash = Hashing.fileHash(bytes);
+      _upload = null;
+      _receiptNote = null;
+    });
+  }
+
+  void _snack(String text) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(text), behavior: SnackBarBehavior.floating),
+    );
+  }
 
   final List<Map<String, dynamic>> _incomeTypeInfos = [
     {'label': '학생회비 수납', 'icon': Icons.people_rounded, 'color': const Color(0xFF06B6D4)},
@@ -65,24 +179,73 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
         _selectedDate.day,
       );
 
+  /// 초안 저장 → 기기 서명 → 제출. 수입은 예산 검사 대상이 아니라 결과는 `PENDING` 이다.
   Future<void> _submitIncome() async {
-    if (!_formKey.currentState!.validate()) return;
-
-    final date =
+    if (_submitting || !_formKey.currentState!.validate()) return;
+    final termId = _termId;
+    if (termId == null) {
+      _snack(_termError != null ? '$_termError 제출하지 않았어요.' : '학기 정보를 불러오는 중이에요. 잠시 후 다시 시도해 주세요.');
+      return;
+    }
+    // 입력은 여기서 한 번만 읽는다 — 업로드·저장·제출을 기다리는 사이 바꿔도(금액을 비워도) 보낸 값과 안내가 같다.
+    // 출처(납부자)는 거래처, 분류는 수입 사유로 기록한다. 메모는 장부에 올리지 않는다
+    final base = EntryDraft(
+      kind: EntryKind.INCOME,
+      termId: termId,
+      amount: int.parse(_amountController.text),
+      counterparty: _sourceController.text,
+      purpose: _incomeType,
+      occurredAt: _occurredAt,
+      receiptHash: _receiptHash,
+    );
+    final bytes = _receiptBytes;
+    final shownType = _incomeType;
+    final shownDate =
         '${_selectedDate.year}-${_selectedDate.month.toString().padLeft(2, '0')}-${_selectedDate.day.toString().padLeft(2, '0')}';
+    setState(() => _submitting = true);
+    final RegistrationResult result;
+    final EntryDraft draft;
+    try {
+      // 영수증을 붙였으면 원본을 먼저 올린다 — 같은 사진은 한 번만 (#66: 파일 없는 해시는 400)
+      if (bytes != null) _upload ??= await _registrar.uploadReceipt(bytes, filename: receiptFilename(bytes));
+      draft = base.withReceiptPath(_upload?.path);
+      if (_draftId == null || _savedDraft != draft) {
+        _draftId = await _registrar.saveDraft(draft);
+        _savedDraft = draft;
+      }
+      final outcome = await _registrar.submit(_draftId!, draft);
+      result = outcome.status == EntryStatus.BLOCKED
+          ? RegistrationResult.blocked(outcome.blockReason!)
+          : const RegistrationResult.pending();
+      _draftId = null;
+      _savedDraft = null;
+    } on EntryDecisionException catch (e) {
+      if (!mounted) return;
+      setState(() => _submitting = false);
+      _snack(e.message);
+      return;
+    } catch (_) {
+      // 예상 못 한 실패도 「제출 중」에 갇히지 않게 푼다 — 서버에는 이미 기록됐을 수 있어 확인을 권한다
+      if (!mounted) return;
+      setState(() => _submitting = false);
+      _snack('등록을 마치지 못했어요. 내 등록 현황에서 확인한 뒤 다시 시도해 주세요.');
+      return;
+    }
+    if (!mounted) return;
+    setState(() => _submitting = false);
+
     final done = await showRegistrationResultDialog(
       context,
       kindLabel: '수입',
       rows: [
-        ('분류', _incomeType),
-        ('출처', _sourceController.text),
-        ('금액', '${_amountController.text}원'),
-        ('일자', date),
-        ('영수증', _hasReceipt ? '첨부' : '없음'),
+        ('분류', shownType),
+        ('출처', draft.counterparty),
+        ('금액', '${draft.amount}원'),
+        ('일자', shownDate),
+        ('영수증', draft.receiptHash != null ? '첨부' : '없음'),
       ],
-      // 수입은 예산 검사 대상이 아니라 BLOCKED 가 없다. 감사 승인 전까지 PENDING.
-      result: const RegistrationResult.pending(),
-      occurredAtNote: '전송값 occurred_at: $_occurredAt (사용일 KST 00:00)',
+      result: result,
+      occurredAtNote: '전송값 occurred_at: ${draft.occurredAt} (사용일 KST 00:00)',
       gradient: AppTheme.incomeGradient,
     );
     if (done && mounted) Navigator.pop(context);
@@ -112,6 +275,7 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              if (widget.resubmitOf != null) ResubmitBanner(source: widget.resubmitOf!, receiptNote: _receiptNote),
               // 수입 유형 선택 카드 (가로 스크롤)
               SizedBox(
                 height: 94,
@@ -262,7 +426,7 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
 
               // 영수증 첨부 (선택)
               GestureDetector(
-                onTap: () => setState(() => _hasReceipt = !_hasReceipt),
+                onTap: _toggleReceipt,
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
                   decoration: BoxDecoration(
@@ -304,7 +468,7 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
 
               GradientButton(
                 onPressed: _submitIncome,
-                label: '제출하기',
+                label: _submitting ? '제출 중...' : '제출하기',
                 icon: Icons.add_circle_rounded,
                 gradient: AppTheme.incomeGradient,
               ),

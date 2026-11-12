@@ -17,6 +17,7 @@ import 'approval_list_screen.dart';
 import 'budget_revision_screen.dart';
 import 'correction_approval_screen.dart';
 import 'correction_screen.dart';
+import 'signing_key_screen.dart';
 import 'my_entries_screen.dart';
 import 'inquiry_response_screen.dart';
 import 'hardware_test_screen.dart';
@@ -68,6 +69,10 @@ class _CouncilHomeScreenState extends State<CouncilHomeScreen> with WidgetsBindi
   int _unreadSeq = 0;
   int _balanceSeq = 0;
   int _mineSeq = 0;
+  int _signSeq = 0;
+
+  /// 회장이 서명할 증액 요청 건수. null 은 「모름」이다 — 못 읽은 것을 0 건으로 내리지 않는다.
+  int? _signWaiting;
 
   /// 총무의 「내 등록 건」 상태별 건수. null 은 「모름」이다 — 못 읽은 것을 0 건으로 내리지 않는다.
   ({int pending, int rejected, int blocked})? _mine;
@@ -99,7 +104,15 @@ class _CouncilHomeScreenState extends State<CouncilHomeScreen> with WidgetsBindi
   /// 승인 대기 건수·안 읽은 알림 수·잔액, 그리고 [mine] 이면 총무의 내 등록 건을 함께 다시 읽는다.
   /// [silent] 면 배지를 「확인 중」으로 바꾸지 않는다 — 15초마다 배지가 깜빡이지 않게.
   Future<void> _refreshAll({bool silent = false, bool mine = true}) =>
-      Future.wait([_load(silent: silent), _loadUnread(), _loadBalance(), if (mine) _loadMine()]);
+      Future.wait([_load(silent: silent), _loadUnread(), _loadBalance(), _loadSignWaiting(), if (mine) _loadMine()]);
+
+  /// 회장 홈의 「서명할 증액 요청」 건수 — 서버 목록(`GET /budget-revisions`)에서 읽는다.
+  Future<void> _loadSignWaiting() async {
+    if (!_isPresident) return; // 회장 홈에만 있는 배너다
+    final seq = ++_signSeq;
+    final count = await ApiService().fetchRevisionSignWaitingCount();
+    if (mounted && seq == _signSeq) setState(() => _signWaiting = count);
+  }
 
   /// 총무 홈의 「내 등록 건」 — **로그인한 총무가 등록한 건만** 센다. `GET /entries` 는 전체 내역이라
   /// 거르지 않으면 다른 등록자의 대기·반려·차단 건까지 내 건으로 보인다.
@@ -315,13 +328,12 @@ class _CouncilHomeScreenState extends State<CouncilHomeScreen> with WidgetsBindi
                     const SizedBox(height: 12),
                     if (_isPresident) ...[
                       _SignRequestBanner(
-                        count: budgetRevisionMockSignCount(),
+                        count: _signWaiting,
                         onTap: () => _notice(context, Icons.construction_rounded, '예산 개정 서명 화면은 준비 중입니다.'),
                       ),
                       const SizedBox(height: 12),
                     ],
                     _UnansweredBanner(
-                      count: inquiryMockUnansweredCount(),
                       onTap: () => Navigator.push(
                         context,
                         MaterialPageRoute(builder: (_) => const InquiryResponseScreen()),
@@ -441,6 +453,14 @@ class _CouncilHomeScreenState extends State<CouncilHomeScreen> with WidgetsBindi
             badge: '준비 중',
             gradient: LinearGradient(colors: [Color(0xFF6366F1), Color(0xFF8B5CF6)]),
           ),
+          _MenuData(
+            title: '서명 키',
+            subtitle: '이 기기의 서명 키 만들기·주소 확인',
+            icon: Icons.vpn_key_rounded,
+            badge: '임원 공통',
+            gradient: LinearGradient(colors: [Color(0xFF64748B), Color(0xFF475569)]),
+            target: SigningKeyScreen(),
+          ),
         ]
       : const [
           _MenuData(
@@ -482,6 +502,14 @@ class _CouncilHomeScreenState extends State<CouncilHomeScreen> with WidgetsBindi
             badge: '증액만 가능',
             gradient: LinearGradient(colors: [Color(0xFF3B82F6), Color(0xFF6C63FF)]),
             target: BudgetRevisionScreen(),
+          ),
+          _MenuData(
+            title: '서명 키',
+            subtitle: '이 기기의 서명 키 만들기·주소 확인',
+            icon: Icons.vpn_key_rounded,
+            badge: '임원 공통',
+            gradient: LinearGradient(colors: [Color(0xFF64748B), Color(0xFF475569)]),
+            target: SigningKeyScreen(),
           ),
         ];
 
@@ -676,11 +704,12 @@ class _NotificationBell extends StatelessWidget {
   }
 }
 
-// ── 감사/회장: 미답변 이의 건수 ─────────────────────────────────
+// ── 감사/회장: 학생 이의 답변 ────────────────────────────────────
+/// **건수를 적지 않는다.** 이의 제기를 받는 서버 API 가 아직 없어서 센 숫자가 없다 — 예시 목록의 건수를
+/// 실제 미답변 건수처럼 보여 주지 않는다. 열리는 화면도 예시 화면이다.
 class _UnansweredBanner extends StatelessWidget {
-  final int count;
   final VoidCallback onTap;
-  const _UnansweredBanner({required this.count, required this.onTap});
+  const _UnansweredBanner({required this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -691,17 +720,17 @@ class _UnansweredBanner extends StatelessWidget {
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: count > 0 ? AppTheme.expense.withOpacity(0.35) : AppTheme.divider),
+          border: Border.all(color: AppTheme.divider),
           boxShadow: AppTheme.softShadow,
         ),
-        child: Row(
+        child: const Row(
           children: [
-            Icon(Icons.mark_unread_chat_alt_rounded, color: count > 0 ? AppTheme.expense : AppTheme.textSub, size: 20),
-            const SizedBox(width: 10),
+            Icon(Icons.mark_unread_chat_alt_rounded, color: AppTheme.textSub, size: 20),
+            SizedBox(width: 10),
             Expanded(
               child: Text(
-                count > 0 ? '미답변 이의 $count건' : '미답변 이의가 없습니다',
-                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: AppTheme.textMain),
+                '학생 이의 답변 · 준비 중',
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: AppTheme.textMain),
               ),
             ),
             const Icon(Icons.arrow_forward_ios_rounded, size: 14, color: AppTheme.textSub),
@@ -712,12 +741,10 @@ class _UnansweredBanner extends StatelessWidget {
   }
 }
 
-/// 회장 홈 배너용 예시 — 총무가 올린 증액 요청 중 회장 서명 대기 건수.
-int budgetRevisionMockSignCount() => 1;
-
 // ── 회장: 서명할 증액 요청 건수 ─────────────────────────────────
 class _SignRequestBanner extends StatelessWidget {
-  final int count;
+  /// null 은 「모름」 — 못 읽었다고 적는다 (0 건으로 내리지 않는다).
+  final int? count;
   final VoidCallback onTap;
   const _SignRequestBanner({required this.count, required this.onTap});
 
@@ -730,16 +757,20 @@ class _SignRequestBanner extends StatelessWidget {
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: count > 0 ? AppTheme.primary.withOpacity(0.35) : AppTheme.divider),
+          border: Border.all(color: (count ?? 0) > 0 ? AppTheme.primary.withOpacity(0.35) : AppTheme.divider),
           boxShadow: AppTheme.softShadow,
         ),
         child: Row(
           children: [
-            Icon(Icons.draw_rounded, color: count > 0 ? AppTheme.primary : AppTheme.textSub, size: 20),
+            Icon(Icons.draw_rounded, color: (count ?? 0) > 0 ? AppTheme.primary : AppTheme.textSub, size: 20),
             const SizedBox(width: 10),
             Expanded(
               child: Text(
-                count > 0 ? '서명할 증액 요청 $count건' : '서명할 증액 요청이 없습니다',
+                count == null
+                    ? '서명할 증액 요청을 확인하지 못했어요'
+                    : count! > 0
+                        ? '서명할 증액 요청 $count건'
+                        : '서명할 증액 요청이 없습니다',
                 style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: AppTheme.textMain),
               ),
             ),

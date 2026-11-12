@@ -9,8 +9,11 @@ import '../../models/entry_model.dart';
 import '../../services/api_service.dart';
 import '../../services/auth_service.dart';
 import '../../services/entry_decision_service.dart';
+import '../../services/entry_registration_service.dart';
 import '../../services/notification_service.dart';
 import 'reason_dialog.dart';
+import 'receipt_view_dialog.dart';
+import 'sending_dialog.dart';
 
 /// OCR 이 경고인가 — `MISMATCH`·`DUPLICATE`·`UNREADABLE` 만 경고다 (PRD §6).
 ///
@@ -37,12 +40,6 @@ String _warningLabel(Map<String, dynamic> item) {
   ];
   return parts.join('·');
 }
-
-/// 확정이 예산 문제로 실패했을 때 반려 흐름으로 넘기는 `fail_reason` (RELAY §9).
-const _budgetFailReasons = {
-  'InsufficientBudget': '예산 잔량이 부족해요',
-  'BudgetExpired': '예산 집행 기간이 지났어요',
-};
 
 /// **목업** 승인 대상 목록 — 위젯 테스트·화면 캡처에서 [ApprovalListScreen.items] 로 넣는다.
 /// 앱은 빌드와 상관없이 서버(`GET /entries`)를 읽는다 ([approvalItemFromEntry]).
@@ -188,7 +185,10 @@ class ApprovalListScreen extends StatefulWidget {
   /// 반려 서명·전송. 테스트에서 가짜 본인 확인을 넣는다.
   final EntryDecisionService? decisions;
 
-  const ApprovalListScreen({super.key, this.role, this.currentUserId, this.items, this.decisions});
+  /// 영수증 원본을 받아 오는 입구 (`GET /receipts/{파일}`). 테스트에서 가짜를 넣는다.
+  final EntryRegistrar? registrar;
+
+  const ApprovalListScreen({super.key, this.role, this.currentUserId, this.items, this.decisions, this.registrar});
 
   /// 화면에 적용되는 역할. 로그인했으면 세션 역할이고, 인자는 세션이 없을 때만 쓴다.
   UserRole? get effectiveRole => AuthService().session?.role ?? role;
@@ -218,6 +218,8 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
 
   late final EntryDecisionService _decisions = widget.decisions ?? EntryDecisionService();
 
+  late final EntryRegistrar _registrar = widget.registrar ?? EntryRegistrationService();
+
   /// 서버 목록을 읽는 중인가 / 마지막 읽기가 실패한 이유.
   late bool _loading = _fromServer;
   String? _loadError;
@@ -225,10 +227,59 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
   /// 겹친 읽기 중 마지막 응답만 반영한다 (홈의 승인 대기 건수와 같은 방식).
   int _loadSeq = 0;
 
+  /// 승인 대기 건의 영수증 대조 결과 (건 id → 결과) — 카드에 보여 승인 버튼을 누르기 전에 알린다.
+  /// 일치·불일치는 한 번 대조하면 다시 받지 않고, 못 받은 건(`unavailable`)만 목록을 다시 읽을 때 다시 시도한다.
+  /// 승인하는 순간에는 이 값을 믿지 않고 [_freshReceiptCheck] 로 한 번 더 대조한다.
+  final Map<int, ReceiptCheck> _receiptChecks = {};
+  final Set<int> _receiptChecking = {};
+  bool _approving = false;
+
+  static EntryModel? _entryOf(Map<String, dynamic> item) => item['entry'] is EntryModel ? item['entry'] as EntryModel : null;
+
+  static bool _hasReceipt(EntryModel? e) => e != null && e.receiptHash != null && e.receiptPath != null;
+
+  /// 영수증이 있는 승인 대기 건의 해시를 대조한다. 영수증 바꿔치기는 OCR·카테고리 경고에도, `meta_hash` 에도 걸리지
+  /// 않는다 (`receipt_hash` 는 등록 때 값 그대로라서) — 승인자가 파일을 직접 대조하는 것이 유일한 확인이다.
+  void _checkReceipts() {
+    for (final item in _items) {
+      final e = _entryOf(item);
+      if (e == null || e.status != EntryStatus.PENDING || !_hasReceipt(e)) continue;
+      final known = _receiptChecks[e.id];
+      if (_receiptChecking.contains(e.id) || known == ReceiptCheck.matched || known == ReceiptCheck.mismatched) continue;
+      _receiptChecking.add(e.id);
+      _safeVerify(e).then((verdict) {
+        if (!mounted) return;
+        setState(() {
+          _receiptChecking.remove(e.id);
+          _receiptChecks[e.id] = verdict.check;
+        });
+      });
+    }
+  }
+
+  Future<ReceiptVerdict> _safeVerify(EntryModel e) async {
+    try {
+      return await verifyReceipt(_registrar, e);
+    } catch (_) {
+      return const ReceiptVerdict(ReceiptCheck.unavailable); // 받지 못했다 — 일치로 두지 않는다
+    }
+  }
+
+  /// 승인하기 직전의 대조 — 안내는 [receiptAllowsApproval] 이 한다. 결과는 카드에도 반영한다.
+  Future<bool> _freshReceiptCheck(EntryModel e) => receiptAllowsApproval(
+        context,
+        _registrar,
+        e,
+        onChecked: (check) {
+          if (mounted) setState(() => _receiptChecks[e.id] = check);
+        },
+      );
+
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 3, vsync: this);
+    _checkReceipts();
     if (_fromServer && widget.allowed) {
       _load(initial: true);
       _poll = Timer.periodic(NotificationService.pollInterval, (_) => _load(silent: true));
@@ -270,6 +321,7 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
         _loading = false;
         _loadError = null;
       });
+      _checkReceipts();
     } on ApiUnavailable catch (e) {
       if (!mounted || seq != _loadSeq) return;
       setState(() {
@@ -299,97 +351,27 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
     super.dispose();
   }
 
+  /// 영수증 원본 — 서버 건은 파일을 받아 기록된 해시와 맞춰 보이고, 해시가 다르면 파일을 보여 주지 않는다.
   void _showReceiptDialog(Map<String, dynamic> item) {
-    showDialog(
+    showDialog<void>(
       context: context,
-      builder: (ctx) => Dialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Row(
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: AppTheme.primaryLight,
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: const Icon(Icons.receipt_long_rounded, color: AppTheme.primary, size: 20),
-                  ),
-                  const SizedBox(width: 12),
-                  Text('영수증 확인 (#${item['id']})',
-                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: AppTheme.textMain),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 16),
-              Container(
-                height: 160,
-                width: double.infinity,
-                decoration: BoxDecoration(
-                  gradient: const LinearGradient(
-                    colors: [Color(0xFFEDE9FE), Color(0xFFE0F2FE)],
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                  ),
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.all(16),
-                      decoration: const BoxDecoration(
-                        color: Colors.white,
-                        shape: BoxShape.circle,
-                      ),
-                      child: const Icon(Icons.receipt_long_rounded, size: 40, color: AppTheme.primary),
-                    ),
-                    const SizedBox(height: 8),
-                    const Text('영수증 이미지 원본',
-                      style: TextStyle(fontWeight: FontWeight.bold, color: AppTheme.textMain),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 16),
-              _DetailRow(icon: Icons.description_rounded, label: '증빙 종류', value: item['receiptInfo']),
-              _DetailRow(
-                icon: Icons.document_scanner_rounded,
-                label: 'OCR 결과',
-                // 영수증 없는 수입은 OCR 을 돌리지 않아 null 이다
-                value: (item['ocrStatus'] as OcrStatus?)?.label ?? '판독 안 함',
-              ),
-              _DetailRow(
-                icon: Icons.storefront_rounded,
-                label: '가맹점',
-                value: '${item['merchant']} | ${item['amount']}원',
-              ),
-              const SizedBox(height: 16),
-              SizedBox(
-                width: double.infinity,
-                child: OutlinedButton(
-                  onPressed: () => Navigator.pop(ctx),
-                  style: OutlinedButton.styleFrom(
-                    side: const BorderSide(color: AppTheme.primary),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                  ),
-                  child: const Text('닫기', style: TextStyle(color: AppTheme.primary, fontWeight: FontWeight.bold)),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
+      builder: (_) => ReceiptViewDialog(item: item, registrar: _registrar),
     );
   }
 
   /// 승인 진입점. 경고가 있으면 사유를 먼저 받는다 (빈 값은 서버가 400).
   Future<void> _onApprove(Map<String, dynamic> item) async {
+    // 영수증이 있는 건은 사유·서명 단계로 가기 전에 해시부터 대조한다 — 불일치면 여기서 끝난다.
+    final entry = _entryOf(item);
+    if (_hasReceipt(entry)) {
+      if (_approving) return;
+      _approving = true;
+      try {
+        if (!await _freshReceiptCheck(entry!) || !mounted) return;
+      } finally {
+        _approving = false;
+      }
+    }
     String? warningReason;
     if (_hasWarning(item)) {
       warningReason = await showReasonDialog(
@@ -554,11 +536,13 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
   /// 확정 실패 안내. 항목은 `PENDING` 그대로다 (컨트랙트: 확정 실패 시 전체 revert).
   /// 예산 문제(`InsufficientBudget`·`BudgetExpired`)면 반려 흐름으로 넘긴다.
   ///
-  /// 서버 건은 실패 코드(`fail_reason`)가 아직 응답에 없어 [serverMessage](서버 설명)를 그대로 보여 주고,
-  /// 반려로 넘길지는 사람이 설명을 읽고 정한다 — 앱이 문구를 해석해 분기하지 않는다.
+  /// 서버 건은 실패 코드(`fail_reason`, #65)로 나눈다 — 예산 사유일 때만 반려로 넘기고, 다른 코드면 다시 서명할 일이라
+  /// 반려를 권하지 않는다. 코드가 없는 서버(#65 이전)면 [serverMessage](서버 설명)를 보여 주고 사람이 읽고 정한다
+  /// — 어느 쪽이든 앱이 문구를 해석해 분기하지 않는다.
   Future<void> _showApprovalFailure(Map<String, dynamic> item, String? failReason, {String? serverMessage}) async {
-    final budgetReason = failReason == null ? null : _budgetFailReasons[failReason];
-    final offerReject = budgetReason != null || serverMessage != null;
+    final budgetReason = failReason == null ? null : budgetFailReasons[failReason];
+    final unknownCause = failReason == null && serverMessage != null;
+    final offerReject = budgetReason != null || unknownCause;
     final goReject = await showDialog<bool>(
       context: context,
       builder: (ctx) => Dialog(
@@ -592,7 +576,7 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
               _DetailRow(
                 icon: Icons.report_gmailerrorred_rounded,
                 label: '사유',
-                value: serverMessage ?? budgetReason ?? '체인이 확정을 거부했어요 ($failReason)',
+                value: budgetReason ?? serverMessage ?? '체인이 확정을 거부했어요 ($failReason)',
               ),
               const SizedBox(height: 10),
               Container(
@@ -602,13 +586,13 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
                   borderRadius: BorderRadius.circular(12),
                 ),
                 child: Text(
-                  serverMessage != null
-                      ? '이 항목은 아직 승인 대기(PENDING) 상태예요. 위 사유가 예산 부족·집행 기간 지남처럼 '
-                          '확정할 수 없는 이유라면 반려로 처리해 주세요.'
-                      : budgetReason != null
-                          ? '이 항목은 아직 승인 대기(PENDING) 상태예요. 등록할 때는 잔량이 있었지만 '
-                              '다른 건이 먼저 확정되면서 예산이 부족해졌을 수 있어요. '
-                              '확정할 수 없으므로 반려로 처리해 주세요.'
+                  budgetReason != null
+                      ? '이 항목은 아직 승인 대기(PENDING) 상태예요. 등록할 때는 잔량이 있었지만 '
+                          '다른 건이 먼저 확정되면서 예산이 부족해졌을 수 있어요. '
+                          '확정할 수 없으므로 반려로 처리해 주세요.'
+                      : unknownCause
+                          ? '이 항목은 아직 승인 대기(PENDING) 상태예요. 위 사유가 예산 부족·집행 기간 지남처럼 '
+                              '확정할 수 없는 이유라면 반려로 처리해 주세요.'
                           : '이 항목은 아직 승인 대기(PENDING) 상태예요. 잠시 뒤 다시 서명해 주세요.',
                   style: const TextStyle(fontSize: 12, height: 1.5, color: AppTheme.textMain),
                 ),
@@ -684,34 +668,13 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
     );
   }
 
-  /// 서명을 보내는 동안 막음 다이얼로그를 띄우고 [send] 를 돌린다. 실패 이유를, 성공이면 null 을 돌려준다.
-  Future<EntryDecisionException?> _sendWithBlocking(String label, Future<void> Function() send) async {
-    final navigator = Navigator.of(context, rootNavigator: true);
-    final sending = DialogRoute<void>(
-      context: context,
-      themes: InheritedTheme.capture(from: context, to: navigator.context),
-      barrierDismissible: false,
-      builder: (_) => PopScope(canPop: false, child: _Sending(label: label)),
-    );
-    navigator.push(sending);
-    EntryDecisionException? failed;
-    try {
-      await send();
-    } on EntryDecisionException catch (e) {
-      failed = e;
-    }
-    // pop() 이 아니라 이 다이얼로그만 지운다. 401 이면 로그인 화면으로 가면서 쌓인 화면이 다 지워져
-    // 다이얼로그도 이미 없다 — 그때 pop() 하면 방금 연 로그인 화면이 닫혀 빈 화면이 된다.
-    if (sending.isActive) navigator.removeRoute(sending);
-    return failed;
-  }
-
   /// 서버 건 승인 — 기기 서명 → `POST /entries/{id}/confirm`.
   ///
   /// 체인·서버가 거부하면(400) 항목은 `PENDING` 그대로라 실패 안내에서 반려로 넘길 수 있다.
   /// 그 밖의 실패는 알리고 목록을 다시 읽는다 — 409·결과 모름이면 다른 임원의 처리가 반영됐을 수 있다.
   Future<void> _confirmOnServer(Map<String, dynamic> item, EntryModel entry, String? warningReason) async {
-    final failed = await _sendWithBlocking(
+    final failed = await sendWithBlocking(
+      context,
       '승인 서명을 보내는 중이에요…',
       () => _decisions.confirm(entry, warningReason: warningReason),
     );
@@ -719,7 +682,7 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
 
     if (failed != null) {
       if (failed.failure == EntryDecisionFailure.refused) {
-        await _showApprovalFailure(item, null, serverMessage: failed.message);
+        await _showApprovalFailure(item, failed.failReason, serverMessage: failed.message);
       } else {
         _snack(failed.message, AppTheme.expense);
       }
@@ -740,7 +703,7 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
   /// 성공이든 실패든 끝나면 목록을 다시 읽는다. 실패 이유는 상태 코드로만 나뉘고(서버 문구로
   /// 분기하지 않는다), 409·결과 모름이면 다른 임원의 처리나 앞선 시도가 반영됐을 수 있어서다.
   Future<void> _rejectOnServer(Map<String, dynamic> item, EntryModel entry, String reason) async {
-    final failed = await _sendWithBlocking('반려 서명을 보내는 중이에요…', () => _decisions.reject(entry, reason));
+    final failed = await sendWithBlocking(context, '반려 서명을 보내는 중이에요…', () => _decisions.reject(entry, reason));
     if (!mounted) return;
 
     if (failed != null) {
@@ -918,9 +881,12 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
       separatorBuilder: (_, __) => const SizedBox(height: 12),
       itemBuilder: (context, index) {
         final item = filtered[index];
+        final entry = _entryOf(item);
         return _ApprovalCard(
           item: item,
           status: status,
+          receiptCheck: entry == null ? null : _receiptChecks[entry.id],
+          receiptChecking: entry != null && _receiptChecking.contains(entry.id),
           onReceipt: () => _showReceiptDialog(item),
           own: isOwnEntry(item, widget.effectiveUserId),
           onApprove: () => _onApprove(item),
@@ -1002,29 +968,6 @@ class _LoadFailed extends StatelessWidget {
   }
 }
 
-/// 서명을 보내는 동안 띄우는 막음 다이얼로그.
-class _Sending extends StatelessWidget {
-  final String label;
-  const _Sending({required this.label});
-
-  @override
-  Widget build(BuildContext context) {
-    return Dialog(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Row(
-          children: [
-            const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2.5)),
-            const SizedBox(width: 16),
-            Expanded(child: Text(label, style: const TextStyle(fontSize: 14, color: AppTheme.textMain))),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
 /// 누를 수 없는 회색 버튼 (본인 등록 건).
 class _DisabledAction extends StatelessWidget {
   final String label;
@@ -1041,16 +984,79 @@ class _DisabledAction extends StatelessWidget {
   }
 }
 
+/// 카드의 영수증 해시 대조 결과 — 승인 버튼을 누르기 전에 보인다.
+class _ReceiptCheckNote extends StatelessWidget {
+  final ReceiptCheck? check;
+  final bool checking;
+  const _ReceiptCheckNote({required this.check, required this.checking});
+
+  @override
+  Widget build(BuildContext context) {
+    if (checking && check == null) {
+      return const Text('영수증 대조 중…', key: Key('approval_receipt_checking'), style: TextStyle(fontSize: 11, color: AppTheme.textSub));
+    }
+    switch (check) {
+      case ReceiptCheck.matched:
+        return const Row(
+          key: Key('approval_receipt_match'),
+          children: [
+            Icon(Icons.verified_rounded, size: 14, color: AppTheme.success),
+            SizedBox(width: 6),
+            Expanded(child: Text('영수증 해시 일치 — 올린 원본 그대로예요', style: TextStyle(fontSize: 11, height: 1.3, color: AppTheme.textSub))),
+          ],
+        );
+      case ReceiptCheck.mismatched:
+        return Container(
+          key: const Key('approval_receipt_mismatch'),
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          decoration: BoxDecoration(
+            color: const Color(0xFFFDECEC),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: const Color(0xFFF5B5B5)),
+          ),
+          child: const Row(
+            children: [
+              Icon(Icons.gpp_bad_rounded, size: 16, color: Colors.red),
+              SizedBox(width: 8),
+              Expanded(
+                child: Text('영수증 해시 불일치 — 등록 때 올린 파일과 달라요. 승인할 수 없어요',
+                    style: TextStyle(fontSize: 11, height: 1.3, color: Color(0xFF8A1C1C), fontWeight: FontWeight.bold)),
+              ),
+            ],
+          ),
+        );
+      case ReceiptCheck.unavailable:
+        return const Row(
+          key: Key('approval_receipt_unavailable'),
+          children: [
+            Icon(Icons.help_outline_rounded, size: 14, color: Colors.orange),
+            SizedBox(width: 6),
+            Expanded(child: Text('영수증을 받지 못해 대조하지 못했어요', style: TextStyle(fontSize: 11, height: 1.3, color: Color(0xFF7C4700)))),
+          ],
+        );
+      case null:
+        return const SizedBox.shrink();
+    }
+  }
+}
+
 class _ApprovalCard extends StatelessWidget {
   final Map<String, dynamic> item;
   final EntryStatus status;
   final bool own;
   final VoidCallback onReceipt, onApprove, onReject;
 
+  /// 영수증 해시 대조 결과. 대조 전이거나 영수증이 없으면 null.
+  final ReceiptCheck? receiptCheck;
+  final bool receiptChecking;
+
   const _ApprovalCard({
     required this.item,
     required this.status,
     this.own = false,
+    this.receiptCheck,
+    this.receiptChecking = false,
     required this.onReceipt,
     required this.onApprove,
     required this.onReject,
@@ -1137,6 +1143,10 @@ class _ApprovalCard extends StatelessWidget {
                   ],
                 ),
               ),
+            ],
+            if (status == EntryStatus.PENDING && !own && (receiptChecking || receiptCheck != null)) ...[
+              const SizedBox(height: 10),
+              _ReceiptCheckNote(check: receiptCheck, checking: receiptChecking),
             ],
             if (status == EntryStatus.CONFIRMED && item['warningAckReason'] != null) ...[
               const SizedBox(height: 10),
