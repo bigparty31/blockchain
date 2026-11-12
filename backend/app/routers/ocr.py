@@ -90,3 +90,8 @@ async def read_receipt(
         ocr_approval_no=parsed.approval_no,
         ocr_paid_at=parsed.paid_at,
     )
+
+
+# B9: 2서버 아키텍처용 라우터 별칭
+command_router = router
+

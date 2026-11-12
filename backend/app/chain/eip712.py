@@ -26,10 +26,13 @@ from eth_utils import keccak
 
 from app.chain.deployment import Eip712Domain
 from app.chain.models import (
+    BURN_REASON_ORDER,
     KIND_ORDER,
+    BurnRequest,
     ConfirmApproval,
     IncreaseRequest,
     IssueRequest,
+    MintBatchRequest,
     RecordRequest,
     RejectDecision,
     check_signature,
@@ -85,14 +88,34 @@ INCREASE_REQUEST_FIELDS = (
     ("deadline", "uint256"),
 )
 
+# IMembershipSBT 의 typehash 순서 (docs/CONTRACTS.md EIP-712 표). 도메인은 배포 기록의 eip712["MembershipSBT"] 이다.
+# address[] 는 EIP-712 배열 규칙대로 각 원소를 32바이트로 채워 이어 붙인 것의 keccak256 = keccak256(abi.encodePacked(recipients))
+MINT_BATCH_REQUEST_FIELDS = (
+    ("recipients", "address[]"),
+    ("term", "uint256"),
+    ("nonce", "uint256"),
+    ("deadline", "uint256"),
+)
+
+BURN_REQUEST_FIELDS = (
+    ("holder", "address"),
+    ("term", "uint256"),
+    ("reason", "uint8"),
+    ("nonce", "uint256"),
+    ("deadline", "uint256"),
+)
+
 # docs/CONTRACTS.md category 표 그대로. 표가 바뀌면 같이 고친다 (tests/test_budget_relay.py 가 대조한다)
 APPROVED_CATEGORIES = frozenset(
     {"학생회비", "지원금", "후원금", "이자수입", "행사비", "사업비", "운영비", "홍보비", "복지비", "회의비", "비품비", "예비비"}
 )
 
-SignedPayload = Union[RecordRequest, ConfirmApproval, RejectDecision, IssueRequest, IncreaseRequest]
-# BudgetToken 도메인으로 서명하는 구조체. 나머지는 AccountingLedger 도메인이다
+SignedPayload = Union[
+    RecordRequest, ConfirmApproval, RejectDecision, IssueRequest, IncreaseRequest, MintBatchRequest, BurnRequest
+]
+# BudgetToken 도메인으로 서명하는 구조체. MEMBERSHIP_PAYLOADS 는 MembershipSBT 도메인, 나머지는 AccountingLedger 도메인이다
 BUDGET_PAYLOADS = (IssueRequest, IncreaseRequest)
+MEMBERSHIP_PAYLOADS = (MintBatchRequest, BurnRequest)
 
 
 def typed_data(primary_type: str, fields: tuple, domain: Eip712Domain, message: dict) -> dict:
@@ -209,6 +232,37 @@ def increase_request_typed_data(request: IncreaseRequest, domain: Eip712Domain) 
     )
 
 
+def mint_batch_request_typed_data(request: MintBatchRequest, domain: Eip712Domain) -> dict:
+    """회장 또는 감사가 서명하는 MintBatchRequest. domain 은 배포 기록의 eip712["MembershipSBT"]."""
+    return typed_data(
+        "MintBatchRequest",
+        MINT_BATCH_REQUEST_FIELDS,
+        domain,
+        {
+            "recipients": list(request.recipients),
+            "term": request.term,
+            "nonce": request.nonce,
+            "deadline": request.deadline,
+        },
+    )
+
+
+def burn_request_typed_data(request: BurnRequest, domain: Eip712Domain) -> dict:
+    """회장 또는 감사가 서명하는 BurnRequest. domain 은 배포 기록의 eip712["MembershipSBT"]."""
+    return typed_data(
+        "BurnRequest",
+        BURN_REQUEST_FIELDS,
+        domain,
+        {
+            "holder": request.holder,
+            "term": request.term,
+            "reason": BURN_REASON_ORDER.index(request.reason),  # EIP-712 타입 문자열에서는 uint8
+            "nonce": request.nonce,
+            "deadline": request.deadline,
+        },
+    )
+
+
 def typed_data_for(payload: SignedPayload, domain: Eip712Domain) -> dict:
     """서명 대상 모델에 맞는 typed data. ChainClient.signer_of 구현이 쓴다."""
     if isinstance(payload, IssueRequest):
@@ -221,6 +275,10 @@ def typed_data_for(payload: SignedPayload, domain: Eip712Domain) -> dict:
         return confirm_approval_typed_data(payload, domain)
     if isinstance(payload, RejectDecision):
         return reject_decision_typed_data(payload, domain)
+    if isinstance(payload, MintBatchRequest):
+        return mint_batch_request_typed_data(payload, domain)
+    if isinstance(payload, BurnRequest):
+        return burn_request_typed_data(payload, domain)
     raise TypeError(f"서명 대상이 아니다: {type(payload).__name__}")
 
 

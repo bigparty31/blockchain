@@ -29,9 +29,11 @@ from app.chain import (
 from app.chain.deployment import DEFAULT_PATH, load_deployment
 from app.chain.models import ZERO_BYTES32, BlockReason
 from app.chain.web3_client import LEDGER
-from app.models import Base, Entry, Term, User
+from app.models import Base, Entry, Notification, Term, User
 from app.schemas.entry import EntryKind, EntryStatus
 from app.services import chain_tx
+from app.services import push
+from app.services.notifications import NotificationKind, create_notification
 from app.services.chain_tx import EntryAlreadyRecorded, EntryConflict, EntryInFlight, relay_confirm, relay_record, relay_reject
 from chain_support import (
     AUDITOR,
@@ -692,6 +694,168 @@ def test_confirming_a_confirmed_entry_is_a_conflict(engine, db):
     with pytest.raises(EntryConflict):
         asyncio.run(approve(db, chain, entry_id))
     assert chain.sends == 2  # 등록 1 + 확정 1
+
+
+# ---------------------------------------------------------------- 알림 (docs/NOTIFICATION_API.md)
+
+
+def notices(engine, entry_id: int) -> list:
+    """(받는 사람, kind, 닫혔나) — 받는 사람·종류 순."""
+    with Session(engine) as db:
+        rows = db.query(Notification).filter(Notification.entry_id == entry_id).order_by(Notification.kind, Notification.user_id)
+        return [(n.user_id, n.kind, n.resolved_at is not None) for n in rows]
+
+
+def test_recorded_entry_asks_auditors_and_president(engine, db):
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    assert notices(engine, entry_id) == [(AUDITOR_ID, "ENTRY_REGISTERED", False), (PRESIDENT_ID, "ENTRY_REGISTERED", False)]
+
+
+def test_blocked_entry_is_only_reported_as_blocked(engine, db):
+    # BLOCKED 는 확정·반려할 수 없어 승인 요청을 보내면 닫히지 않는 재알림이 남는다
+    entry_id = draft(engine, kind="EXPENSE", amount=35_000)
+    assert submit(db, Chain(), entry_id, kind=EntryKind.EXPENSE, amount=35_000).status is EntryStatus.BLOCKED
+    assert notices(engine, entry_id) == [(TREASURER_ID, "ENTRY_BLOCKED", False), (PRESIDENT_ID, "ENTRY_BLOCKED", False)]
+
+
+def test_confirmation_closes_the_requests_and_tells_the_treasurer(engine, db):
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    with Session(engine) as other:
+        create_notification(other, NotificationKind.ENTRY_EDIT_REQUESTED, entry_id=entry_id)
+        other.commit()
+    asyncio.run(approve(db, chain, entry_id))
+    assert notices(engine, entry_id) == [
+        (TREASURER_ID, "ENTRY_CONFIRMED", False),
+        (AUDITOR_ID, "ENTRY_EDIT_REQUESTED", True),
+        (PRESIDENT_ID, "ENTRY_EDIT_REQUESTED", True),
+        (AUDITOR_ID, "ENTRY_REGISTERED", True),
+        (PRESIDENT_ID, "ENTRY_REGISTERED", True),
+    ]
+
+
+def test_rejection_closes_the_requests_and_tells_the_treasurer(engine, db):
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    asyncio.run(refuse(db, chain, entry_id))
+    assert notices(engine, entry_id) == [
+        (AUDITOR_ID, "ENTRY_REGISTERED", True),
+        (PRESIDENT_ID, "ENTRY_REGISTERED", True),
+        (TREASURER_ID, "ENTRY_REJECTED", False),
+    ]
+
+
+def test_result_found_again_by_a_retry_is_reported_once(engine, db):
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    lost_confirmation(engine, db, chain, entry_id)
+    asyncio.run(approve(db, chain, entry_id))  # 저장한 hash 로 결과를 맞춘다
+    with pytest.raises(EntryConflict):
+        asyncio.run(approve(db, chain, entry_id))
+    assert [n for n in notices(engine, entry_id) if n[1] == "ENTRY_CONFIRMED"] == [(TREASURER_ID, "ENTRY_CONFIRMED", False)]
+
+
+@pytest.mark.parametrize("reason", [RevertReason.INSUFFICIENT_BUDGET, RevertReason.BUDGET_EXPIRED])
+def test_confirmation_refused_for_the_budget_tells_the_treasurer_once_until_read(engine, db, reason):
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    for _ in range(2):
+        chain.fail_next("confirm_entry", reason)
+        with pytest.raises(ChainRevert):
+            asyncio.run(approve(db, chain, entry_id))
+    failed = [n for n in notices(engine, entry_id) if n[1] == "ENTRY_CONFIRM_FAILED"]
+    assert failed == [(TREASURER_ID, "ENTRY_CONFIRM_FAILED", False)]  # 안 읽은 알림이 있으면 다시 만들지 않는다
+    with Session(engine) as other:
+        other.query(Notification).filter(Notification.kind == "ENTRY_CONFIRM_FAILED").update({"read_at": datetime.now(timezone.utc)})
+        other.commit()
+    chain.fail_next("confirm_entry", reason)
+    with pytest.raises(ChainRevert):
+        asyncio.run(approve(db, chain, entry_id))
+    assert len([n for n in notices(engine, entry_id) if n[1] == "ENTRY_CONFIRM_FAILED"]) == 2
+    assert row(engine, entry_id)["status"] == "PENDING"
+
+
+def test_other_refusals_are_left_to_the_approver(engine, db):
+    # 서명·entryCommit 불일치 같은 거부는 총무가 할 일이 없다. 승인자 응답으로 끝난다
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    chain.fail_next("confirm_entry", RevertReason.ENTRY_COMMIT_MISMATCH)
+    with pytest.raises(ChainRevert):
+        asyncio.run(approve(db, chain, entry_id))
+    assert [n[1] for n in notices(engine, entry_id)] == ["ENTRY_REGISTERED", "ENTRY_REGISTERED"]
+
+
+def test_failing_to_record_the_failure_notice_does_not_hide_the_refusal(engine, db, monkeypatch):
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("알림 테이블 오류")
+
+    monkeypatch.setattr(chain_tx, "create_notification", broken)
+    chain.fail_next("confirm_entry", RevertReason.INSUFFICIENT_BUDGET)
+    with pytest.raises(ChainRevert) as raised:
+        asyncio.run(approve(db, chain, entry_id))
+    assert raised.value.reason is RevertReason.INSUFFICIENT_BUDGET
+
+
+def test_settling_and_its_notices_are_one_transaction(engine, db, monkeypatch):
+    # 알림을 기록하지 못하면 상태 반영도 남지 않는다 (②). 다시 요청하면 결과를 맞추면서 알림도 남긴다
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    real = chain_tx.create_notification
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("알림 테이블 오류")
+
+    monkeypatch.setattr(chain_tx, "create_notification", broken)
+    with pytest.raises(RuntimeError):
+        asyncio.run(approve(db, chain, entry_id))
+    assert row(engine, entry_id)["status"] == "PENDING" and row(engine, entry_id)["tx_confirm"] is not None
+    assert [n[1] for n in notices(engine, entry_id)] == ["ENTRY_REGISTERED", "ENTRY_REGISTERED"]
+    monkeypatch.setattr(chain_tx, "create_notification", real)
+    assert asyncio.run(approve(db, chain, entry_id)).status is EntryStatus.CONFIRMED
+    assert (TREASURER_ID, "ENTRY_CONFIRMED", False) in notices(engine, entry_id)
+
+
+class PushRecorder:
+    def __init__(self):
+        self.topics = []
+
+    def send_to_tokens(self, tokens, message):
+        return []
+
+    def send_to_topic(self, topic, message):
+        self.topics.append((topic, message.body))
+
+
+def pushed(engine) -> PushRecorder:
+    recorder = PushRecorder()
+    push.drain(lambda: Session(engine), recorder)
+    return recorder
+
+
+def test_confirmation_is_pushed_to_students_after_commit(engine, db):
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    push.clear()
+    asyncio.run(approve(db, chain, entry_id))
+    assert pushed(engine).topics == [("students_20262", "수입 「목적」 500,000원이 확정되었습니다.")]
+
+
+def test_nothing_is_pushed_when_the_settle_rolls_back(engine, db, monkeypatch):
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    push.clear()
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("알림 테이블 오류")
+
+    monkeypatch.setattr(chain_tx, "notify_students_confirmed", broken)
+    with pytest.raises(RuntimeError):
+        asyncio.run(approve(db, chain, entry_id))
+    assert pushed(engine).topics == []  # 확정 알림 행도, 학생 푸시도 나가지 않았다
 
 
 # ---------------------------------------------------------------- T4 수정 요청과 확정

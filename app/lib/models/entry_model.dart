@@ -53,6 +53,16 @@ class EntryModel {
   final int? correctsEntryId;
   final CorrectionReason? correctionReason;
 
+  /// 영수증 중복(`ocr_status == DUPLICATE`)일 때 겹치는 **기존 건의 id**. 아니면 null.
+  /// 서버가 아직 안 내려주면(옛 서버) 항상 null 이고, 그때 승인 화면은 「중복」만 적는다.
+  final int? duplicateOf;
+
+  /// 예산 검사에서 차단된(`BLOCKED`) 사유. 모르는 값·없는 값은 null — 다른 사유로 바꿔 보이지 않는다.
+  final BlockReason? blockReason;
+
+  /// 등록자 실명. 없으면 null 이고 화면은 「사용자 #id」로 적는다.
+  final String? creatorName;
+
   EntryModel({
     required this.id,
     required this.termId,
@@ -82,6 +92,9 @@ class EntryModel {
     this.blockNumber,
     this.correctsEntryId,
     this.correctionReason,
+    this.duplicateOf,
+    this.blockReason,
+    this.creatorName,
   });
 
   factory EntryModel.fromJson(Map<String, dynamic> json) {
@@ -116,7 +129,17 @@ class EntryModel {
       correctionReason: json['correction_reason'] != null
           ? CorrectionReason.fromCode(json['correction_reason'])
           : null,
+      duplicateOf: json['duplicate_of'] is int ? json['duplicate_of'] as int : null,
+      blockReason: BlockReason.tryParse(json['block_reason']),
+      creatorName: _nonBlank(json['creator_name']),
     );
+  }
+
+  /// 문자열이고 공백만이 아니면 앞뒤 공백을 걷어 돌려준다. 아니면 null.
+  static String? _nonBlank(dynamic raw) {
+    if (raw is! String) return null;
+    final s = raw.trim();
+    return s.isEmpty ? null : s;
   }
 
   /// `status` 가 없으면 **채우지 않고 던진다.**

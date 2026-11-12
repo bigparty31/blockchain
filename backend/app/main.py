@@ -6,6 +6,8 @@ from fastapi.responses import JSONResponse
 
 from app.chain import ChainSetupError
 from app.chain.provider import check_chain_config, close_chain_client
+from app.database import SessionLocal
+from app.services import notification_worker
 from app.routers.auth import router as auth_router
 from app.routers.entries import router as entries_router
 from app.routers.balance import router as balance_router
@@ -17,15 +19,22 @@ from app.routers.terms import router as terms_router
 from app.routers.events import router as events_router
 from app.routers.budget_revisions import router as budget_revisions_router
 from app.routers.memberships import router as memberships_router
+from app.routers.notifications import router as notifications_router
+from app.routers.membership_mint import router as membership_mint_router
 from app.routers.ocr import router as ocr_router
 from app.routers.bank import router as bank_router
+from app.routers.receipts import router as receipts_router
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 체인 설정이 없으면 서버를 띄우지 않는다. 가짜 체인은 CHAIN_FAKE=1 로 명시했을 때만 쓴다 (app/chain/provider.py)
     check_chain_config()
+    # 재알림 작업과 푸시 전송 (PRD §4.8 — API 프로세스 안에서 돈다). 학생 서버는 NOTIFICATION_WORKER=0 으로 끈다
+    notification_worker.check_config()
+    worker = notification_worker.start(SessionLocal)
     yield
+    await notification_worker.stop(worker)
     await close_chain_client()  # 릴레이어의 RPC 연결을 닫는다
 
 
@@ -81,8 +90,11 @@ app.include_router(terms_router)
 app.include_router(events_router)
 app.include_router(budget_revisions_router)
 app.include_router(memberships_router)
+app.include_router(notifications_router)
+app.include_router(membership_mint_router)
 app.include_router(ocr_router)
 app.include_router(bank_router)
+app.include_router(receipts_router)
 
 
 @app.get("/", tags=["Health"])

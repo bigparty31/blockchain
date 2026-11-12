@@ -11,6 +11,7 @@ from app.schemas.term import TermResponse
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/terms", tags=["Terms"])
+query_router = router
 
 
 @router.get("", response_model=List[TermResponse], summary="학기 목록 조회")
