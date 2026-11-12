@@ -6,6 +6,7 @@ import '../../core/entry_merge.dart';
 import '../../core/entry_verifier.dart';
 import '../../core/enums.dart';
 import '../../core/format.dart';
+import '../../core/hashing.dart';
 import '../../models/entry_model.dart';
 import '../../models/objection_model.dart';
 import '../../services/auth_service.dart';
@@ -53,6 +54,13 @@ class _EntryDetailScreenState extends State<EntryDetailScreen> {
 
   EntryModel get _entry => widget.chain.original;
 
+  /// 상세에서만 내려오는 블록 번호. 목록 응답에는 없어서([StudentApiService.fetchEntry])
+  /// 화면을 열 때 한 번 더 읽어 보완한다. 못 읽으면 null 이고 「기록되어 있지 않습니다」가 뜬다.
+  int? _blockNumber;
+
+  /// 화면에 보일 블록 번호 — 목록에 실려 있으면 그것, 아니면 상세에서 읽은 것.
+  int? get _shownBlockNumber => _entry.blockNumber ?? _blockNumber;
+
   /// 멤버십을 다시 조회하는 중인지 — 재시도 버튼의 스피너용.
   bool _membershipLoading = false;
 
@@ -71,7 +79,16 @@ class _EntryDetailScreenState extends State<EntryDetailScreen> {
     super.initState();
     _loadObjections();
     _loadMembership();
+    _loadBlockNumber();
     _verify();
+  }
+
+  /// 블록 번호만 상세에서 보완해 온다. 실패해도 화면은 그대로 — 없으면 없다고 적을 뿐이다.
+  Future<void> _loadBlockNumber() async {
+    if (_entry.blockNumber != null) return; // 목록에 이미 실려 왔으면 다시 읽지 않는다
+    final fresh = await _api.fetchEntry(_entry.id);
+    if (!mounted || fresh?.blockNumber == null) return;
+    setState(() => _blockNumber = fresh!.blockNumber);
   }
 
   Future<void> _loadMembership() async {
@@ -795,8 +812,8 @@ class _EntryDetailScreenState extends State<EntryDetailScreen> {
           _txRow(_secondTxLabel, _entry.txConfirm),
           // 서버가 `block_number` 를 내려준다 (S10). 아직 체인에 올라가지 않은 건과
           // 옛 서버에서는 없어서, 그때만 아래 안내가 자리를 지킨다.
-          if (_entry.blockNumber != null)
-            _txRow('블록 번호', '#${_entry.blockNumber}')
+          if (_shownBlockNumber != null)
+            _txRow('블록 번호', '#$_shownBlockNumber')
           else
             Text(
               '이 항목은 블록 번호가 기록되어 있지 않습니다.',
@@ -1605,12 +1622,18 @@ class _ObjectionTile extends StatelessWidget {
                 Icon(Icons.schedule_rounded,
                     size: 13, color: AppTheme.pending.withOpacity(0.9)),
                 const SizedBox(width: 4),
-                Text(
-                  '아직 답변이 없습니다',
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: AppTheme.pending.withOpacity(0.9),
-                    fontWeight: FontWeight.w600,
+                Flexible(
+                  child: Text(
+                    // 며칠째 답이 없는지를 같이 보인다 (스토리보드 5 ⑤)
+                    switch (objectionElapsedDays(objection.raisedAt)) {
+                      0 => '아직 답변이 없습니다 · 오늘 제기',
+                      final d => '아직 답변이 없습니다 · 제기 후 $d일 경과',
+                    },
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: AppTheme.pending.withOpacity(0.9),
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
                 ),
               ],
@@ -1620,6 +1643,26 @@ class _ObjectionTile extends StatelessWidget {
       ),
     );
   }
+}
+
+/// 이의를 제기한 날로부터 **한국 날짜 기준** 며칠 지났는지 (스토리보드 5 ⑤).
+///
+/// 24시간 단위가 아니라 **날짜가 바뀐 횟수**를 센다. 어제 23시에 제기한 건이 오늘 아침에도
+/// 「0일 경과」로 보이면 미답변 압력이 하루 늦게 걸린다 — 답하지 않은 사실이 쌓이는 것이
+/// 이 화면의 목적이다 (PRD §4.5).
+///
+/// 시간대는 KST 로 고정한다. 기기 시간대를 쓰면 UTC 인 에뮬레이터·해외 로밍에서 날짜가
+/// 하루 밀린다 ([Fmt.date] 와 같은 판단).
+int objectionElapsedDays(int raisedAt, {DateTime? now}) {
+  final raised = Hashing.kstDateOf(raisedAt);
+  final today = Hashing.kstDateOf(
+    (now ?? DateTime.now()).millisecondsSinceEpoch ~/ 1000,
+  );
+  final days = DateTime.utc(today.year, today.month, today.day)
+      .difference(DateTime.utc(raised.year, raised.month, raised.day))
+      .inDays;
+  // 기기 시계가 뒤로 가 있으면 음수가 나온다. 「-2일 경과」를 보여 주지 않는다
+  return days < 0 ? 0 : days;
 }
 
 /// 이의를 제기할 수 있는 상태인지 (스토리보드 5 「화면 전체 규칙」).

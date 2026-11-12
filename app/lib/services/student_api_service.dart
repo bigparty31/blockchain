@@ -220,6 +220,21 @@ class StudentApiService {
     return _usingDemoData ? _demoOnChain(entryId) : null;
   }
 
+  /// GET /entries/{id} — 단건 상세.
+  ///
+  /// **목록(`GET /entries`)에 없는 값이 여기에만 있다.** 지금은 `block_number` 가 그렇다 —
+  /// 서버가 트랜잭션 영수증을 읽어 채우는데(backend `entries.py` `_fetch_entry_chain_detail`),
+  /// 항목마다 RPC 왕복이라 목록에서는 하지 않는다. 목록 응답에서는 `null` 이다
+  /// (2026-11-12 실연동에서 확인: 목록 `null` / 상세 `11`).
+  ///
+  /// 못 읽으면 null 이다. **예시 데이터로 메우지 않는다** — 상세 화면은 이미 목록에서 받은
+  /// 값을 그리고 있고, 여기서 데모 값을 섞으면 실제 항목에 가짜 블록 번호가 붙는다.
+  Future<EntryModel?> fetchEntry(int entryId) async {
+    final json = await _getJson('${ApiConfig.entries}/$entryId');
+    if (json is Map<String, dynamic>) return EntryModel.fromJson(json);
+    return null;
+  }
+
   /// GET /users/wallets — **지갑 주소 → user id** 매핑 (검증 2단계)
   ///
   /// 체인의 `registrant`·`approver` 는 지갑 주소이고 DB 의 `created_by`·
