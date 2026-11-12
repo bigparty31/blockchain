@@ -114,6 +114,12 @@ class _BudgetRevisionScreenState extends State<BudgetRevisionScreen> {
     if (_submitting || !_formKey.currentState!.validate()) return;
     final budget = _selected;
     if (budget == null) return; // 항목 검사(validator)가 먼저 막는다
+    // 현재 학기를 모르면 어느 학기 예산인지 정할 수 없다 — 근거 지출이 이미 가진 예산은 그대로 쓴다
+    if (_currentTermId == null && budget.id != widget.initialBudgetId) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('현재 학기를 확인하지 못해 예산 항목을 정할 수 없어요. 잠시 후 다시 시도해 주세요.'), behavior: SnackBarBehavior.floating));
+      return;
+    }
     setState(() => _submitting = true);
     final amount = int.parse(_amountController.text);
     // trim() 을 쓰지 않는다 — BOM 처리가 서버(Python)와 달라 사유 해시가 갈린다 (input_rules.dart 머리말).
