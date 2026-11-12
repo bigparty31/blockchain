@@ -170,7 +170,8 @@ class EntryRegistrationService implements EntryRegistrar {
         final request = http.MultipartRequest('POST', Uri.parse('${ApiConfig.baseUrl}/receipts'))
           ..headers.addAll(authHeaders)
           ..files.add(http.MultipartFile.fromBytes('file', bytes, filename: filename));
-        return http.Response.fromStream(await client.send(request).timeout(uploadTimeout));
+        // 제한은 본문을 다 받을 때까지 건다 — 헤더만 오고 본문이 끝나지 않으면 `send()` 의 제한만으로는 영영 안 끝난다.
+        return (() async => http.Response.fromStream(await client.send(request)))().timeout(uploadTimeout);
       },
       what: '영수증 업로드',
     );
