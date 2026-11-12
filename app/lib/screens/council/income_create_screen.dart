@@ -51,6 +51,11 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
 
   bool _submitting = false;
 
+  /// 이전·저장해 둔 영수증을 서버에서 받는 중. 받기 전에 제출하면 영수증 없이 올라가 해시가 비고, 뒤늦게 온 영수증은 붙지 못한다.
+  bool _restoringReceipt = false;
+
+  bool get _receiptPending => _restoringReceipt && _receiptHash == null;
+
   late final EntryRegistrar _registrar = widget.registrar ?? EntryRegistrationService();
 
   /// 저장한 초안 번호와 그때의 입력 — 제출이 실패하면 다시 제출할 때 같은 번호를 쓴다 (API §2.3).
@@ -89,7 +94,9 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
     _draftId = d.id;
     _savedDraft = d.toEntryDraft();
     if (d.receiptHash == null) return;
+    _restoringReceipt = true;
     restoreReceiptFile(_registrar, d.receiptHash, d.receiptPath).then((restored) {
+      _restoringReceipt = false;
       if (!mounted || _receiptHash != null) return;
       setState(() {
         if (restored == null) {
@@ -112,7 +119,9 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
     _incomeType = e.purpose;
     _selectedDate = pickerDateOf(e.occurredAt);
     if (e.receiptHash == null) return;
+    _restoringReceipt = true;
     restoreReceipt(_registrar, e).then((restored) {
+      _restoringReceipt = false;
       if (!mounted || _receiptHash != null) return;
       setState(() {
         if (restored == null) {
@@ -213,7 +222,12 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
 
   /// 초안 저장 → 기기 서명 → 제출. 수입은 예산 검사 대상이 아니라 결과는 `PENDING` 이다.
   Future<void> _submitIncome() async {
-    if (_submitting || !_formKey.currentState!.validate()) return;
+    if (_submitting) return;
+    if (_receiptPending) {
+      _snack('이전 영수증을 불러오는 중이에요. 잠시 후 다시 눌러 주세요.');
+      return;
+    }
+    if (!_formKey.currentState!.validate()) return;
     final termId = _termId;
     if (termId == null) {
       _snack(_termError != null ? '$_termError 제출하지 않았어요.' : '학기 정보를 불러오는 중이에요. 잠시 후 다시 시도해 주세요.');

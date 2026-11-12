@@ -46,6 +46,11 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
   DateTime _selectedDate = kstToday();
   bool _submitting = false;
 
+  /// 이전·저장해 둔 영수증을 서버에서 받는 중. 받기 전에 제출하면 영수증 없이 올라가 해시가 비고, 뒤늦게 온 영수증은 붙지 못한다.
+  bool _restoringReceipt = false;
+
+  bool get _receiptPending => _restoringReceipt && _receiptHash == null;
+
   /// 영수증 원본 바이트의 SHA-256. 지출은 제출에 필수다 (초안은 없어도 저장된다).
   String? _receiptHash;
   bool get _hasReceiptImage => _receiptHash != null;
@@ -92,7 +97,9 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
     _selectedDate = pickerDateOf(e.occurredAt);
     if (e.status == EntryStatus.BLOCKED) _blockedId = e.id;
     if (e.receiptHash == null) return;
+    _restoringReceipt = true;
     restoreReceipt(_registrar, e).then((restored) {
+      _restoringReceipt = false;
       if (!mounted || _receiptHash != null) return; // 그새 다른 사진을 골랐으면 그대로 둔다
       setState(() {
         if (restored == null) {
@@ -115,7 +122,9 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
     _draftId = d.id;
     _savedDraft = d.toEntryDraft();
     if (d.receiptHash == null) return;
+    _restoringReceipt = true;
     restoreReceiptFile(_registrar, d.receiptHash, d.receiptPath).then((restored) {
+      _restoringReceipt = false;
       if (!mounted || _receiptHash != null) return; // 그새 다른 사진을 골랐으면 그대로 둔다
       setState(() {
         if (restored == null) {
@@ -269,7 +278,12 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
 
   /// ① 초안 저장 — 서버에만 저장한다. 체인 검사(BLOCKED)도 서명도 하지 않는다.
   Future<void> _saveDraft() async {
-    if (_submitting || !_formKey.currentState!.validate()) return;
+    if (_submitting) return;
+    if (_receiptPending) {
+      _snack('이전 영수증을 불러오는 중이에요. 잠시 후 다시 눌러 주세요.');
+      return;
+    }
+    if (!_formKey.currentState!.validate()) return;
     // 입력은 여기서 한 번만 읽는다 — 업로드·저장을 기다리는 사이 바꿔도(금액을 비워도) 보낸 값과 안내가 같다 (#71 리뷰)
     final base = _buildDraft(forSubmit: false); // 예산 확인 — 올리기 전에 막는다
     if (base == null) return;
@@ -299,7 +313,12 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
   /// ② 제출 — 기기 키로 서명해 체인에 올린다. 결과는 `PENDING` 또는 `BLOCKED`.
   /// 실패하면 초안 번호를 들고 있다가 다시 제출할 때 쓴다.
   Future<void> _submitExpense() async {
-    if (_submitting || !_formKey.currentState!.validate()) return;
+    if (_submitting) return;
+    if (_receiptPending) {
+      _snack('이전 영수증을 불러오는 중이에요. 잠시 후 다시 눌러 주세요.');
+      return;
+    }
+    if (!_formKey.currentState!.validate()) return;
     final base = _buildDraft(forSubmit: true); // 예산·영수증 확인 — 올리기 전에 막는다. 입력은 여기서 한 번만 읽는다
     if (base == null) return;
     final category = _selectedBudgetCategory;
