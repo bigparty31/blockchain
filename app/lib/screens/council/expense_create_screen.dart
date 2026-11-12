@@ -62,7 +62,7 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
   final List<String> _budgetCategories = ['행사비', '사업비', '운영비'];
 
   /// 예산 항목별 잔량 (`GET /budgets`). 고르기 전에 남은 예산을 보여 준다 (스토리보드 7 ③).
-  Map<String, int> _remaining = const {};
+  int? _currentTermId; // 현재 학기 — 같은 분류의 예산이 학기마다 있어서 이 학기의 것을 고른다
 
   /// 마지막 제출이 차단(`BLOCKED`)된 건의 번호 — 예산 개정 요청의 근거로 붙인다 (`blocked_entry_id`).
   int? _blockedId;
@@ -106,15 +106,22 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
   Future<void> _loadBudgets() async {
     try {
       final budgets = await ApiService().fetchBudgets();
+      // 현재 학기를 못 읽어도 예산은 보인다 — 그때는 가장 최근 학기의 예산을 쓴다
+      int? termId;
+      try {
+        termId = await ApiService().fetchCurrentTermId();
+      } on ApiUnavailable {
+        termId = null;
+      }
       if (!mounted) return;
       setState(() {
         _budgetsError = null;
         _budgets = budgets;
-        _remaining = {for (final b in budgets) b.category: b.remainingAmount};
-        // 다시 등록이면 이전 건의 예산 항목을 고른다
-        final budgetId = widget.resubmitOf?.budgetId;
+        _currentTermId = termId;
+        // 다시 등록이면 이전 건의 예산 항목을 고른다 — 지난 학기 건이면 그 학기의 예산 그대로
+        final pinned = _pinnedBudgetId;
         for (final b in budgets) {
-          if (b.id == budgetId && _budgetCategories.contains(b.category)) _selectedBudgetCategory = b.category;
+          if (b.id == pinned && _budgetCategories.contains(b.category)) _selectedBudgetCategory = b.category;
         }
       });
     } on ApiUnavailable catch (e) {
@@ -123,7 +130,7 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
   }
 
   String _budgetLabel(String category) {
-    final left = _remaining[category];
+    final left = _budgetFor(category)?.remainingAmount;
     return left == null ? category : '$category · 잔량 ${Fmt.won(left)}';
   }
 
@@ -180,12 +187,11 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
     );
   }
 
-  BudgetModel? _budgetFor(String category) {
-    for (final b in _budgets) {
-      if (b.category == category) return b;
-    }
-    return null;
-  }
+  /// 다시 등록하는 건의 예산 번호. 그 분류의 예산은 학기와 상관없이 이것으로 고정한다.
+  int? get _pinnedBudgetId => widget.resubmitOf?.budgetId;
+
+  BudgetModel? _budgetFor(String category) =>
+      pickBudget(_budgets, category, pinnedId: _pinnedBudgetId, currentTermId: _currentTermId);
 
   /// 입력으로 초안을 만든다. 만들 수 없으면 이유를 알리고 null.
   EntryDraft? _buildDraft({required bool forSubmit, String? receiptPath}) {
