@@ -36,6 +36,7 @@ class _BudgetRevisionScreenState extends State<BudgetRevisionScreen> {
 
   List<BudgetModel> _budgets = const [];
   String? _category;
+  int? _currentTermId; // 현재 학기 — 같은 분류의 예산이 학기마다 있어서 이 학기의 것을 고른다
   bool _submitting = false;
 
   @override
@@ -63,10 +64,18 @@ class _BudgetRevisionScreenState extends State<BudgetRevisionScreen> {
       if (mounted) setState(() => _budgetsError = e.message);
       return;
     }
+    // 현재 학기를 못 읽어도 예산은 보인다 — 그때는 가장 최근 학기의 예산을 쓴다
+    int? termId;
+    try {
+      termId = await ApiService().fetchCurrentTermId();
+    } on ApiUnavailable {
+      termId = null;
+    }
     if (!mounted) return;
     setState(() {
       _budgetsError = null;
       _budgets = budgets;
+      _currentTermId = termId;
       _category ??= budgets.isEmpty ? null : budgets.first.category;
       // 차단 지출이 근거면 모자란 만큼을 기본 증액분으로 채워 둔다.
       final short = _shortfall;
@@ -76,12 +85,7 @@ class _BudgetRevisionScreenState extends State<BudgetRevisionScreen> {
     });
   }
 
-  BudgetModel? get _selected {
-    for (final b in _budgets) {
-      if (b.category == _category) return b;
-    }
-    return null;
-  }
+  BudgetModel? get _selected => _category == null ? null : pickBudget(_budgets, _category!, currentTermId: _currentTermId);
 
   /// 근거 지출이 선택한 항목의 잔량을 넘는 금액.
   int? get _shortfall {
@@ -225,11 +229,11 @@ class _BudgetRevisionScreenState extends State<BudgetRevisionScreen> {
               const Text('예산 항목', style: TextStyle(fontWeight: FontWeight.bold, color: AppTheme.textMain)),
               const SizedBox(height: 8),
               DropdownButtonFormField<String>(
-                value: _budgets.any((b) => b.category == _category) ? _category : null,
+                value: _selected == null ? null : _category,
                 isExpanded: true,
                 decoration: _decoration('증액할 항목'),
                 items: [
-                  for (final b in _budgets)
+                  for (final b in budgetsPerCategory(_budgets, currentTermId: _currentTermId))
                     DropdownMenuItem(
                       value: b.category,
                       child: Text('${b.category} · 잔량 ${Fmt.won(b.remainingAmount)}', overflow: TextOverflow.ellipsis),
