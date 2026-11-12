@@ -59,6 +59,21 @@ class EntryDraft {
 
   bool get isCorrection => correctsEntryId != null;
 
+  /// 같은 초안에 서버에 올린 영수증 경로를 붙인 것 — 입력을 다시 읽지 않고 제출 시점의 값을 그대로 쓴다.
+  EntryDraft withReceiptPath(String? path) => EntryDraft(
+        kind: kind,
+        termId: termId,
+        amount: amount,
+        counterparty: counterparty,
+        purpose: purpose,
+        budgetId: budgetId,
+        occurredAt: occurredAt,
+        receiptHash: receiptHash,
+        receiptPath: path,
+        correctsEntryId: correctsEntryId,
+        correctionReason: correctionReason,
+      );
+
   String get canonicalCounterparty => Hashing.canonical(counterparty);
   String get canonicalPurpose => Hashing.canonical(purpose);
 
