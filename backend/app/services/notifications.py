@@ -8,6 +8,9 @@
   외래키와 출처가 같아야 시드가 덜 된 DB 에서도 상태 변경이 외래키 오류로 롤백되지 않는다. 「총무」는 그 건의 등록자다
 - 문구(body)는 인자로 받지 않는다. 만들 때 kind 와 대상 건의 값으로 만들어 저장한다. 앱은 받은 문구를 그대로 표시한다
 - 잘못 부르면(대상 id 누락, 없는 건) ValueError 다. 조용히 넘기면 알림이 빠진 것을 아무도 모른다
+- 만든 알림은 받는 사람의 기기로도 푸시한다. 같은 세션이 commit 된 뒤에만 나간다 (app/services/push.py)
+- 학생에게는 행을 만들지 않고 토픽(students_{학기 코드})으로만 보낸다: 확정(notify_students_confirmed),
+  장부–계좌 차이(notify_students_balance_mismatch, 계좌 대조에서 부른다)
 """
 import logging
 import os
@@ -17,11 +20,21 @@ from typing import Iterable, List, Optional
 from sqlalchemy import update
 from sqlalchemy.orm import Session
 
-from app.models import NOTIFICATION_REMIND_KINDS, BudgetRevisionRequest, Entry, Notification, User
+from app.models import NOTIFICATION_REMIND_KINDS, BudgetRevisionRequest, Entry, Notification, Term, User
 from app.schemas.auth import Role
 from app.schemas.notification import NotificationKind
+from app.services import push
 
-__all__ = ["NotificationKind", "REMIND_KINDS", "create_notification", "resolve_notifications", "remind_interval"]
+__all__ = [
+    "NotificationKind",
+    "REMIND_KINDS",
+    "create_notification",
+    "resolve_notifications",
+    "remind_interval",
+    "notify_students_confirmed",
+    "notify_students_balance_mismatch",
+    "student_topic",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -123,9 +136,14 @@ def create_notification(
         if kind is K.ENTRY_CONFIRM_FAILED:
             # 위의 조회와 INSERT 사이에 같은 실패가 먼저 기록될 수 있다 (확정 요청 두 개가 브로드캐스트 전에 함께 revert).
             # uq_notifications_confirm_failed_unread 에 걸리면 건너뛴다
-            _insert_unless_unread_exists(db, values)
+            new_id = _insert_unless_unread_exists(db, values)
+            if new_id is None:
+                continue  # 이미 기록됐다. 푸시도 그쪽이 보낸다
+            notification = db.get(Notification, new_id)
         else:
-            db.add(Notification(**values))
+            notification = Notification(**values)
+            db.add(notification)
+        push.queue_notification(db, notification)
 
 
 def _unread_confirm_failed(db: Session, entry_id: int) -> set:
@@ -143,7 +161,8 @@ def _unread_confirm_failed(db: Session, entry_id: int) -> set:
 def _insert_unless_unread_exists(db: Session, values: dict) -> Optional[int]:
     """INSERT ... ON CONFLICT DO NOTHING. 넣었으면 새 id, 이미 있었으면 None.
 
-    IntegrityError 를 세이브포인트로 잡지 않는다 — 세이브포인트 롤백도 세션의 after_rollback 을 일으킨다.
+    IntegrityError 를 세이브포인트로 잡지 않는다 — 세이브포인트 롤백도 세션의 after_rollback 을 일으켜
+    같은 세션에 쌓인 푸시(app/services/push.py)까지 버린다.
     """
     dialect = db.get_bind().dialect.name
     if dialect == "postgresql":
@@ -176,6 +195,35 @@ def resolve_notifications(
         .values(resolved_at=_now(), next_remind_at=None)
         .execution_options(synchronize_session=False)
     )
+
+
+def student_topic(term_code: int) -> str:
+    """학생 앱이 로그인할 때 구독하는 토픽. 학기 코드(YYYYS)다 — DB 의 Term.id 가 아니다."""
+    return f"students_{term_code}"
+
+
+def notify_students_confirmed(db: Session, entry_id: int) -> None:
+    """확정된 항목을 그 학기 학생 전원에게 토픽으로 알린다 (금액과 사용처, 공개 정보). commit 된 뒤에 나간다."""
+    entry = db.get(Entry, entry_id)
+    if entry is None:
+        raise ValueError(f"항목이 없다 (entry_id={entry_id})")
+    term_code = _term_code(db, entry.term_id)
+    message = push.PushMessage(push.TITLE, f"{_entry_label(entry)}이 확정되었습니다.", {"term_code": str(term_code), "entry_id": str(entry.id)})
+    push.queue_job(db, push.TopicPush(student_topic(term_code), message))
+
+
+def notify_students_balance_mismatch(db: Session, term_id: int) -> None:
+    """계좌 대조에서 장부와 계좌 잔액이 다를 때 그 학기 학생 전원에게 알린다 (문승준, 계좌 대조). commit 된 뒤에 나간다."""
+    term_code = _term_code(db, term_id)
+    message = push.PushMessage(push.TITLE, "장부와 계좌 잔액이 다릅니다.", {"term_code": str(term_code)})
+    push.queue_job(db, push.TopicPush(student_topic(term_code), message))
+
+
+def _term_code(db: Session, term_id: int) -> int:
+    term = db.get(Term, term_id)
+    if term is None:
+        raise ValueError(f"학기가 없다 (term_id={term_id})")
+    return term.term_code
 
 
 # ---------------------------------------------------------------- 받는 사람·문구

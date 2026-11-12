@@ -32,6 +32,7 @@ from app.chain.web3_client import LEDGER
 from app.models import Base, Entry, Notification, Term, User
 from app.schemas.entry import EntryKind, EntryStatus
 from app.services import chain_tx
+from app.services import push
 from app.services.notifications import NotificationKind, create_notification
 from app.services.chain_tx import EntryAlreadyRecorded, EntryConflict, EntryInFlight, relay_confirm, relay_record, relay_reject
 from chain_support import (
@@ -816,6 +817,45 @@ def test_settling_and_its_notices_are_one_transaction(engine, db, monkeypatch):
     monkeypatch.setattr(chain_tx, "create_notification", real)
     assert asyncio.run(approve(db, chain, entry_id)).status is EntryStatus.CONFIRMED
     assert (TREASURER_ID, "ENTRY_CONFIRMED", False) in notices(engine, entry_id)
+
+
+class PushRecorder:
+    def __init__(self):
+        self.topics = []
+
+    def send_to_tokens(self, tokens, message):
+        return []
+
+    def send_to_topic(self, topic, message):
+        self.topics.append((topic, message.body))
+
+
+def pushed(engine) -> PushRecorder:
+    recorder = PushRecorder()
+    push.drain(lambda: Session(engine), recorder)
+    return recorder
+
+
+def test_confirmation_is_pushed_to_students_after_commit(engine, db):
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    push.clear()
+    asyncio.run(approve(db, chain, entry_id))
+    assert pushed(engine).topics == [("students_20262", "수입 「목적」 500,000원이 확정되었습니다.")]
+
+
+def test_nothing_is_pushed_when_the_settle_rolls_back(engine, db, monkeypatch):
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    push.clear()
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("알림 테이블 오류")
+
+    monkeypatch.setattr(chain_tx, "notify_students_confirmed", broken)
+    with pytest.raises(RuntimeError):
+        asyncio.run(approve(db, chain, entry_id))
+    assert pushed(engine).topics == []  # 확정 알림 행도, 학생 푸시도 나가지 않았다
 
 
 # ---------------------------------------------------------------- T4 수정 요청과 확정
