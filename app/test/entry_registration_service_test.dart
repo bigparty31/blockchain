@@ -52,6 +52,7 @@ void main() {
   late http.Response Function() onDraft;
   late http.Response Function() onSubmit;
   late http.Response Function() onTerm;
+  late http.Response Function(String path) onDownload;
   late FakeAuthenticator auth;
   final now = DateTime.utc(2026, 11, 6, 9);
 
@@ -70,6 +71,7 @@ void main() {
     onSubmit = () => json({'id': 11, 'status': 'PENDING', 'tx_pending': '0x${'ab' * 32}', 'message': 'ok'});
     onTerm = () => json({'id': 1, 'term_code': 20262, 'name': '2026-2', 'started_at': '2026-09-01T00:00:00', 'ended_at': '2027-02-28T00:00:00'});
     uploads = [];
+    onDownload = (_) => http.Response('', 404); // 옛 서버 — GET /receipts 가 없다
     // 서버(#66 receipts.py)처럼 받은 바이트를 그대로 해시한다 — 여기서는 multipart 본문 안의 파일 바이트를 꺼내지 않고,
     // 테스트가 보낸 원본을 알고 있으므로 그 해시를 돌려준다
     onUpload = (_) => json({'receipt_hash': Hashing.fileHash(receiptBytes), 'receipt_path': '/receipts/${Hashing.fileHash(receiptBytes).substring(2)}.jpg', 'filename': 'receipt.jpg', 'size': receiptBytes.length}, 201);
@@ -89,6 +91,7 @@ void main() {
         case 'GET /chain/domains':
           return json({'domains': {LedgerTypes.domainName: domainJson}});
       }
+      if (req.method == 'GET' && req.url.path.startsWith('/receipts/')) return onDownload(req.url.path);
       return http.Response('{}', 404);
     });
     EntryRegistrationService.client = server;
@@ -138,6 +141,50 @@ void main() {
     );
     expect(SigningService.recoverSigner(Eip712.digest(domain, serverSide), body['signature'] as String), treasurerAddress);
     expect(auth.calls, 1);
+  });
+
+  test('정정은 원본 id 를 corrects_entry_id 로 보내고, 서명의 correctsId 도 원본 id 다 — 금액은 음수 증감분', () async {
+    final correction = EntryDraft(
+      kind: EntryKind.EXPENSE,
+      termId: 1,
+      amount: -20000,
+      counterparty: '한결문구',
+      purpose: '입력 오류 정정',
+      budgetId: 1,
+      occurredAt: 1788793200,
+      correctsEntryId: 1,
+      correctionReason: CorrectionReason.INPUT_ERROR,
+    );
+    // HASHING 샘플 3 — 정정, 금액 음수
+    expect(correction.metaHash, '0xebd26de486f8caba6e4d24662acd1cc671be1c9c60cfd3048da527c9a351ca73');
+
+    await service().saveDraft(correction);
+    final draft = jsonDecode(drafts.single.body) as Map<String, dynamic>;
+    expect(draft['amount'], -20000);
+    expect(draft['corrects_entry_id'], 1);
+    expect(draft['correction_reason'], 'INPUT_ERROR');
+
+    await service().submit(11, correction);
+    final body = jsonDecode(submits.single.body) as Map<String, dynamic>;
+    final serverSide = LedgerTypes.recordRequest(
+      id: 11,
+      hash: correction.metaHash,
+      amount: -20000,
+      kind: EntryKind.EXPENSE,
+      term: 20262,
+      occurredAt: 1788793200,
+      budgetId: 1,
+      correctsId: 1,
+      deadline: body['deadline'] as int,
+    );
+    expect(SigningService.recoverSigner(Eip712.digest(domain, serverSide), body['signature'] as String), treasurerAddress);
+  });
+
+  test('정정이 아니면 정정 칸을 보내지 않는다', () async {
+    await service().saveDraft(expense());
+    final body = jsonDecode(drafts.single.body) as Map<String, dynamic>;
+    expect(body.containsKey('corrects_entry_id'), isFalse);
+    expect(body.containsKey('correction_reason'), isFalse);
   });
 
   test('예산 문제면 BLOCKED 와 차단 사유를 돌려준다 (revert 가 아니라 기록된다)', () async {
@@ -282,6 +329,14 @@ void main() {
       );
     });
 
+    test('올린 영수증을 파일 이름으로 다시 내려받는다 — 없으면(옛 서버) null', () async {
+      final path = '/receipts/${Hashing.fileHash(receiptBytes).substring(2)}.jpg';
+      expect(await service().downloadReceipt(path), isNull);
+      onDownload = (p) => p == path ? http.Response.bytes(receiptBytes, 200) : http.Response('', 404);
+      expect(await service().downloadReceipt(path), receiptBytes);
+      expect(await service().downloadReceipt('/receipts/'), isNull, reason: '파일 이름이 없으면 묻지 않는다');
+    });
+
     test('초안에 업로드한 receipt_path 를 함께 보낸다 — 서버는 파일 없는 해시를 400 으로 막는다', () async {
       final up = await service().uploadReceipt(receiptBytes, filename: 'receipt.jpg');
       await service().saveDraft(EntryDraft(
@@ -299,5 +354,26 @@ void main() {
       expect(body['receipt_hash'], up.hash);
       expect(body['receipt_path'], up.path);
     });
+  });
+
+  test('영수증 경로를 붙여도 정정 필드와 나머지 입력은 그대로다 — 정정 초안이 일반 초안으로 바뀌지 않는다 (#71 리뷰)', () {
+    const draft = EntryDraft(
+      kind: EntryKind.EXPENSE,
+      termId: 1,
+      amount: -5000,
+      counterparty: '한결문구',
+      purpose: '금액 입력 오류',
+      budgetId: 1,
+      occurredAt: 1790694000,
+      receiptHash: '0xabc',
+      correctsEntryId: 7,
+      correctionReason: CorrectionReason.INPUT_ERROR,
+    );
+    final withPath = draft.withReceiptPath('/receipts/abc.jpg');
+    expect(withPath.receiptPath, '/receipts/abc.jpg');
+    expect(withPath.correctsEntryId, 7);
+    expect(withPath.correctionReason, CorrectionReason.INPUT_ERROR);
+    expect(withPath.isCorrection, isTrue);
+    expect(withPath.toCreateJson(), {...draft.toCreateJson(), 'receipt_path': '/receipts/abc.jpg'});
   });
 }

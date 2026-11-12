@@ -36,6 +36,13 @@ class EntryDraft {
   /// 서버는 해시만 있고 파일이 없으면 400 으로 막는다 (#66 B2).
   final String? receiptPath;
 
+  /// 정정이면 원본 id (`corrects_entry_id`). 서명의 `correctsId` 가 이 값이고, 정정이 아니면 0 이다.
+  /// 정정의 [amount] 는 새 총액이 아니라 **증감분**이다 — 음수는 정정에만 허용된다 (CONTRACTS §정정).
+  final int? correctsEntryId;
+
+  /// 정정 사유 유형. 서명·해시에는 들어가지 않는다 (PRD §4.4).
+  final CorrectionReason? correctionReason;
+
   const EntryDraft({
     required this.kind,
     required this.termId,
@@ -46,7 +53,11 @@ class EntryDraft {
     required this.occurredAt,
     this.receiptHash,
     this.receiptPath,
+    this.correctsEntryId,
+    this.correctionReason,
   });
+
+  bool get isCorrection => correctsEntryId != null;
 
   /// 같은 초안에 서버에 올린 영수증 경로를 붙인 것 — 입력을 다시 읽지 않고 제출 시점의 값을 그대로 쓴다.
   EntryDraft withReceiptPath(String? path) => EntryDraft(
@@ -59,6 +70,8 @@ class EntryDraft {
         occurredAt: occurredAt,
         receiptHash: receiptHash,
         receiptPath: path,
+        correctsEntryId: correctsEntryId,
+        correctionReason: correctionReason,
       );
 
   String get canonicalCounterparty => Hashing.canonical(counterparty);
@@ -84,6 +97,8 @@ class EntryDraft {
         'occurred_at': occurredAt,
         if (receiptHash != null) 'receipt_hash': receiptHash!,
         if (receiptPath != null) 'receipt_path': receiptPath!,
+        if (correctsEntryId != null) 'corrects_entry_id': correctsEntryId!,
+        if (correctionReason != null) 'correction_reason': correctionReason!.code,
       };
 
   @override
@@ -97,11 +112,13 @@ class EntryDraft {
       other.budgetId == budgetId &&
       other.occurredAt == occurredAt &&
       other.receiptHash == receiptHash &&
-      other.receiptPath == receiptPath;
+      other.receiptPath == receiptPath &&
+      other.correctsEntryId == correctsEntryId &&
+      other.correctionReason == correctionReason;
 
   @override
-  int get hashCode =>
-      Object.hash(kind, termId, amount, canonicalCounterparty, canonicalPurpose, budgetId, occurredAt, receiptHash, receiptPath);
+  int get hashCode => Object.hash(kind, termId, amount, canonicalCounterparty, canonicalPurpose, budgetId, occurredAt,
+      receiptHash, receiptPath, correctsEntryId, correctionReason);
 }
 
 /// 제출 결과 — 체인에 기록된 상태. 예산 문제는 revert 가 아니라 `BLOCKED` 로 **기록된다** (IAccountingLedger).
@@ -122,6 +139,9 @@ class ReceiptUpload {
 abstract class EntryRegistrar {
   /// 영수증 원본을 올린다 — 초안보다 먼저. 서버 해시가 원본과 다르면 던진다.
   Future<ReceiptUpload> uploadReceipt(List<int> bytes, {required String filename});
+
+  /// 서버에 있는 영수증 원본 (`GET /receipts/{파일}`). 못 받으면 null — 해시 대조는 부르는 쪽이 한다.
+  Future<List<int>?> downloadReceipt(String receiptPath);
 
   /// 초안 저장 — 발급된 id.
   Future<int> saveDraft(EntryDraft draft);
@@ -187,6 +207,22 @@ class EntryRegistrationService implements EntryRegistrar {
       );
     }
     return ReceiptUpload(hash.toLowerCase(), path);
+  }
+
+  /// 영수증 원본을 내려받는다 — 반려·차단 건을 다시 등록할 때 같은 영수증을 다시 쓰려고.
+  /// 경로의 파일 이름만 쓴다(`/receipts/{파일}`). 옛 서버(#66 이전)나 네트워크 오류면 null.
+  @override
+  Future<List<int>?> downloadReceipt(String receiptPath) async {
+    final name = receiptPath.split('/').last;
+    if (name.isEmpty) return null;
+    try {
+      final res = await client
+          .get(Uri.parse('${ApiConfig.baseUrl}/receipts/${Uri.encodeComponent(name)}'), headers: AuthService().authHeaders)
+          .timeout(uploadTimeout);
+      return res.statusCode == 200 ? res.bodyBytes : null;
+    } catch (_) {
+      return null;
+    }
   }
 
   /// ① 초안 저장. 발급된 id 를 돌려준다. 체인에는 아무것도 올라가지 않는다.
@@ -256,7 +292,7 @@ class EntryRegistrationService implements EntryRegistrar {
         term: term,
         occurredAt: draft.occurredAt,
         budgetId: draft.budgetId ?? 0,
-        correctsId: 0,
+        correctsId: draft.correctsEntryId ?? 0,
         deadline: deadline,
       );
 

@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:student_council_app/screens/council/my_entries_screen.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:student_council_app/core/enums.dart';
@@ -247,7 +248,9 @@ void main() {
       await tester.ensureVisible(find.text('내 등록 현황'));
       await tester.tap(find.text('내 등록 현황'));
       await tester.pumpAndSettle();
-      expect(find.text('처리 중 — 다시 보낼 수 없어요'), findsOneWidget);
+      // 서버 목록을 읽는 화면 — 로그인 세션이 없는 테스트에서는 내 건을 찾을 수 없다고 알린다
+      expect(find.byType(MyEntriesScreen), findsOneWidget);
+      expect(find.byKey(const Key('my_entries_failed')), findsOneWidget);
     });
 
     testWidgets('감사 홈의 정정 승인은 화면으로 이어진다', (tester) async {

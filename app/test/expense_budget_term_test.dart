@@ -4,9 +4,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:student_council_app/core/enums.dart';
+import 'package:student_council_app/models/entry_model.dart';
 import 'package:student_council_app/screens/council/budget_revision_screen.dart';
 import 'package:student_council_app/screens/council/expense_create_screen.dart';
 import 'package:student_council_app/services/api_service.dart';
+import 'package:student_council_app/services/budget_revision_service.dart';
 
 import 'support/registration.dart';
 
@@ -162,4 +165,143 @@ void main() {
     expect(find.textContaining('잔량 ₩ 100,000'), findsNothing);
     expect(find.textContaining('잔량 ₩ 800,000'), findsWidgets);
   });
+  // 지난 학기에 반려된 건을 다시 등록하면 그 건의 예산(지난 학기 #1)으로 올라가야 한다 — 현재 학기로 옮기면 건의 학기가 바뀐다.
+  testWidgets('지난 학기 건을 다시 등록하면 그 건의 예산·학기 그대로 제출한다', (tester) async {
+    final registrar = FakeRegistrar();
+    final old = EntryModel(
+      id: 6,
+      termId: 1,
+      kind: EntryKind.EXPENSE,
+      amount: 85000,
+      counterparty: '현수막나라',
+      purpose: '동아리 연합 행사 현수막',
+      budgetId: 1,
+      occurredAt: 1789225200,
+      metaHash: '0x${'ab' * 32}',
+      status: EntryStatus.REJECTED,
+      createdBy: 2,
+    );
+    await pump(tester, ExpenseCreateScreen(registrar: registrar, resubmitOf: old, pickReceipt: fakeReceipt));
+    expect(find.textContaining('잔량 ₩ 100,000'), findsOneWidget, reason: '그 건의 예산(지난 학기 행사비)의 잔량');
+
+    await tester.tap(find.text('영수증 촬영 또는 사진 첨부'));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('제출하기'));
+    await tester.tap(find.text('제출하기'));
+    for (var i = 0; i < 10; i++) {
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 10)));
+      await tester.pump();
+    }
+    await tester.pumpAndSettle();
+
+    final draft = registrar.submits.single.$2;
+    expect(draft.budgetId, 1);
+    expect(draft.termId, 1);
+  });
+
+  // 차단된 지출의 예산이 지난 학기여도 개정 요청은 그 예산으로 가야 한다 — 서버는 근거 지출과 다른 예산이면 400.
+  testWidgets('예산 개정 — 근거 지출의 예산(지난 학기)이 현재 학기 예산에 가려지지 않는다', (tester) async {
+    final requester = _FakeRequester();
+    await pump(
+      tester,
+      BudgetRevisionScreen(
+        initialCategory: '행사비',
+        initialBudgetId: 1,
+        blockedEntryId: 6,
+        basisTitle: '현수막',
+        basisAmount: 150000,
+        requester: requester,
+      ),
+    );
+    expect(find.textContaining('행사비 잔량이 ₩ 50,000 모자라요'), findsOneWidget, reason: '지난 학기 행사비 잔량(100,000) 기준');
+
+    await tester.enterText(find.byType(TextFormField).first, '50000');
+    await tester.enterText(find.byType(TextFormField).last, '행사 인원 증가');
+    await tester.ensureVisible(find.text('예산 개정 요청하기'));
+    await tester.tap(find.text('예산 개정 요청하기'));
+    await tester.pumpAndSettle();
+
+    final req = requester.requests.single;
+    expect(req.budgetId, 1);
+    expect(req.termId, 1);
+    expect(req.blockedEntryId, 6);
+  });
+
+  // 학기를 못 읽어도, 건이 이미 가진 예산(다시 등록·근거 지출)은 그대로 쓸 수 있다 — 학기를 정할 필요가 없다.
+  void termsDown() {
+    ApiService.client = MockClient((req) async {
+      if (req.url.path == '/budgets') return json([budget(1, 1, '행사비', 100000), budget(11, 2, '행사비', 900000)]);
+      return http.Response('{}', 503);
+    });
+  }
+
+  testWidgets('학기를 못 읽어도 지난 학기 건을 다시 등록하면 그 건의 예산으로 제출한다', (tester) async {
+    termsDown();
+    final registrar = FakeRegistrar();
+    final old = EntryModel(
+      id: 6,
+      termId: 1,
+      kind: EntryKind.EXPENSE,
+      amount: 85000,
+      counterparty: '현수막나라',
+      purpose: '동아리 연합 행사 현수막',
+      budgetId: 1,
+      occurredAt: 1789225200,
+      metaHash: '0x${'ab' * 32}',
+      status: EntryStatus.REJECTED,
+      createdBy: 2,
+    );
+    await pump(tester, ExpenseCreateScreen(registrar: registrar, resubmitOf: old, pickReceipt: fakeReceipt));
+    await tester.tap(find.text('영수증 촬영 또는 사진 첨부'));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('제출하기'));
+    await tester.tap(find.text('제출하기'));
+    for (var i = 0; i < 10; i++) {
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 10)));
+      await tester.pump();
+    }
+    await tester.pumpAndSettle();
+
+    expect(registrar.submits.single.$2.budgetId, 1);
+    expect(find.textContaining('현재 학기를 확인하지 못해'), findsNothing);
+  });
+
+  testWidgets('예산 개정 — 학기를 못 읽어도 근거 지출의 예산으로는 요청할 수 있다', (tester) async {
+    termsDown();
+    final requester = _FakeRequester();
+    await pump(
+      tester,
+      BudgetRevisionScreen(
+          initialCategory: '행사비', initialBudgetId: 1, blockedEntryId: 6, basisTitle: '현수막', basisAmount: 150000, requester: requester),
+    );
+    await tester.enterText(find.byType(TextFormField).first, '50000');
+    await tester.enterText(find.byType(TextFormField).last, '행사 인원 증가');
+    await tester.ensureVisible(find.text('예산 개정 요청하기'));
+    await tester.tap(find.text('예산 개정 요청하기'));
+    await tester.pumpAndSettle();
+    expect(requester.requests.single.budgetId, 1);
+  });
+
+  testWidgets('예산 개정 — 학기를 못 읽고 정해 둔 예산도 없으면 요청을 막는다', (tester) async {
+    termsDown();
+    final requester = _FakeRequester();
+    await pump(tester, BudgetRevisionScreen(initialCategory: '행사비', requester: requester));
+    await tester.enterText(find.byType(TextFormField).first, '50000');
+    await tester.enterText(find.byType(TextFormField).last, '행사 인원 증가');
+    await tester.ensureVisible(find.text('예산 개정 요청하기'));
+    await tester.tap(find.text('예산 개정 요청하기'));
+    await tester.pumpAndSettle();
+    expect(requester.requests, isEmpty, reason: '어느 학기 예산인지 정할 수 없다');
+    expect(find.textContaining('현재 학기를 확인하지 못해'), findsOneWidget);
+  });
+}
+
+class _FakeRequester implements BudgetRevisionRequester {
+  final List<IncreaseRequestDraft> requests = [];
+
+  @override
+  Future<int> requestIncrease(IncreaseRequestDraft draft) async {
+    requests.add(draft);
+    return 7;
+  }
 }

@@ -32,6 +32,17 @@ class FakeRegistrar implements EntryRegistrar {
     }
     return ReceiptUpload(Hashing.fileHash(bytes), pathOf(bytes));
   }
+
+  /// 서버에 있는 영수증 — 경로 → 바이트. 없으면 null (옛 서버처럼).
+  final Map<String, List<int>> stored = {};
+  final List<String> downloads = [];
+
+  @override
+  Future<List<int>?> downloadReceipt(String receiptPath) async {
+    downloads.add(receiptPath);
+    return stored[receiptPath];
+  }
+
   final List<(int, EntryDraft)> submits = [];
 
   /// 다음 제출을 이 예외로 실패시킨다 (한 번만).
