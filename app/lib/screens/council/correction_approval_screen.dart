@@ -106,38 +106,48 @@ List<CorrectionItem> correctionItemsFromEntries(List<EntryModel> entries, {List<
 
   CorrectionItem build(EntryModel e) {
     final root = rootOf(e);
-    final orphan = identical(root, e); // 원본을 목록에서 찾지 못했다
+    final target = byId[e.correctsEntryId]; // 이 정정이 직접 가리키는 건 — 원본이거나, 재분류로 옮겨 간 증액 건
+    final orphan = target == null; // 정정 대상을 목록에서 찾지 못했다
     final reason = e.correctionReason ?? CorrectionReason.OTHER;
 
-    // 이 예산에서 정정 직전의 금액 = 원본 + 이 건보다 먼저 확정된 같은 체인의 정정.
-    // 재분류의 증액(+) 쪽은 다른 예산에 새로 생기는 금액이라 0 에서 시작한다.
+    // 이 예산에서 정정 직전의 금액 = 직접 대상의 현재 순금액(서버 `_calculate_net_amount` 와 같은 규칙):
+    // 대상 금액 + 그 대상을 가리키는 확정 정정 중 감액(−)과 같은 예산의 증액(+). 다른 예산의 증액(재분류)은 자기 금액이라 더하지 않는다.
+    // 등록 번호는 확정 순서가 아니므로 쓰지 않는다. 재분류의 증액(+) 쪽은 다른 예산에 새로 생기는 금액이라 0 에서 시작한다.
     int? original;
     if (!orphan) {
       if (reason == CorrectionReason.RECLASSIFY && e.amount > 0) {
         original = 0;
       } else {
-        var sum = root.amount;
-        for (final c in entries) {
-          if (c.id == e.id || c.id > e.id || !isCorrection(c) || c.status != EntryStatus.CONFIRMED) continue;
-          if (c.correctionReason == CorrectionReason.RECLASSIFY && c.amount > 0) continue; // 다른 예산의 금액
-          if (identical(rootOf(c), root)) sum += c.amount;
+        final confirmedOthers = entries
+            .where((c) => c.id != e.id && c.correctsEntryId == target.id && c.status == EntryStatus.CONFIRMED)
+            .toList();
+        // 이미 확정된 건은 「그 직전」 금액을 알려면 확정 순서가 필요한데 응답에 없다 — 다른 확정 정정이 있으면 비워 둔다.
+        if (e.status == EntryStatus.CONFIRMED && confirmedOthers.isNotEmpty) {
+          original = null;
+        } else {
+          var sum = target.amount;
+          for (final c in confirmedOthers) {
+            if (c.amount < 0 || c.budgetId == target.budgetId) sum += c.amount;
+          }
+          original = sum;
         }
-        original = sum;
       }
     }
 
-    // 재분류 짝 — 같은 원본의 다른 재분류 건.
+    // 재분류 짝 — 같은 정정 대상을 가리키는 반대 부호·같은 금액의 재분류 건. 하나로 정해질 때만 짝으로 본다.
     String? pairNote;
     var status = statusOf(e.status);
     if (reason == CorrectionReason.RECLASSIFY && !orphan) {
-      final siblings = entries.where((c) =>
-          c.id != e.id &&
-          isCorrection(c) &&
-          c.correctionReason == CorrectionReason.RECLASSIFY &&
-          identical(rootOf(c), root) &&
-          c.status != EntryStatus.REJECTED &&
-          c.status != EntryStatus.BLOCKED);
-      if (siblings.isNotEmpty) {
+      final siblings = entries
+          .where((c) =>
+              c.id != e.id &&
+              c.correctsEntryId == e.correctsEntryId &&
+              c.correctionReason == CorrectionReason.RECLASSIFY &&
+              c.amount == -e.amount &&
+              c.status != EntryStatus.REJECTED &&
+              c.status != EntryStatus.BLOCKED)
+          .toList();
+      if (siblings.length == 1) {
         final other = siblings.first;
         final plus = e.amount > 0 ? e : other;
         final minus = e.amount > 0 ? other : e;
