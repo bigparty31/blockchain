@@ -374,6 +374,9 @@
 ### 1. 수입·지출 목록 조회 (`GET /entries`)
 - **설명**: 장부 내역 목록을 최신순으로 조회합니다. (필터 쿼리: `kind`, `status`)
 - **타임스탬프**: `occurred_at`은 사용일 KST 00:00:00 기준 Unix 초(정수)입니다.
+- **등록자 지갑 주소**: `registrant` 필드에 온체인 등록자 지갑 주소(`0x...`)가 실려 내려옵니다. 체인을 읽지 못하거나 미기록 상태일 때는 DB 등록자 지갑으로 대체하지 않고 `null`로 두어, 앱이 서명 전에 온체인 등록자 확인 불가 상태를 감지하고 서명을 막을 수 있습니다.
+- **블록 번호**: 목록 조회 시에는 블록체인 RPC 부하 및 호출 비용 절감을 위해 `block_number`가 항상 `null`로 반환됩니다. 확정·반려 트랜잭션의 블록 번호는 단건 상세 조회(`GET /entries/{id}`) 또는 온체인 원장 조회(`GET /entries/{id}/onchain`)에서 확인하실 수 있습니다.
+- **조회 성능 및 RPC 보호**: 감사·회장 홈 폴링(15초) 및 앱 3초 타임아웃 방지를 위해, 목록 조회에서는 최대 1.5초 이내로 온체인 등록자 조회를 시도하고 초과·실패 시 `registrant: null`로 즉시 응답합니다. (앱은 서명 직전 단건 상세 조회 `GET /entries/{id}`로 온체인 값을 최종 확인합니다)
 - **초안(`DRAFT`) 제외 기준**:
   - 온체인 트랜잭션이 아직 발생하지 않은 미완성 초안(`status IS NULL`)은 **학생 앱과 총무 일반 장부 목록에서 모두 제외**됩니다.
   - **학생 앱**: 온체인에 등록 완료된 `CONFIRMED` 및 `PENDING` 건만 조회 가능합니다.
@@ -385,50 +388,152 @@
   {
     "id": 1,
     "term_id": 1,
+    "term_code": 20261,
     "kind": "EXPENSE",
     "amount": 35000,
     "counterparty": "한결문구",
     "purpose": "신입생 환영회 명찰 및 필기구 구매",
     "occurred_at": 1788793200,
     "status": "CONFIRMED",
-    "receipt_path": "/receipts/sample_01.jpg"
+    "receipt_path": "/receipts/sample_01.jpg",
+    "registrant": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+    "block_number": null
   },
   {
     "id": 2,
     "term_id": 1,
+    "term_code": 20261,
     "kind": "EXPENSE",
     "amount": 120000,
     "counterparty": "청년피자",
     "purpose": "개강총회 다과 주문",
     "occurred_at": 1788706800,
     "status": "PENDING",
-    "receipt_path": "/receipts/sample_02.jpg"
-  },
+    "receipt_path": "/receipts/sample_02.jpg",
+    "registrant": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+    "block_number": null
+  }
+]
+```
+
+### 1.1 수입·지출 내역 단건 상세 조회 (`GET /entries/{id}`)
+- **설명**: 내역 ID로 특정 수입/지출 내역의 상세 정보를 조회합니다.
+- **등록자 및 추가 필드**:
+  - `registrant`: 온체인 등록자 지갑 주소(`0x...`)가 실려 내려옵니다 (미기록 또는 체인 조회 실패 시 DB 값으로 대체하지 않고 `null` 반환).
+  - `creator_name`: 등록자 이름(총무 실명, 예: `"김총무"`)이 실려 내려옵니다.
+  - `block_number`: 확정/반려 트랜잭션이 안착된 블록 번호가 실려 내려옵니다 (`tx_confirm` 또는 `tx_pending` 기준 receipt 조회, 체인 미안착 시 `null`).
+  - `block_reason`: 예산 초과 등으로 지출이 차단(`BLOCKED`)된 경우 그 사유(`BUDGET_EXCEEDED`, `BUDGET_EXPIRED`, `BUDGET_NOT_FOUND`)가 실려 내려옵니다 (정상 등록 시 `null`).
+  - `duplicate_of`: 영수증 중복 경고(`ocr_status == "DUPLICATE"`) 발생 시, 겹치는 기존 원본 Entry ID가 실려 내려옵니다 (정상 시 `null`).
+  - `revision_requested_at`: 총무가 수정 요청을 제출한 일시(Unix 초)가 실려 내려옵니다 (미요청 시 `null`). 승인 화면에서 이 값이 존재하면 확정 버튼을 숨기고 반려만 노출해야 합니다.
+
+**Response (`200 OK`)**
+```json
+{
+  "id": 1,
+  "term_id": 1,
+  "term_code": 20261,
+  "kind": "EXPENSE",
+  "amount": 35000,
+  "counterparty": "한결문구",
+  "purpose": "신입생 환영회 명찰 및 필기구 구매",
+  "occurred_at": 1788793200,
+  "status": "CONFIRMED",
+  "block_reason": null,
+  "receipt_path": "/receipts/sample_01.jpg",
+  "created_by": 2,
+  "creator_name": "김총무",
+  "registrant": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+  "block_number": 102,
+  "duplicate_of": null,
+  "revision_requested_at": null
+}
+```
+
+### 1.2 [T5] 본인 작성 미제출 초안 목록 조회 (`GET /entries/drafts`)
+- **설명**: 총무 본인이 작성하였으나 아직 블록체인 기기 서명을 제출하지 않은 초안(`status IS NULL`) 목록을 조회합니다. 앱이 종료되거나 이탈한 후에도 미제출 초안을 다시 불러와 서명을 이어갈 수 있습니다.
+- **권한**: 총무(`TREASURER`) 전용. (학생·감사·회장은 `403 Forbidden`)
+
+**Response (`200 OK`)**
+```json
+[
   {
-    "id": 3,
+    "id": 5,
     "term_id": 1,
-    "kind": "INCOME",
-    "amount": 5000000,
-    "counterparty": "컴퓨터공학과 학생회비 일괄 납부",
-    "purpose": "2026-2학기 학과 학생회비 수납",
-    "occurred_at": 1788620400,
-    "status": "CONFIRMED",
-    "receipt_path": null
+    "term_code": 20261,
+    "kind": "EXPENSE",
+    "amount": 45000,
+    "counterparty": "알파문구",
+    "purpose": "중간고사 간식 박스 테이프 구매",
+    "occurred_at": 1788793200,
+    "status": null,
+    "block_reason": null,
+    "created_by": 2,
+    "creator_name": "김총무",
+    "tx_pending": null,
+    "receipt_path": "/receipts/sample_01.jpg",
+    "receipt_hash": "0x11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff",
+    "duplicate_of": null,
+    "revision_requested_at": null
   }
 ]
 ```
 
 ### 2. 지출 및 수입 신규 등록 흐름 (2단계 등록 프로세스)
-지출/수입 등록은 블록체인 EIP-712 기기 서명 검증을 위해 **2단계**로 진행됩니다:
-1. **1단계 (초안 등록 및 검증)**: 클라이언트가 거래 내역을 전송하여 서버에 초안을 생성하고 고유 id를 발급받습니다.
-2. **2단계 (앱 서명 및 체인 제출)**: 모바일 앱에서 기기 서명(EIP-712 `RecordRequest`)을 완료하여 서버/릴레이어에 제출하면 스마트 컨트랙트 트랜잭션이 발행되고 `PENDING` 상태로 전환됩니다.
+지출/수입 등록은 영수증 업로드 및 블록체인 EIP-712 기기 서명 검증을 위해 아래 절차로 진행됩니다:
+1. **[사전 단계] 영수증 파일 업로드 (`POST /receipts`)**: 총무가 영수증 이미지를 업로드하고, 서버에서 바이트를 보존해 산출한 `receipt_hash`와 `receipt_path`를 획득합니다.
+2. **1단계 (초안 등록 및 검증, `POST /entries`)**: 클라이언트가 영수증 해시와 거래 내역을 전송하여 서버에 초안을 생성하고 고유 id를 발급받습니다.
+3. **2단계 (앱 서명 및 체인 제출, `POST /entries/{id}/submit`)**: 모바일 앱에서 기기 서명(EIP-712 `RecordRequest`)을 완료하여 서버/릴레이어에 제출하면 스마트 컨트랙트 트랜잭션이 발행되고 `PENDING` 상태로 전환됩니다.
+
+---
+
+#### 2.0 [사전] 영수증 파일 업로드 (`POST /receipts`, `GET /receipts/{filename}`)
+- **설명**: 총무가 촬영하거나 선택한 영수증 이미지를 서버에 업로드합니다 (`multipart/form-data`). 서버는 파일의 원본 바이트를 보존하여 SHA-256 해시를 계산하고 파일명에 반영해 저장합니다.
+- **권한**: 업로드(`POST /receipts`)는 총무(`TREASURER`) 전용이며, **영수증 원본 열람/다운로드(`GET /receipts/{filename}`)는 학생 앱의 영수증 확인 및 해시 대조 검증(S3, S7)을 위해 인증 없이 공개**됩니다 (`GET /entries`의 `receipt_path`와 동일한 공개 범위).
+- **조회/열람**: 업로드된 파일은 `GET /receipts/{filename}`으로 언제든 원본 이미지를 다운로드하거나 모바일 앱 화면에서 열람(S3)할 수 있습니다.
+
+**Request (`POST /receipts`)**
+- Header: `Content-Type: multipart/form-data`
+- Body: `file: <바이너리 이미지 파일>`
+
+**Response (`201 Created`)**
+```json
+{
+  "receipt_hash": "0xdef4567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+  "receipt_path": "/receipts/def4567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef.jpg",
+  "filename": "receipt_20261106.jpg",
+  "size": 245120
+}
+```
+
+| 코드 | 경우 (`POST /receipts`, `GET /receipts/{filename}`) |
+| --- | --- |
+| `201` | 영수증 업로드 성공 및 해시 발급 완료 |
+| `200` | `GET /receipts/{filename}` 파일 다운로드 성공 |
+| `400` | 빈 파일이거나 파일 파라미터 누락 |
+| `403` | 총무(`TREASURER`)가 아님 |
+| `404` | `GET /receipts/{filename}` 파일 미존재 |
 
 ---
 
 #### 2.1 [1단계] 초안 등록 및 검증 (`POST /entries`)
 - **설명**: 총무가 영수증 해시와 거래 내역을 입력하여 초안을 생성합니다. 블록체인 기록 전이므로 온체인 상태가 아니며, 고유 `id`만 발급됩니다.
 - **권한**: 총무(`TREASURER`)만. 컨트랙트도 등록자를 총무로 제한합니다(`NotRegistrant`). 학생·감사·회장은 `403`, 토큰이 없으면 `401` (인증 §3).
-- **등록자**: `created_by`에는 토큰의 사용자 id가 기록됩니다.
+- **영수증 필수 및 검증 (PRD §4.3, B2, B3)**:
+  - **지출(`EXPENSE`)**: 일반 지출 및 양수(증액·재분류) 정정 지출은 `receipt_hash`가 필수입니다 (누락 시 `400 Bad Request`). 단, 음수(감액·환불) 정정 지출은 영수증이 선택값입니다 (`docs/HASHING.md` §2 샘플 3).
+  - **수입(`INCOME`)**: `receipt_hash`는 선택값입니다.
+  - **해시 형식 검증**: `receipt_hash`는 `0x`로 시작하는 64자리 소문자 16진수(`^0x[0-9a-f]{64}$`)여야 합니다 (대문자, 0x 누락, 길이 불일치 시 `400 Bad Request`).
+  - **파일 존재 검증**: 사전에 `POST /receipts`로 업로드되지 않았거나 서버에 존재하지 않는 파일의 해시는 `400 Bad Request`로 거부됩니다.
+- **영수증 중복 검증 (PRD §6, §8, B4)**:
+  - 기존 승인번호+결제일시+금액 또는 영수증 해시가 이미 등록되어 있는 경우, `409 Conflict`로 차단하지 않고 **정상 등록하되 `ocr_status = "DUPLICATE"` 경고 상태로 등록**합니다. (감사 승인 시 소명 사유가 강제됩니다)
+  - 단, 미제출 초안(`status IS NULL`), 반려(`REJECTED`), 예산초과 차단(`BLOCKED`) 내역 및 정정 시 원본(`corrects_entry_id`)은 중복 대조 대상에서 제외됩니다.
+  - **2단계 제출(`POST /entries/{id}/submit`) 시 재검사**: 같은 영수증으로 초안을 두 번 만든 뒤 순차 제출하는 경우를 잡기 위해, `POST /entries/{id}/submit`(`entries.py` `submit_entry` 단계 6.5)에서도 `PENDING` 전환 직전에 이미 `PENDING`·`CONFIRMED`가 된 동일 영수증이 있는지 한 번 더 검사하여 `ocr_status = "DUPLICATE"`로 갱신합니다.
+- **정정 규칙 검증 (PRD §4.4, `docs/CONTRACTS.md` '정정', B7)**:
+  - `amount == 0`인 경우 일반·정정 모두 `400 Bad Request`(`ZeroAmount`)로 거부됩니다.
+  - 일반 내역(`corrects_entry_id = null`)은 양수 금액만 허용되며 `correction_reason`을 지정할 수 없습니다. 정정 내역(`corrects_entry_id != null`)은 `correction_reason`(`INPUT_ERROR | RECEIPT_RECHECK | REFUND | RECLASSIFY | OTHER`, `OTHER`는 상세 사유를 `purpose`에 작성)이 필수입니다.
+  - 정정 대상(`corrects_entry_id`)이 없으면 `404 Not Found`, 확정(`CONFIRMED`) 상태가 아니면 `400`(`CorrectionTargetNotConfirmed`), 원본이나 다른 예산으로 재분류된 양수 지출 정정이 아니면 `400`(`InvalidCorrectionTarget`)으로 차단됩니다.
+  - 정정의 `kind`와 `term_id`는 정정 대상과 같아야 합니다(`CorrectionKindMismatch` / `TermMismatch`).
+  - 감액(음수) 정정은 대상과 같은 `budget_id`여야 하며(`CorrectionBudgetMismatch`), 대상의 현재 확정 순금액(`netAmount`)을 초과하여 감액할 수 없습니다(`CorrectionExceedsOriginal`).
+  - **항목 재분류(`RECLASSIFY`) 확정 순서 강제**: 앱에서 양수(증액) 정정과 음수(감액) 정정 2건을 연속으로 등록(`POST /entries`)할 수 있도록 등록 단계에서는 차단하지 않으며, 확정(`POST /entries/{id}/confirm`) 단계에서 새 예산에 대한 양수 재분류 정정이 먼저 확정(`CONFIRMED`)되었는지 검사합니다 (미확정 상태에서 음수 정정을 먼저 확정하려 하면 `400 Bad Request`).
 
 **Request**
 ```json
@@ -440,7 +545,8 @@
   "purpose": "개강총회 다과 주문",
   "budget_id": 1,
   "occurred_at": 1788706800,
-  "receipt_hash": "0xdef4567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+  "receipt_hash": "0xdef4567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+  "receipt_path": "/receipts/def4567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef.jpg"
 }
 ```
 
@@ -454,6 +560,16 @@
   "message": "지출 초안이 등록되었으며, 기기 서명 제출 대기 상태입니다."
 }
 ```
+
+| 코드 | 경우 (`POST /entries`) |
+| --- | --- |
+| `201` | 초안 ID 채번 완료 (`duplicate_of` 포함) |
+| `400` | 지출 시 `receipt_hash` 누락, 해시 형식 불일치(대문자·길이 오류), 서버 미존재 영수증, 거래처/목적 제어문자 포함 또는 빈 문자열, `occurred_at` 자정 시각 불일치, 수입 내역에 예산 배정 시도, 금액 0(`ZeroAmount`), 정정 규칙 위반(`CorrectionTargetNotConfirmed`, `InvalidCorrectionTarget`, `CorrectionKindMismatch`, `TermMismatch`, `CorrectionBudgetMismatch`, `CorrectionExceedsOriginal`, 재분류 양수 정정에 동일 예산 지정) |
+| `401` | 로그인 토큰 없음 |
+| `403` | 총무(`TREASURER`)가 아님 |
+| `404` | 정정 대상 내역(`corrects_entry_id`)을 찾을 수 없음 |
+| `422` | 요청 본문 유효성 검증 실패 (문자열 길이 초과 등) |
+| `503` | 데이터베이스 오류 |
 
 ---
 
@@ -495,7 +611,38 @@
 
 ---
 
-#### 2.3 초안 수명주기 및 예외 처리 정책 (모바일 앱 등록 화면 가이드)
+#### 2.3 [T4] 수입·지출 내역 수정 요청 (`POST /entries/{id}/request-revision`)
+- **설명**: 총무가 이미 온체인에 등록되어 승인 대기 중인 `PENDING` 내역에 대해 수정 요청을 등록합니다 (PRD §4.3).
+- **효과**:
+  - `revision_requested_at` 일시가 기록되며 감사·회장에게 알림(`ENTRY_EDIT_REQUESTED`)이 발행됩니다.
+  - 이 값이 존재하는 내역은 승인권자의 확정 버튼이 숨겨지고 반려만 가능해지며, 온체인 확정 시도 시 차단됩니다 (#40 연계).
+- **권한 및 검증**:
+  - 총무(`TREASURER`) 본인이 등록한 건만 가능 (`created_by == user.id`, 타 총무/사용자는 `403 Forbidden`).
+  - `PENDING` 상태만 가능 (초안, 확정, 반려 건은 `400 Bad Request`).
+  - 확정이 선점 중(`tx_confirm` 존재)이면 `409 Conflict` (확정이 먼저 처리되면 총무는 정정 등록으로 진행해야 함).
+  - 이미 수정 요청된 건에 재요청 시 `200 OK` 및 동일한 `EntryResponse` 반환 (멱등성 보장).
+
+**Request**
+- URL: `POST /entries/{id}/request-revision`
+- Header: `Authorization: Bearer <총무 토큰>`
+- Body: 없음
+
+**Response (`200 OK`)**
+- `EntryResponse` 반환 (`revision_requested_at` 필드가 채워짐)
+
+| 코드 | 경우 (`POST /entries/{id}/request-revision`) |
+| --- | --- |
+| `200` | 수정 요청 등록 완료 또는 이미 요청된 건의 멱등 응답 |
+| `400` | `PENDING` 상태가 아님 (이미 확정/반려되었거나 미제출 초안) |
+| `401` | 로그인 토큰 없음 |
+| `403` | 총무(`TREASURER`)가 아니거나 본인이 작성한 내역이 아님 |
+| `404` | 항목(`id`)을 찾을 수 없음 |
+| `409` | 확정 처리(`tx_confirm`)가 선점 진행 중인 내역 |
+| `503` | 데이터베이스 오류 |
+
+---
+
+#### 2.4 초안 수명주기 및 예외 처리 정책 (모바일 앱 등록 화면 가이드)
 총무가 1단계로 ID를 발급받은 뒤 모바일 앱 기기 서명(2단계) 단계에서 이탈하거나 오류가 발생한 경우의 처리 정책입니다:
 
 1. **서명 실패/이탈 시 재시도 (`Retry`) 허용**:
@@ -558,13 +705,157 @@
 
 | 코드 | 경우 |
 | --- | --- |
-| `400` | `PENDING`이 아님, 사유 없음, 서명 형식 오류, 서명자 불일치, 체인이 거부함 |
+| `400` | `PENDING`이 아님, 사유 없음, 서명 형식 오류, 서명자 불일치, 체인이 거부함 (`fail_reason` 코드 동봉) |
 | `403` | 감사·회장이 아님, 본인이 등록한 항목 |
 | `404` | 없는 항목 |
 | `409` | 확정이 처리 중, 다른 요청이 먼저 처리함 또는 처리 중. 잠시 뒤 다시 조회합니다 |
 | `503` | 노드·DB 오류. 트랜잭션이 들어갔는지 모르면 같은 요청을 다시 보내 결과를 확인합니다 |
 
 확정(`POST /entries/{id}/confirm`)도 반려가 처리 중이면 같은 방식으로 `409`입니다.
+
+#### 온체인 거부 시 `fail_reason` 코드 (400 Bad Request)
+체인이 확정(`confirm`)·반려(`reject`)·등록(`submit`)을 거부(`ChainRevert`)하면, `detail` 문구와 함께 최상위에 기계 판독용 `fail_reason` 코드가 함께 반환됩니다.
+앱은 문자열 파싱 없이 `fail_reason` 코드로 분기할 수 있습니다.
+- 예산 관련 거부 코드: `InsufficientBudget`(예산 잔량 부족), `BudgetExpired`(집행 기간 만료), `BudgetNotFound`(예산 미존재)
+- 서명/상태 거부 코드: `InvalidStatus`(이미 처리됨), `SignatureExpired`(서명 유효시한 만료), `SelfApproval`(자기 승인/반려), `EntryCommitMismatch` 등
+
+**온체인 승인 거부 응답 예시 (`400 Bad Request`)**
+```json
+{
+  "detail": "온체인 승인이 거부되었습니다 (InsufficientBudget).",
+  "fail_reason": "InsufficientBudget"
+}
+```
+
+---
+
+### 5. 온체인 원장 항목 조회 (`GET /entries/{id}/onchain`)
+- **설명**: 스마트 컨트랙트 원장(`getEntry`) 및 블록체인 트랜잭션 기록(`entry_tx_detail`)을 직접 조회합니다. 모바일 앱의 1단계/2단계 검증(등록자 지갑 주소 대조, 해시 대조, 블록 번호 대조)에 사용됩니다.
+- **체인 미등록 항목**: 체인에 아직 올라가지 않았거나 없는 건은 `404 Not Found`를 반환합니다.
+
+**Response (`200 OK`)**
+```json
+{
+  "id": 1,
+  "hash": "0x3b8d...",
+  "amount": 35000,
+  "kind": "EXPENSE",
+  "status": "CONFIRMED",
+  "term": 20261,
+  "occurred_at": 1788793200,
+  "budget_id": 1,
+  "corrects_id": 0,
+  "registrant": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+  "approver": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+  "had_warning": false,
+  "reason_hash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+  "block_number": 102,
+  "block_reason": null,
+  "tx_hash": "0x2222222222222222222222222222222222222222222222222222222222222222"
+}
+```
+
+---
+
+## 계좌 대조
+
+PRD v0.15 §4.6. 총무가 은행에서 내려받은 거래내역 CSV를 올리면 원장과 1:1로 맞추고, 짝이 없는 거래를 지목합니다.
+- **원장에 자동 반영하지 않습니다.** 파일은 검사 용도로만 씁니다.
+- 업로드는 **총무만**, 조회는 **임원(총무·감사·회장)**만. 토큰이 없으면 `401`, 권한이 없으면 `403`.
+- 같은 학기에 여러 번 올릴 수 있습니다. 새로 올리면 같은 학기 이전 스냅샷의 짝을 풀고 **최신 파일로 다시 맞춥니다**(원장 1건은 은행 거래 1줄에만 짝 — `uq_bank_tran_matched_entry`). 이전 스냅샷은 파일 해시·거래 줄을 근거로 남고 `superseded: true`가 됩니다.
+
+**대조 규칙**
+- 방향(입금=`INCOME`, 출금=`EXPENSE`)·금액·날짜(KST)가 모두 같으면 짝. 짝이 된 원장은 후보에서 빠집니다(같은 날 같은 금액 2건이면 원장도 2건 있어야 둘 다 맞음).
+- 후보는 **정정이 아닌 원본 중 `PENDING`·`CONFIRMED`만**. 초안·`REJECTED`·`BLOCKED`는 제외 — 예산 초과로 차단된 지출의 출금은 `UNREGISTERED`로 드러납니다.
+- 금액은 **원본 + 확정된 정정의 순금액**. 순금액이 0 이하(전액 환불)면 후보가 아닙니다. 확정 항목을 대기 항목보다 먼저 짝짓습니다.
+
+### 1. 거래내역 업로드·대조 (`POST /bank/snapshots`)
+
+**Request**
+```json
+{
+  "term_id": 1,
+  "file_base64": "6rGw656Y7J287IucLOyggeyalCwu...",
+  "file_hash": "0x9f2c…(선택, 64자리 소문자 hex)"
+}
+```
+- `file_base64`: 은행에서 받은 CSV **원본 바이트**의 base64 (최대 2MB). 인코딩은 UTF-8(BOM 허용)·CP949 둘 다 받습니다.
+- `file_hash` (선택): 앱이 계산한 원본 바이트 SHA-256 (`0x` + 소문자 hex). 주면 서버 재계산과 대조해 다르면 `400`, 대문자면 `422` (`HASHING.md` §4·§5).
+- 지원 형식: NH(`거래일시`)·KB(`거래일자`+`거래시각`) 등 헤더 이름으로 컬럼을 찾습니다. 위쪽 안내 줄(계좌번호·조회기간)·빈 줄·합계 줄은 건너뜁니다.
+
+**Response (`201 Created`)** — `GET /bank/snapshots/{id}`와 같은 대조 결과
+```json
+{
+  "snapshot_id": 1,
+  "term_id": 1,
+  "file_hash": "0x…",
+  "bank_balance": 1171000,
+  "snapshot_at": "2026-11-07T05:00:00Z",
+  "period_start": "2026-03-05",
+  "period_end": "2026-03-18",
+  "superseded": false,
+  "summary": {
+    "total": 5, "matched": 4, "matched_pending": 0, "unregistered": 1,
+    "unregistered_out_amount": 12000, "unregistered_in_amount": 0, "unbacked": 0
+  },
+  "transactions": [
+    { "id": 2, "tran_date": "2026-03-10", "tran_time": "14:03:11", "description": "카드출금 OO문구점",
+      "direction": "OUT", "amount": 35000, "balance_after": 1215000, "status": "MATCHED", "entry_id": 2 },
+    { "id": 5, "tran_date": "2026-03-18", "tran_time": "08:55:19", "description": "카드출금 OO편의점",
+      "direction": "OUT", "amount": 12000, "balance_after": 1171000, "status": "UNREGISTERED", "entry_id": null }
+  ],
+  "unbacked_entries": []
+}
+```
+
+| 필드 | 설명 |
+| --- | --- |
+| `bank_balance` | 시간순 마지막 거래의 거래후잔액. 결산(`GET /settlement`)의 `balance_gap`이 최신 스냅샷의 이 값을 씁니다 |
+| `period_start`·`period_end` | 파일에 들어 있는 거래 날짜 범위 |
+| `transactions[].description` | 적요 + 거래점 (예: `카드출금 OO문구점`) |
+| `transactions[].status` | 아래 표. `superseded`면 `null` |
+| `unbacked_entries[]` | 원장엔 **확정**돼 있는데 이 파일(기간 안)에 대응 거래가 없는 항목 — 가짜 등록 의심. `entry_id`, `kind`, `amount`(순금액), `date`, `counterparty`, `purpose` |
+| `summary.unregistered_out_amount` | 미등록 출금 합계 — 장부에 없이 나간 돈 |
+| `summary` | `superseded`면 `null` |
+
+| `status` | 의미 |
+| --- | --- |
+| `MATCHED` | 확정 원장 항목과 짝 |
+| `MATCHED_PENDING` | 승인 대기 항목과 짝 — 확정 전이라 판단 보류 |
+| `UNREGISTERED` | 계좌에는 있는데 원장에 없음 (미등록 의심) |
+
+| 코드 | 경우 |
+| --- | --- |
+| `201` | 업로드·대조 완료 |
+| `400` | base64 아님, 빈 파일, `file_hash` 불일치, CSV 형식 오류(헤더 없음, 출금·입금 둘 다/둘 다 없음, 날짜·금액을 못 읽음 — `detail`에 몇 번째 거래인지 나옴) |
+| `404` | `term_id`의 학기가 없음 |
+| `409` | 같은 학기에 같은 파일(해시)이 이미 있음 → 원장을 고친 뒤엔 재대조(`/rematch`)를 쓰세요. 또는 같은 학기 대조가 동시에 진행됨(다시 시도) |
+| `413` | 파일이 2MB 초과 |
+| `422` | 필드 누락, `file_hash` 형식 오류 |
+| `503` | DB 오류 |
+
+### 2. 재대조 (`POST /bank/snapshots/{snapshot_id}/rematch`)
+- 미등록 건을 등록·승인한 뒤 **같은 파일로 다시 맞출 때** 씁니다 (같은 파일은 다시 올릴 수 없어 `409`). 총무만.
+- 응답은 1번과 같은 대조 결과(`200`).
+- `404` 스냅샷 없음, `409` 더 최근 업로드가 있음(최신 스냅샷에서 재대조) 또는 동시 진행, `503` DB 오류.
+
+### 3. 업로드 목록 (`GET /bank/snapshots?term_id=`)
+- `term_id` 필수. 최근 업로드가 먼저 옵니다.
+```json
+[
+  { "id": 2, "term_id": 1, "file_hash": "0x…", "bank_balance": 1168000,
+    "snapshot_at": "2026-11-07T06:00:00Z", "uploaded_by": 2, "superseded": false },
+  { "id": 1, "term_id": 1, "file_hash": "0x…", "bank_balance": 1171000,
+    "snapshot_at": "2026-11-07T05:00:00Z", "uploaded_by": 2, "superseded": true }
+]
+```
+
+### 4. 대조 결과 조회 (`GET /bank/snapshots/{snapshot_id}`)
+- 1번 응답과 같은 형태(`200`). 짝은 업로드(또는 재대조) 때 정한 것을 쓰고, 상태는 **조회 시점의 원장**으로 다시 매깁니다 — 업로드 뒤 짝 항목이 반려됐으면 `UNREGISTERED`로 보입니다. 새로 등록한 항목을 짝지으려면 재대조를 쓰세요.
+- 이전 스냅샷(`superseded: true`)은 거래 줄만 보이고 `summary`는 `null`, `status`는 모두 `null`입니다.
+- `404` 스냅샷 없음, `503` DB 오류.
+
+**한계** — 파일 해시의 온체인 기록은 컨트랙트가 정해지지 않아 아직 없습니다(`tx_hash` 비어 있음). 원본 파일은 저장하지 않고 해시만 저장합니다. 날짜는 같은 날만 짝으로 봅니다.
 
 ---
 
@@ -625,6 +916,74 @@
 
 ---
 
+## 결산
+
+### 1. 학기 결산 (`GET /settlement/{term_id}`)
+- **설명**: 결산 화면(A11)의 요약 카드·예산 집행률·메타지표 (PRD §4.7, §7.4). **확정(`CONFIRMED`)된 항목만** 집계합니다. 초안·대기·반려·차단은 금액에 들어가지 않습니다.
+- **권한**: 임원(총무·감사·회장)만. 토큰이 없으면 `401`, 학생 토큰이면 `403`.
+- **쿼리**: `audit_at` (선택, ISO 8601) — 「감사 D-30 이내 정정」을 셀 감사일. 없으면 학기 종료일, 시간대가 없으면 KST로 봅니다.
+  - 예: `GET /settlement/1?audit_at=2026-12-10T00:00:00%2B09:00` (`+`는 URL에서 `%2B`로)
+
+**Response (`200 OK`)**
+```json
+{
+  "term_id": 1,
+  "term_code": 20262,
+  "term_name": "2026-2학기",
+  "income": 5000000,
+  "expense": 440000,
+  "ledger_balance": 4560000,
+  "bank_balance": 4500000,
+  "bank_snapshot_at": "2026-12-01T00:00:00Z",
+  "balance_gap": 60000,
+  "budgets": [
+    {
+      "budget_id": 1, "category": "행사비",
+      "initial_amount": 2000000, "planned_amount": 2500000, "version": 2,
+      "spent": 310000, "remaining": 2190000, "execution_rate": 0.124
+    }
+  ],
+  "metrics": {
+    "ocr_warning_approved": 1,
+    "category_warning_approved": 1,
+    "corrections": 2,
+    "corrections_by_reason": { "INPUT_ERROR": 1, "RECEIPT_RECHECK": 0, "REFUND": 1, "RECLASSIFY": 0, "OTHER": 0 },
+    "corrections_before_audit": 1,
+    "audit_at": "2026-12-20T00:00:00Z",
+    "budget_revisions": 2,
+    "budget_revisions_after_block": 1,
+    "revision_after_block_rate": 0.5
+  }
+}
+```
+
+| 필드 | 설명 |
+| --- | --- |
+| `income`·`expense` | 확정 수입·지출 합계. 정정(음수 포함)이 반영된 최종값 |
+| `ledger_balance` | 장부잔액 = `income` − `expense` (PRD §7.4) |
+| `bank_balance`·`bank_snapshot_at` | **가장 최근** 계좌 스냅샷(거래내역 업로드)의 통장 잔액과 시각. 스냅샷이 없으면 `null` |
+| `balance_gap` | 장부잔액 − 통장 잔액. 스냅샷이 없으면 `null`. **0이 아니면 장부와 계좌가 어긋난 것** (양수: 장부에 있는데 계좌에 없음) |
+| `budgets[]` | **체인에 발행된(`tx_issue` 있음) 예산만**, 버전이 있는 것만. `initial_amount`는 v1, `planned_amount`는 최신 버전(개정 반영), `spent`는 확정 지출, `execution_rate`는 `spent / planned_amount` (편성액 0이면 `null`) |
+| `ocr_warning_approved` | OCR 경고(`MISMATCH`·`DUPLICATE`·`UNREADABLE`) 상태로 확정된 건수 |
+| `category_warning_approved` | 용도 불일치 경고 상태로 확정된 건수 |
+| `corrections`·`corrections_by_reason` | 확정된 정정 건수와 사유별 분포. 사유 5종은 0이어도 항상 들어 있습니다 |
+| `corrections_before_audit` | 감사일 30일 전부터 감사일까지 등록된 확정 정정 건수 |
+| `budget_revisions`·`budget_revisions_after_block` | 승인된 예산 증액 횟수, 그중 차단(`BLOCKED`) 지출을 근거로 한 횟수 |
+| `revision_after_block_rate` | 초과 집행 이후 개정 비율. 증액이 0회면 `null` |
+
+- 이의 제기 건수는 v0.13에서 범위 밖이라 없습니다.
+- 시각은 시간대가 붙은 ISO 8601 문자열입니다. 표기(`Z`/`+09:00`)는 DB 설정에 따라 다를 수 있으니 문자열로 비교하지 말고 시각으로 파싱해 쓰세요.
+
+| 코드 | 경우 |
+| --- | --- |
+| `200` | 결산 |
+| `401` / `403` | 토큰 없음 / 학생 토큰 |
+| `404` | `term_id`의 학기가 없음 |
+| `422` | `audit_at`이 날짜 형식이 아님 |
+| `503` | DB 오류 |
+
+---
+
 ## 회원권
 
 ### 1. 내 회원권과 입장 QR (`GET /memberships/me`)
@@ -655,6 +1014,140 @@
 | `401` | 토큰 없음·만료 |
 | `404` | `term_id`의 학기가 없음 |
 | `503` | 보유 여부를 확인하지 못함 (체인 장애, `MembershipSBT` 미배포, `STUDENT_WALLET_MNEMONIC` 미설정, DB 오류). **미보유가 아니므로 「납부 확인 필요」로 안내하지 않습니다** |
+
+### 2. 회원권 일괄 발행 (`POST /memberships/mint-batches`, `POST /memberships/mint-batches/{id}/submit`, `GET /memberships/mint-batches/{id}`)
+- **설명**: 임원 화면 A3. 납부자 명단(학번)으로 그 학기 회원권(SBT)을 한 번에 발행합니다. 회장 또는 감사가 기기에서 EIP-712 `MintBatchRequest`에 서명하고 서버가 릴레이합니다 (PRD §4.2, §7.2, §9.2). 서버 혼자서는 발행하지 않습니다.
+- **권한**: 회장(`PRESIDENT`)·감사(`AUDITOR`). 제출은 준비한 임원 본인만 할 수 있습니다 — nonce가 서명자마다 따로라서 다른 사람의 서명으로는 낼 수 없습니다.
+- **2단계 흐름** (예산 최초 편성과 같은 구조):
+  1. **준비 (`POST /memberships/mint-batches`)**: 학기와 학번 목록(1~100개)을 보내면, 서버가 학번을 학생 지갑 주소로 바꾸고 이미 보유한 학생 등을 뺀 뒤 서명할 값(`term_code`, `nonce`, `recipients`)을 돌려줍니다.
+  2. **서명**: 앱이 `GET /chain/domains`의 `MembershipSBT` 도메인으로 `MintBatchRequest(recipients, term_code, nonce, deadline)`에 서명합니다. **`recipients`는 받은 순서 그대로** 써야 합니다 (배열 해시가 순서에 따라 달라집니다).
+  3. **제출 (`POST /memberships/mint-batches/{id}/submit`)**: `deadline`과 `signature`를 보내면 서버가 서명자를 확인하고 체인에 보냅니다. 학생별 결과(새로 발행 / 이미 보유로 건너뜀)를 돌려줍니다.
+- **100명 넘는 명단**은 앱이 100명씩 나눠 **한 묶음씩** 준비 → 서명 → 제출합니다. 같은 서명자의 nonce는 성공할 때마다 1씩 올라서, 여러 묶음을 미리 서명해 두면 앞 묶음이 실패했을 때 뒤 묶음 서명이 모두 무효가 됩니다.
+- **화면에 보이는 것과 서명하는 것**: 승인자는 학번·이름을 보고, 서명은 서버가 준 주소에 합니다. 학번↔주소 매핑은 서버에만 있어서 승인자가 주소를 확인할 방법은 없습니다. 발행 뒤 학생이 자기 화면(`GET /memberships/me`)에서 보유를 확인하는 것이 그 대응입니다 (PRD §13).
+
+**Request (`POST /memberships/mint-batches` - 1단계 준비)**
+```json
+{
+  "term_id": 2,
+  "student_nos": ["20231234", "20231235", "20231236", "20990000"]
+}
+```
+- `student_nos`: 1~100개. 앞뒤 공백은 지웁니다.
+
+**Response (`201 Created` - 1단계 준비)**
+```json
+{
+  "id": 7,
+  "term_id": 2,
+  "term_code": 20262,
+  "status": "PREPARED",
+  "signer_address": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+  "nonce": 3,
+  "recipients": [
+    "0x1aB2...",
+    "0x3cD4..."
+  ],
+  "deadline": null,
+  "tx_hash": null,
+  "reason": null,
+  "targets": [
+    { "student_no": "20231234", "user_id": 11, "name": "김학생", "address": "0x1aB2...", "status": "PENDING", "token_id": null, "membership_id": null },
+    { "student_no": "20231235", "user_id": 12, "name": "이학생", "address": "0x3cD4...", "status": "PENDING", "token_id": null, "membership_id": null }
+  ],
+  "excluded": [
+    { "student_no": "20231236", "user_id": 13, "name": "박학생", "status": "ALREADY_MEMBER" },
+    { "student_no": "20990000", "user_id": null, "name": null, "status": "NOT_FOUND" }
+  ],
+  "created_at": 1794700800,
+  "message": "2명에게 발행할 준비가 되었습니다. 기기에서 서명해 제출해 주세요."
+}
+```
+- `signer_address`: 로그인한 임원의 지갑 주소입니다. 이 주소로 서명해야 합니다.
+- `nonce`: 체인의 `MembershipSBT.nonces(signer_address)`를 준비할 때 읽은 값입니다.
+- `recipients`: 서명할 주소 배열입니다. `targets`와 순서가 같습니다.
+- `excluded`의 `status`:
+
+| 값 | 뜻 |
+| --- | --- |
+| `ALREADY_MEMBER` | 그 학기 회원권을 이미 보유 (체인 `hasValidMembership` 기준). 서버에 그 회원권의 DB 기록이 없으면 이때 체인 `tokenOf`로 채웁니다 (발행할 학생이 0명이라 `400`이어도 채웁니다) |
+| `NOT_FOUND` | 등록된 학번이 아님 |
+| `NOT_STUDENT` | 임원 계정 (회원권을 받을 수 없음) |
+| `DUPLICATE` | 명단에 같은 학번이 두 번 이상 있음 (첫 번째만 남김) |
+| `DB_MISMATCH` | DB와 체인의 회원권 기록이 다름 — DB에는 유효한 회원권이 있는데 체인에는 없음. 운영자 확인이 필요해 발행하지 않음 |
+
+- `excluded`는 준비 응답에만 있고 명단 순서대로입니다. 서버는 `targets`만 저장합니다.
+- 끝난 학기에도 준비할 수 있습니다 (학기가 있는지만 봅니다). `deadline`의 상한은 서버가 보지 않습니다 — 지난 `deadline`은 체인이 `SignatureExpired`로 거부합니다.
+
+**Request (`POST /memberships/mint-batches/{id}/submit` - 2단계 서명 제출)**
+```json
+{
+  "deadline": 1794704400,
+  "signature": "0x..."
+}
+```
+
+**Response (`200 OK` - 2단계 결과)**
+```json
+{
+  "id": 7,
+  "term_id": 2,
+  "term_code": 20262,
+  "status": "MINTED",
+  "signer_address": "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+  "nonce": 3,
+  "recipients": ["0x1aB2...", "0x3cD4..."],
+  "deadline": 1794704400,
+  "tx_hash": "0x...",
+  "reason": null,
+  "targets": [
+    { "student_no": "20231234", "user_id": 11, "name": "김학생", "address": "0x1aB2...", "status": "MINTED", "token_id": 41, "membership_id": 88 },
+    { "student_no": "20231235", "user_id": 12, "name": "이학생", "address": "0x3cD4...", "status": "SKIPPED", "token_id": 17, "membership_id": 52 }
+  ],
+  "excluded": [],
+  "created_at": 1794700800,
+  "message": "1명에게 발행했고 1명은 이미 보유해 건너뛰었습니다."
+}
+```
+
+요청 `status`:
+
+| 값 | 뜻 | 앱이 할 일 |
+| --- | --- | --- |
+| `PREPARED` | 준비됨, 아직 보내지 않음 | 서명해 제출 |
+| `SUBMITTING` | 다른 제출이 지금 체인에 보내는 중 | 잠시 뒤 `GET`으로 확인 |
+| `MINTED` | 체인에 들어감. 학생별 결과는 `targets` | 끝 |
+| `REJECTED` | 체인이 거부함. 사유는 `reason`(Solidity 에러 이름) | 아래 표 |
+| `NO_RESPONSE` | 보냈지만 결과를 모름 | **같은 서명을 다시 보내지 않는다.** `GET`으로 확인 |
+
+대상 `status`: `PENDING`(아직 결과 없음) · `MINTED`(새로 발행, `token_id` 있음) · `SKIPPED`(제출 사이에 이미 보유해 컨트랙트가 건너뜀, `token_id`는 그 회원권).
+
+`membership_id`는 서버 DB의 회원권 기록(`GET /memberships/me`의 `id`)입니다. 발행되면(`MINTED`) 서버가 기록을 만들고, 건너뛴 학생(`SKIPPED`)도 기록이 없으면 만듭니다. 체인에는 들어갔는데 DB 기록을 만들지 못하면(예: 체인을 재배포해 같은 `token_id`가 DB에 이미 있음) `null`이고, 다른 학생의 결과에는 영향이 없습니다. 이 경우 체인 기록이 기준이므로 회원권은 유효하지만 운영자 확인이 필요합니다.
+
+`REJECTED`의 `reason`과 대응:
+
+| `reason` | 뜻 | 대응 |
+| --- | --- | --- |
+| `SignatureExpired` | `deadline`이 지남 | 새 `deadline`으로 다시 서명해 같은 `id`로 제출 |
+| `InvalidNonce` | 그사이 같은 서명자의 다른 발행이 먼저 들어감 | 다시 준비 (`POST /memberships/mint-batches`) |
+| `NotApprover` | 서명자가 체인에서 회장·감사가 아님 | 롤 확인 |
+| `InvalidSignature` | 서명이 깨짐 | 다시 서명 |
+| 그 밖 (`EmptyBatch`, `BatchTooLarge`, `ZeroAddress`, `TermRequired`) | 서버 준비 단계에서 걸러야 하는 값 | 서버 오류로 보고 |
+
+- `REJECTED`는 같은 `id`로 다시 제출할 수 있습니다. 제출할 때 체인의 nonce가 준비 때 값과 다르면 보내지 않고 `409`입니다.
+
+**Response (`GET /memberships/mint-batches/{id}`)**: 위와 같은 모양입니다 (`excluded`는 빈 배열). `NO_RESPONSE`·`SUBMITTING`이면 저장된 `tx_hash`로 체인 결과를 다시 확인해 반영한 뒤 돌려줍니다.
+
+| 코드 | 경우 |
+| --- | --- |
+| `201` | 준비 완료 |
+| `200` | 제출 결과(`MINTED` \| `REJECTED` \| `NO_RESPONSE`), 조회 |
+| `400` | 서명 형식 오류, 서명자가 `signer_address`와 다름, 발행할 학생이 0명(본문 `detail.excluded`에 학생별 사유), 로그인한 임원의 지갑 주소가 등록되지 않음 |
+| `401` | 토큰 없음·만료 |
+| `403` | 회장·감사가 아님, 다른 임원이 준비한 요청을 제출 |
+| `404` | 학기(`term_id`) 또는 요청(`id`)이 없음 |
+| `409` | 체인의 nonce가 준비 때와 다름(다시 준비), 이미 `MINTED`, 다른 제출이 처리 중(`SUBMITTING`·`NO_RESPONSE`) |
+| `422` | 본문 형식 오류 (`student_nos` 0개·101개 이상, `deadline` 음수 등) |
+| `503` | 체인에 닿지 못함, `MembershipSBT` 미배포, 릴레이어 전송 불가, `STUDENT_WALLET_MNEMONIC` 미설정, DB 오류 |
 
 ---
 
@@ -703,6 +1196,8 @@ PRD v0.15 §4.2 (QR 입장), §8 (`Event`, `CheckIn`). 세 API 모두 **임원(�
 - **설명**: 학생 QR을 스캔해 입장을 판정하고, 입장이면 기록을 남깁니다. **한 행사에 한 학생은 한 번만** 입장합니다 (DB 유일 제약 `uq_check_ins_event_user`).
 - **판정 결과는 모두 `200` + `result`** 입니다. 스캐너 화면이 결과마다 다른 안내를 띄우기 때문입니다. `400`/`404`는 요청 자체가 잘못된 경우만입니다.
 - **자격은 QR의 학기가 아니라 행사의 학기로 봅니다.** 지난 학기 QR 캡처를 보여 줘도 이번 학기 회원권이 없으면 `NOT_MEMBER`입니다.
+- **회원권 보유는 체인으로 판정합니다** (`MembershipSBT.hasValidMembership`, PRD §10). `GET /memberships/me`와 같은 확인 함수입니다. DB의 회원권 행은 판정에 쓰지 않으므로, DB에만 있고 체인에 없으면 `NOT_MEMBER`입니다.
+- 체인에 연결하지 못했거나 **3초 안에 답이 오지 않으면** `UNVERIFIABLE`입니다 (`503`이 아님). 중복 입장(`ALREADY_CHECKED_IN`)과 없는 학생(`UNKNOWN_STUDENT`)은 회원권을 보지 않으므로 체인이 죽어도 그대로 판정됩니다.
 
 **Request**
 ```json
@@ -728,7 +1223,7 @@ PRD v0.15 §4.2 (QR 입장), §8 (`Event`, `CheckIn`). 세 API 모두 **임원(�
 | `ALREADY_CHECKED_IN` | 이 행사에 이미 입장함. 스캐너 두 대가 동시에 찍어 늦은 쪽도 여기 | 안 남김 | 있음 | **처음** 입장한 시각 |
 | `NOT_MEMBER` | 이 학기 회원권 없음 (미납·환불 회수·다른 학기 회원권만 있음) | 안 남김 | 있음 | `null` |
 | `UNKNOWN_STUDENT` | QR의 ID가 없는 사용자이거나 학생이 아님 (임원 ID 포함) | 안 남김 | `null` | `null` |
-| `UNVERIFIABLE` | 회원권 확인 자체를 못 함 (체인 장애 등). **거부가 아니므로 「미납」으로 안내하지 않고 다시 스캔하게 합니다.** 복구 후 다시 찍으면 정상 판정됩니다 | 안 남김 | 있음 | `null` |
+| `UNVERIFIABLE` | 회원권 확인 자체를 못 함 (체인 연결 실패·3초 초과·학생 지갑 설정 없음). **거부가 아니므로 「미납」으로 안내하지 않고 다시 스캔하게 합니다.** 복구 후 다시 찍으면 정상 판정됩니다 | 안 남김 | 있음 | `null` |
 
 - `student_no`·`name`은 스캐너가 **현장에서 본인 확인**에 씁니다. QR의 ID는 추측할 수 있어서(U000001 → U000002) 다른 사람 ID로 먼저 들어오는 것을 막는 수단입니다.
 
@@ -754,6 +1249,9 @@ PRD v0.15 §4.2 (QR 입장), §8 (`Event`, `CheckIn`). 세 API 모두 **임원(�
 | 등록 `RecordRequest`, 승인 `ConfirmApproval`, 반려 `RejectDecision` | `AccountingLedger` |
 | 예산 발행 `IssueRequest`, 증액 `IncreaseRequest`, 회수 `ReclaimRequest` | `BudgetToken` |
 | 롤 변경 `RoleChange`, 회장 복구 `PresidentRecovery`·`RecoveryCancel` | `RoleManager` |
+| SBT 발행 `MintBatchRequest`, 회수 `BurnRequest` | `MembershipSBT` |
+
+- `MembershipSBT`는 배포 기록에 있을 때만 `domains`에 들어갑니다. 아직 배포 전이라 없어도 `503`이 아니고 나머지 세 도메인은 그대로 내려갑니다. 앱은 키가 없으면 「회원권 발행을 아직 쓸 수 없음」으로 안내합니다. 있으면 다른 도메인과 같은 검사(아래 `503` 조건)를 거칩니다.
 
 - **검산**: `domainSeparator`는 컨트랙트의 `DOMAIN_SEPARATOR()`입니다. 앱이 나머지 네 필드로 계산한 도메인 해시와 비교하면, 체인 id나 주소를 잘못 쓴 것을 서명 전에 잡을 수 있습니다.
 - 키 이름은 EIP-712 도메인 필드 그대로(`chainId`, `verifyingContract`)라 서명 라이브러리에 바로 넘길 수 있습니다. `domainSeparator`는 도메인 필드가 아니니 넘기기 전에 뺍니다.
@@ -788,7 +1286,7 @@ PRD v0.15 §4.2 (QR 입장), §8 (`Event`, `CheckIn`). 세 API 모두 **임원(�
 }
 ```
 
-**배포 기록이 없거나 앞뒤가 맞지 않을 때 (`503 Service Unavailable`)** — 서명 도메인(`AccountingLedger`·`BudgetToken`·`RoleManager`) 중 하나라도 없거나, 도메인의 `chainId`·`verifyingContract`가 같은 파일의 체인·주소와 다르거나, `domainSeparator`가 네 필드로 계산한 값과 다르면 반쯤 갱신되거나 잘못된 기록으로 보고 내려주지 않습니다. 틀린 `domainSeparator`를 내려주면 앱의 검산이 모든 서명을 막기 때문입니다.
+**배포 기록이 없거나 앞뒤가 맞지 않을 때 (`503 Service Unavailable`)** — 필수 서명 도메인(`AccountingLedger`·`BudgetToken`·`RoleManager`) 중 하나라도 없거나, 배포 기록에 있는 도메인(`MembershipSBT` 포함)의 `chainId`·`verifyingContract`가 같은 파일의 체인·주소와 다르거나, `domainSeparator`가 네 필드로 계산한 값과 다르면 반쯤 갱신되거나 잘못된 기록으로 보고 내려주지 않습니다. 틀린 `domainSeparator`를 내려주면 앱의 검산이 모든 서명을 막기 때문입니다.
 ```json
 { "detail": "배포 기록이 없습니다 (localhost.json). 컨트랙트를 배포했는지 확인하세요" }
 ```

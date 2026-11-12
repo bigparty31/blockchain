@@ -2,26 +2,21 @@ import 'package:flutter/material.dart';
 import '../../core/app_theme.dart';
 import 'input_rules.dart';
 
-/// [이승호 담당: app/lib/screens/council/]
-/// 5. 학생 이의 제기 답변 화면
-class InquiryResponseScreen extends StatefulWidget {
-  const InquiryResponseScreen({super.key});
-
-  @override
-  State<InquiryResponseScreen> createState() => _InquiryResponseScreenState();
+String _daysAgo(int days) {
+  final d = DateTime.now().subtract(Duration(days: days));
+  return '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 }
 
-class _InquiryResponseScreenState extends State<InquiryResponseScreen> {
-  int _selectedFilterIndex = 0;
-
-  final List<Map<String, dynamic>> _inquiries = [
+/// **목업** 이의 목록. 서버가 붙으면 이의 목록 API 로 바꾼다.
+List<Map<String, dynamic>> buildInquiryMockItems() => [
     {
       'id': 101,
       'entryId': 1,
       'studentName': '익명의 재학생',
       'category': '행사비',
       'question': '한결문구 신입생 환영회 물품 35,000원 건 세부 품목 내역서가 누락되어 있습니다.',
-      'date': '2026-09-11',
+      // 목업: 제기 3일 뒤인 오늘 — 발표일에 상관없이 「3일 경과」로 보인다
+      'date': _daysAgo(3),
       'isAnswered': false,
       'answer': null,
     },
@@ -35,7 +30,32 @@ class _InquiryResponseScreenState extends State<InquiryResponseScreen> {
       'isAnswered': true,
       'answer': '네, 개강총회 당일 출석 서명부 스캔본을 증빙에 추가 업로드 완료하였습니다.',
     },
-  ];
+    ];
+
+/// 홈 화면에 쓰는 미답변 건수.
+int inquiryMockUnansweredCount() => buildInquiryMockItems().where((e) => e['isAnswered'] != true).length;
+
+/// 제기일부터 오늘까지 지난 날 수. 답하지 않은 사실이 남는 것이 압력이다 (PRD §4.5).
+int inquiryElapsedDays(String raisedDate, {DateTime? now}) {
+  final d = DateTime.tryParse(raisedDate);
+  if (d == null) return 0;
+  final days = (now ?? DateTime.now()).difference(d).inDays;
+  return days < 0 ? 0 : days;
+}
+
+/// [이승호 담당: app/lib/screens/council/]
+/// 5. 학생 이의 제기 답변 화면 — 답변 주체는 감사·회장이다 (PRD §4.5)
+class InquiryResponseScreen extends StatefulWidget {
+  const InquiryResponseScreen({super.key});
+
+  @override
+  State<InquiryResponseScreen> createState() => _InquiryResponseScreenState();
+}
+
+class _InquiryResponseScreenState extends State<InquiryResponseScreen> {
+  int _selectedFilterIndex = 0;
+
+  final List<Map<String, dynamic>> _inquiries = buildInquiryMockItems();
 
   /// 답변 작성. **이미 답변한 이의에는 다시 답변할 수 없다** — 컨트랙트가
   /// `ObjectionAlreadyAnswered` 로 거부한다 (IObjectionRegistry). 그래서 답변 대기 건에만 연다.
@@ -64,7 +84,7 @@ class _InquiryResponseScreenState extends State<InquiryResponseScreen> {
                   ),
                   const SizedBox(width: 12),
                   Expanded(
-                    child: Text('소명 답변 (내역 #${item['entryId']})',
+                    child: Text('이의 답변 (내역 #${item['entryId']})',
                       style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: AppTheme.textMain),
                     ),
                   ),
@@ -94,8 +114,8 @@ class _InquiryResponseScreenState extends State<InquiryResponseScreen> {
                   controller: textController,
                   maxLines: 4,
                   decoration: AppTheme.inputDecoration(
-                    label: '학생회 공식 소명 답변 *',
-                    hint: '투명하고 구체적인 소명 내용을 기재하세요.',
+                    label: '감사·회장 공식 답변 *',
+                    hint: '확인한 내용을 구체적으로 적어 주세요.',
                     icon: Icons.edit_rounded,
                   ),
                   // 답변은 텍스트 해시(answerHash) 대상이다 — 빈 값·제어문자·보이지 않는 공백은
@@ -139,7 +159,7 @@ class _InquiryResponseScreenState extends State<InquiryResponseScreen> {
                               children: [
                                 Icon(Icons.check_circle_rounded, color: Colors.white, size: 18),
                                 SizedBox(width: 10),
-                                Expanded(child: Text('소명 답변이 등록되었습니다.')),
+                                Expanded(child: Text('답변이 등록되었습니다.')),
                               ],
                             ),
                             backgroundColor: AppTheme.success,
@@ -438,7 +458,7 @@ class _InquiryCard extends StatelessWidget {
                         Icon(Icons.rate_review_rounded, size: 14, color: AppTheme.success),
                         SizedBox(width: 6),
                         Expanded(
-                          child: Text('총무단 공식 소명 답변',
+                          child: Text('감사·회장 공식 답변',
                             style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: AppTheme.success),
                           ),
                         ),
@@ -463,29 +483,41 @@ class _InquiryCard extends StatelessWidget {
                 ),
               )
             else
-              Align(
-                alignment: Alignment.centerRight,
-                child: GestureDetector(
-                  onTap: onAnswer,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                    decoration: BoxDecoration(
-                      gradient: const LinearGradient(
-                        colors: [Color(0xFF10B981), Color(0xFF06B6D4)],
-                      ),
-                      borderRadius: BorderRadius.circular(10),
+              // Wrap: 좁은 화면·큰 글자에서 경과일과 버튼이 줄을 나눠 넘치지 않는다
+              SizedBox(
+                width: double.infinity,
+                child: Wrap(
+                  alignment: WrapAlignment.spaceBetween,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    Text('미답변 ${inquiryElapsedDays(item['date'] as String)}일 경과',
+                      style: const TextStyle(fontSize: 12, color: AppTheme.expense, fontWeight: FontWeight.bold),
                     ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Icon(Icons.reply_rounded, color: Colors.white, size: 15),
-                        const SizedBox(width: 6),
-                        const Text('답변 작성하기',
-                          style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13),
+                    GestureDetector(
+                      onTap: onAnswer,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                        decoration: BoxDecoration(
+                          gradient: const LinearGradient(
+                            colors: [Color(0xFF10B981), Color(0xFF06B6D4)],
+                          ),
+                          borderRadius: BorderRadius.circular(10),
                         ),
-                      ],
+                        child: const Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.reply_rounded, color: Colors.white, size: 15),
+                            SizedBox(width: 6),
+                            Text('답변 작성하기',
+                              style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13),
+                            ),
+                          ],
+                        ),
+                      ),
                     ),
-                  ),
+                  ],
                 ),
               ),
           ],

@@ -69,3 +69,28 @@ def clean_chain_env(monkeypatch):
     """셸의 체인 설정(CHAIN_RPC_URL·CHAIN_FAKE·RELAYER_PRIVATE_KEY·DEPLOYMENTS_FILE)이 체인 테스트 결과를 바꾸지 않게 지운다."""
     for name in ("CHAIN_RPC_URL", "CHAIN_FAKE", "RELAYER_PRIVATE_KEY", "DEPLOYMENTS_FILE"):
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def setup_test_receipts(tmp_path, monkeypatch):
+    """각 테스트마다 영수증 저장소 디렉터리를 격리하고, 테스트용 영수증 파일 fixture를 준비한다 (운영 코드 하드코딩 배제)."""
+    receipts_dir = tmp_path / "receipts"
+    receipts_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("RECEIPTS_STORAGE_DIR", str(receipts_dir))
+
+    # 기본 테스트 영수증 ("0x" + "a" * 64)
+    (receipts_dir / f"{'a' * 64}.jpg").write_bytes(b"dummy test receipt bytes")
+    # 시드 내역 1, 2 용 파일
+    (receipts_dir / "abc1234567890abcdef1234567890abcdef1234567890abcdef1234567890abc.jpg").write_bytes(b"seed 01")
+    (receipts_dir / "def4567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef.jpg").write_bytes(b"seed 02")
+
+    # 기존 테스트들에서 사용하는 고정 샘플 해시들에 대한 파일 fixture (운영 코드 하드코딩 대체)
+    for raw in (
+        "11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff",
+        "bb" * 32,
+        "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+    ):
+        (receipts_dir / f"{raw}.jpg").write_bytes(b"fixture receipt bytes")
+
+    return receipts_dir
+

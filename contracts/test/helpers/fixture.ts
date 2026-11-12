@@ -478,3 +478,82 @@ export async function recordAndConfirm(f: Fixture, o: RecordOpts) {
   await (await record(f, o)).tx;
   await (await confirm(f, { id: o.id })).tx;
 }
+
+// ---------------------------------------------------------------- MembershipSBT
+
+export const SBT_TYPES = {
+  MintBatchRequest: [
+    { name: "recipients", type: "address[]" },
+    { name: "term", type: "uint256" },
+    { name: "nonce", type: "uint256" },
+    { name: "deadline", type: "uint256" },
+  ],
+  BurnRequest: [
+    { name: "holder", type: "address" },
+    { name: "term", type: "uint256" },
+    { name: "reason", type: "uint8" },
+    { name: "nonce", type: "uint256" },
+    { name: "deadline", type: "uint256" },
+  ],
+} as const;
+
+/** docs/enums.md burn_reason 표 순서 */
+export const BurnReason = { REFUND: 0, WITHDRAWAL: 1 } as const;
+
+export async function signMintBatch(signer: any, sbt: any, req: any): Promise<string> {
+  return sign(signer, sbt, "MembershipSBT", "MintBatchRequest", SBT_TYPES.MintBatchRequest, req);
+}
+
+export async function signBurn(signer: any, sbt: any, req: any): Promise<string> {
+  return sign(signer, sbt, "MembershipSBT", "BurnRequest", SBT_TYPES.BurnRequest, req);
+}
+
+export interface MintBatchOpts {
+  recipients: string[];
+  term?: bigint;
+  nonce?: bigint;
+  deadline?: bigint;
+}
+
+/** 서명만 만든다 (보내지 않음). nonce 기본값은 서명자의 현재 nonce. */
+export async function signedMint(f: Fixture, o: MintBatchOpts, signer: any = f.president) {
+  const req = {
+    recipients: o.recipients,
+    term: o.term ?? TERM,
+    nonce: o.nonce ?? (await f.membershipSBT.nonces(signer.address)),
+    deadline: o.deadline ?? (await deadlineIn()),
+  };
+  return { req, sig: await signMintBatch(signer, f.membershipSBT, req) };
+}
+
+/** 회장 서명(기본)으로 일괄 발급. 릴레이어가 보낸다. */
+export async function mintBatch(f: Fixture, o: MintBatchOpts, signer: any = f.president) {
+  const { req, sig } = await signedMint(f, o, signer);
+  return { req, sig, tx: f.membershipSBT.connect(f.relayer).mintBatchRelayed(req, sig) };
+}
+
+export interface BurnOpts {
+  holder: string;
+  term?: bigint;
+  reason?: number;
+  nonce?: bigint;
+  deadline?: bigint;
+}
+
+/** 서명만 만든다 (보내지 않음). reason 기본값은 REFUND. */
+export async function signedBurn(f: Fixture, o: BurnOpts, signer: any = f.president) {
+  const req = {
+    holder: o.holder,
+    term: o.term ?? TERM,
+    reason: o.reason ?? BurnReason.REFUND,
+    nonce: o.nonce ?? (await f.membershipSBT.nonces(signer.address)),
+    deadline: o.deadline ?? (await deadlineIn()),
+  };
+  return { req, sig: await signBurn(signer, f.membershipSBT, req) };
+}
+
+/** 회장 서명(기본)으로 소각. 릴레이어가 보낸다. */
+export async function burnMembership(f: Fixture, o: BurnOpts, signer: any = f.president) {
+  const { req, sig } = await signedBurn(f, o, signer);
+  return { req, sig, tx: f.membershipSBT.connect(f.relayer).burnRelayed(req, sig) };
+}
