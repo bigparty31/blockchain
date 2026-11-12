@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -10,6 +11,7 @@ import 'package:student_council_app/core/signing/eip712.dart';
 import 'package:student_council_app/core/signing/signing_service.dart';
 import 'package:student_council_app/models/budget_revision_model.dart';
 import 'package:student_council_app/screens/council/budget_revision_approval_screen.dart';
+import 'package:student_council_app/services/auth_service.dart';
 import 'package:student_council_app/services/budget_revision_decision_service.dart';
 
 import 'support/session.dart';
@@ -237,6 +239,21 @@ void main() {
       }
     });
 
+    test('회장 서명 버전이 1 미만이면 서명하지 않는다 (API.md: signed_version >= 1)', () async {
+      for (final v in [0, -1]) {
+        final r = row(status: 'PRESIDENT_SIGNED', signedVersion: v, deadline: nowSec + 3600);
+        BudgetRevisionDecisionService.client = server(single: r);
+        final s = service();
+        await expectLater(
+          s.auditorApprove(model(r)),
+          throwsA(isA<RevisionDecisionException>().having((e) => e.failure, 'failure', RevisionDecisionFailure.notReady)),
+          reason: 'signed_version=$v',
+        );
+        expect(signed, isEmpty);
+        expect(posts, isEmpty);
+      }
+    });
+
     test('재조회했더니 서버가 PENDING 으로 되돌려 놨으면 서명하지 않는다', () async {
       BudgetRevisionDecisionService.client = server(single: row());
       final s = service();
@@ -309,6 +326,44 @@ void main() {
       );
       expect(posts, isEmpty);
     });
+  });
+
+  /// 보내는 사이 다시 로그인했으면, 늦게 온 401 이 새 로그인을 지우면 안 된다 (#80 리뷰 — 이승호).
+  /// 토큰은 보내기 직전에 잡아 그 요청의 401 에 넘겨야 한다.
+  group('늦게 온 401', () {
+    tearDown(signOutForTest);
+
+    Future<void> relogDuringRequest({required bool holdPost}) async {
+      await signInAs(UserRole.AUDITOR, userId: 3); // token-3
+      final signedRow = row(status: 'PRESIDENT_SIGNED', signedVersion: 2, deadline: nowSec + 3600);
+      final held = Completer<http.Response>();
+      final sentAuth = <String?>[];
+      BudgetRevisionDecisionService.client = MockClient((req) async {
+        final hold = holdPost ? req.method == 'POST' : req.method == 'GET';
+        if (!hold) return json(signedRow);
+        sentAuth.add(req.headers['Authorization']);
+        return held.future;
+      });
+
+      final inFlight = service().auditorApprove(model(signedRow));
+      // 잡아 둔 요청이 나갈 때까지 돌린다
+      while (sentAuth.isEmpty) {
+        await Future<void>.delayed(Duration.zero);
+      }
+      await signInAs(UserRole.AUDITOR, userId: 5); // 다시 로그인 → token-5
+
+      held.complete(http.Response('{"detail":"expired"}', 401));
+      await expectLater(
+        inFlight,
+        throwsA(isA<RevisionDecisionException>()
+            .having((e) => e.failure, 'failure', RevisionDecisionFailure.unauthorized)),
+      );
+      expect(sentAuth.single, 'Bearer token-3', reason: '요청은 그때의 토큰으로 나갔다');
+      expect(AuthService().session?.token, 'token-5', reason: '늦게 온 401 이 방금 만든 세션을 지웠다');
+    }
+
+    test('조회(GET) 401', () => relogDuringRequest(holdPost: false));
+    test('제출(POST) 401', () => relogDuringRequest(holdPost: true));
   });
 
   group('화면', () {

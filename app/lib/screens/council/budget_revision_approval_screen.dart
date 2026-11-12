@@ -94,6 +94,8 @@ class _BudgetRevisionApprovalScreenState extends State<BudgetRevisionApprovalScr
     setState(() => _busyId = rev.id);
     try {
       await action();
+      // 처리 중에 화면을 나갔으면 다시 읽지 않는다 — [_load] 가 바로 setState 를 부른다
+      if (!mounted) return;
       _snack(done, AppTheme.success);
       await _load();
     } on RevisionDecisionException catch (e) {

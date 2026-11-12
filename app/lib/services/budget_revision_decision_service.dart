@@ -154,7 +154,8 @@ class BudgetRevisionDecisionService {
     final latest = await _checkStillSame(rev, BudgetRevisionStatus.PRESIDENT_SIGNED);
     final version = latest.signedVersion;
     final deadline = latest.signatureDeadline;
-    if (version == null || deadline == null) {
+    // 회장 쪽과 같은 기준 (API.md: signed_version >= 1). 0 이하는 체인에 없는 버전이다
+    if (version == null || version < 1 || deadline == null) {
       throw const RevisionDecisionException(
         RevisionDecisionFailure.notReady,
         '회장 서명 정보를 받지 못해 서명할 수 없어요. 목록을 새로 고쳐 주세요.',
@@ -272,14 +273,16 @@ class BudgetRevisionDecisionService {
   }
 
   static Future<http.Response> _get(String url, String what) async {
+    // 보낼 때의 토큰을 잡아 둔다 — 보내는 사이 다시 로그인했으면 늦게 온 401 이 새 로그인을 지우면 안 된다
+    final auth = AuthService().authSnapshot;
     final http.Response res;
     try {
-      res = await client.get(Uri.parse(url), headers: AuthService().authHeaders).timeout(_readTimeout);
+      res = await client.get(Uri.parse(url), headers: auth.headers).timeout(_readTimeout);
     } catch (_) {
       throw ApiUnavailable(what);
     }
     if (res.statusCode == 401) {
-      await AuthService().reportUnauthorized();
+      await AuthService().reportUnauthorized(token: auth.token);
       throw ApiUnauthorized(what);
     }
     if (res.statusCode == 403) throw ApiForbidden(what);
@@ -288,12 +291,13 @@ class BudgetRevisionDecisionService {
 
   /// 쓰기 요청. 200 이면 바뀐 요청을, 아니면 [RevisionDecisionException] 을 던진다.
   static Future<BudgetRevisionModel> _post(String url, Map<String, Object> body, {required String what}) async {
+    final auth = AuthService().authSnapshot; // [_get] 과 같은 이유
     final http.Response res;
     try {
       res = await client
           .post(
             Uri.parse(url),
-            headers: {...AuthService().authHeaders, 'Content-Type': 'application/json'},
+            headers: {...auth.headers, 'Content-Type': 'application/json'},
             body: jsonEncode(body),
           )
           .timeout(postTimeout);
@@ -315,7 +319,7 @@ class BudgetRevisionDecisionService {
           );
         }
       case 401:
-        await AuthService().reportUnauthorized();
+        await AuthService().reportUnauthorized(token: auth.token);
         throw const RevisionDecisionException(RevisionDecisionFailure.unauthorized, '로그인이 끝났어요. 다시 로그인해 주세요.');
       case 403:
         throw const RevisionDecisionException(RevisionDecisionFailure.forbidden, '이 작업을 할 권한이 없어요.');
