@@ -55,6 +55,9 @@ Future<RegistrationResult> simulateExpenseRegistration({
 }
 
 /// 등록 결과 다이얼로그. 초안·`PENDING` 이면 true(화면을 닫아도 됨), `BLOCKED` 면 false(입력 화면에 남음).
+///
+/// [onBudgetRevision] 이 있으면 `BLOCKED` 일 때 「예산 개정 요청」 버튼이 같이 나온다 (스토리보드 7 → 11).
+/// 누르면 다이얼로그를 닫은 뒤 이 콜백을 부른다. 입력 화면은 그대로 남는다.
 Future<bool> showRegistrationResultDialog(
   BuildContext context, {
   required String kindLabel, // '지출' | '수입'
@@ -62,7 +65,9 @@ Future<bool> showRegistrationResultDialog(
   required RegistrationResult result,
   String? occurredAtNote,
   LinearGradient gradient = AppTheme.primaryGradient,
+  VoidCallback? onBudgetRevision,
 }) async {
+  var goRevision = false;
   await showDialog<void>(
     context: context,
     builder: (ctx) {
@@ -159,6 +164,21 @@ Future<bool> showRegistrationResultDialog(
                 style: TextStyle(color: AppTheme.textSub, fontSize: 11),
               ),
               const SizedBox(height: 16),
+              if (blocked && onBudgetRevision != null) ...[
+                SizedBox(
+                  width: double.infinity,
+                  child: GradientButton(
+                    onPressed: () {
+                      goRevision = true;
+                      Navigator.pop(ctx);
+                    },
+                    label: '예산 개정 요청',
+                    icon: Icons.trending_up_rounded,
+                    gradient: const LinearGradient(colors: [AppTheme.info, AppTheme.primary]),
+                  ),
+                ),
+                const SizedBox(height: 10),
+              ],
               SizedBox(
                 width: double.infinity,
                 child: GradientButton(
@@ -176,5 +196,6 @@ Future<bool> showRegistrationResultDialog(
       );
     },
   );
+  if (goRevision) onBudgetRevision?.call();
   return !result.isBlocked;
 }

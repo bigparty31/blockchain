@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:student_council_app/core/enums.dart';
 import 'package:student_council_app/screens/council/approval_list_screen.dart';
 import 'package:student_council_app/screens/council/correction_screen.dart';
 import 'package:student_council_app/screens/council/expense_create_screen.dart';
 import 'package:student_council_app/screens/council/income_create_screen.dart';
 import 'package:student_council_app/screens/council/inquiry_response_screen.dart';
+import 'package:student_council_app/services/api_service.dart';
 
 /// 총무·감사 화면이 좁은 폰·큰 글자에서 픽셀이 넘치지(RenderFlex overflow) 않는지 본다.
 ///
@@ -14,6 +16,8 @@ import 'package:student_council_app/screens/council/inquiry_response_screen.dart
 /// 좁은 폰(320·360dp)과 큰 글자(시스템 글자 크기 130%·150%)에서도 확인한다.
 /// 넘침은 Flutter 가 예외로 던지므로 `takeException` 으로 잡는다.
 void main() {
+  // 목업 화면 테스트 — 서버 없이 시연용 더미로 돈다. 실패 표시는 api_unavailable_test.dart 가 본다 (PRD v0.14 §7.3).
+  setUp(() => ApiService.useDemoData = true);
   const widths = [320.0, 360.0, 411.0];
   const scales = [1.0, 1.3, 1.5];
 
@@ -30,7 +34,7 @@ void main() {
                 data: MediaQuery.of(context).copyWith(textScaler: TextScaler.linear(scale)),
                 child: child!,
               ),
-              home: const ApprovalListScreen(),
+              home: ApprovalListScreen(role: UserRole.AUDITOR, currentUserId: 3, items: buildApprovalMockItems()),
             ),
           );
           await tester.pumpAndSettle();
@@ -190,10 +194,10 @@ void main() {
         await tester.tap(find.text('내역 조회'));
         await waitFor(tester, find.textContaining('현재 금액 ₩'));
         await tester.enterText(find.widgetWithText(TextFormField, '수정 후 올바른 금액(원) *'), '30000');
-        await tester.enterText(find.widgetWithText(TextFormField, '정정 상세 사유 및 소명 내용 *'), '실제 영수증 확인 결과 금액 정정');
-        await tester.tap(find.text('정정 신청 제출하기'));
+        await tester.enterText(find.widgetWithText(TextFormField, '정정 상세 사유 *'), '실제 영수증 확인 결과 금액 정정');
+        await tester.tap(find.text('정정 제출하기'));
         await tester.pumpAndSettle();
-        expect(find.text('정정 신청 접수 완료!'), findsOneWidget);
+        expect(find.text('정정 등록 완료!'), findsOneWidget);
         final ex = tester.takeException();
         expect(ex, isNull, reason: '넘침: $ex');
       });

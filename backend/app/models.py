@@ -25,6 +25,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship
 
 from app.database import Base
+from app.schemas.notification import NotificationKind
 
 # SQLite에서는 INTEGER PRIMARY KEY여야 자동 증가(rowid)가 활성화되고,
 # PostgreSQL에서는 BIGINT / BIGSERIAL로 동작하도록 variant 지정
@@ -474,7 +475,93 @@ class CheckIn(Base):
 
 
 # =============================================================================
-# 12. 로그인 시도 (login_attempts) — 학번별 연속 실패 5회 잠금 (PRD v0.15 §9.1, §9.2)
+# 12. 알림 (notifications, device_tokens) — PRD §4.8, docs/NOTIFICATION_API.md
+# =============================================================================
+# 재알림 대상 종류. 처리되면 닫히고(resolved_at), 재알림 작업이 next_remind_at 으로 다시 알린다
+NOTIFICATION_REMIND_KINDS = (
+    NotificationKind.ENTRY_REGISTERED.value,
+    NotificationKind.ENTRY_EDIT_REQUESTED.value,
+    NotificationKind.REVISION_REQUESTED.value,
+    NotificationKind.REVISION_PRESIDENT_SIGNED.value,
+    NotificationKind.SIGNATURE_DEADLINE_NEAR.value,
+)
+
+# 안 읽은 확정 실패 알림 (uq_notifications_confirm_failed_unread 의 조건)
+CONFIRM_FAILED_UNREAD = f"kind = '{NotificationKind.ENTRY_CONFIRM_FAILED.value}' AND read_at IS NULL"
+
+
+class Notification(Base):
+    """임원 한 명에게 간 알림 한 건. 학생에게는 행을 만들지 않는다 — 학생은 FCM 토픽 푸시만 받는다 (PRD §4.8).
+
+    대상 건(항목·증액 요청·이의)이 지워지면 알림도 함께 지운다(CASCADE). 알림은 파생 데이터라 본 데이터 삭제를 막지 않는다 —
+    예: 예산 발행이 시드 더미 증액 요청을 정리할 때 (routers/budgets.py _cleanup_unissued_seed_versions).
+    """
+
+    __tablename__ = "notifications"
+
+    id = Column(ID_TYPE, primary_key=True, autoincrement=True, doc="고유 ID")
+    user_id = Column(BigInteger, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, doc="받는 임원 ID")
+    kind = Column(String(40), nullable=False, doc="docs/enums.md notification kind")
+    entry_id = Column(BigInteger, ForeignKey("entries.id", ondelete="CASCADE"), nullable=True, doc="대상 항목")
+    budget_revision_request_id = Column(
+        BigInteger, ForeignKey("budget_revision_requests.id", ondelete="CASCADE"), nullable=True, doc="대상 증액 요청"
+    )
+    objection_id = Column(
+        BigInteger, ForeignKey("objections.id", ondelete="CASCADE"), nullable=True, doc="대상 이의 (v0.13 범위 밖이라 비어 있다)"
+    )
+    body = Column(Text, nullable=False, doc="서버가 kind 로 만든 문구. 만들 때 저장한다")
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), doc="처음 알린 일시")
+    notified_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), doc="마지막으로 알린 일시 (목록 정렬 기준)")
+    read_at = Column(DateTime(timezone=True), nullable=True, doc="읽은 일시. 재알림 때 비운다")
+    resolved_at = Column(DateTime(timezone=True), nullable=True, doc="처리돼 닫힌 일시. 재알림 대상 종류만 닫힌다")
+    remind_count = Column(Integer, nullable=False, server_default=text("0"), default=0, doc="재알림 횟수 (최대 3)")
+    next_remind_at = Column(DateTime(timezone=True), nullable=True, doc="다음 재알림 일시. 재알림 대상이 아니거나 끝났으면 NULL")
+
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN (" + ", ".join(f"'{kind.value}'" for kind in NotificationKind) + ")",
+            name="ck_notifications_kind",
+        ),
+        CheckConstraint("entry_id IS NULL OR budget_revision_request_id IS NULL", name="ck_notifications_single_target"),
+        CheckConstraint("remind_count >= 0", name="ck_notifications_remind_count"),
+        Index("idx_notifications_user_open", "user_id", "resolved_at", "read_at"),
+        Index("idx_notifications_entry", "entry_id"),
+        Index("idx_notifications_revision", "budget_revision_request_id"),
+        Index("idx_notifications_next_remind", "next_remind_at"),
+        # 같은 건의 확정 실패는 받는 사람마다 안 읽은 알림이 한 건이다. 실패 기록이 동시에 두 번 와도 DB 가 막는다
+        # (create_notification 은 이 인덱스에 걸리면 건너뛴다). 읽은 뒤 다시 실패하면 새 행이 들어간다
+        Index(
+            "uq_notifications_confirm_failed_unread",
+            "entry_id",
+            "user_id",
+            unique=True,
+            postgresql_where=text(CONFIRM_FAILED_UNREAD),
+            sqlite_where=text(CONFIRM_FAILED_UNREAD),
+        ),
+    )
+
+
+class DeviceToken(Base):
+    """임원 기기의 FCM 등록 토큰 (학생회 서버에 등록). 학생은 토픽을 구독하므로 등록하지 않는다."""
+
+    __tablename__ = "device_tokens"
+
+    id = Column(ID_TYPE, primary_key=True, autoincrement=True, doc="고유 ID")
+    user_id = Column(BigInteger, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, doc="임원 ID")
+    platform = Column(String(20), nullable=False, doc="android (iOS 제외, PRD §4.8)")
+    token = Column(String(512), nullable=False, doc="FCM 등록 토큰. 한 기기에 한 행 — 다른 사람이 올리면 그 사람에게 넘어간다")
+    registered_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), doc="등록(또는 넘겨받은) 일시")
+    revoked_at = Column(DateTime(timezone=True), nullable=True, doc="해제 일시 (로그아웃, FCM 무효 응답)")
+
+    __table_args__ = (
+        CheckConstraint("platform IN ('android')", name="ck_device_tokens_platform"),
+        UniqueConstraint("token", name="uq_device_tokens_token"),
+        Index("idx_device_tokens_user", "user_id"),
+    )
+
+
+# =============================================================================
+# 13. 로그인 시도 (login_attempts) — 학번별 연속 실패 5회 잠금 (PRD v0.15 §9.1, §9.2)
 # =============================================================================
 class LoginAttempt(Base):
     """학번별 로그인 시도 횟수와 잠금. 서버 메모리가 아니라 DB 에 두어 학생 서버가 여러 대여도 횟수가 합쳐진다 (§9.1).
@@ -492,4 +579,85 @@ class LoginAttempt(Base):
 
     __table_args__ = (
         CheckConstraint("failed_count >= 0", name="ck_login_attempts_failed_count"),
+    )
+
+
+# =============================================================================
+# 14. 회원권 일괄 발행 요청 (membership_mint_batches, membership_mint_targets) — PRD v0.16 §4.2, §7.2
+# =============================================================================
+# 요청 상태 (docs/API.md 「회원권 2」). PREPARED·REJECTED 만 제출할 수 있다
+MINT_BATCH_STATUSES = ("PREPARED", "SUBMITTING", "MINTED", "REJECTED", "NO_RESPONSE")
+# 대상 결과. SKIPPED 는 이미 유효해 컨트랙트가 건너뛴 학생
+MINT_TARGET_STATUSES = ("PENDING", "MINTED", "SKIPPED")
+
+
+class MembershipMintBatch(Base):
+    """회원권 일괄 발행 한 묶음 (1~100명). 준비 때 서명할 값(nonce·수령자 순서)을 고정해 두고, 제출 때 그 값으로 서명을 확인한다.
+
+    서명자는 준비한 임원 한 명이다 — nonce 가 서명자마다 따로라 다른 임원의 서명으로는 낼 수 없다.
+    tx_hash 는 보내기 직전에 조건부 UPDATE 로 선점한다(SUBMITTING). 응답을 잃으면(NO_RESPONSE) 같은 서명을 다시 보내지 않고
+    이 hash 로 결과를 확인한다 — 들어갔으면 nonce 가 올라 재전송은 InvalidNonce 로 보여 결과를 잃는다.
+    """
+
+    __tablename__ = "membership_mint_batches"
+
+    id = Column(ID_TYPE, primary_key=True, autoincrement=True, doc="고유 ID")
+    term_id = Column(BigInteger, ForeignKey("terms.id", ondelete="RESTRICT"), nullable=False, doc="발행 학기")
+    requested_by = Column(BigInteger, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, doc="준비한 임원 (회장·감사)")
+    signer_address = Column(String(42), nullable=False, doc="서명할 지갑 주소 (준비할 때 requested_by 의 wallet_address, 소문자)")
+    nonce = Column(BigInteger, nullable=False, doc="준비할 때 읽은 MembershipSBT.nonces(signer). 성공마다 1씩 올라 int64 를 넘지 않는다")
+    status = Column(String(20), nullable=False, server_default=text("'PREPARED'"), default="PREPARED", doc="요청 상태")
+    deadline = Column(BigInteger, nullable=True, doc="제출한 서명의 유효 시한 (Unix 초). API 가 int64 범위로 받는다")
+    signature = Column(String(132), nullable=True, doc="제출한 서명 (0x + 130자)")
+    tx_hash = Column(String(66), nullable=True, doc="보낸(보내는 중인) 트랜잭션 hash. 보내기 직전에 선점한다")
+    reason = Column(String(40), nullable=True, doc="REJECTED 사유 (Solidity 에러 이름 또는 Unknown)")
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), doc="준비 일시")
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), doc="마지막 상태 변경 일시")
+
+    term = relationship("Term")
+    requester = relationship("User", foreign_keys=[requested_by])
+    targets = relationship(
+        "MembershipMintTarget", back_populates="batch", order_by="MembershipMintTarget.position", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN (" + ", ".join(f"'{s}'" for s in MINT_BATCH_STATUSES) + ")", name="ck_mint_batches_status"
+        ),
+        CheckConstraint("status = 'PREPARED' OR signature IS NOT NULL", name="ck_mint_batches_signature"),
+        CheckConstraint("status NOT IN ('SUBMITTING', 'MINTED', 'NO_RESPONSE') OR tx_hash IS NOT NULL", name="ck_mint_batches_tx"),
+        CheckConstraint("status != 'REJECTED' OR reason IS NOT NULL", name="ck_mint_batches_reason"),
+        UniqueConstraint("tx_hash", name="uq_mint_batches_tx_hash"),
+        Index("idx_mint_batches_term", "term_id"),
+    )
+
+
+class MembershipMintTarget(Base):
+    """일괄 발행의 대상 학생 한 명. position 순서가 서명한 recipients 배열의 순서다."""
+
+    __tablename__ = "membership_mint_targets"
+
+    id = Column(ID_TYPE, primary_key=True, autoincrement=True, doc="고유 ID")
+    batch_id = Column(BigInteger, ForeignKey("membership_mint_batches.id", ondelete="CASCADE"), nullable=False, doc="요청 ID")
+    position = Column(Integer, nullable=False, doc="recipients 배열의 자리 (0부터)")
+    user_id = Column(BigInteger, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, doc="학생 ID")
+    address = Column(String(42), nullable=False, doc="학생 지갑 주소 (EIP-55). 서명 대상")
+    status = Column(String(10), nullable=False, server_default=text("'PENDING'"), default="PENDING", doc="대상 결과")
+    token_id = Column(BigInteger, nullable=True, doc="발행됐거나 이미 있던 회원권의 tokenId")
+    membership_id = Column(
+        BigInteger, ForeignKey("memberships.id", ondelete="SET NULL"), nullable=True, doc="만든(또는 있던) DB 회원권 기록"
+    )
+
+    batch = relationship("MembershipMintBatch", back_populates="targets")
+    user = relationship("User", foreign_keys=[user_id])
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN (" + ", ".join(f"'{s}'" for s in MINT_TARGET_STATUSES) + ")", name="ck_mint_targets_status"
+        ),
+        CheckConstraint("position >= 0 AND position < 100", name="ck_mint_targets_position"),
+        CheckConstraint("status != 'MINTED' OR token_id IS NOT NULL", name="ck_mint_targets_token"),
+        UniqueConstraint("batch_id", "position", name="uq_mint_targets_batch_position"),
+        UniqueConstraint("batch_id", "user_id", name="uq_mint_targets_batch_user"),
+        Index("idx_mint_targets_user", "user_id"),
     )

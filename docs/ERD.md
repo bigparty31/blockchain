@@ -584,7 +584,60 @@ erDiagram
 
 ---
 
-### 3.12 `login_attempts` (로그인 실패 제한)
+### 3.12 `notifications` (임원 알림)
+- **요구사항 매핑**: PRD v0.15 §4.8(알림과 재알림), A16
+- **설명**: 임원 한 명에게 간 알림 한 건입니다. 학생에게는 행을 만들지 않고 FCM 토픽 푸시만 보냅니다. 알림은 파생 데이터라 대상 건이 지워지면 함께 지워집니다(CASCADE). 기록·닫기 규칙과 API는 `docs/NOTIFICATION_API.md`가 정본입니다.
+
+| 컬럼명 | 데이터 타입 | Null | 기본값 | 제약조건 / 설명 |
+| :--- | :--- | :---: | :---: | :--- |
+| `id` | `BIGSERIAL` | N | Auto | **PK** |
+| `user_id` | `BIGINT` | N | - | **FK** -> `users(id)` ON DELETE RESTRICT (받는 임원) |
+| `kind` | `VARCHAR(40)` | N | - | `docs/enums.md` notification kind |
+| `entry_id` | `BIGINT` | Y | NULL | **FK** -> `entries(id)` ON DELETE CASCADE |
+| `budget_revision_request_id` | `BIGINT` | Y | NULL | **FK** -> `budget_revision_requests(id)` ON DELETE CASCADE |
+| `objection_id` | `BIGINT` | Y | NULL | **FK** -> `objections(id)` ON DELETE CASCADE (이의는 범위 밖이라 비어 있음) |
+| `body` | `TEXT` | N | - | 서버가 kind로 만든 문구. 만들 때 저장 |
+| `created_at` | `TIMESTAMPTZ` | N | `now()` | 처음 알린 일시 |
+| `notified_at` | `TIMESTAMPTZ` | N | `now()` | 마지막으로 알린 일시. 재알림 때 갱신, 목록 정렬 기준 |
+| `read_at` | `TIMESTAMPTZ` | Y | NULL | 읽은 일시. 재알림 때 비움 |
+| `resolved_at` | `TIMESTAMPTZ` | Y | NULL | 처리돼 닫힌 일시 (재알림 대상 종류만) |
+| `remind_count` | `INTEGER` | N | 0 | 재알림 횟수 (최대 3) |
+| `next_remind_at` | `TIMESTAMPTZ` | Y | NULL | 다음 재알림 일시. 재알림 대상이 아니거나 끝났으면 NULL |
+
+- **테이블 제약조건**:
+  - `CONSTRAINT ck_notifications_kind CHECK (kind IN (...))` (`docs/enums.md` notification kind 14종)
+  - `CONSTRAINT ck_notifications_single_target CHECK (entry_id IS NULL OR budget_revision_request_id IS NULL)`
+  - `CONSTRAINT ck_notifications_remind_count CHECK (remind_count >= 0)`
+- **인덱스**:
+  - `idx_notifications_user_open ON notifications (user_id, resolved_at, read_at)` (목록·안 읽은 수)
+  - `idx_notifications_entry ON notifications (entry_id)`, `idx_notifications_revision ON notifications (budget_revision_request_id)` (닫기)
+  - `idx_notifications_next_remind ON notifications (next_remind_at)` (재알림 작업)
+  - `uq_notifications_confirm_failed_unread ON notifications (entry_id, user_id) WHERE kind = 'ENTRY_CONFIRM_FAILED' AND read_at IS NULL` (UNIQUE, 같은 건의 안 읽은 확정 실패는 한 건 — 동시 기록 중복 방지)
+
+---
+
+### 3.13 `device_tokens` (임원 기기 FCM 토큰)
+- **요구사항 매핑**: PRD v0.15 §4.8(FCM), §8
+- **설명**: 임원 앱이 로그인한 뒤 올리는 FCM 등록 토큰입니다. 학생은 토픽을 구독하므로 등록하지 않습니다. 한 기기에 한 행이며, 다른 임원이 같은 기기로 로그인하면 그 사람에게 넘어갑니다.
+
+| 컬럼명 | 데이터 타입 | Null | 기본값 | 제약조건 / 설명 |
+| :--- | :--- | :---: | :---: | :--- |
+| `id` | `BIGSERIAL` | N | Auto | **PK** |
+| `user_id` | `BIGINT` | N | - | **FK** -> `users(id)` ON DELETE RESTRICT |
+| `platform` | `VARCHAR(20)` | N | - | `android`만 (iOS 제외) |
+| `token` | `VARCHAR(512)` | N | - | **UNIQUE**, FCM 등록 토큰 |
+| `registered_at` | `TIMESTAMPTZ` | N | `now()` | 등록(또는 넘겨받은) 일시 |
+| `revoked_at` | `TIMESTAMPTZ` | Y | NULL | 해제 일시 (로그아웃, FCM 무효 응답) |
+
+- **테이블 제약조건**:
+  - `CONSTRAINT ck_device_tokens_platform CHECK (platform IN ('android'))`
+  - `CONSTRAINT uq_device_tokens_token UNIQUE (token)`
+- **인덱스**:
+  - `idx_device_tokens_user ON device_tokens (user_id)`
+
+---
+
+### 3.14 `login_attempts` (로그인 실패 제한)
 - **요구사항 매핑**: PRD v0.15 §9.1 (실패 횟수는 서버 메모리가 아니라 DB — 학생 서버 2대에서 횟수가 나뉘지 않게), §9.2 (계정 존재 여부를 드러내지 않음)
 - **설명**: 학번별 로그인 시도 횟수와 잠금. **연속 5회 실패하면 15분 잠금**, 잠긴 동안은 맞는 비밀번호도 `429`. 로그인에 성공하면 행을 지운다. 마지막 시도에서 15분이 지났거나 잠금이 끝났으면 처음부터 센다. 규칙은 `backend/app/auth/login_limit.py`.
 - **`users`를 참조하지 않는다.** 없는 학번도 똑같이 세고 잠가야, 잠기는지 여부로 가입 여부가 드러나지 않는다.
@@ -599,8 +652,62 @@ erDiagram
 
 - **테이블 제약조건**:
   - `CONSTRAINT ck_login_attempts_failed_count CHECK (failed_count >= 0)`
-- **DB 계정**: 학생 서버의 읽기 전용 계정에도 **이 테이블만** `INSERT`·`UPDATE`·`DELETE` 권한이 필요하다 (학생 서버에도 `/auth/login`이 있다).
+- **DB 계정**: 학생 서버의 읽기 전용 계정에도 **이 테이블만** `INSERT`·`UPDATE`·`DELETE` 권한이 필요하다 (학생 서버에도 `/auth/login`이 있다). 없으면 학생 로그인이 전부 `503`이다. 마이그레이션으로 테이블을 만든 **뒤에** 준다 — `docs/SERVER_ENV.md` §5
 - **잠금 수동 해제** (예: 시연 중 누가 임원 학번으로 5회 틀렸을 때): `DELETE FROM login_attempts WHERE student_no = '20240003';`
+
+---
+
+### 3.15 `membership_mint_batches` (회원권 일괄 발행 요청)
+- **요구사항 매핑**: PRD v0.16 §4.2 (납부자 명단 → SBT 일괄 발행, 기기 서명 + 릴레이어), §7.2 (`mintBatchRelayed`), §5 A3
+- **설명**: 한 번 서명해 보내는 1~100명 묶음. 준비 때 서명할 값(학기 코드·`nonce`·수령자 순서)을 고정해 두고, 제출 때 그 값으로 `MintBatchRequest`를 다시 만들어 서명자를 확인한다. `nonce`는 서명자별이라 준비한 임원만 제출한다. 보내기 직전에 `tx_hash`를 조건부 UPDATE로 선점하고(`SUBMITTING`), 응답을 잃으면(`NO_RESPONSE`) 같은 서명을 다시 보내지 않고 이 hash로 결과를 확인한다 (`docs/API.md` 「회원권 2」).
+
+| 컬럼명 | 데이터 타입 | Null | 기본값 | 제약조건 / 설명 |
+| :--- | :--- | :---: | :---: | :--- |
+| `id` | `BIGSERIAL` | N | Auto | **PK** |
+| `term_id` | `BIGINT` | N | - | **FK** -> `terms(id)` ON DELETE RESTRICT, 발행 학기 |
+| `requested_by` | `BIGINT` | N | - | **FK** -> `users(id)` ON DELETE RESTRICT, 준비한 임원 (회장·감사) |
+| `signer_address` | `VARCHAR(42)` | N | - | 서명할 지갑 주소 (준비 때 `requested_by`의 `wallet_address`, 소문자) |
+| `nonce` | `BIGINT` | N | - | 준비 때 읽은 `MembershipSBT.nonces(signer)` |
+| `status` | `VARCHAR(20)` | N | `'PREPARED'` | `PREPARED`, `SUBMITTING`, `MINTED`, `REJECTED`, `NO_RESPONSE` |
+| `deadline` | `BIGINT` | Y | NULL | 제출한 서명의 유효 시한 (Unix 초) |
+| `signature` | `VARCHAR(132)` | Y | NULL | 제출한 서명 |
+| `tx_hash` | `VARCHAR(66)` | Y | NULL | 보낸(보내는 중인) 트랜잭션 hash. 보내기 직전에 선점 |
+| `reason` | `VARCHAR(40)` | Y | NULL | `REJECTED` 사유 (Solidity 에러 이름 또는 `Unknown`) |
+| `created_at` | `TIMESTAMPTZ` | N | `now()` | 준비 일시 |
+| `updated_at` | `TIMESTAMPTZ` | N | `now()` | 마지막 상태 변경 일시 |
+
+- **테이블 제약조건**:
+  - `CONSTRAINT ck_mint_batches_status CHECK (status IN ('PREPARED', 'SUBMITTING', 'MINTED', 'REJECTED', 'NO_RESPONSE'))`
+  - `CONSTRAINT ck_mint_batches_signature CHECK (status = 'PREPARED' OR signature IS NOT NULL)`
+  - `CONSTRAINT ck_mint_batches_tx CHECK (status NOT IN ('SUBMITTING', 'MINTED', 'NO_RESPONSE') OR tx_hash IS NOT NULL)`
+  - `CONSTRAINT ck_mint_batches_reason CHECK (status != 'REJECTED' OR reason IS NOT NULL)`
+  - `CONSTRAINT uq_mint_batches_tx_hash UNIQUE (tx_hash)`
+- **인덱스**:
+  - `idx_mint_batches_term ON membership_mint_batches (term_id)`
+
+### 3.16 `membership_mint_targets` (회원권 일괄 발행 대상)
+- **요구사항 매핑**: PRD v0.16 §4.2 (일부만 성공하면 학생별로 결과를 보여 준다)
+- **설명**: 묶음의 학생 한 명. `position` 순서가 서명한 `recipients` 배열의 순서다. 결과를 반영할 때 `memberships` 기록을 만들고 `membership_id`로 잇는다. 기록을 만들지 못하면(같은 `token_id`나 같은 학생·학기의 유효한 기록이 이미 있음 — 체인만 재배포한 환경) 그 학생만 `membership_id`가 NULL이다.
+
+| 컬럼명 | 데이터 타입 | Null | 기본값 | 제약조건 / 설명 |
+| :--- | :--- | :---: | :---: | :--- |
+| `id` | `BIGSERIAL` | N | Auto | **PK** |
+| `batch_id` | `BIGINT` | N | - | **FK** -> `membership_mint_batches(id)` ON DELETE CASCADE |
+| `position` | `INTEGER` | N | - | `recipients` 배열의 자리 (0~99) |
+| `user_id` | `BIGINT` | N | - | **FK** -> `users(id)` ON DELETE RESTRICT, 학생 |
+| `address` | `VARCHAR(42)` | N | - | 학생 지갑 주소 (EIP-55, 서버가 `wallet_index`로 파생) |
+| `status` | `VARCHAR(10)` | N | `'PENDING'` | `PENDING`, `MINTED`, `SKIPPED` (이미 유효해 컨트랙트가 건너뜀) |
+| `token_id` | `BIGINT` | Y | NULL | 발행된(또는 이미 있던) 회원권 tokenId. `SKIPPED`는 읽지 못하면 NULL |
+| `membership_id` | `BIGINT` | Y | NULL | **FK** -> `memberships(id)` ON DELETE SET NULL |
+
+- **테이블 제약조건**:
+  - `CONSTRAINT ck_mint_targets_status CHECK (status IN ('PENDING', 'MINTED', 'SKIPPED'))`
+  - `CONSTRAINT ck_mint_targets_position CHECK (position >= 0 AND position < 100)`
+  - `CONSTRAINT ck_mint_targets_token CHECK (status != 'MINTED' OR token_id IS NOT NULL)`
+  - `CONSTRAINT uq_mint_targets_batch_position UNIQUE (batch_id, position)`
+  - `CONSTRAINT uq_mint_targets_batch_user UNIQUE (batch_id, user_id)`
+- **인덱스**:
+  - `idx_mint_targets_user ON membership_mint_targets (user_id)`
 
 ---
 
@@ -943,6 +1050,53 @@ CREATE TABLE check_ins (
 
 CREATE INDEX idx_check_ins_user_id ON check_ins (user_id);
 
+-- 임원 알림 (notifications) — docs/NOTIFICATION_API.md
+CREATE TABLE notifications (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    kind VARCHAR(40) NOT NULL,
+    entry_id BIGINT NULL,
+    budget_revision_request_id BIGINT NULL,
+    objection_id BIGINT NULL,
+    body TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    notified_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    read_at TIMESTAMPTZ NULL,
+    resolved_at TIMESTAMPTZ NULL,
+    remind_count INTEGER NOT NULL DEFAULT 0,
+    next_remind_at TIMESTAMPTZ NULL,
+    CONSTRAINT fk_notifications_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT,
+    CONSTRAINT fk_notifications_entry FOREIGN KEY (entry_id) REFERENCES entries(id) ON DELETE CASCADE,
+    CONSTRAINT fk_notifications_revision FOREIGN KEY (budget_revision_request_id) REFERENCES budget_revision_requests(id) ON DELETE CASCADE,
+    CONSTRAINT fk_notifications_objection FOREIGN KEY (objection_id) REFERENCES objections(id) ON DELETE CASCADE,
+    CONSTRAINT ck_notifications_kind CHECK (kind IN ('ENTRY_REGISTERED', 'ENTRY_EDIT_REQUESTED', 'ENTRY_CONFIRMED', 'ENTRY_REJECTED', 'ENTRY_CONFIRM_FAILED', 'ENTRY_BLOCKED', 'REVISION_REQUESTED', 'REVISION_PRESIDENT_SIGNED', 'REVISION_APPROVED', 'REVISION_REJECTED', 'ROLE_CHANGE_REQUESTED', 'PRESIDENT_RECOVERY_PROPOSED', 'RECLASSIFY_PAIR_UNCONFIRMED', 'SIGNATURE_DEADLINE_NEAR')),
+    CONSTRAINT ck_notifications_single_target CHECK (entry_id IS NULL OR budget_revision_request_id IS NULL),
+    CONSTRAINT ck_notifications_remind_count CHECK (remind_count >= 0)
+);
+
+CREATE INDEX idx_notifications_user_open ON notifications (user_id, resolved_at, read_at);
+CREATE INDEX idx_notifications_entry ON notifications (entry_id);
+CREATE INDEX idx_notifications_revision ON notifications (budget_revision_request_id);
+CREATE INDEX idx_notifications_next_remind ON notifications (next_remind_at);
+CREATE UNIQUE INDEX uq_notifications_confirm_failed_unread ON notifications (entry_id, user_id)
+    WHERE kind = 'ENTRY_CONFIRM_FAILED' AND read_at IS NULL;
+
+
+-- 임원 기기 FCM 토큰 (device_tokens)
+CREATE TABLE device_tokens (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    platform VARCHAR(20) NOT NULL,
+    token VARCHAR(512) NOT NULL,
+    registered_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    revoked_at TIMESTAMPTZ NULL,
+    CONSTRAINT fk_device_tokens_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT,
+    CONSTRAINT ck_device_tokens_platform CHECK (platform IN ('android')),
+    CONSTRAINT uq_device_tokens_token UNIQUE (token)
+);
+
+CREATE INDEX idx_device_tokens_user ON device_tokens (user_id);
+
 -- 로그인 실패 제한 (login_attempts) — PRD v0.15 §9.1, §9.2. users 를 참조하지 않는다 (없는 학번도 기록)
 CREATE TABLE login_attempts (
     student_no VARCHAR(20) PRIMARY KEY,
@@ -951,6 +1105,52 @@ CREATE TABLE login_attempts (
     locked_until BIGINT,
     CONSTRAINT ck_login_attempts_failed_count CHECK (failed_count >= 0)
 );
+
+-- 15·16. 회원권 일괄 발행 (membership_mint_batches, membership_mint_targets)
+CREATE TABLE membership_mint_batches (
+    id BIGSERIAL PRIMARY KEY,
+    term_id BIGINT NOT NULL,
+    requested_by BIGINT NOT NULL,
+    signer_address VARCHAR(42) NOT NULL,
+    nonce BIGINT NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'PREPARED',
+    deadline BIGINT NULL,
+    signature VARCHAR(132) NULL,
+    tx_hash VARCHAR(66) NULL,
+    reason VARCHAR(40) NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_mint_batches_term FOREIGN KEY (term_id) REFERENCES terms(id) ON DELETE RESTRICT,
+    CONSTRAINT fk_mint_batches_requested_by FOREIGN KEY (requested_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CONSTRAINT ck_mint_batches_status CHECK (status IN ('PREPARED', 'SUBMITTING', 'MINTED', 'REJECTED', 'NO_RESPONSE')),
+    CONSTRAINT ck_mint_batches_signature CHECK (status = 'PREPARED' OR signature IS NOT NULL),
+    CONSTRAINT ck_mint_batches_tx CHECK (status NOT IN ('SUBMITTING', 'MINTED', 'NO_RESPONSE') OR tx_hash IS NOT NULL),
+    CONSTRAINT ck_mint_batches_reason CHECK (status != 'REJECTED' OR reason IS NOT NULL),
+    CONSTRAINT uq_mint_batches_tx_hash UNIQUE (tx_hash)
+);
+
+CREATE INDEX idx_mint_batches_term ON membership_mint_batches (term_id);
+
+CREATE TABLE membership_mint_targets (
+    id BIGSERIAL PRIMARY KEY,
+    batch_id BIGINT NOT NULL,
+    position INTEGER NOT NULL,
+    user_id BIGINT NOT NULL,
+    address VARCHAR(42) NOT NULL,
+    status VARCHAR(10) NOT NULL DEFAULT 'PENDING',
+    token_id BIGINT NULL,
+    membership_id BIGINT NULL,
+    CONSTRAINT fk_mint_targets_batch FOREIGN KEY (batch_id) REFERENCES membership_mint_batches(id) ON DELETE CASCADE,
+    CONSTRAINT fk_mint_targets_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT,
+    CONSTRAINT fk_mint_targets_membership FOREIGN KEY (membership_id) REFERENCES memberships(id) ON DELETE SET NULL,
+    CONSTRAINT ck_mint_targets_status CHECK (status IN ('PENDING', 'MINTED', 'SKIPPED')),
+    CONSTRAINT ck_mint_targets_position CHECK (position >= 0 AND position < 100),
+    CONSTRAINT ck_mint_targets_token CHECK (status != 'MINTED' OR token_id IS NOT NULL),
+    CONSTRAINT uq_mint_targets_batch_position UNIQUE (batch_id, position),
+    CONSTRAINT uq_mint_targets_batch_user UNIQUE (batch_id, user_id)
+);
+
+CREATE INDEX idx_mint_targets_user ON membership_mint_targets (user_id);
 
 COMMIT;
 ```

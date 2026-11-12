@@ -156,7 +156,7 @@ hex        353030303030301fecbbb4ed93a8ed84b0eab3b5ed9599eab3bc20ed9599ec839ded9
 meta_hash  0x74c9740556d857575586251e71fa24091ffaece5c01c4f889d7c1224ce7af3a9
 ```
 
-**샘플 3 — 정정, 금액 음수**
+**샘플 3 — 정정, 금액 음수** (음수 정정은 영수증이 없을 수 있어 `receipt_hash`가 NULL일 수 있다. 양수 정정 지출은 영수증이 필수다)
 
 ```
 amount        -20000

@@ -8,13 +8,18 @@ from app.services.student_wallet import MNEMONIC_ENV, WalletDerivationError, stu
 TEST_MNEMONIC = "test test test test test test test test test test test junk"
 
 
+# 캐시가 붙은 원래 함수. 시험이 monkeypatch 로 바꿔 끼운 뒤에도 이것을 비운다 — 정리 순서는 conftest 의 다른
+# autouse fixture 에 따라 달라져서, 정리할 때 student_wallet._derive 가 아직 바꿔 끼운 함수일 수 있다
+_CACHED = (student_wallet._derive, student_wallet._seed)
+
+
 @pytest.fixture(autouse=True)
 def fresh_cache():
-    student_wallet._derive.cache_clear()
-    student_wallet._seed.cache_clear()
+    for cached in _CACHED:
+        cached.cache_clear()
     yield
-    student_wallet._derive.cache_clear()
-    student_wallet._seed.cache_clear()
+    for cached in _CACHED:
+        cached.cache_clear()
 
 
 def test_derives_bip44_addresses(monkeypatch):
