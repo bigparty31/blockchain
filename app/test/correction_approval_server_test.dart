@@ -34,6 +34,7 @@ void main() {
     int? corrects,
     String? reason,
     String? ocrStatus,
+    int? revisionRequestedAt,
   }) =>
       {
         'id': id,
@@ -53,6 +54,7 @@ void main() {
         'created_by': createdBy,
         'corrects_entry_id': corrects,
         'correction_reason': reason,
+        'revision_requested_at': revisionRequestedAt,
       };
 
   EntryModel entry(int id,
@@ -222,6 +224,12 @@ void main() {
       final minus = items.firstWhere((c) => c.id == 2);
       expect(minus.pairNote, isNull, reason: '+30,000 후보가 둘이라 어느 쪽이 짝인지 모른다');
       expect(minus.status, '대기');
+      // 증액 카드 쪽에서 보면 감액 후보는 하나뿐이지만, 그 감액의 짝 후보가 둘이라 어느 쪽도 짝이라 단정할 수 없다 (#74 리뷰 4차)
+      for (final id in [3, 4]) {
+        final plus = items.firstWhere((c) => c.id == id);
+        expect(plus.pairNote, isNull, reason: '두 증액 카드가 같은 감액을 각자의 짝으로 보이면 안 된다');
+        expect(plus.status, '대기');
+      }
     });
 
     test('원본이 목록에 없으면 정정 후 금액을 지어내지 않는다', () {
@@ -437,6 +445,29 @@ void main() {
       await waitUntil(tester, () => shows(find.text('승인에 실패했어요')));
       expect(find.text('반려로 처리'), findsNothing);
       expect(find.text('나중에'), findsOneWidget);
+    });
+
+    testWidgets('총무가 수정을 요청한 정정은 승인을 막고 반려만 남긴다 — 서명 단계로 가지 않는다', (tester) async {
+      serverEntries[1] = entryJson(2,
+          amount: -5000, status: 'PENDING', corrects: 1, reason: 'INPUT_ERROR', purpose: '금액 입력 오류', revisionRequestedAt: 1790700000);
+      await pump(tester);
+      expect(find.text('총무가 수정을 요청했어요 — 반려만 할 수 있어요'), findsOneWidget);
+      expect(find.byKey(const Key('correction_approve_blocked')), findsOneWidget);
+      expect(find.text('승인'), findsNothing);
+      expect(find.widgetWithText(OutlinedButton, '반려'), findsOneWidget);
+      expect(confirms, isEmpty);
+    });
+
+    testWidgets('수정 요청이 걸린 정정도 반려는 서명해 보낼 수 있다', (tester) async {
+      serverEntries[1] = entryJson(2,
+          amount: -5000, status: 'PENDING', corrects: 1, reason: 'INPUT_ERROR', purpose: '금액 입력 오류', revisionRequestedAt: 1790700000);
+      await pump(tester);
+      await tester.tap(find.widgetWithText(OutlinedButton, '반려'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextFormField), '다시 올려 주세요');
+      await tester.tap(find.text('반려하기'));
+      await waitUntil(tester, () => shows(find.textContaining('정정이 반려되었습니다.')));
+      expect(rejects, hasLength(1));
     });
 
     testWidgets('반려하면 사유를 서명해 보낸다', (tester) async {

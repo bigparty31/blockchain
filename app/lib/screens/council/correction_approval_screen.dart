@@ -138,16 +138,20 @@ List<CorrectionItem> correctionItemsFromEntries(List<EntryModel> entries, {List<
     String? pairNote;
     var status = statusOf(e.status);
     if (reason == CorrectionReason.RECLASSIFY && !orphan) {
-      final siblings = entries
+      // 짝 후보 — 같은 정정 대상을 가리키는 반대 부호·같은 금액의 재분류 건.
+      List<EntryModel> candidatesOf(EntryModel x) => entries
           .where((c) =>
-              c.id != e.id &&
-              c.correctsEntryId == e.correctsEntryId &&
+              c.id != x.id &&
+              c.correctsEntryId == x.correctsEntryId &&
               c.correctionReason == CorrectionReason.RECLASSIFY &&
-              c.amount == -e.amount &&
+              c.amount == -x.amount &&
               c.status != EntryStatus.REJECTED &&
               c.status != EntryStatus.BLOCKED)
           .toList();
-      if (siblings.length == 1) {
+      // 양쪽에서 서로가 유일한 후보일 때만 짝으로 본다 — 한쪽에서만 유일하면(감액 1건에 같은 금액의 증액 2건)
+      // 두 증액 카드가 같은 감액을 각자의 짝이라고 보이게 된다.
+      final siblings = candidatesOf(e);
+      if (siblings.length == 1 && candidatesOf(siblings.first).length == 1) {
         final other = siblings.first;
         final plus = e.amount > 0 ? e : other;
         final minus = e.amount > 0 ? other : e;
@@ -640,6 +644,7 @@ class _CorrectionApprovalScreenState extends State<CorrectionApprovalScreen> {
   Widget _card(CorrectionItem e) {
     final own = widget.effectiveUserId != null && e.createdBy == widget.effectiveUserId;
     final done = e.status == '확정' || e.status == '반려';
+    final revisionRequested = e.entry?.revisionRequestedAt != null;
     final statusColor = switch (e.status) {
       '확정' => AppTheme.success,
       '반려' => AppTheme.expense,
@@ -693,6 +698,11 @@ class _CorrectionApprovalScreenState extends State<CorrectionApprovalScreen> {
             Text('${e.category} 잔량(${Fmt.won(e.budgetRemaining!)}) 부족 — 승인해도 대기로 남아요',
               style: const TextStyle(fontSize: 12, height: 1.4, color: AppTheme.expense)),
           ],
+          if (!done && !own && revisionRequested) ...[
+            const SizedBox(height: 8),
+            const Text('총무가 수정을 요청했어요 — 반려만 할 수 있어요',
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: AppTheme.textSub)),
+          ],
           const SizedBox(height: 12),
           if (done)
             const SizedBox.shrink()
@@ -722,11 +732,20 @@ class _CorrectionApprovalScreenState extends State<CorrectionApprovalScreen> {
                 const SizedBox(width: 12),
                 Expanded(
                   flex: 2,
-                  child: GradientButton(
-                    onPressed: () => _approve(e),
-                    label: '승인',
-                    icon: Icons.fingerprint_rounded,
-                  ),
+                  // 수정 요청 중인 건은 서명하게 두지 않는다 — 서명한 뒤에야 서버가 거절하면 이유를 알 수 없다
+                  child: revisionRequested
+                      ? Container(
+                          key: const Key('correction_approve_blocked'),
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          alignment: Alignment.center,
+                          decoration: BoxDecoration(color: const Color(0xFFE5E7EB), borderRadius: BorderRadius.circular(12)),
+                          child: const Text('승인 서명', style: TextStyle(fontSize: 13, color: Color(0xFF9CA3AF))),
+                        )
+                      : GradientButton(
+                          onPressed: () => _approve(e),
+                          label: '승인',
+                          icon: Icons.fingerprint_rounded,
+                        ),
                 ),
               ],
             ),
