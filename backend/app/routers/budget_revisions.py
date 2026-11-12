@@ -49,7 +49,9 @@ from app.utils.hashing import (
 
 logger = logging.getLogger(__name__)
 
+# PRD v0.15 §9.1 & §10: 예산 증액/개정 절차는 학생회 임원 전용이므로 command_router로 취급되며 student_api에는 마운트되지 않는다.
 router = APIRouter(prefix="/budget-revisions", tags=["BudgetRevisions"])
+command_router = router
 
 council_only = require_roles(Role.TREASURER, Role.PRESIDENT, Role.AUDITOR)
 

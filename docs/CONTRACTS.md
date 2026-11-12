@@ -123,8 +123,9 @@
 | `RoleManager` | `(president, treasurer, auditor1, auditor2)` — 서로 다른 네 계정 |
 | `BudgetToken` | `(roleManager)` |
 | `AccountingLedger` | `(roleManager, budgetToken)` — 0 이면 `ZeroAddress` |
+| `MembershipSBT` | `(roleManager)` — 0 이면 `ZeroAddress` |
 
-배포 순서: `RoleManager` → `BudgetToken` → `AccountingLedger` → `BudgetToken.setLedger(ledger)`. 릴레이어 계정은 롤이 없다. 배포 스크립트가 끝나면 배포자에게 남는 권한은 없다.
+배포 순서: `RoleManager` → `BudgetToken` → `AccountingLedger` → `BudgetToken.setLedger(ledger)` → `MembershipSBT`. `MembershipSBT`를 맨 뒤에 두어 앞의 세 컨트랙트 주소(배포자 nonce로 정해짐)가 SBT 추가 전과 같다. 릴레이어 계정은 롤이 없다. 배포 스크립트가 끝나면 배포자에게 남는 권한은 없다.
 
 ### 저장 배치
 
@@ -327,7 +328,7 @@ nonce가 없으므로 같은 id에 `ConfirmApproval`과 `RejectDecision` 서명�
 
 ## 필수 테스트
 
-이번 범위(RoleManager·BudgetToken·AccountingLedger)에서 통과해야 하는 목록이다. MembershipSBT는 인터페이스·문서 설계만 이번 범위이며, SBT 구현 테스트는 후속 범위다.
+네 컨트랙트(RoleManager·BudgetToken·AccountingLedger·MembershipSBT)가 통과해야 하는 목록이다.
 
 | # | 항목 | 이번 범위 |
 | --- | --- | --- |
@@ -336,7 +337,7 @@ nonce가 없으므로 같은 id에 `ConfirmApproval`과 `RejectDecision` 서명�
 | 3 | 확정 항목을 수정하는 함수가 존재하지 않음 (ABI에 상태 변경 경로가 `recordPending`·`confirmEntry`·`rejectEntry`뿐) | O |
 | 4 | 정정 대상이 `CONFIRMED`가 아니면 revert (`CorrectionTargetNotConfirmed`) | O |
 | 5 | 증액 정정(양수 정정)도 잔량 검사 (등록 시 `BLOCKED`, 확정 시 `InsufficientBudget`) | O |
-| 6 | SBT 전송·approve·setApprovalForAll revert (`Soulbound`) | X (다음 범위) |
+| 6 | SBT 전송·approve·setApprovalForAll revert (`Soulbound`) | O |
 | 7 | 릴레이어 키로 승인 불가 (릴레이어 서명은 `NotApprover`) | O |
 | 8 | `BudgetToken.spend`를 `AccountingLedger` 외 계정이 호출하면 revert (`Unauthorized`). PRD §7.2 | O |
 | 9 | 롤 변경(부여·회수·교체)은 회장과 감사 두 사람의 서명 없이는 실행되지 않음 (회장 키 분실 시에만 감사 2명 + 72시간 대기). PRD §7.2·§9.2 | O |
@@ -376,7 +377,7 @@ nonce가 없으므로 같은 id에 `ConfirmApproval`과 `RejectDecision` 서명�
 - 회장 복구 소멸: 제안 뒤 회장이 일반 교체되면 대기 복구가 지워지고, 옛 회장이 돌아온 뒤 72시간이 지나도 실행은 `NoPendingRecovery`
 - 발행: `category == 0` → `CategoryRequired`
 
-MembershipSBT 후속 구현 테스트 범위:
+MembershipSBT (`test/MembershipSBT.test.ts`):
 
 - PRESIDENT·AUDITOR 서명으로 발행·소각 성공, actor가 서명자 / 롤 없는 릴레이어 호출 성공 / 총무·외부인 서명은 `NotApprover`
 - 빈 배치 `EmptyBatch` / 100명 성공 / 101명 `BatchTooLarge` / 중간에 0 주소가 있으면 `ZeroAddress`로 전체 revert

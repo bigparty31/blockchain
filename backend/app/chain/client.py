@@ -1,7 +1,7 @@
 """백엔드가 블록체인을 부르는 입구.
 
 모양만 정한다. 실제 구현(릴레이어)을 붙이기 전까지는 fake.py 를 쓴다.
-범위는 AccountingLedger 의 등록·확정·반려와 조회, BudgetToken 의 발행·증액과 조회다. 예산 회수·롤(RoleManager)도 서명 + 릴레이어
+범위는 AccountingLedger 의 등록·확정·반려와 조회, BudgetToken 의 발행·증액과 조회, MembershipSBT 의 발행·소각과 조회다. 예산 회수·롤(RoleManager)도 서명 + 릴레이어
 방식이라 나중에 같은 방식으로 더한다.
 
 서명은 여기서 만들지 않는다. 임원 기기가 서명한 값을 받아 릴레이만 한다 (PRD §9.2).
@@ -12,6 +12,10 @@ from typing import Awaitable, Callable, Optional, Protocol, Union
 
 from app.chain.models import (
     BudgetTxResult,
+    BurnRequest,
+    BurnResult,
+    MintBatchRequest,
+    MintBatchResult,
     ChainBudget,
     ChainEntry,
     EntryTxDetail,
@@ -36,11 +40,15 @@ BeforeBroadcast = Callable[[str], Awaitable[None]]
 
 class ChainClient(Protocol):
     def signer_of(
-        self, payload: Union[RecordRequest, ConfirmApproval, RejectDecision, IssueRequest, IncreaseRequest], signature: str
+        self,
+        payload: Union[
+            RecordRequest, ConfirmApproval, RejectDecision, IssueRequest, IncreaseRequest, MintBatchRequest, BurnRequest
+        ],
+        signature: str,
     ) -> str:
         """payload 에 대한 signature 의 서명자 주소 (EIP-55 체크섬). 체인에 보내지 않는다.
 
-        도메인은 payload 로 정해진다 — 발행·증액은 BudgetToken, 나머지는 AccountingLedger.
+        도메인은 payload 로 정해진다 — 예산 발행·증액은 BudgetToken, 회원권 발행·소각은 MembershipSBT, 나머지는 AccountingLedger.
 
         서비스는 릴레이 전에 이 주소를 기대 지갑(등록은 created_by 의 지갑, 확정·반려는 요청한 감사·회장의 지갑)과
         소문자로 맞춰 비교하고, 다르면 체인에 보내지 않고 400 으로 끝낸다. 컨트랙트는 다른 값에 대한 서명을
@@ -199,4 +207,42 @@ class ChainClient(Protocol):
 
     async def membership_token_of(self, account: str, term: int) -> int:
         """MembershipSBT.tokenOf. 그 학기의 유효한 tokenId. 없거나 소각됐으면 0. 예외는 has_valid_membership 과 같다."""
+        ...
+
+    async def membership_nonce(self, signer: str) -> int:
+        """MembershipSBT.nonces(signer). 그 서명자의 다음 발행·소각 nonce (둘이 공유). 예외는 has_valid_membership 과 같다."""
+        ...
+
+    async def mint_memberships(
+        self, request: MintBatchRequest, signature: str, before_broadcast: Optional[BeforeBroadcast] = None
+    ) -> MintBatchResult:
+        """MembershipSBT.mintBatchRelayed 를 릴레이한다. 서명자는 회장 또는 감사. before_broadcast 는 record_pending 과 같다.
+
+        이미 유효한 수령자는 revert 가 아니라 결과의 skipped 로 온다. 전부 skipped 여도 성공이고 nonce 는 올라간다.
+
+        Raises:
+            ValueError: 서명 형식이 틀렸다.
+            ChainRevert: 사유는 MembershipRevertReason. INVALID_NONCE(같은 서명자의 다른 발행·소각이 먼저 들어감·서명 재사용)·
+                         SIGNATURE_EXPIRED·NOT_APPROVER(앱이 다른 값에 서명해도 이것) 등.
+            ChainUnavailable: 콜백이 불렸으면 그 hash 로 mint_tx_result 를 본다. 같은 서명을 다시 보내지 않는다 —
+                              들어갔으면 nonce 가 올라 INVALID_NONCE 로 보여 결과를 잃는다.
+            ChainSetupError: 배포 기록에 MembershipSBT 가 없거나 읽기 전용 클라이언트다. 보내지 않았다.
+        """
+        ...
+
+    async def mint_tx_result(self, tx_hash: str) -> Optional[MintBatchResult]:
+        """일괄 발행 트랜잭션의 결과를 receipt 로 다시 읽는다. None 은 아직 블록에 없다는 뜻이다.
+
+        Raises:
+            ChainRevert: 트랜잭션이 실패로 끝났다 (사유는 알 수 없어 RevertReason.UNKNOWN).
+            ChainUnavailable: receipt 를 읽지 못했다.
+        """
+        ...
+
+    async def burn_membership_relayed(
+        self, request: BurnRequest, signature: str, before_broadcast: Optional[BeforeBroadcast] = None
+    ) -> BurnResult:
+        """MembershipSBT.burnRelayed 를 릴레이한다. 서명자는 회장 또는 감사. 예외는 mint_memberships 와 같고,
+        대상 회원권이 없으면 NO_MEMBERSHIP 이다. 소각하면 같은 학기 재발행이 된다 (새 tokenId).
+        """
         ...

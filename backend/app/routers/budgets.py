@@ -42,7 +42,11 @@ from app.services.budget_relay import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/budgets", tags=["Budgets"])
+# PRD v0.15 §9.1 & §10: 2서버 구조(student_api / council_api)를 위한 라우터 분리
+# 학생 서버는 query_router(읽기 전용 DB)만 마운트하고, 학생회 서버는 router(통합) 또는 command_router를 마운트한다.
+query_router = APIRouter(prefix="/budgets", tags=["Budgets (Queries)"])
+command_router = APIRouter(prefix="/budgets", tags=["Budgets (Commands)"])
+router = APIRouter()
 
 T = TypeVar("T")
 
@@ -540,8 +544,8 @@ async def _execute_budget_issue(
         )
 
 
-@router.get("", response_model=List[BudgetResponse], summary="항목별 예산 편성액 및 잔량 조회")
-@router.get("/", response_model=List[BudgetResponse], include_in_schema=False)
+@query_router.get("", response_model=List[BudgetResponse], summary="항목별 예산 편성액 및 잔량 조회")
+@query_router.get("/", response_model=List[BudgetResponse], include_in_schema=False)
 async def get_budgets(
     term_id: Optional[int] = Query(None, ge=1, description="조회할 학기 ID (미지정 시 전체 학기)"),
     db: Session = Depends(get_db),
@@ -615,13 +619,13 @@ async def get_budgets(
     return result
 
 
-@router.post(
+@command_router.post(
     "",
     response_model=BudgetIssueResponse,
     status_code=status.HTTP_201_CREATED,
     summary="예산 최초 편성 1단계 초안 ID 발급 (회장 전용)",
 )
-@router.post(
+@command_router.post(
     "/",
     response_model=BudgetIssueResponse,
     status_code=status.HTTP_201_CREATED,
@@ -723,7 +727,7 @@ async def create_budget_draft(
         )
 
 
-@router.post(
+@command_router.post(
     "/{id}/submit",
     response_model=BudgetIssueResponse,
     status_code=status.HTTP_200_OK,
@@ -789,3 +793,9 @@ async def submit_budget_issue(
         signature=req.signature,
         prev_tx_issue=prev_tx_issue,
     )
+
+
+# 기존 main.py 및 통합 사용을 위해 하위 라우터를 router에 포함
+router.include_router(query_router)
+router.include_router(command_router)
+
