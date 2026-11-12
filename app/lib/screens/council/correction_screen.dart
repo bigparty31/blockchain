@@ -243,8 +243,13 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
 
   /// 영수증을 고른다 — 원본 바이트를 그대로 해시한다 (HASHING §4). 다시 누르면 다른 사진으로 바꾼다.
   Future<void> _attachReceipt() async {
+    // 제출 중에는 바꾸지 못한다 — 올리던 사진의 경로가 다른 사진의 해시와 섞이지 않게 (#71·#111 리뷰)
+    if (_submitting) {
+      _snack('제출 중에는 영수증을 바꿀 수 없어요.');
+      return;
+    }
     final bytes = await (widget.pickReceipt ?? pickReceiptBytes)(context);
-    if (bytes == null || !mounted) return;
+    if (bytes == null || !mounted || _submitting) return;
     final problem = receiptFormatProblem(bytes); // HEIC 는 서버가 받지 않는다 (#71 리뷰)
     if (problem != null) {
       _snack(problem);
@@ -259,6 +264,9 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
 
   /// 이번 제출로 체인에 올라간 정정 — 재분류 둘째 건이 실패하면 첫째 건은 다시 올리지 않는다.
   final List<_Registered> _registered = [];
+
+  /// 입력을 바꿔 다시 제출해서 이번 초안에 들지 않게 된 옛 건 — 서버에는 승인 대기로 남아 있다. 결과에 따로 알린다.
+  final List<_Registered> _leftBehind = [];
 
   /// 저장했지만 아직 제출하지 못한 초안 — 같은 입력으로 다시 제출하면 같은 번호를 쓴다 (API §2.3).
   (EntryDraft, int)? _unsent;
@@ -298,6 +306,12 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
     try {
       final path = await _ensureUploaded();
       final drafts = [for (final d in base) d.withReceiptPath(path)];
+      // 입력을 바꿔 초안이 달라졌으면, 앞서 올라간 건은 이번 결과에 섞지 않고 따로 알린다 (#111 리뷰)
+      final stale = _registered.where((r) => !drafts.contains(r.draft)).toList();
+      if (stale.isNotEmpty) {
+        _leftBehind.addAll(stale);
+        _registered.removeWhere(stale.contains);
+      }
       for (final draft in drafts) {
         if (_registered.any((r) => r.draft == draft)) continue;
         final r = await _register(draft);
@@ -330,6 +344,7 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
   /// 등록 결과 — 건마다 번호와 체인 상태(`PENDING`·`BLOCKED`).
   Future<void> _showResult(EntryChain target, {required int? correctedAmount, required bool reclassify}) async {
     final registered = List.of(_registered);
+    final leftBehind = List.of(_leftBehind);
     final blocked = registered.any((r) => r.outcome.status == EntryStatus.BLOCKED);
     String statusOf(_Registered r) =>
         r.outcome.status == EntryStatus.BLOCKED ? '차단 (${r.outcome.blockReason?.code ?? '-'})' : '승인 대기';
@@ -398,6 +413,14 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
                 style: const TextStyle(color: AppTheme.textSub, fontSize: 12, height: 1.4),
                 textAlign: TextAlign.center,
               ),
+              if (leftBehind.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Text(
+                  '이전 입력으로 올라간 ${leftBehind.map((r) => '#${r.id}').join(', ')} 은 승인 대기에 남아 있어요. 내 등록 현황에서 확인해 주세요.',
+                  style: const TextStyle(color: AppTheme.expense, fontSize: 12, height: 1.4),
+                  textAlign: TextAlign.center,
+                ),
+              ],
               const SizedBox(height: 16),
               SizedBox(
                 width: double.infinity,

@@ -47,8 +47,10 @@ services:
       CHAIN_RPC_URL: http://chain:8545
       RELAYER_PRIVATE_KEY: ${RELAYER_PRIVATE_KEY:-}
       DEPLOYMENTS_FILE: /deployments/localhost.json
+      RECEIPTS_STORAGE_DIR: /app/uploads/receipts
     volumes:
       - deployments:/deployments:ro
+      - receipts-data:/app/uploads/receipts
     ports:
       # API 만 Tailscale 주소로 연다. RPC(8545)와 DB 는 밖으로 열지 않는다.
       - "${BIND_ADDR:-127.0.0.1}:${API_PORT:-8000}:8000"
@@ -57,3 +59,4 @@ services:
 volumes:
   db-data:
   deployments:
+  receipts-data:

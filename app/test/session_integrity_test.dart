@@ -430,6 +430,38 @@ void main() {
       expect(cleared, 0);
     });
 
+    /// 4차 리뷰 Medium — 앱을 다시 켰을 때 저장된 토큰이 거부되는 경로.
+    ///
+    /// 메모리 세션이 애초에 없어서 `_setSession(null)` 의 「있던 세션이
+    /// 비워질 때」 조건에 안 걸린다. 그래서 정리 콜백이 불리지 않고,
+    /// `main.dart` 의 **FCM 토픽 해제에 도달하지 못한다** — 토픽은 기기 단위라
+    /// 로그인 화면에 있는데도 이전 사용자의 학기 알림이 계속 온다.
+    test('앱 시작 복원이 401 로 거부돼도 정리 콜백이 불린다', () async {
+      AuthService.store = MemoryTokenStore('stale-token', UserRole.STUDENT);
+      AuthService.client = MockClient((_) async => http.Response('{}', 401));
+      var cleared = 0;
+      AuthService().onSessionCleared = () => cleared++;
+
+      final restored = await AuthService().restore();
+
+      expect(restored, isNull);
+      expect(
+        cleared,
+        1,
+        reason: '해제에 도달하지 못하면 공용 기기에서 다음 사람이 이전 학기 알림을 받는다',
+      );
+    });
+
+    /// 반대쪽도 못 박는다 — 저장된 토큰이 없으면 정리할 것도 없다.
+    test('저장된 토큰이 없으면 정리 콜백을 부르지 않는다', () async {
+      AuthService.store = MemoryTokenStore();
+      var cleared = 0;
+      AuthService().onSessionCleared = () => cleared++;
+
+      expect(await AuthService().restore(), isNull);
+      expect(cleared, 0);
+    });
+
     test('resetSessionState 가 이의 목록과 데모 깃발을 되돌린다', () async {
       // 서버가 없는 상태로 이의를 제기하면 세션 동안 로컬에 남는다.
       StudentApiService.client = MockClient((_) async => throw http.ClientException('no server'));
@@ -692,14 +724,21 @@ class _SlowLockStore implements LoginLockStore {
   int attempts;
   DateTime? lockedUntil;
   bool byServer;
+  String? studentNo;
 
   _SlowLockStore(this.delay, {required this.attempts, this.lockedUntil})
       : byServer = false;
 
   @override
-  Future<({int attempts, DateTime? lockedUntil, bool byServer})?> read() async {
+  Future<({int attempts, DateTime? lockedUntil, bool byServer, String? studentNo})?>
+      read() async {
     await Future<void>.delayed(delay);
-    return (attempts: attempts, lockedUntil: lockedUntil, byServer: byServer);
+    return (
+      attempts: attempts,
+      lockedUntil: lockedUntil,
+      byServer: byServer,
+      studentNo: studentNo,
+    );
   }
 
   @override
@@ -707,10 +746,12 @@ class _SlowLockStore implements LoginLockStore {
     required int attempts,
     DateTime? lockedUntil,
     bool byServer = false,
+    String? studentNo,
   }) async {
     this.attempts = attempts;
     this.lockedUntil = lockedUntil;
     this.byServer = byServer;
+    this.studentNo = studentNo;
   }
 
   @override
@@ -718,5 +759,6 @@ class _SlowLockStore implements LoginLockStore {
     attempts = 0;
     lockedUntil = null;
     byServer = false;
+    studentNo = null;
   }
 }

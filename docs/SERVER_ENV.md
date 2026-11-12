@@ -100,7 +100,13 @@ GRANT SELECT ON ALL TABLES IN SCHEMA public TO student_ro;
 ALTER DEFAULT PRIVILEGES FOR ROLE council IN SCHEMA public GRANT SELECT ON TABLES TO student_ro;
 ```
 
-로그인 실패 횟수를 DB에 두면(PRD §9.1 확장 구성) 학생 서버의 로그인이 그 테이블에 써야 한다. 그때 그 테이블 하나에만 쓰기 권한을 준다.
+**로그인 실패 횟수 테이블에는 쓰기 권한도 준다.** 학생 서버의 `POST /auth/login`은 연속 실패 횟수를 `login_attempts`에 쓴다 (#89, PRD §9.1 — 학생 서버가 여러 대여도 합쳐 센다). 이 권한이 없으면 학생 로그인이 **전부 `503`**이다 (`permission denied for table login_attempts`). 쓰기 권한은 이 테이블 하나에만 준다.
+
+테이블이 있어야 `GRANT`가 되므로 **`alembic upgrade head` 뒤에** 실행한다. 위의 `ALTER DEFAULT PRIVILEGES`는 조회 권한만 주므로 이 줄은 따로 필요하다.
+
+```sql
+GRANT INSERT, UPDATE, DELETE ON login_attempts TO student_ro;
+```
 
 ## 6. 비밀값 만들기와 보관
 

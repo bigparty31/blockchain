@@ -1,4 +1,5 @@
-"""행사·입장 API 테스트 — PRD v0.15 §4.2 (QR 입장, 중복 차단, 판정 불가 구분)."""
+"""행사·입장 API 테스트 — PRD v0.16 §4.2 (QR 입장, 중복 차단, 판정 불가 구분), §10 (회원권 확인은 체인 기준 공용 함수)."""
+import asyncio
 from datetime import datetime, timezone
 
 import pytest
@@ -6,20 +7,27 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from app import membership_check
 from app.auth import users as seed
+from app.chain import ChainSetupError, ChainUnavailable, FakeChainClient, get_chain_client
 from app.database import get_db
 from app.main import app
 from app.membership_check import MembershipUnavailable, get_membership_checker
 from app.models import Base, CheckIn, Event, Membership, Term, User
 from app.routers.events import parse_qr
 from app.schemas.auth import Role
+from app.services import student_wallet
+from app.services.student_wallet import MNEMONIC_ENV, student_address
 
 client = TestClient(app)
+
+TEST_MNEMONIC = "test test test test test test test test test test test junk"
 
 STUDENT = 1          # 시드 학생 (회원권 있음)
 NON_MEMBER = 10      # 회원권 없는 학생
 BURNED = 11          # 환불로 회원권이 소각된 학생
 TERM, OTHER_TERM = 1, 2
+TERM_CODE, OTHER_TERM_CODE = 20262, 20271
 
 
 def qr(user_id: int, term: str = "2026-2") -> str:
@@ -27,7 +35,26 @@ def qr(user_id: int, term: str = "2026-2") -> str:
 
 
 @pytest.fixture
-def db_session(tmp_path):
+def chain(monkeypatch):
+    """회원권의 기준인 체인. 학생 지갑 주소는 시험용 니모닉에서 파생한다 (test_memberships_api 와 같다)."""
+    monkeypatch.setenv(MNEMONIC_ENV, TEST_MNEMONIC)
+    student_wallet._derive.cache_clear()
+    student_wallet._seed.cache_clear()
+    fake = FakeChainClient()
+    app.dependency_overrides[get_chain_client] = lambda: fake
+    yield fake
+    app.dependency_overrides.pop(get_chain_client, None)
+    student_wallet._derive.cache_clear()
+    student_wallet._seed.cache_clear()
+
+
+def wallet(user_id: int) -> str:
+    index = {STUDENT: 0, NON_MEMBER: 10, BURNED: 11}[user_id]
+    return student_address(index)
+
+
+@pytest.fixture
+def db_session(tmp_path, chain):
     engine = create_engine(f"sqlite:///{tmp_path / 'events.db'}", connect_args={"check_same_thread": False})
     Session = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     Base.metadata.create_all(bind=engine)
@@ -53,6 +80,12 @@ def db_session(tmp_path):
     db.add(Event(id=1, term_id=TERM, name="축제", held_at=datetime(2026, 10, 1, tzinfo=timezone.utc), created_by=2))
     db.commit()
     db.close()
+
+    # 판정의 기준은 체인이다. DB 행(위)은 발급 정보 표시용이라 체인과 같게 맞춰 둔다
+    chain.grant_membership(wallet(STUDENT), TERM_CODE)
+    chain.grant_membership(wallet(BURNED), TERM_CODE)
+    chain.burn_membership(wallet(BURNED), TERM_CODE)
+    chain.grant_membership(wallet(NON_MEMBER), OTHER_TERM_CODE)
 
     def override():
         s = Session()
@@ -213,6 +246,73 @@ def test_concurrent_scan_returns_already_checked_in(db_session, auth_header):
     assert res.status_code == 200
     assert res.json()["result"] == "ALREADY_CHECKED_IN"
     assert count_check_ins(db_session) == 1
+
+
+# ---------------------------------------------------------------- 판정의 기준은 체인 (PRD §10, §13)
+
+
+def test_db_row_without_chain_membership_is_not_member(db_session, auth_header, chain):
+    # DB 에 회원권 행이 있어도 체인에 없으면 회원이 아니다. DB 만 고쳐서 입장시킬 수 없다
+    chain.burn_membership(wallet(STUDENT), TERM_CODE)
+    assert scan(auth_header).json()["result"] == "NOT_MEMBER"
+    assert count_check_ins(db_session) == 0
+
+
+def test_chain_membership_without_db_row_is_admitted(db_session, auth_header, chain):
+    # 체인에 회원권이 있으면 DB 행이 없어도 입장한다 (DB 행은 발급 정보 표시용)
+    s = db_session()
+    s.query(Membership).filter(Membership.user_id == NON_MEMBER).delete()
+    s.commit()
+    s.close()
+    chain.grant_membership(wallet(NON_MEMBER), TERM_CODE)
+    assert scan(auth_header, user_id=NON_MEMBER).json()["result"] == "ADMITTED"
+
+
+@pytest.mark.parametrize("error", [ChainSetupError("CHAIN_RPC_URL 없음"), ChainUnavailable("노드 무응답")])
+def test_chain_connection_failure_is_unverifiable(db_session, auth_header, error):
+    # 체인에 붙지 못하면 503 이 아니라 200 + UNVERIFIABLE 이다. 스캐너가 '미납'으로 안내하지 않고 다시 찍게 한다
+    def broken():
+        raise error
+
+    app.dependency_overrides[get_chain_client] = broken
+    res = scan(auth_header)
+    assert res.status_code == 200
+    assert res.json()["result"] == "UNVERIFIABLE"
+    assert count_check_ins(db_session) == 0
+
+
+def test_chain_down_does_not_block_scans_that_need_no_membership(db_session, auth_header):
+    # 중복 입장·없는 학생은 회원권을 볼 필요가 없다. 체인이 죽어도 그대로 판정한다
+    scan(auth_header)
+
+    def broken():
+        raise ChainUnavailable("노드 무응답")
+
+    app.dependency_overrides[get_chain_client] = broken
+    assert scan(auth_header).json()["result"] == "ALREADY_CHECKED_IN"
+    assert scan(auth_header, user_id=999).json()["result"] == "UNKNOWN_STUDENT"
+
+
+def test_slow_chain_is_unverifiable(db_session, auth_header, chain, monkeypatch):
+    # 노드가 느리면 RPC 기본 대기(10초)까지 스캐너가 멈추지 않고 제한 시간에 끊는다
+    monkeypatch.setattr(membership_check, "MEMBERSHIP_TIMEOUT_SECONDS", 0.05)
+
+    async def slow(account, term):
+        await asyncio.sleep(1)
+        return True
+
+    monkeypatch.setattr(chain, "has_valid_membership", slow)
+    res = scan(auth_header)
+    assert res.json()["result"] == "UNVERIFIABLE"
+    assert count_check_ins(db_session) == 0
+
+
+def test_missing_wallet_mnemonic_is_unverifiable(db_session, auth_header, monkeypatch):
+    # 학생 지갑을 파생할 설정이 없으면 회원권을 '모른다' — 미보유로 판정하지 않는다
+    monkeypatch.delenv(MNEMONIC_ENV)
+    student_wallet._derive.cache_clear()
+    student_wallet._seed.cache_clear()
+    assert scan(auth_header).json()["result"] == "UNVERIFIABLE"
 
 
 # ---------------------------------------------------------------- 요청 오류·권한

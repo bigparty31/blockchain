@@ -5,11 +5,11 @@ Solidity 컨트랙트. 규칙의 정본은 `interfaces/*.sol`, 요약은 `../doc
 | 경로 | 내용 |
 | --- | --- |
 | `interfaces/` | 인터페이스 5종 (정본). `docs/` 가 이 경로를 참조한다 |
-| `src/` | 구현. 이번 범위는 `RoleManager` `BudgetToken` `AccountingLedger` |
+| `src/` | 구현. `RoleManager` `BudgetToken` `AccountingLedger` `MembershipSBT` (`IObjectionRegistry`는 범위 밖) |
 | `mocks/` | 테스트 전용 컨트랙트 (`MockLedger`). 배포하지 않는다 |
 | `test/` | Mocha + ethers 테스트. `docs/CONTRACTS.md` "필수 테스트" 절 전 항목 |
 | `scripts/deploy.ts` | 로컬 배포. 결과를 `deployments/<network>.json` 과 `deployments/abi/` 에 쓴다 |
-| `deployments/` | 백엔드가 읽는 파일. 주소·chainId·EIP-712 도메인 3개·ABI. JSON 안의 abi 경로는 `deployments/` 기준 |
+| `deployments/` | 백엔드가 읽는 파일. 주소·chainId·EIP-712 도메인 4개·ABI. JSON 안의 abi 경로는 `deployments/` 기준 |
 
 ## 도구
 
@@ -51,11 +51,11 @@ npx hardhat node
 npx hardhat run scripts/deploy.ts --network localhost
 ```
 
-배포 순서는 `RoleManager(회장, 총무, 감사1, 감사2)` → `BudgetToken` → `AccountingLedger` → `BudgetToken.setLedger`. 네 임원은 생성자 인자라 롤 부여 단계가 없고, 끝나면 배포자에게 남는 권한이 없다. 감사는 최소 2명이다. 회장 키를 잃었을 때 감사 둘이 복구하기 위해서다 (`docs/CONTRACTS.md` "롤" 절).
+배포 순서는 `RoleManager(회장, 총무, 감사1, 감사2)` → `BudgetToken` → `AccountingLedger` → `BudgetToken.setLedger` → `MembershipSBT`. 네 임원은 생성자 인자라 롤 부여 단계가 없고, 끝나면 배포자에게 남는 권한이 없다. 감사는 최소 2명이다. 회장 키를 잃었을 때 감사 둘이 복구하기 위해서다 (`docs/CONTRACTS.md` "롤" 절).
 
-`--network localhost` 를 빠뜨리면 스크립트가 바로 멈춘다. 기록 전에 롤 배치, 컨트랙트끼리 가리키는 주소, 세 컨트랙트의 DOMAIN_SEPARATOR 를 다시 계산해 대조하고, 하나라도 틀리면 기록하지 않는다.
+`--network localhost` 를 빠뜨리면 스크립트가 바로 멈춘다. 기록 전에 롤 배치, 컨트랙트끼리 가리키는 주소, 네 컨트랙트의 DOMAIN_SEPARATOR 를 다시 계산해 대조하고, 하나라도 틀리면 기록하지 않는다.
 
-서명을 받는 컨트랙트가 셋이라 도메인도 셋이다. 앱은 서명 대상에 맞는 도메인을 골라야 한다: 등록·확정·반려는 `AccountingLedger`, 예산 발행·증액·회수는 `BudgetToken`, 롤 변경은 `RoleManager`.
+서명을 받는 컨트랙트가 넷이라 도메인도 넷이다. 앱은 서명 대상에 맞는 도메인을 골라야 한다: 등록·확정·반려는 `AccountingLedger`, 예산 발행·증액·회수는 `BudgetToken`, 롤 변경은 `RoleManager`, 회원권 발행·소각은 `MembershipSBT`.
 
 계정은 Hardhat 기본 니모닉 순서를 그대로 쓴다. 개인키는 Hardhat 이 공개한 테스트 키라 저장소에 두지 않는다.
 
