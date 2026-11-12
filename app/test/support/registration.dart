@@ -71,5 +71,5 @@ class FakeRegistrar implements EntryRegistrar {
 }
 
 /// 테스트용 영수증 — 고정 바이트. 해시는 `Hashing.fileHash(fakeReceiptBytes)`.
-final fakeReceiptBytes = utf8.encode('fake receipt jpeg bytes');
+final fakeReceiptBytes = [0xFF, 0xD8, 0xFF, 0xE0, ...utf8.encode('fake receipt jpeg bytes')]; // JPEG 머리 — 앱이 형식을 알아본다
 Future<List<int>?> fakeReceipt(BuildContext _) async => fakeReceiptBytes;

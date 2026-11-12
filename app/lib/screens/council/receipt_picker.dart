@@ -19,22 +19,34 @@ bool _isHeic(List<int> bytes) {
   return const {'heic', 'heix', 'heim', 'heis', 'hevc', 'hevx', 'mif1', 'msf1'}.contains(brand);
 }
 
+/// 내용의 앞 바이트로 알아본 서버 허용 형식의 확장자(`jpg`·`png`·`pdf`·`webp`). 모르면 null.
+String? _knownExtension(List<int> bytes) {
+  if (_starts(bytes, [0xFF, 0xD8, 0xFF])) return 'jpg';
+  if (_starts(bytes, [0x89, 0x50, 0x4E, 0x47])) return 'png';
+  if (_starts(bytes, [0x25, 0x50, 0x44, 0x46])) return 'pdf'; // %PDF
+  if (_starts(bytes, [0x52, 0x49, 0x46, 0x46]) && _starts(bytes, [0x57, 0x45, 0x42, 0x50], 8)) return 'webp';
+  return null;
+}
+
 /// 고른 영수증을 서버가 받을 수 없으면 그 안내 문구, 올릴 수 있으면 null. 고르는 자리에서 막아
 /// 「영수증이 없어 지출을 못 올린다」로 끝나지 않게 한다.
-String? receiptFormatProblem(List<int> bytes) =>
-    _isHeic(bytes) ? '이 사진 형식(HEIC)은 서버가 받지 않아요. JPEG·PNG·WebP·PDF 로 다시 골라 주세요.' : null;
+String? receiptFormatProblem(List<int> bytes) {
+  if (_isHeic(bytes)) return '이 사진 형식(HEIC)은 서버가 받지 않아요. JPEG·PNG·WebP·PDF 로 다시 골라 주세요.';
+  if (_knownExtension(bytes) == null) return '알아볼 수 없는 파일 형식이에요. JPEG·PNG·WebP·PDF 로 다시 골라 주세요.';
+  return null;
+}
 
 /// 업로드 파일 이름 — 내용의 앞 바이트로 형식을 알아내 확장자를 붙인다. 서버는 확장자를 그대로 쓰고
 /// (`/receipts/{해시}.{확장자}`), 내려줄 때 그 확장자로 형식을 정한다. 서버에는 기본 확장자가 없고
 /// 허용 목록(`.jpg`·`.jpeg`·`.png`·`.webp`·`.pdf`)에 없으면 400 으로 거부한다.
 ///
-/// HEIC·HEIF 는 이름을 만들지 않고 던진다 — 고르는 자리에서 [receiptFormatProblem] 으로 걸러야 한다.
+/// 서버는 **확장자만 보고 내용은 보지 않으므로** 알아보지 못한 형식에 확장자를 지어 붙이면 그 추측이 저장되는
+/// 파일의 형식을 정한다. HEIC·HEIF 를 포함해 알아보지 못한 형식은 이름을 만들지 않고 던진다 —
+/// 고르는 자리에서 [receiptFormatProblem] 으로 걸러야 한다.
 String receiptFilename(List<int> bytes) {
-  if (_isHeic(bytes)) throw ArgumentError.value('HEIC', 'bytes', receiptFormatProblem(bytes));
-  if (_starts(bytes, [0x89, 0x50, 0x4E, 0x47])) return 'receipt.png';
-  if (_starts(bytes, [0x25, 0x50, 0x44, 0x46])) return 'receipt.pdf'; // %PDF
-  if (_starts(bytes, [0x52, 0x49, 0x46, 0x46]) && _starts(bytes, [0x57, 0x45, 0x42, 0x50], 8)) return 'receipt.webp';
-  return 'receipt.jpg'; // JPEG(FF D8) 와 그 밖 — 모르는 형식은 서버가 알아서 거부한다
+  final problem = receiptFormatProblem(bytes);
+  if (problem != null) throw ArgumentError.value(bytes.length, 'bytes', problem);
+  return 'receipt.${_knownExtension(bytes)}';
 }
 
 /// 기본 선택기 — 카메라 촬영 또는 갤러리.

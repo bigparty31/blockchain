@@ -229,10 +229,87 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
   /// 겹친 읽기 중 마지막 응답만 반영한다 (홈의 승인 대기 건수와 같은 방식).
   int _loadSeq = 0;
 
+  /// 승인 대기 건의 영수증 대조 결과 (건 id → 결과) — 카드에 보여 승인 버튼을 누르기 전에 알린다.
+  /// 일치·불일치는 한 번 대조하면 다시 받지 않고, 못 받은 건(`unavailable`)만 목록을 다시 읽을 때 다시 시도한다.
+  /// 승인하는 순간에는 이 값을 믿지 않고 [_freshReceiptCheck] 로 한 번 더 대조한다.
+  final Map<int, ReceiptCheck> _receiptChecks = {};
+  final Set<int> _receiptChecking = {};
+  bool _approving = false;
+
+  static EntryModel? _entryOf(Map<String, dynamic> item) => item['entry'] is EntryModel ? item['entry'] as EntryModel : null;
+
+  static bool _hasReceipt(EntryModel? e) => e != null && e.receiptHash != null && e.receiptPath != null;
+
+  /// 영수증이 있는 승인 대기 건의 해시를 대조한다. 영수증 바꿔치기는 OCR·카테고리 경고에도, `meta_hash` 에도 걸리지
+  /// 않는다 (`receipt_hash` 는 등록 때 값 그대로라서) — 승인자가 파일을 직접 대조하는 것이 유일한 확인이다.
+  void _checkReceipts() {
+    for (final item in _items) {
+      final e = _entryOf(item);
+      if (e == null || e.status != EntryStatus.PENDING || !_hasReceipt(e)) continue;
+      final known = _receiptChecks[e.id];
+      if (_receiptChecking.contains(e.id) || known == ReceiptCheck.matched || known == ReceiptCheck.mismatched) continue;
+      _receiptChecking.add(e.id);
+      _safeVerify(e).then((verdict) {
+        if (!mounted) return;
+        setState(() {
+          _receiptChecking.remove(e.id);
+          _receiptChecks[e.id] = verdict.check;
+        });
+      });
+    }
+  }
+
+  Future<ReceiptVerdict> _safeVerify(EntryModel e) async {
+    try {
+      return await verifyReceipt(_registrar, e);
+    } catch (_) {
+      return const ReceiptVerdict(ReceiptCheck.unavailable); // 받지 못했다 — 일치로 두지 않는다
+    }
+  }
+
+  /// 승인하기 직전의 대조. 목록을 본 뒤 서버의 파일이 바뀌었을 수 있어 캐시를 쓰지 않고 다시 받는다.
+  /// 진행해도 되면 true.
+  Future<bool> _freshReceiptCheck(EntryModel e) async {
+    final verdict = await _safeVerify(e);
+    if (!mounted) return false;
+    setState(() => _receiptChecks[e.id] = verdict.check);
+    switch (verdict.check) {
+      case ReceiptCheck.matched:
+        return true;
+      case ReceiptCheck.mismatched:
+        await showDialog<void>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            key: const Key('receipt_blocks_approval'),
+            title: const Text('영수증이 등록 때와 달라요'),
+            content: const Text('서버에 있는 영수증 파일의 해시가 등록 때 기록된 값과 달라 승인할 수 없어요. '
+                '올린 뒤 파일이 바뀌었을 수 있으니, 반려하거나 등록한 총무에게 확인해 주세요.'),
+            actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('닫기'))],
+          ),
+        );
+        return false;
+      case ReceiptCheck.unavailable:
+        final go = await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            key: const Key('receipt_unavailable_confirm'),
+            title: const Text('영수증을 받지 못했어요'),
+            content: const Text('원본을 받지 못해 영수증 해시를 대조하지 못했어요. 대조 없이 승인하려면 계속해 주세요.'),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('취소')),
+              TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('그래도 승인')),
+            ],
+          ),
+        );
+        return go == true && mounted;
+    }
+  }
+
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 3, vsync: this);
+    _checkReceipts();
     if (_fromServer && widget.allowed) {
       _load(initial: true);
       _poll = Timer.periodic(NotificationService.pollInterval, (_) => _load(silent: true));
@@ -274,6 +351,7 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
         _loading = false;
         _loadError = null;
       });
+      _checkReceipts();
     } on ApiUnavailable catch (e) {
       if (!mounted || seq != _loadSeq) return;
       setState(() {
@@ -313,6 +391,17 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
 
   /// 승인 진입점. 경고가 있으면 사유를 먼저 받는다 (빈 값은 서버가 400).
   Future<void> _onApprove(Map<String, dynamic> item) async {
+    // 영수증이 있는 건은 사유·서명 단계로 가기 전에 해시부터 대조한다 — 불일치면 여기서 끝난다.
+    final entry = _entryOf(item);
+    if (_hasReceipt(entry)) {
+      if (_approving) return;
+      _approving = true;
+      try {
+        if (!await _freshReceiptCheck(entry!) || !mounted) return;
+      } finally {
+        _approving = false;
+      }
+    }
     String? warningReason;
     if (_hasWarning(item)) {
       warningReason = await showReasonDialog(
@@ -822,9 +911,12 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
       separatorBuilder: (_, __) => const SizedBox(height: 12),
       itemBuilder: (context, index) {
         final item = filtered[index];
+        final entry = _entryOf(item);
         return _ApprovalCard(
           item: item,
           status: status,
+          receiptCheck: entry == null ? null : _receiptChecks[entry.id],
+          receiptChecking: entry != null && _receiptChecking.contains(entry.id),
           onReceipt: () => _showReceiptDialog(item),
           own: isOwnEntry(item, widget.effectiveUserId),
           onApprove: () => _onApprove(item),
@@ -922,16 +1014,79 @@ class _DisabledAction extends StatelessWidget {
   }
 }
 
+/// 카드의 영수증 해시 대조 결과 — 승인 버튼을 누르기 전에 보인다.
+class _ReceiptCheckNote extends StatelessWidget {
+  final ReceiptCheck? check;
+  final bool checking;
+  const _ReceiptCheckNote({required this.check, required this.checking});
+
+  @override
+  Widget build(BuildContext context) {
+    if (checking && check == null) {
+      return const Text('영수증 대조 중…', key: Key('approval_receipt_checking'), style: TextStyle(fontSize: 11, color: AppTheme.textSub));
+    }
+    switch (check) {
+      case ReceiptCheck.matched:
+        return const Row(
+          key: Key('approval_receipt_match'),
+          children: [
+            Icon(Icons.verified_rounded, size: 14, color: AppTheme.success),
+            SizedBox(width: 6),
+            Expanded(child: Text('영수증 해시 일치 — 올린 원본 그대로예요', style: TextStyle(fontSize: 11, height: 1.3, color: AppTheme.textSub))),
+          ],
+        );
+      case ReceiptCheck.mismatched:
+        return Container(
+          key: const Key('approval_receipt_mismatch'),
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          decoration: BoxDecoration(
+            color: const Color(0xFFFDECEC),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: const Color(0xFFF5B5B5)),
+          ),
+          child: const Row(
+            children: [
+              Icon(Icons.gpp_bad_rounded, size: 16, color: Colors.red),
+              SizedBox(width: 8),
+              Expanded(
+                child: Text('영수증 해시 불일치 — 등록 때 올린 파일과 달라요. 승인할 수 없어요',
+                    style: TextStyle(fontSize: 11, height: 1.3, color: Color(0xFF8A1C1C), fontWeight: FontWeight.bold)),
+              ),
+            ],
+          ),
+        );
+      case ReceiptCheck.unavailable:
+        return const Row(
+          key: Key('approval_receipt_unavailable'),
+          children: [
+            Icon(Icons.help_outline_rounded, size: 14, color: Colors.orange),
+            SizedBox(width: 6),
+            Expanded(child: Text('영수증을 받지 못해 대조하지 못했어요', style: TextStyle(fontSize: 11, height: 1.3, color: Color(0xFF7C4700)))),
+          ],
+        );
+      case null:
+        return const SizedBox.shrink();
+    }
+  }
+}
+
 class _ApprovalCard extends StatelessWidget {
   final Map<String, dynamic> item;
   final EntryStatus status;
   final bool own;
   final VoidCallback onReceipt, onApprove, onReject;
 
+  /// 영수증 해시 대조 결과. 대조 전이거나 영수증이 없으면 null.
+  final ReceiptCheck? receiptCheck;
+  final bool receiptChecking;
+
   const _ApprovalCard({
     required this.item,
     required this.status,
     this.own = false,
+    this.receiptCheck,
+    this.receiptChecking = false,
     required this.onReceipt,
     required this.onApprove,
     required this.onReject,
@@ -1018,6 +1173,10 @@ class _ApprovalCard extends StatelessWidget {
                   ],
                 ),
               ),
+            ],
+            if (status == EntryStatus.PENDING && !own && (receiptChecking || receiptCheck != null)) ...[
+              const SizedBox(height: 10),
+              _ReceiptCheckNote(check: receiptCheck, checking: receiptChecking),
             ],
             if (status == EntryStatus.CONFIRMED && item['warningAckReason'] != null) ...[
               const SizedBox(height: 10),
