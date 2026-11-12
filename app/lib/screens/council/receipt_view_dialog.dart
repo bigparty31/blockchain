@@ -50,6 +50,61 @@ Future<ReceiptVerdict> verifyReceipt(EntryRegistrar registrar, EntryModel entry)
   return ReceiptVerdict(ReceiptCheck.matched, bytes: Uint8List.fromList(bytes), computedHash: computed);
 }
 
+/// 승인하기 직전의 영수증 대조 — 일반 승인 목록과 정정 승인이 함께 쓴다. 목록을 본 뒤 서버의 파일이 바뀌었을 수 있어
+/// 캐시를 쓰지 않고 다시 받는다. 진행해도 되면 true.
+///
+/// - 일치: true.
+/// - 불일치: 사유·서명 단계로 가지 않고 안내만 하고 false. 영수증 바꿔치기는 OCR·카테고리 경고에도, `meta_hash` 에도 걸리지
+///   않아(`receipt_hash` 는 등록 때 값 그대로) 승인자가 파일을 직접 대조하는 것이 유일한 확인이다.
+/// - 못 받음: 대조하지 못했다고 알리고, 그래도 승인할지 확인받는다. 못 받은 것을 일치로 보이지 않는다.
+///
+/// [onChecked] 는 대조 결과가 나오자마자(안내창을 띄우기 전에) 불린다 — 카드의 표시를 갱신하는 데 쓴다.
+Future<bool> receiptAllowsApproval(
+  BuildContext context,
+  EntryRegistrar registrar,
+  EntryModel entry, {
+  void Function(ReceiptCheck check)? onChecked,
+}) async {
+  ReceiptVerdict verdict;
+  try {
+    verdict = await verifyReceipt(registrar, entry);
+  } catch (_) {
+    verdict = const ReceiptVerdict(ReceiptCheck.unavailable); // 받지 못했다 — 일치로 두지 않는다
+  }
+  if (!context.mounted) return false;
+  onChecked?.call(verdict.check);
+  switch (verdict.check) {
+    case ReceiptCheck.matched:
+      return true;
+    case ReceiptCheck.mismatched:
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          key: const Key('receipt_blocks_approval'),
+          title: const Text('영수증이 등록 때와 달라요'),
+          content: const Text('서버에 있는 영수증 파일의 해시가 등록 때 기록된 값과 달라 승인할 수 없어요. '
+              '올린 뒤 파일이 바뀌었을 수 있으니, 반려하거나 등록한 총무에게 확인해 주세요.'),
+          actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('닫기'))],
+        ),
+      );
+      return false;
+    case ReceiptCheck.unavailable:
+      final go = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          key: const Key('receipt_unavailable_confirm'),
+          title: const Text('영수증을 받지 못했어요'),
+          content: const Text('원본을 받지 못해 영수증 해시를 대조하지 못했어요. 대조 없이 승인하려면 계속해 주세요.'),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('취소')),
+            TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('그래도 승인')),
+          ],
+        ),
+      );
+      return go == true && context.mounted;
+  }
+}
+
 /// 승인 화면의 「영수증」 — 서버 건이면 원본 이미지를 받아 해시를 대조해 보여 주고, 목업 건은 자리표시만 보인다.
 class ReceiptViewDialog extends StatefulWidget {
   /// 승인 카드 재료 ([approvalItemFromEntry]). 서버 건은 `'entry'` 에 [EntryModel] 이 있다.
