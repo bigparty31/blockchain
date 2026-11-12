@@ -12,6 +12,11 @@ import '../../services/entry_registration_service.dart';
 import 'input_rules.dart';
 import 'receipt_picker.dart';
 
+/// 재분류로 옮겨 갈 수 있는 예산 — 정정 대상과 같은 학기의 다른 예산. `GET /budgets` 는 전 학기를 주는데,
+/// 학기가 다른 예산으로 옮기면 체인이 학기 불일치로 거부한다. 정정 대상을 아직 모르면 거르지 않는다.
+List<BudgetModel> reclassifyCandidates(List<BudgetModel> budgets, {required int? termId, required int? fromBudgetId}) =>
+    budgets.where((b) => b.id != fromBudgetId && (termId == null || b.termId == termId)).toList();
+
 /// [이승호 담당: app/lib/screens/council/]
 /// 4. 정정 등록 화면 (스토리보드 10, T8) — 확정된 원본을 고치지 않고 증감분을 새 항목으로 올린다 (PRD §4.4).
 ///
@@ -578,9 +583,7 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
                     hint: '옮겨 갈 예산 항목을 고르세요',
                     icon: Icons.swap_horiz_rounded,
                   ),
-                  items: _budgets
-                      .where((b) => b.id != _target?.original.budgetId)
-                      .where((b) => _target == null || b.termId == _target!.original.termId)
+                  items: reclassifyCandidates(_budgets, termId: _target?.original.termId, fromBudgetId: _target?.original.budgetId)
                       .map((b) => DropdownMenuItem(value: b.id, child: Text('${b.category} · 잔량 ${Fmt.won(b.remainingAmount)}', overflow: TextOverflow.ellipsis)))
                       .toList(),
                   onChanged: (v) => setState(() => _newBudgetId = v),
