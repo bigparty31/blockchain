@@ -40,13 +40,18 @@ class Fmt {
     return s.endsWith('.0') ? s.substring(0, s.length - 2) : s;
   }
 
-  /// epoch 초 → `2026.09.08`
-  static String date(int epochSeconds) =>
-      _date.format(DateTime.fromMillisecondsSinceEpoch(epochSeconds * 1000));
+  /// epoch 초 → `2026.09.08` (**한국 시간**)
+  ///
+  /// 기기 시간대를 쓰지 않는다. `occurred_at` 은 사용일의 KST 자정이라(HASHING §1.3) 시간대가 UTC 인
+  /// 기기(에뮬레이터 기본값, 해외 로밍)에서 기기 시간으로 바꾸면 하루 전 날짜가 보인다.
+  static String date(int epochSeconds) => _date.format(_kst(epochSeconds));
 
-  /// epoch 초 → `2026.09.08 18:30`
-  static String dateTime(int epochSeconds) =>
-      _dateTime.format(DateTime.fromMillisecondsSinceEpoch(epochSeconds * 1000));
+  /// epoch 초 → `2026.09.08 18:30` (**한국 시간**)
+  static String dateTime(int epochSeconds) => _dateTime.format(_kst(epochSeconds));
+
+  /// epoch 초의 한국 시각. 연·월·일·시·분만 읽는 값이라 UTC 로 표시한 「벽시계」다.
+  static DateTime _kst(int epochSeconds) =>
+      DateTime.fromMillisecondsSinceEpoch((epochSeconds + 9 * 3600) * 1000, isUtc: true);
 
   /// 해시를 앞뒤만 남겨 줄인다. `0x8a3f…6b4e`
   static String shortHash(String hash, {int head = 10, int tail = 6}) {

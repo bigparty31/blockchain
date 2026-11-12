@@ -8,6 +8,8 @@ import 'package:student_council_app/screens/council/income_create_screen.dart';
 import 'package:student_council_app/screens/council/inquiry_response_screen.dart';
 import 'package:student_council_app/services/api_service.dart';
 
+import 'support/registration.dart';
+
 /// 총무·감사 화면이 좁은 폰·큰 글자에서 픽셀이 넘치지(RenderFlex overflow) 않는지 본다.
 ///
 /// 승인 목록 → 승인 서명 흐름과, 지출·수입 등록, 정정 신청, 이의 답변 화면을 확인한다.
@@ -150,10 +152,20 @@ void main() {
         await tester.pumpAndSettle();
       }
 
-      testWidgets('지출 등록 결과(PENDING) 다이얼로그 · $label', (tester) async {
-        await pump(tester, const ExpenseCreateScreen());
-        await tester.tap(find.text('영수증 촬영 또는 사진 첨부')); // 목업 자동 입력: 35,000원 · 행사비
+      /// 등록기·영수증은 가짜다 (서버·카메라 없음). 예산 목록이 도착한 뒤 영수증을 붙이고 입력을 채운다.
+      Future<void> openExpense(WidgetTester tester, {String amount = '35000'}) async {
+        await pump(tester, ExpenseCreateScreen(registrar: FakeRegistrar(), pickReceipt: fakeReceipt));
+        await waitFor(tester, find.textContaining('행사비 · 잔량'));
+        await tester.tap(find.text('영수증 촬영 또는 사진 첨부'));
         await tester.pumpAndSettle();
+        await tester.enterText(find.widgetWithText(TextFormField, '목적 *'), '신입생 오리엔테이션 다과 구매');
+        await tester.enterText(find.widgetWithText(TextFormField, '사용처(상호명) *'), '한결문구점');
+        await tester.enterText(find.widgetWithText(TextFormField, '지출 금액(원) *'), amount);
+        await tester.ensureVisible(find.text('제출하기'));
+      }
+
+      testWidgets('지출 등록 결과(PENDING) 다이얼로그 · $label', (tester) async {
+        await openExpense(tester);
         await tester.tap(find.text('제출하기'));
         await waitFor(tester, find.text('지출 제출 완료!'));
         expect(find.text('지출 제출 완료!'), findsOneWidget);
@@ -162,11 +174,8 @@ void main() {
       });
 
       testWidgets('지출 초안 저장은 체인 검사 없이 초안 다이얼로그 · $label', (tester) async {
-        await pump(tester, const ExpenseCreateScreen());
-        await tester.tap(find.text('영수증 촬영 또는 사진 첨부'));
-        await tester.pumpAndSettle();
         // 예산을 넘는 금액이어도 초안은 BLOCKED 가 아니다 — 체인에 올리지 않았기 때문
-        await tester.enterText(find.widgetWithText(TextFormField, '지출 금액(원) *'), '3000000000');
+        await openExpense(tester, amount: '3000000000');
         await tester.ensureVisible(find.text('초안으로 저장'));
         await tester.tap(find.text('초안으로 저장'));
         await waitFor(tester, find.text('지출 초안 저장 완료'));
@@ -177,10 +186,7 @@ void main() {
       });
 
       testWidgets('지출 등록 결과(BLOCKED) 다이얼로그 · $label', (tester) async {
-        await pump(tester, const ExpenseCreateScreen());
-        await tester.tap(find.text('영수증 촬영 또는 사진 첨부'));
-        await tester.pumpAndSettle();
-        await tester.enterText(find.widgetWithText(TextFormField, '지출 금액(원) *'), '3000000000');
+        await openExpense(tester, amount: '3000000000');
         await tester.tap(find.text('제출하기'));
         await waitFor(tester, find.text('지출 등록이 차단되었어요'));
         expect(find.text('지출 등록이 차단되었어요'), findsOneWidget);
@@ -189,7 +195,7 @@ void main() {
       });
 
       testWidgets('정정 접수 결과 다이얼로그 · $label', (tester) async {
-        await pump(tester, const CorrectionScreen());
+        await pump(tester, CorrectionScreen(registrar: FakeRegistrar()));
         await tester.enterText(find.widgetWithText(TextFormField, '정정 대상 내역 ID (Entry ID) *'), '1');
         await tester.tap(find.text('내역 조회'));
         await waitFor(tester, find.textContaining('현재 금액 ₩'));

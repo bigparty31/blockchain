@@ -23,11 +23,14 @@ Future<void> useAuditorDeviceKey() async {
 /// 가짜 본인 확인 — 몇 번 불렸는지 센다.
 class FakeAuthenticator implements DeviceAuthenticator {
   final DeviceAuthResult result;
+
+  /// 기기 잠금(PIN·패턴·생체)이 설정돼 있는가. 없으면 키를 만들지 않는다 (PRD §9.2).
+  final bool lock;
   int calls = 0;
-  FakeAuthenticator({this.result = DeviceAuthResult.success});
+  FakeAuthenticator({this.result = DeviceAuthResult.success, this.lock = true});
 
   @override
-  Future<bool> hasDeviceLock() async => true;
+  Future<bool> hasDeviceLock() async => lock;
 
   @override
   Future<DeviceAuthResult> authenticate(String reason) async {
