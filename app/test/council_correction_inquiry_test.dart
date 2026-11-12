@@ -204,6 +204,45 @@ void main() {
       expect(d.receiptPath, FakeRegistrar.pathOf(fakeReceiptBytes));
     });
 
+    // 양수 정정(증액·재분류의 새 예산 쪽)은 예산을 쓰므로 증빙이 있어야 한다 — 서버(#66)는 영수증 없는 양수 지출 정정을
+    // 400 으로 막는다. 원본의 해시를 그대로 쓰면 된다(파일은 이미 서버에 있고, 중복 판정에서는 원본이 빠진다).
+    const originalHash = '0xabc1234567890abcdef1234567890abcdef1234567890abcdef1234567890abc';
+
+    testWidgets('증액(양수) 정정은 사진을 안 붙여도 원본의 영수증 해시를 싣는다 — 다시 올리지 않는다', (tester) async {
+      await pumpScreen(tester);
+      await lookup(tester, '1');
+      await tester.enterText(amountField(), '40000');
+      await tester.enterText(detailField(), '실제 영수증 확인 결과 금액 정정');
+
+      await tester.ensureVisible(find.text('정정 제출하기'));
+      await tester.tap(find.text('정정 제출하기'));
+      await tester.pumpAndSettle();
+
+      final d = reg.submits.single.$2;
+      expect(d.amount, 5000);
+      expect(d.receiptHash, originalHash);
+      expect(d.toCreateJson()['receipt_hash'], originalHash);
+      expect(reg.uploads, isEmpty, reason: '원본 파일은 이미 서버에 있다');
+    });
+
+    testWidgets('증액 정정에 사진을 붙이면 원본 해시가 아니라 붙인 사진의 해시를 싣는다', (tester) async {
+      await pumpScreen(tester);
+      await lookup(tester, '1');
+      await tester.enterText(amountField(), '40000');
+      await tester.enterText(detailField(), '실제 영수증 확인 결과 금액 정정');
+      await tester.ensureVisible(find.text('수정 증빙 자료 재첨부 (영수증, 선택)'));
+      await tester.tap(find.text('수정 증빙 자료 재첨부 (영수증, 선택)'));
+      await tester.pumpAndSettle();
+
+      await tester.ensureVisible(find.text('정정 제출하기'));
+      await tester.tap(find.text('정정 제출하기'));
+      await tester.pumpAndSettle();
+
+      final d = reg.submits.single.$2;
+      expect(d.receiptHash, Hashing.fileHash(fakeReceiptBytes));
+      expect(reg.uploads, hasLength(1));
+    });
+
     testWidgets('기타(OTHER) 사유도 고를 수 있다 — 상세 사유가 목적 칸에 들어간다', (tester) async {
       await pumpScreen(tester);
       await lookup(tester, '1');
@@ -386,6 +425,26 @@ void main() {
         (1, 35000, 1),
         (2, -35000, 1),
       ]);
+    });
+
+    testWidgets('재분류는 증액(+) 건만 원본의 영수증 해시를 싣는다 — 감액(−) 건은 증빙 없이도 된다', (tester) async {
+      await pumpScreen(tester);
+      await lookup(tester, '1');
+      await chooseReclassify(tester);
+      await tester.ensureVisible(find.byType(DropdownButtonFormField<int>));
+      await tester.tap(find.byType(DropdownButtonFormField<int>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.textContaining('행사비 · 잔량').last);
+      await tester.pumpAndSettle();
+      await tester.enterText(detailField(), '예산 항목을 잘못 골랐어요');
+      await tester.ensureVisible(find.text('정정 제출하기'));
+      await tester.tap(find.text('정정 제출하기'));
+      await tester.pumpAndSettle();
+
+      expect(reg.submits.map((s) => (s.$2.amount, s.$2.receiptHash)).toList(), [
+        (35000, originalHash),
+        (-35000, null),
+      ], reason: '증빙이 필수인 것은 예산을 쓰는 양수 정정뿐이다');
     });
 
     testWidgets('재분류의 뒤쪽(−)이 실패한 뒤 입력을 바꿔 다시 내면, 옛 건은 결과에 섞이지 않고 따로 알린다 (#111 리뷰)', (tester) async {
