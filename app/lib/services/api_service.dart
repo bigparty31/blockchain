@@ -6,6 +6,7 @@ import '../models/budget_model.dart';
 import '../models/entry_model.dart';
 import '../core/dev_flags.dart';
 import '../core/enums.dart';
+import '../core/format.dart';
 import 'auth_service.dart';
 
 /// 서버에서 읽지 못했다 (연결 실패·200 이 아닌 응답·형식 오류). [what] 은 화면에 쓰는 대상 이름.
@@ -219,8 +220,8 @@ class ApiService {
         if (terms.isNotEmpty) {
           final t = now ?? DateTime.now();
           for (final term in terms) {
-            final start = DateTime.parse(term['started_at'] as String);
-            final end = DateTime.parse(term['ended_at'] as String);
+            final start = Fmt.parseServerTime(term['started_at'] as String);
+            final end = Fmt.parseServerTime(term['ended_at'] as String);
             if (!t.isBefore(start) && !t.isAfter(end)) return term['id'] as int;
           }
           return terms.map((e) => e['id'] as int).reduce((a, b) => a > b ? a : b);

@@ -31,8 +31,10 @@ Future<EntryDecisionException?> sendWithBlocking(
     await send();
   } on EntryDecisionException catch (e) {
     failed = e;
+  } finally {
+    // 예상 밖의 예외가 나도 닫을 수 없는 「전송 중」 창이 남지 않게 한다 (#111 리뷰)
+    if (sending.isActive) navigator.removeRoute(sending);
   }
-  if (sending.isActive) navigator.removeRoute(sending);
   return failed;
 }
 
