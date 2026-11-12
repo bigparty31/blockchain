@@ -15,6 +15,9 @@ from app.main import app
 
 client = TestClient(app)
 
+# 로그인이 실패 횟수를 DB 에 남긴다. 시험마다 새 DB 라 앞 시험의 실패가 다음 시험을 잠그지 않는다
+pytestmark = pytest.mark.usefixtures("login_db")
+
 
 def login(student_no, password=SEED_PASSWORD):
     return client.post("/auth/login", json={"student_no": student_no, "password": password})

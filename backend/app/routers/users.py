@@ -5,6 +5,7 @@ from fastapi import APIRouter
 from app.auth import users
 
 router = APIRouter(prefix="/users", tags=["Users"])
+query_router = router
 
 
 @router.get("/wallets", response_model=Dict[str, int], summary="지갑 주소 → user id 매핑 (검증 2단계)")

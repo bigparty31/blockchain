@@ -157,5 +157,89 @@
       "signature": "0x3ff4ba3ccb72ba19c3325456e24c4d18b89fd72530c661c7e10efda7c82619bc29cdf89742ef5695c204b89a64be9ca559b4de449364d20e04d7fe207842c20c1c",
       "signer": "0x90F79bf6EB2c4f870365E785982E1f101E93b906"
     }
+  ],
+  "sbtDomain": {
+    "name": "MembershipSBT",
+    "version": "1",
+    "chainId": 31337,
+    "verifyingContract": "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9",
+    "domainSeparator": "0xf444fbbb6b315e54e4c5cb770eb1db1669ce7880e8bbccd8eba12ecb8127281f"
+  },
+  "sbtVectors": [
+    {
+      "name": "mint_batch_president",
+      "primaryType": "MintBatchRequest",
+      "message": {
+        "recipients": [
+          "0x976EA74026E726554dB657fA54763abd0C3a0aa9",
+          "0x14dC79964da2C08b23698B3D3cc7Ca32193d9955"
+        ],
+        "term": 20262,
+        "nonce": 0,
+        "deadline": 1790700000
+      },
+      "digest": "0xdfd44bfd9515e2ace6a656762fa3c1e9103407f2e5c5c7a145a8fd098e44df9e",
+      "signature": "0xcf5008fb8e36cf7687600bff31e0ee642c043be56e136d39b850e29122a6ec615a01854664ab7835f37b66c33a583b51d76508256948edae6dcacf0f443413a51c",
+      "signer": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+    },
+    {
+      "name": "mint_batch_reversed",
+      "primaryType": "MintBatchRequest",
+      "message": {
+        "recipients": [
+          "0x14dC79964da2C08b23698B3D3cc7Ca32193d9955",
+          "0x976EA74026E726554dB657fA54763abd0C3a0aa9"
+        ],
+        "term": 20262,
+        "nonce": 0,
+        "deadline": 1790700000
+      },
+      "digest": "0x0c02fc69a18347f0ada05ccd5a5265767c250339fb17ec02afab94ad46853508",
+      "signature": "0x5bdfbf0f99a1c7039d7bdc4ea4e05cb5cebf6dc761daa54312acdf4b5993c6b33b59c0d81e036c4e41483942b87a06876056aee16d1b2886035b7a73211df8db1c",
+      "signer": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+    },
+    {
+      "name": "mint_batch_auditor",
+      "primaryType": "MintBatchRequest",
+      "message": {
+        "recipients": [
+          "0x976EA74026E726554dB657fA54763abd0C3a0aa9"
+        ],
+        "term": 20262,
+        "nonce": 0,
+        "deadline": 1790700000
+      },
+      "digest": "0x752f90389579544c32bf4046c1db31e37a4f13c2b2bc1bcad4677adcacab6eb6",
+      "signature": "0x7da432c0337f0392d41c4416b122a569b6fbee6b2e5c5f8166c3fc4fee7c6abe60c1d13ea44540746f7a4e080df1a30d80a2b70a0c96d1ee20a42055c2ff03231c",
+      "signer": "0x90F79bf6EB2c4f870365E785982E1f101E93b906"
+    },
+    {
+      "name": "burn_refund_president",
+      "primaryType": "BurnRequest",
+      "message": {
+        "holder": "0x976EA74026E726554dB657fA54763abd0C3a0aa9",
+        "term": 20262,
+        "reason": 0,
+        "nonce": 1,
+        "deadline": 1790700000
+      },
+      "digest": "0xcb1c0d29ea86bc5b92f6c3e3e703b35caef19b504685e5283d84756e1a0d242f",
+      "signature": "0xfc84c25c2714f249675782607aaeeea62c5e6a77b8631223554ac6ca82124d20056440e48fab9e25cb46410df773055445dde1363c528de4c578212bebbb41501b",
+      "signer": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+    },
+    {
+      "name": "burn_withdrawal_auditor",
+      "primaryType": "BurnRequest",
+      "message": {
+        "holder": "0x976EA74026E726554dB657fA54763abd0C3a0aa9",
+        "term": 20262,
+        "reason": 1,
+        "nonce": 1,
+        "deadline": 1790700000
+      },
+      "digest": "0xa5bc7e0f529dea888158a598d0077027615d5f9608eb02f1d42bf4fbf834596d",
+      "signature": "0x5f05604ca286709f6a7728ea533b1a7d3e3f325679805572b5e0e615aec4ee532e5396efdaabd26cc031ec17cd6c37e5c2af87387230e97904db758e0391d9781c",
+      "signer": "0x90F79bf6EB2c4f870365E785982E1f101E93b906"
+    }
   ]
 }

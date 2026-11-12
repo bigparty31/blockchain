@@ -44,8 +44,10 @@ class EntryModel {
   /// 그때 학기 대조는 「모름」으로 남는다 — 승인·반려 서명은 학기 코드가 없으면 서명 전에 멈춘다.
   final int? termCode;
 
-  /// 등록자 지갑 주소 (#65). 체인을 읽었으면 체인의 registrant, 못 읽었으면 DB 등록자 지갑이다 — 검증용
-  /// 체인 값으로 쓰지 않는다(그건 `/entries/{id}/onchain`). 서명의 `entryCommit` 에만 쓴다. 옛 서버는 null.
+  /// 등록자 지갑 주소 (#65) — 서버가 체인에서 읽은 registrant 다. **체인을 못 읽었거나 기록이 없으면 null 이다**
+  /// (서버가 DB 등록자 지갑으로 메우지 않는다 — 앱이 체인 값으로 오인하지 않게). 옛 서버도 null.
+  /// 검증용 체인 값으로 쓰지 않는다(그건 `/entries/{id}/onchain`). 서명의 `entryCommit` 에만 쓴다.
+  /// null 이면 승인·반려는 `GET /users/wallets` 로 찾되, 주소가 정확히 하나일 때만 서명한다.
   final String? registrant;
 
   final int? correctsEntryId;
@@ -53,6 +55,16 @@ class EntryModel {
 
   /// 총무가 수정을 요청한 시각 (unix seconds). 대기 건에만 생긴다.
   final int? revisionRequestedAt;
+
+  /// 영수증 중복(`ocr_status == DUPLICATE`)일 때 겹치는 **기존 건의 id**. 아니면 null.
+  /// 서버가 아직 안 내려주면(옛 서버) 항상 null 이고, 그때 승인 화면은 「중복」만 적는다.
+  final int? duplicateOf;
+
+  /// 예산 검사에서 차단된(`BLOCKED`) 사유. 모르는 값·없는 값은 null — 다른 사유로 바꿔 보이지 않는다.
+  final BlockReason? blockReason;
+
+  /// 등록자 실명. 없으면 null 이고 화면은 「사용자 #id」로 적는다.
+  final String? creatorName;
 
   EntryModel({
     required this.id,
@@ -84,6 +96,9 @@ class EntryModel {
     this.correctsEntryId,
     this.correctionReason,
     this.revisionRequestedAt,
+    this.duplicateOf,
+    this.blockReason,
+    this.creatorName,
   });
 
   factory EntryModel.fromJson(Map<String, dynamic> json) {
@@ -120,7 +135,17 @@ class EntryModel {
           : null,
       // 숫자가 아니면 「요청 안 함」으로 둔다 — 시각을 지어내지 않는다
       revisionRequestedAt: json['revision_requested_at'] is int ? json['revision_requested_at'] as int : null,
+      duplicateOf: json['duplicate_of'] is int ? json['duplicate_of'] as int : null,
+      blockReason: BlockReason.tryParse(json['block_reason']),
+      creatorName: _nonBlank(json['creator_name']),
     );
+  }
+
+  /// 문자열이고 공백만이 아니면 앞뒤 공백을 걷어 돌려준다. 아니면 null.
+  static String? _nonBlank(dynamic raw) {
+    if (raw is! String) return null;
+    final s = raw.trim();
+    return s.isEmpty ? null : s;
   }
 
   /// `status` 가 없으면 **채우지 않고 던진다.**

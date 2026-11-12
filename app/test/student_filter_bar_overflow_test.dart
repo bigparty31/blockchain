@@ -85,6 +85,34 @@ void main() {
     }
   }
 
+  /// 가로 스크롤로 바꾸면서 한 번 깨진 자리다. 스크롤뷰는 콘텐츠 너비만큼만
+  /// 차지해서, 폭을 지정하지 않으면 **흰 배경이 칩 끝에서 끊기고** 오른쪽이
+  /// 페이지 배경으로 비친다. 넘침 시험으로는 안 잡힌다 — 넘치지는 않으니까.
+  testWidgets('필터 바 배경이 화면 폭을 채운다', (tester) async {
+    const width = 411.0;
+    tester.view.physicalSize = const Size(width, 800);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const MaterialApp(home: EntryListScreen()));
+    for (var i = 0; i < 12; i++) {
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+
+    // 필터 바 = 가로 스크롤을 품고 있는 Container.
+    final bar = find.ancestor(
+      of: find.byType(SingleChildScrollView),
+      matching: find.byType(Container),
+    );
+    expect(bar, findsWidgets);
+    expect(
+      tester.getSize(bar.first).width,
+      width,
+      reason: '칩 너비만큼만 그려져 오른쪽이 비어 보인다',
+    );
+  });
+
   testWidgets('좁은 기기에서도 모든 칩에 닿을 수 있다', (tester) async {
     tester.view.physicalSize = const Size(320, 800);
     tester.view.devicePixelRatio = 1.0;

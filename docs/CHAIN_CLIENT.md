@@ -362,4 +362,21 @@ outcome = await relay_increase(chain, request, reason, president_sig, auditor_si
 
 **확인은 `app/services/membership.py`의 `check_membership(db, chain, user_id, term_id)`로 한다.** `GET /memberships/me`와 행사 입장 판정이 같은 함수를 쓴다 (PRD §10). 확인하지 못하면 `MembershipUnavailable`을 던지고, 부른 쪽은 미보유와 다르게 다룬다 — 조회 API는 503, 입장 판정은 `UNVERIFIABLE`. 보유의 기준은 체인이다. DB `Membership` 행은 화면의 발급 정보에만 쓴다.
 
-**`FakeChainClient`** — 발행 릴레이가 아직 없어서 `grant_membership(account, term)`·`burn_membership(account, term)`으로 체인 상태를 만든다. 이미 유효하면 같은 tokenId를 돌려주고(컨트랙트의 건너뛰기), 소각 뒤 재발행은 새 tokenId다.
+**`FakeChainClient`** — 시험은 `grant_membership(account, term)`·`burn_membership(account, term)`으로 서명 없이 체인 상태를 만들 수 있다 (nonce는 오르지 않는다). 이미 유효하면 같은 tokenId를 돌려주고(컨트랙트의 건너뛰기), 소각 뒤 재발행은 새 tokenId다.
+
+## 11. 회원권 발행·소각 (MembershipSBT 릴레이)
+
+| 메서드 | 컨트랙트 | 돌려주는 값 |
+| --- | --- | --- |
+| `membership_nonce(signer)` | `nonces` | 그 서명자의 다음 nonce. 발행·소각이 공유하고 성공마다 1 오른다 |
+| `mint_memberships(request, signature, before_broadcast)` | `mintBatchRelayed` | `MintBatchResult` — `minted`(주소·tokenId), `skipped`(이미 유효해 건너뛴 주소), `signer` |
+| `mint_tx_result(tx_hash)` | receipt | 같은 결과. 아직 블록에 없으면 `None` |
+| `burn_membership_relayed(request, signature, before_broadcast)` | `burnRelayed` | `BurnResult` — holder·tokenId·사유·signer |
+
+- 서명 대상은 `MintBatchRequest(recipients, term, nonce, deadline)`·`BurnRequest(holder, term, reason, nonce, deadline)`이고 도메인은 배포 기록의 `eip712["MembershipSBT"]`다 (`app/chain/eip712.py`). `signer_of`가 도메인을 고른다. 배포 기록에 그 도메인이 없으면 `ChainSetupError`다.
+- 배치 전체를 revert 하는 값(빈 배열, 100명 초과, 0 주소, 학기 코드 0, 같은 주소 두 번)은 모델을 만들 때 막는다.
+- revert 사유는 `MembershipRevertReason`(Solidity 에러 이름)이다. `INVALID_NONCE`는 같은 서명자의 다른 발행·소각이 먼저 들어갔거나 서명을 재사용한 것이다.
+- **응답을 잃으면(`ChainUnavailable`) 같은 서명을 다시 보내지 않는다.** 들어갔으면 nonce가 올라 재전송은 `INVALID_NONCE`로 보이고 결과를 잃는다. `before_broadcast`로 남긴 hash로 `mint_tx_result`를 본다.
+- 결과는 receipt의 `MembershipMinted`·`MembershipSkipped` 이벤트로 만든다. `MembershipSkipped`에는 tokenId가 없어 필요하면 `membership_token_of`로 읽는다.
+- 서비스는 `app/services/membership_mint.py`(준비·제출·결과 확인), API는 `docs/API.md` 「회원권 2」다. 소각 API는 아직 없다 (A14, P2).
+- **아직 실체인 시험은 없다.** `MembershipSBT` 구현·배포 전이라 Web3 경로는 `IMembershipSBT` 인터페이스 ABI(`tests/fixtures/IMembershipSBT.abi.json`)로 이벤트 해석·revert 이름·서명 복구만 노드 없이 확인한다. EIP-712 값은 앱 PR #90의 ethers 벡터 4건과 같다 (`tests/test_membership_chain.py`).
