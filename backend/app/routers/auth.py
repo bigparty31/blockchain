@@ -6,6 +6,7 @@ from app.auth.users import SEED_USERS, User, get_user_by_student_no
 from app.schemas.auth import LoginRequest, LoginResponse, MeResponse
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
+query_router = router
 
 # 없는 학번도 비밀번호 검사 시간을 똑같이 써서, 응답 시간으로 학번 존재 여부가 드러나지 않게 한다
 _DUMMY_HASH = SEED_USERS[0].password_hash

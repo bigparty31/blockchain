@@ -83,15 +83,19 @@ class NotificationService {
       Uri.parse('${ApiConfig.baseUrl}$path').replace(queryParameters: query);
 
   /// 401 이면 세션이 끝난 것이다 — 로그인 화면으로 보낸다 (`AuthService.reportUnauthorized`).
-  static Future<http.Response?> _send(Future<http.Response> Function() request) async {
+  ///
+  /// 헤더는 [request] 가 받는 것을 쓴다 — **보내기 직전에 잡은 토큰**과 한 쌍이라야, 늦게 돌아온 401 이
+  /// 그 사이 다시 로그인해 만든 새 세션을 지우지 않는다.
+  static Future<http.Response?> _send(Future<http.Response> Function(Map<String, String> headers) request) async {
+    final auth = AuthService().authSnapshot;
     final http.Response res;
     try {
-      res = await request().timeout(timeout);
+      res = await request(auth.headers).timeout(timeout);
     } catch (_) {
       return null;
     }
     if (res.statusCode == 401) {
-      await AuthService().reportUnauthorized();
+      await AuthService().reportUnauthorized(token: auth.token);
       return null;
     }
     return res;
@@ -99,9 +103,9 @@ class NotificationService {
 
   /// 목록 — 안 읽은 것 먼저, 그 안에서 최근 알린 순 (서버가 정렬한다). 못 읽으면 null.
   static Future<List<AppNotification>?> list({bool unreadOnly = false, int limit = 50}) async {
-    final res = await _send(() => client.get(
+    final res = await _send((headers) => client.get(
           _uri('/notifications', {'unread_only': '$unreadOnly', 'limit': '$limit'}),
-          headers: AuthService().authHeaders,
+          headers: headers,
         ));
     if (res == null || res.statusCode != 200) return null;
     final Object? body;
@@ -123,7 +127,7 @@ class NotificationService {
 
   /// 안 읽은 수 — 뱃지 폴링용. 못 읽으면 null.
   static Future<int?> unreadCount() async {
-    final res = await _send(() => client.get(_uri('/notifications/unread-count'), headers: AuthService().authHeaders));
+    final res = await _send((headers) => client.get(_uri('/notifications/unread-count'), headers: headers));
     if (res == null || res.statusCode != 200) return null;
     try {
       final count = (jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>)['count'];
@@ -136,7 +140,7 @@ class NotificationService {
   /// 읽음 처리. 성공하면 서버의 `read_at`, 실패하면 null.
   /// 이미 읽은 알림도 200 이고, 없는 알림·남의 알림은 404 다.
   static Future<int?> markRead(int id) async {
-    final res = await _send(() => client.post(_uri('/notifications/$id/read'), headers: AuthService().authHeaders));
+    final res = await _send((headers) => client.post(_uri('/notifications/$id/read'), headers: headers));
     if (res == null || res.statusCode != 200) return null;
     try {
       return (jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>)['read_at'] as int;

@@ -11,6 +11,7 @@ import 'package:student_council_app/services/auth_service.dart';
 /// 부른 테스트는 `tearDown` 에서 [signOutForTest] 를 불러 다음 테스트에 세션을 남기지 않는다.
 Future<void> signInAs(UserRole role, {int userId = 2}) async {
   AuthService.store = MemoryTokenStore();
+  AuthService.lockStore = MemoryLoginLockStore(); // 기본 잠금 보관소(키스토어)는 위젯 테스트에서 응답이 없다
   AuthService().resetAttempts();
   http.Response json(Object body) => http.Response(
         jsonEncode(body),
@@ -35,6 +36,7 @@ Future<void> signInAs(UserRole role, {int userId = 2}) async {
 /// 응답이 오지 않아, 로그인한 적 없는 테스트에서 `logout()` 이 끝나지 않는다.
 Future<void> signOutForTest() async {
   AuthService.store = MemoryTokenStore();
+  AuthService.lockStore = MemoryLoginLockStore(); // 기본 잠금 보관소(키스토어)는 위젯 테스트에서 응답이 없다
   await AuthService().logout();
   AuthService.client = http.Client();
 }

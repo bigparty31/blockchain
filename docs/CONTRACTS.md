@@ -9,7 +9,7 @@
 | `RoleManager` | 임원 롤(TREASURER / AUDITOR / PRESIDENT). 롤 식별자는 `keccak256("TREASURER")` 등 이름 해시(`bytes32`), enum 인덱스 아님. 일반 변경은 회장+감사 서명, 회장 키 분실은 감사 2명 + 72시간 대기로 복구 |
 | `BudgetToken` | 학기+항목 1줄 단위 예산 한도·소모액. 발행·회수는 회장 서명, 증액은 회장+감사 서명. `spend/refund`는 `AccountingLedger`만 호출 |
 | `AccountingLedger` | 수입·지출 원장. 확정 항목 수정 불가, 정정은 `correctsId`로 원본을 가리키는 새 항목 |
-| `MembershipSBT` | 학기 단위 학생 회원 증명. 전송 불가. 학번은 `keccak256(studentId, salt)` 커밋만 |
+| `MembershipSBT` | 학기 단위 학생 회원 증명. PRESIDENT 또는 AUDITOR 서명으로 발행·소각. 전송 불가. 온체인에는 지갑 주소만 있고 학번 등 식별정보는 없음 |
 | `ObjectionRegistry` | 학생 이의 제기·답변. 해시만 온체인. entry 상태에 영향 없음 |
 
 거래내역 CSV 파일 해시를 남기는 `recordBankSnapshot`은 원장에 넣지 않는다. 별도 컨트랙트로 추후 설계한다 (문승준과 필드·서명 주체 확정 후).
@@ -17,7 +17,7 @@
 ## 공통 규칙
 
 - **임원의 모든 쓰기는 기기 EIP-712 서명 + 서버 릴레이어 제출이다** (PRD §9.2). 임원 지갑이 직접 트랜잭션을 보내는 함수는 없다. 서명 없이 부를 수 있는 쓰기는 셋뿐이다: 배포자의 `setLedger` 1회, 릴레이어 신뢰인 `raise`, 대기가 끝난 회장 복구를 실행하는 `executePresidentRecovery`(누구나. 실행 조건은 저장된 감사 2명의 제안이 정한다).
-- ID(`budgetId`, `entryId`, `objectionId`)는 백엔드 DB auto-increment 값을 파라미터로 받는다. 컨트랙트는 중복만 막는다. SBT `tokenId`와 RoleManager `nonce`만 온체인 카운터. ID는 1부터 시작한다 (`0`은 "없음"). `0`으로 등록·발행하면 `ReservedId`로 revert하며, 중복(`…AlreadyExists`)과 구분된다.
+- ID(`budgetId`, `entryId`, `objectionId`)는 백엔드 DB auto-increment 값을 파라미터로 받는다. 컨트랙트는 중복만 막는다. SBT `tokenId`·서명자별 `nonces`와 RoleManager `nonce`는 온체인 카운터. ID는 1부터 시작한다 (`0`은 "없음"). `0`으로 등록·발행하면 `ReservedId`로 revert하며, 중복(`…AlreadyExists`)과 구분된다.
 - 금액은 원 단위 정수. 요청의 `amount`는 `int256`, `correctsId != 0`인 정정 항목만 음수 허용. 상한 `MAX_AMOUNT = 10^15`원(`AmountOutOfRange`).
 - 이벤트에 기록 시각을 넣지 않는다 (블록에 있음). 발생 시각 `occurredAt`은 파라미터.
 - enum 온체인 순서 = `docs/enums.md` 표 순서. `ocr_status`는 온체인에 올리지 않는다.
@@ -71,6 +71,17 @@
 - `spend` / `refund` 호출자는 `AccountingLedger` 하나로 제한한다. 원장 주소는 **배포자가 `setLedger`로 한 번만 설정하고 잠근다.** 두 번째 호출은 `LedgerAlreadySet`. 원장의 `roleManager()`·`budgetToken()`이 맞지 않으면 `LedgerMismatch`. 설정 시 `LedgerSet` 이벤트.
 - `issue`의 `term == 0`은 `TermRequired`, `category == 0`은 `CategoryRequired`. 해시 0은 시스템 전체에서 "없음"이라 예산 키로 쓸 수 없다.
 
+### 회원권 (MembershipSBT)
+
+- 발행·소각 서명자는 RoleManager 의 `PRESIDENT` 또는 `AUDITOR` 한 명이다. 호출자는 롤이 없는 릴레이어이며 이벤트 `actor`는 서명자다.
+- `nonce`는 서명자별로 하나이며 발행·소각이 공유한다. 성공한 요청마다 1 증가한다. 전부 건너뛴 배치도 nonce를 소비한다. 만료는 `SignatureExpired`, 현재 nonce 불일치는 `InvalidNonce`다.
+- 배치는 1~100명(`MAX_BATCH_SIZE() = 100`). 빈 배열은 `EmptyBatch`, 초과는 `BatchTooLarge`. 수령자 중 0 주소가 하나라도 있으면 `ZeroAddress`로 배치 전체를 revert 한다.
+- 한 `(account, term)`에 유효한 회원권은 하나뿐이다. 이미 유효한 수령자는 revert 없이 `MembershipSkipped`로 넘긴다. 새 tokenId는 1부터 시작하는 온체인 카운터로 발급하고 `MembershipMinted`로 알린다.
+- `term == 0`은 `TermRequired`. `hasValidMembership`은 해당 학기의 미소각 회원권 보유 여부, `tokenOf`는 유효한 tokenId를 반환한다. 없거나 소각됐으면 `tokenOf`는 0이다.
+- 소각은 `(holder, term)`으로 대상을 찾고 없으면 `NoMembership`. `reason`은 `uint8`이며 `BurnReason { REFUND, WITHDRAWAL }`의 값으로, 순서는 `docs/enums.md`의 `burn_reason` 표와 같다. 범위 밖 값은 `InvalidBurnReason`이다. 소각하면 `tokenOf`를 비워 같은 학기 재발행을 허용한다.
+- `transferFrom`·`safeTransferFrom`·`approve`·`setApprovalForAll`은 `Soulbound`로 revert 한다. 발행·소각만 허용한다.
+- 온체인에는 지갑 주소만 두고 학번 등 식별정보는 저장하지 않는다.
+
 ### 롤 (RoleManager)
 
 - **보유 규칙.** 회장 정확히 1명, 총무 정확히 1명, **감사 2명 이상**. 한 주소는 임원 롤을 하나만 가진다(`AlreadyOfficer`).
@@ -112,8 +123,9 @@
 | `RoleManager` | `(president, treasurer, auditor1, auditor2)` — 서로 다른 네 계정 |
 | `BudgetToken` | `(roleManager)` |
 | `AccountingLedger` | `(roleManager, budgetToken)` — 0 이면 `ZeroAddress` |
+| `MembershipSBT` | `(roleManager)` — 0 이면 `ZeroAddress` |
 
-배포 순서: `RoleManager` → `BudgetToken` → `AccountingLedger` → `BudgetToken.setLedger(ledger)`. 릴레이어 계정은 롤이 없다. 배포 스크립트가 끝나면 배포자에게 남는 권한은 없다.
+배포 순서: `RoleManager` → `BudgetToken` → `AccountingLedger` → `BudgetToken.setLedger(ledger)` → `MembershipSBT`. `MembershipSBT`를 맨 뒤에 두어 앞의 세 컨트랙트 주소(배포자 nonce로 정해짐)가 SBT 추가 전과 같다. 릴레이어 계정은 롤이 없다. 배포 스크립트가 끝나면 배포자에게 남는 권한은 없다.
 
 ### 저장 배치
 
@@ -190,8 +202,8 @@ meta_hash = SHA256( amount ␟ counterparty ␟ purpose ␟ occurred_at ␟ rece
 | AccountingLedger | `confirmEntry(ConfirmApproval, sig)` | 릴레이어 호출, 서명자 = AUDITOR 또는 PRESIDENT (≠ 등록자) |
 | AccountingLedger | `rejectEntry(RejectDecision, sig)` | 릴레이어 호출, 서명자 = AUDITOR 또는 PRESIDENT (≠ 등록자) |
 | AccountingLedger | `getEntry`, `statusOf`, `exists`, `entryCommitOf`, `netAmountOf`, `roleManager`, `budgetToken`, `MAX_AMOUNT`, `DOMAIN_SEPARATOR` | view. `statusOf`는 없는 id면 `EntryNotFound` |
-| MembershipSBT | `mintBatch`, `burn` | PRESIDENT |
-| MembershipSBT | `hasValidMembership`, `tokenOf`, `getMembership`, `nextTokenId` | view |
+| MembershipSBT | `mintBatchRelayed(MintBatchRequest, signature)`, `burnRelayed(BurnRequest, signature)` | 릴레이어 호출, 서명자 = PRESIDENT 또는 AUDITOR |
+| MembershipSBT | `hasValidMembership`, `tokenOf`, `nonces`, `DOMAIN_SEPARATOR`, `MAX_BATCH_SIZE` | view. 서명자별 nonce, 배치 상한 100 |
 | ObjectionRegistry | `raise` | 릴레이어 호출, `raiser`는 SBT 보유자 (릴레이어 신뢰) |
 | ObjectionRegistry | `answer(AnswerRequest, sig)` | 릴레이어 호출, 서명자 = 임원 |
 
@@ -217,7 +229,9 @@ meta_hash = SHA256( amount ␟ counterparty ␟ purpose ␟ occurred_at ␟ rece
 | `BudgetSpent(budgetId, amount, entryId)` / `BudgetRefunded(...)` | budgetId |
 | `BudgetReclaimed(budgetId, amount, actor)` | budgetId, actor |
 | `LedgerSet(ledger)` | ledger |
-| `MembershipMinted(tokenId, to, term, commitment)` / `MembershipBurned(tokenId, from, term)` | tokenId, to/from, term |
+| `MembershipMinted(tokenId, to, term, actor)` | tokenId, to, actor (서명자) |
+| `MembershipSkipped(to, term, actor)` | to, term, actor (서명자) |
+| `MembershipBurned(tokenId, from, term, reason, actor)` | tokenId, from, actor (서명자). reason은 BurnReason 값 |
 | `ObjectionRaised(objectionId, entryId, contentHash, raiser)` / `ObjectionAnswered(objectionId, answerHash, responder)` | objectionId, entryId/responder |
 | `RoleGranted(role, account, proposer, approver)` / `RoleRevoked(role, account, proposer, approver)` | role, account, approver. proposer·approver 0 = 생성자 최초 부여 |
 | `RoleChangeExecuted(nonce, role, from, to, proposer, approver)` | nonce, role. 일반 변경·회장 복구 실행 모두 |
@@ -230,7 +244,7 @@ meta_hash = SHA256( amount ␟ counterparty ␟ purpose ␟ occurred_at ␟ rece
 
 | 에러 | 컨트랙트 | 조건 |
 | --- | --- | --- |
-| `TermRequired` | AccountingLedger, BudgetToken | `term == 0` |
+| `TermRequired` | AccountingLedger, BudgetToken, MembershipSBT | `term == 0` |
 | `CategoryRequired` | BudgetToken | 발행의 `category == 0` |
 | `TermMismatch` | AccountingLedger | 지출 `term`이 예산 `term`과 다름, 또는 정정 `term`이 원본과 다름 (등록 시점 revert) |
 | `BudgetIdNotAllowedForIncome` | AccountingLedger | INCOME인데 `budgetId != 0` |
@@ -245,7 +259,7 @@ meta_hash = SHA256( amount ␟ counterparty ␟ purpose ␟ occurred_at ␟ rece
 | `ReservedId` | AccountingLedger, BudgetToken | `id == 0` / `budgetId == 0`. 중복이 아니라 예약값 위반 |
 | `AmountOutOfRange` | AccountingLedger, BudgetToken | 금액이 `MAX_AMOUNT`를 넘음 |
 | `FieldOutOfRange` | AccountingLedger, BudgetToken | id·term·시각이 저장 폭을 넘음 |
-| `ZeroAddress` | AccountingLedger (신규), BudgetToken·RoleManager (기존) | 생성자 인자 0 |
+| `ZeroAddress` | AccountingLedger (신규), BudgetToken·RoleManager (기존), MembershipSBT | 생성자 인자 0 / SBT 수령자·소각 대상 0 |
 | `ZeroAmount` (기존) | AccountingLedger | 차액 0인 정정도 여기에 걸린다. 새 이름 없음 |
 | `BudgetAlreadyIssued` | BudgetToken | 같은 `(term, category)`에 두 번째 발행 |
 | `VersionMismatch` | BudgetToken | 증액 요청의 `version`이 현재 version과 다름 (서명 재사용·경합) |
@@ -253,7 +267,7 @@ meta_hash = SHA256( amount ␟ counterparty ␟ purpose ␟ occurred_at ␟ rece
 | `ReclaimCountMismatch` | BudgetToken | 회수 요청의 `reclaimCount`가 현재 회수 횟수와 다름 (서명 재사용) |
 | `NotPresident` | BudgetToken, RoleManager | 발행·회수 서명자, 증액 요청 서명자, 회장 복구 취소 서명자가 회장이 아님 |
 | `NotAuditor` | BudgetToken, RoleManager | 증액 승인 서명자, 회장 복구 제안자가 감사가 아님 |
-| `InvalidSignature` / `SignatureExpired` | BudgetToken, RoleManager (신규), AccountingLedger (기존) | 서명 바이트 깨짐 / deadline 경과 |
+| `InvalidSignature` / `SignatureExpired` | BudgetToken, RoleManager (신규), AccountingLedger (기존), MembershipSBT | 서명 바이트 깨짐 / deadline 경과 |
 | `BudgetExpired` | BudgetToken (기존), AccountingLedger ABI | 확정 시 `spend`에서 마감 경과(`confirmEntry`를 통과해 그대로 올라옴), 마감 뒤 증액. 원장 ABI에도 선언 |
 | `InsufficientBudget` | BudgetToken (기존), AccountingLedger ABI | 확정 시 잔량 부족. 원장 ABI에도 선언 |
 | `LedgerAlreadySet` | BudgetToken | `setLedger` 두 번째 호출 |
@@ -266,13 +280,19 @@ meta_hash = SHA256( amount ␟ counterparty ␟ purpose ␟ occurred_at ␟ rece
 | `NoPendingRecovery` | RoleManager | 대기 중인 회장 복구가 없거나 id가 다름 |
 | `RecoveryNotReady` | RoleManager | 회장 복구 대기 72시간이 안 지남 |
 | `SameSigner` | RoleManager | 롤 변경 제안자 == 승인자. 원장의 `SelfApproval`과 이름을 나눴다 |
-| `InvalidNonce` | RoleManager | 롤 변경 요청의 nonce가 현재 값과 다름 (이미 실행됐거나 다른 변경이 먼저 실행됨) |
+| `InvalidNonce` | RoleManager, MembershipSBT | 롤 변경 nonce 또는 SBT 서명자별 발행·소각 공유 nonce가 현재 값과 다름 |
+| `NotApprover` | MembershipSBT | 서명자가 PRESIDENT 또는 AUDITOR가 아님 |
+| `EmptyBatch` | MembershipSBT | 수령자 배열이 비어 있음 |
+| `BatchTooLarge` | MembershipSBT | 수령자 수가 100명을 넘음 |
+| `NoMembership` | MembershipSBT | 소각할 `(holder, term)` 회원권이 없음 |
+| `InvalidBurnReason` | MembershipSBT | `reason`이 `BurnReason` 범위 밖 |
+| `Soulbound` | MembershipSBT | 전송·승인 시도 |
 
 이름이 바뀌거나 없어진 것: RoleManager의 `Unauthorized`·`SelfApproval`·`RotationNotFound`·`RotationAlreadyExecuted`는 새 구조에서 쓰지 않는다. 원장의 `Unauthorized`는 쓰이지 않아 뺐다.
 
 ## EIP-712
 
-서명을 받는 컨트랙트마다 도메인이 따로 있다: `name = 컨트랙트명`, `version = "1"`, `chainId`, `verifyingContract`. `DOMAIN_SEPARATOR()`를 노출하는 것은 AccountingLedger·BudgetToken·RoleManager·ObjectionRegistry이고, MembershipSBT는 서명을 받지 않아 없다. 앱은 서명 대상에 맞는 도메인을 골라야 한다.
+서명을 받는 컨트랙트마다 도메인이 따로 있다: `name = 컨트랙트명`, `version = "1"`, `chainId`, `verifyingContract`. 서명 도메인은 AccountingLedger·BudgetToken·RoleManager·MembershipSBT의 4개이며 모두 `DOMAIN_SEPARATOR()`를 노출한다. ObjectionRegistry는 v0.13에서 구현·배포하지 않아 범위 밖이다. 앱은 서명 대상에 맞는 도메인을 골라야 한다.
 
 | 컨트랙트 | struct | typehash 문자열 |
 | --- | --- | --- |
@@ -285,9 +305,13 @@ meta_hash = SHA256( amount ␟ counterparty ␟ purpose ␟ occurred_at ␟ rece
 | RoleManager | `RoleChange` | `RoleChange(bytes32 role,address from,address to,uint256 nonce,uint256 deadline)` |
 | RoleManager | `PresidentRecovery` | `PresidentRecovery(address from,address to,uint256 nonce,uint256 deadline)` |
 | RoleManager | `RecoveryCancel` | `RecoveryCancel(uint256 recoveryId,uint256 deadline)` |
+| MembershipSBT | `MintBatchRequest` | `MintBatchRequest(address[] recipients,uint256 term,uint256 nonce,uint256 deadline)` |
+| MembershipSBT | `BurnRequest` | `BurnRequest(address holder,uint256 term,uint8 reason,uint256 nonce,uint256 deadline)` |
 | ObjectionRegistry | `AnswerRequest` | `AnswerRequest(uint256 objectionId,bytes32 answerHash,uint256 deadline)` |
 
-`deadline`은 서명 유효 시한. 원장의 각 id는 한 번만 상태 전이하므로 nonce는 두지 않는다. 재사용 방지: 예산 발행은 `budgetId` 유일성, 증액은 `version`, 회수는 `reclaimCount`, 롤 변경·회장 복구 제안은 `nonce`, 복구 취소는 `recoveryId`(취소되면 대기 복구가 사라짐).
+`MintBatchRequest.recipients`의 EIP-712 배열 인코딩은 `keccak256(abi.encodePacked(recipients))`이며 이 해시를 struct 인코딩에 넣는다.
+
+`deadline`은 서명 유효 시한. 원장의 각 id는 한 번만 상태 전이하므로 nonce는 두지 않는다. 재사용 방지: 예산 발행은 `budgetId` 유일성, 증액은 `version`, 회수는 `reclaimCount`, 롤 변경·회장 복구 제안은 `nonce`, 복구 취소는 `recoveryId`(취소되면 대기 복구가 사라짐), SBT 발행·소각은 서명자별 공유 `nonces(signer)`. SBT 요청 하나가 성공하면 같은 서명자의 이전 nonce로 받은 발행·소각 서명은 모두 무효다.
 
 nonce가 없으므로 같은 id에 `ConfirmApproval`과 `RejectDecision` 서명이 둘 다 존재하면 릴레이어가 먼저 올리는 쪽이 이긴다. **서버 규칙: 한 id에 확정·반려 서명을 동시에 발급하지 않는다.** 하나를 발급했으면 그 서명이 제출되거나 `deadline`이 지나기 전에는 다른 쪽을 발급하지 않는다.
 
@@ -304,7 +328,7 @@ nonce가 없으므로 같은 id에 `ConfirmApproval`과 `RejectDecision` 서명�
 
 ## 필수 테스트
 
-이번 범위(RoleManager·BudgetToken·AccountingLedger)에서 통과해야 하는 목록이다. SBT는 이번 범위가 아니라 목록에만 둔다.
+네 컨트랙트(RoleManager·BudgetToken·AccountingLedger·MembershipSBT)가 통과해야 하는 목록이다.
 
 | # | 항목 | 이번 범위 |
 | --- | --- | --- |
@@ -313,7 +337,7 @@ nonce가 없으므로 같은 id에 `ConfirmApproval`과 `RejectDecision` 서명�
 | 3 | 확정 항목을 수정하는 함수가 존재하지 않음 (ABI에 상태 변경 경로가 `recordPending`·`confirmEntry`·`rejectEntry`뿐) | O |
 | 4 | 정정 대상이 `CONFIRMED`가 아니면 revert (`CorrectionTargetNotConfirmed`) | O |
 | 5 | 증액 정정(양수 정정)도 잔량 검사 (등록 시 `BLOCKED`, 확정 시 `InsufficientBudget`) | O |
-| 6 | SBT 전송 revert (`Soulbound`) | X (다음 범위) |
+| 6 | SBT 전송·approve·setApprovalForAll revert (`Soulbound`) | O |
 | 7 | 릴레이어 키로 승인 불가 (릴레이어 서명은 `NotApprover`) | O |
 | 8 | `BudgetToken.spend`를 `AccountingLedger` 외 계정이 호출하면 revert (`Unauthorized`). PRD §7.2 | O |
 | 9 | 롤 변경(부여·회수·교체)은 회장과 감사 두 사람의 서명 없이는 실행되지 않음 (회장 키 분실 시에만 감사 2명 + 72시간 대기). PRD §7.2·§9.2 | O |
@@ -352,3 +376,13 @@ nonce가 없으므로 같은 id에 `ConfirmApproval`과 `RejectDecision` 서명�
 - 조회: 없는 id의 `statusOf`는 `EntryNotFound` / `EntryBlocked`에 hash·term·correctsId·등록자 (차단된 양수 정정은 correctsId != 0)
 - 회장 복구 소멸: 제안 뒤 회장이 일반 교체되면 대기 복구가 지워지고, 옛 회장이 돌아온 뒤 72시간이 지나도 실행은 `NoPendingRecovery`
 - 발행: `category == 0` → `CategoryRequired`
+
+MembershipSBT (`test/MembershipSBT.test.ts`):
+
+- PRESIDENT·AUDITOR 서명으로 발행·소각 성공, actor가 서명자 / 롤 없는 릴레이어 호출 성공 / 총무·외부인 서명은 `NotApprover`
+- 빈 배치 `EmptyBatch` / 100명 성공 / 101명 `BatchTooLarge` / 중간에 0 주소가 있으면 `ZeroAddress`로 전체 revert
+- 기존 유효 수령자는 `MembershipSkipped`, 신규만 `MembershipMinted` / 같은 배치의 중복 수령자도 건너뜀 / 전부 건너뛰어도 nonce 소비
+- 발행·소각의 `term == 0`은 `TermRequired` / 소각 대상 0 주소는 `ZeroAddress` / 없는 회원권 소각은 `NoMembership` / 범위 밖 reason은 `InvalidBurnReason`
+- REFUND·WITHDRAWAL 소각 이벤트의 reason·actor / 소각 후 `tokenOf == 0`·`hasValidMembership == false` / 같은 학기 재발행 성공
+- 서명자별 nonce 독립 / 발행·소각 간 nonce 공유 / 재제출·경합은 `InvalidNonce` / 만료는 `SignatureExpired` / 깨진 서명은 `InvalidSignature`
+- EIP-712 도메인·수령자 배열 순서·term·reason 변조 시 서명 검증 실패 / 모든 전송·승인은 `Soulbound` / 인터페이스에 학번 등 식별정보 필드 없음

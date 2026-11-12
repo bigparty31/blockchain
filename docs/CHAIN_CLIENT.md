@@ -6,7 +6,7 @@
 
 | 지금 | 다음 |
 | --- | --- |
-| `AccountingLedger` 등록·확정·반려, `getEntry` 조회. 실제 릴레이어(`Web3ChainClient`)는 등록(`record_pending`)·확정(`confirm_entry`)·조회(`get_entry`·`tx_result`)까지, 배포 기록 읽기, 중복 전송 방지(`before_broadcast`), deadline 결정(§7). `tx_pending` 3상태 전이(`app/services/chain_tx.py`, §3) | 실제 릴레이어의 반려, 한 id에 확정·반려 서명을 동시에 발급하지 않는 서버 규칙, 재시도, 오래 남은 처리 중(②) 정리. 예산(`BudgetToken`)·롤(`RoleManager`) 릴레이 — 둘 다 서명 + 릴레이어 방식이 됐다. 이의·SBT는 컨트랙트가 아직 없다 |
+| `AccountingLedger` 등록·확정·반려, `getEntry` 조회. 실제 릴레이어(`Web3ChainClient`)는 등록(`record_pending`)·확정(`confirm_entry`)·반려(`reject_entry`)·조회(`get_entry`·`tx_result`)까지, 배포 기록 읽기, 중복 전송 방지(`before_broadcast`), deadline 결정(§7). `tx_pending` 3상태 전이(`app/services/chain_tx.py`, §3) | 재시도, 오래 남은 처리 중(②) 정리. 예산(`BudgetToken`)·롤(`RoleManager`) 릴레이 — 둘 다 서명 + 릴레이어 방식이 됐다. 이의·SBT는 컨트랙트가 아직 없다 |
 
 서명은 ChainClient가 만들지 않는다. 임원 기기가 서명한 값을 받아 릴레이만 한다 (PRD §9.2).
 
@@ -43,6 +43,7 @@
 | `reject_entry(decision, signature, before_broadcast=None)` | `rejectEntry` | `REJECTED` |
 | `get_entry(entry_id)` | `getEntry` | 없으면 `None` |
 | `tx_result(tx_hash, entry_id)` | 부르지 않음 (receipt) | 그 트랜잭션이 남긴 결과. 아직 블록에 없으면 `None` (§3) |
+| `entry_tx_detail(tx_hash, entry_id)` | 부르지 않음 (receipt) | 그 트랜잭션의 status·블록 번호·사유 해시. 아직 블록에 없으면 `None`. 예외는 `tx_result`와 같다 |
 | `signer_of(payload, signature)` | 부르지 않음 | 서명자 주소 (§4). 동기 메서드 |
 
 `getEntry`는 없는 id에도 0으로 채운 구조체(`registrant == 0`)를 돌려주고, status 0은 `PENDING`이다. 그대로 옮기면 없는 항목이 `PENDING`으로 보이므로 실제 구현은 `exists(id)`를 먼저 확인해 없으면 `None`을 돌려준다. (`statusOf`는 없는 id면 `EntryNotFound`로 revert한다.) 반환 튜플 순서는 저장 배치를 따르므로 **위치가 아니라 필드 이름으로 읽는다** (HASHING §2).
@@ -75,20 +76,21 @@
 | ② 처리 중 | NULL | 있음 | 보냈는데 결과를 모른다. **다시 보내지 않는다** |
 | ③ 체인 기록 | `PENDING`·`BLOCKED` | 있음 | 끝났다 |
 
-확정은 같은 규칙을 `tx_confirm`으로 한다 — `PENDING`이고 `tx_confirm` NULL → `tx_confirm` 있음 → `CONFIRMED`. `approved_by`·`warning_ack_reason`은 선점할 때 함께 적고, 실패해 비울 때 함께 비운다. `tx_confirm`은 반려와 같이 쓰는 칸이라 **`approved_by`가 빈 선점은 반려의 것으로 보고 읽지도 비우지도 않는다**(409). 경고 사유 원문은 그 SHA256(HASHING §3)이 서명된 `warning_reason_hash`와 같아야 저장한다 — 다르면 학생 검증에서 위조로 보인다(400). 경고 승인이 아니면 사유는 `None`이다.
+확정은 같은 규칙을 `tx_confirm`으로 한다 — `PENDING`이고 `tx_confirm` NULL → `tx_confirm` 있음 → `CONFIRMED`. `approved_by`·`warning_ack_reason`은 선점할 때 함께 적고, 실패해 비울 때 함께 비운다. 반려도 같은 칸을 쓴다 — `PENDING`이고 `tx_confirm` NULL → `tx_confirm` 있음(`rejected_by`·`reject_reason`도 함께) → `REJECTED`. 칸이 하나라 한 항목에 확정과 반려가 같이 나가지 않고, **`approved_by`가 빈 선점은 반려의 것으로, `rejected_by`가 빈 선점은 확정의 것으로 보고 상대 흐름은 읽지도 비우지도 않는다**(409). T4 수정 요청(`revision_requested_at`)이 있으면 확정은 선점하지 않고 409로 끝나며 보내지 않는다. 선점의 조건부 UPDATE에 넣어, 라우터 검사와 수정 요청이 엇갈려도 막는다. 반려는 막지 않는다(수정 요청 → 반려 → 재등록). 이미 선점한 뒤 온 수정 요청은 나간 트랜잭션을 되돌리지 못하므로, 수정 요청 쪽이 `tx_confirm` NULL을 조건으로 저장해야 한다. 경고 사유 원문은 그 SHA256(HASHING §3)이 서명된 `warning_reason_hash`와 같아야 저장한다 — 다르면 학생 검증에서 위조로 보인다(400). 경고 승인이 아니면 사유는 `None`이다.
 
 ```python
-from app.services.chain_tx import EntryConflict, relay_confirm, relay_record
+from app.services.chain_tx import EntryConflict, relay_confirm, relay_record, relay_reject
 
 # 권한 검사 → RecordRequest 구성 → signer_of 대조(다르면 400) → 라우터 자신의 변경은 commit 한 다음에
 result = await relay_record(db, chain, request, signature)                    # ① → ③. DB 는 여기서 갱신된다
 result = await relay_confirm(db, chain, approval, signature, user.id, reason)  # PENDING → CONFIRMED. reason 은 정본 원문 또는 None
+result = await relay_reject(db, chain, decision, signature, user.id, reason)    # PENDING → REJECTED. reason 은 정본 원문
 ```
 
-- **이미 ②인 항목에 요청이 다시 오면 보내지 않고** 저장한 hash로 결과부터 확인한다(`tx_result`). 결과가 있으면 ③으로 맞추고, 그 선점이 이 요청과 같은 내용(확정이면 같은 승인자·사유)일 때만 성공으로 돌려준다 — 다르면 409(앞선 요청이 끝낸 것이고 이 서명은 보내지 않았다). 블록에서 실패로 끝났으면 ①로 돌려 이 요청의 서명으로 보내고, 아직 모르면 409다
+- **이미 ②인 항목에 요청이 다시 오면 보내지 않고** 저장한 hash로 결과부터 확인한다(`tx_result`). 결과가 있으면 ③으로 맞추고, 그 선점이 이 요청과 같은 내용(확정·반려면 같은 사람·사유)일 때만 성공으로 돌려준다 — 다르면 409(앞선 요청이 끝낸 것이고 이 서명은 보내지 않았다). 블록에서 실패로 끝났으면 ①로 돌려 이 요청의 서명으로 보내고, 아직 모르면 409다
 - **DB는 단계(읽기·선점·반영·해제)마다 짧은 세션을 따로 열어 스레드에서 돌린다.** 라우터가 넘긴 세션은 엔진을 얻는 데만 쓰고 commit·rollback하지 않는다 — 라우터는 부르기 전에 자기 변경을 commit하고, 부른 뒤 항목 값이 필요하면 다시 읽는다. 선점은 릴레이어 lock을 쥔 채 일어나므로 동기 DB 대기가 이벤트 루프를 막지 않게 했고, 체인을 기다리는 동안 열린 DB 트랜잭션도 없다. 테스트에서 메모리 sqlite를 쓰면 `poolclass=StaticPool`로 만든다 — 기본 풀은 스레드마다 다른 연결(다른 DB)이라 시작할 때 막는다
 - hash는 소문자로 저장하고, 반영·해제는 DB에 저장된 값을 조건으로 쓴다. 반영이 0행인데 DB가 체인 결과와 다르면 성공으로 돌려주지 않는다(`RuntimeError` → 500, 서버 로그)
-- 콜백 전에 `ENTRY_ALREADY_EXISTS`(등록)·`INVALID_STATUS`(확정)로 걸리면 동시에 온 다른 요청이 먼저 보낸 것일 수 있다. DB를 다시 읽어 그렇다면 409로 바꾼다
+- 콜백 전에 `ENTRY_ALREADY_EXISTS`(등록)·`INVALID_STATUS`(확정·반려)로 걸리면 동시에 온 다른 요청이 먼저 보낸 것일 수 있다. DB를 다시 읽어 그렇다면 409로 바꾼다
 - 선점을 비우는 UPDATE는 칸에 **내 hash가 있을 때만** 쓴다. 남의 선점은 건드리지 않는다
 - ②가 오래 남는 경우(노드가 트랜잭션을 잃음, 선점 직후 보내기 전에 요청이 취소됨 — 서버 종료 등)의 정리는 이번 범위가 아니다. receipt가 없다고 들어가지 않았다고 단정할 수 없다 (§7)
 
@@ -100,6 +102,7 @@ result = await relay_confirm(db, chain, approval, signature, user.id, reason)  #
 | `ChainRevert` | 400 (`e.reason`) | ① 또는 `PENDING` |
 | `ChainSetupError` | 503 (전역 처리기) | 이번 요청이 보낸 것은 없다 — 선점했으면 비웠다. 보낸 뒤에는 이 예외가 아니라 `ChainUnavailable`이다 |
 | `ChainUnavailable` | 503 | ② 유지. 다시 요청하면 결과를 확인한다 |
+| `SQLAlchemyError` | 503 | 체인에 들어간 뒤 DB 저장이 실패했으면 ② 유지. 다시 요청하면 결과를 맞춘다 |
 
 ## 4. 결과와 실패
 
@@ -220,14 +223,16 @@ chain.unavailable_next("confirm_entry", landed=True)                # 체인엔 
 ## 7. 아직 정할 것
 
 - ~~`deadline` 값~~ → 기존 규정대로 나눈다. **만료 판정은 컨트랙트**(`SignatureExpired`, 검사 순서 1)라 ChainClient는 시뮬레이션에서 `ChainRevert(SIGNATURE_EXPIRED)`로 돌려준다. **발급 기본값(발급 + 10분)과 만료된 초안의 410·400은 API 규정**(API.md §2.3)이라 등록 API가 검사한다. 주의 — Hardhat은 블록이 없으면 최신 블록 시각이 마지막 블록에 머무른다. 그래서 실제 구현은 다음 블록(pending) 시각으로 시뮬레이션해, 이미 만료된 서명을 보내기 전에 거른다. deadline은 실제 시각 기준으로 정한다
-- 한 id에 확정·반려 서명을 둘 다 릴레이하지 않는 장치 — ChainClient 안인지 서비스 계층인지 (`docs/CONTRACTS.md` EIP-712 절의 서버 규칙)
+- ~~한 id에 확정·반려 서명을 둘 다 릴레이하지 않는 장치~~ → 서비스 계층. 확정·반려가 `tx_confirm` 한 칸을 선점한다 (§3)
 - ~~앱이 서명에 쓸 EIP-712 도메인을 내려주는 경로~~ → `GET /chain/domains` (API.md 「체인」). 배포 기록은 `app/chain/deployment.py`가 읽고, 실제 릴레이어도 여기서 주소를 읽는다
 - ~~③에서 서버가 서명자를 먼저 복구해 확인할지~~ → 확인한다. 서비스가 `ChainClient.signer_of`로 복구한 주소를 기대 지갑과 비교하고, 다르면 체인에 보내지 않는다 (§4). 서비스가 `app/chain/eip712.py`를 직접 부르지 않는 이유는 FakeChainClient로도 같은 흐름을 테스트하기 위해서다
-- 예산·롤 릴레이 — `BudgetToken`(발행·증액·회수)과 `RoleManager`(롤 변경·회장 복구)도 서명 + 릴레이어 방식이다. 같은 모양으로 메서드를 더한다. 두 컨트랙트에는 원장과 이름이 같은 에러(`TermRequired`·`ReservedId` 등)가 있어 **어느 컨트랙트에서 났는지까지** 보고 분류한다
+- 예산 발행·증액 → §9. 남은 것: 회수(`reclaim`, P2)와 `RoleManager`(롤 변경·회장 복구)는 같은 모양으로 메서드를 더한다. `RoleManager`도 원장과 이름이 같은 에러가 있으니 `BudgetRevertReason`처럼 사유 enum과 해석기를 따로 둔다
 - ~~반려 사유·경고 사유 필수 검사~~ → `REASON_REQUIRED`·`REASON_NOT_ALLOWED`로 반영됨
-- ~~`tx_pending` 3상태~~ → `app/services/chain_tx.py` (§3). 남은 것: ②가 오래 남은 항목의 정리(관리자 해제·정리 작업)와 재시도는 다음 범위 — 노드가 트랜잭션을 잃었거나(receipt 없음), 원장을 다시 배포해 옛 receipt의 로그가 새 원장 것이 아닐 때(결과 이벤트 없음) ②가 풀리지 않는다. 다시 배포하면 DB도 초기화한다. 반려를 구현할 때 같은 모듈에 반려 단계(`tx_confirm`·`rejected_by`·`reject_reason`)를 더하고, 반려의 ② 정리도 그 흐름이 한다. API.md에 409(처리 중·이미 기록됨) 응답을 넣는 것은 등록·승인 API 담당이 정한다
+- ~~`tx_pending` 3상태~~ → `app/services/chain_tx.py` (§3). 남은 것: ②가 오래 남은 항목의 정리(관리자 해제·정리 작업)와 재시도는 다음 범위 — 노드가 트랜잭션을 잃었거나(receipt 없음), 원장을 다시 배포해 옛 receipt의 로그가 새 원장 것이 아닐 때(결과 이벤트 없음) ②가 풀리지 않는다. 다시 배포하면 DB도 초기화한다. 반려의 ② 정리도 같은 범위다. API.md에 409(처리 중·이미 기록됨) 응답을 넣는 것은 등록·승인 API 담당이 정한다
 
 ## 8. 클라이언트 받기 — provider
+
+**`RELAYER_PRIVATE_KEY`가 없으면 읽기 전용이다.** 키를 두지 않는 서버(PRD §9.1)도 `get_entry`, `get_budget`, `tx_result`, `entry_tx_detail`, `signer_of`를 쓴다. 쓰기 메서드는 보내지 않고 `ChainSetupError`(503)이며, 릴레이어 롤·잔액 점검은 하지 않는다. 값이 있는데 형식이 틀리면 지금처럼 503이다.
 
 API에서는 구현을 직접 만들지 않고 의존성으로 받는다. Fake와 실제 구현이 환경변수로 갈린다. **둘 중 하나를 명시해야 서버가 뜬다** (PR #20 2차 리뷰).
 
@@ -269,3 +274,109 @@ cd backend && .venv/bin/python -m scripts.relayer_smoke
 - 마지막 줄이 "관문 2·확정 통과" 또는 "관문 2 실패"이고 종료 코드는 0 또는 1이다
 - 항목 id는 8000억 + 실행 시각(밀리초) × 10(지금은 18조대)이라 등록 API의 DB id(1부터)와 겹치지 않고, 몇 번이고 다시 실행해도 된다. 노드를 재시작하면 기록은 사라진다
 - 총무·감사 키로 서명하는 "앱 역할"이라 서버 코드 밖(`backend/scripts/`)에 있고 로컬 체인(31337)에서만 돈다. 로컬 계정 배치와 앱 서명은 `backend/scripts/local_chain.py`가 정본이다
+
+## 9. 예산 발행·증액
+
+**잔량은 `ChainBudget.remaining`이다.** `BudgetToken.remaining`과 같은 식(`issued - spent`)이고, `get_budget` 한 번으로 읽어 값들이 같은 블록의 것이다. `remaining()`을 따로 부르면 없는 예산도 0으로 보여, `None`과 구분되지 않는다. 시험이 두 값이 같은지 실제 노드에서 대조한다.
+
+코드 `backend/app/services/budget_relay.py`, 서명 대상 `IssueRequest`·`IncreaseRequest`. 경계는 김경윤과 합의한 대로다.
+
+| 맡는 쪽 | 하는 일 |
+| --- | --- |
+| 예산·증액 API (김경윤) | 권한 확인, `signer_of`로 서명자 대조, DB 저장, 결과의 hash·`version` 기록, `tx_increase` 선점·해제 |
+| `budget_relay` (손종인) | 서명 모양과 사유 해시 확인, 체인 전송, 결과 분류. DB를 읽거나 쓰지 않는다 |
+
+```python
+outcome = await relay_issue(chain, request, signature)                 # 회장 서명 1개
+outcome = await relay_increase(chain, request, reason, president_sig, auditor_sig,
+                               previous_tx_hash=tx_increase)           # 같은 값에 회장·감사 서명
+```
+
+**도메인이 원장과 다르다.** 발행·증액은 `/chain/domains`의 `BudgetToken` 도메인으로 서명한다. 원장 도메인으로 서명하면 서명자가 다른 주소로 복구된다. 기대값은 `backend/tests/fixtures/eip712_vectors.json`의 `budgetDomain`·`budgetVectors`다.
+
+**항목명은 `category_hash(name)`로 해시한다.** `docs/CONTRACTS.md` category 표에 있는 이름만 받는다. 나쁜 문자를 골라 막으면 `U+200B` 같은 보이지 않는 문자가 통과해 같아 보이는 이름이 다른 예산이 된다.
+
+**결과는 예외가 아니라 값으로 돌려준다.** 발행은 한 줄이 트랜잭션 하나라 일부만 성공할 수 있다. 한 줄이 실패해도 앞줄 결과를 잃지 않고 다음 줄을 보낼 수 있다.
+
+| `BudgetRelayStatus` | 앱 `BudgetIssueStatus` | 뜻 |
+| --- | --- | --- |
+| `ISSUED` | `issued` | 기록됐다 |
+| `ALREADY_ISSUED` | `alreadyIssued` | 같은 학기·항목의 예산이 이미 있다. 응답을 잃은 시도가 사실은 성공한 경우도 여기로 온다. `existing`이 체인의 그 예산이다 |
+| `INCREASED` | | 증액이 기록됐다. `version`은 올라간 값이다 |
+| `REJECTED` | `rejected` | 들어가지 않았다. `reason`은 아래 표 |
+| `NO_RESPONSE` | `noResponse` | 결과를 모른다. **고쳐서 보내면 안 된다.** 같은 값으로 다시 부르면 결과를 확인한다 |
+| `NOT_SENT` | `rejected` | 릴레이어가 보낼 수 없는 상태다(`ChainSetupError`). 들어가지 않았다. 단건 API면 503이다 |
+
+`ALREADY_ISSUED`이면 서명한 값이 아니라 `existing`을 믿는다. `existing.id`가 요청과 다르면 DB의 예산 id가 체인과 어긋난 것이고(DB 초기화 등), 그 id로 등록한 지출은 `BUDGET_NOT_FOUND`로 막힌다. 금액도 서명과 다를 수 있다.
+
+`reason` 값:
+
+| 값 | 뜻 |
+| --- | --- |
+| Solidity 에러 이름 | `BudgetRevertReason`. 체인이 거부했다 |
+| `Unknown` | revert는 확실하지만 원인을 해석할 수 없다 |
+| `MalformedSignature` | 서명 모양이 틀렸다. 보내지 않았다 → 400 |
+| `ReasonHashMismatch` | 사유 원문의 SHA256이 서명된 `reason_hash`와 다르다. 보내지 않았다 → 400 |
+
+**발행은 어떤 revert든 체인을 먼저 읽는다.** 시한이 지난 재시도는 `SignatureExpired`로 걸리지만 앞선 시도가 이미 들어갔을 수 있다. 학기·항목으로 찾아 있으면 `ALREADY_ISSUED`다. `BudgetAlreadyExists`인데 그 id에 다른 예산이 있으면 `REJECTED`다. 이미 있다고 거부됐는데 읽히지 않으면 대기열에 있는 것이라 `NO_RESPONSE`다 — 시뮬레이션은 다음 블록, 조회는 최신 블록 기준이다.
+
+**증액은 `previous_tx_hash`가 필수 인자다.** 처음이면 `None`, 재시도면 저장한 `tx_increase`를 넘긴다. 컨트랙트는 시한을 version보다 먼저 본다. 응답을 잃은 증액이 사실은 들어갔어도 시한이 지난 재시도는 `SignatureExpired`이고, 이를 보고 재서명하면 **한 번 승인한 증액이 두 번 들어간다.** version으로도 판단할 수 없다 — 다른 증액으로도 오른다.
+
+| 앞선 hash의 상태 | 처리 |
+| --- | --- |
+| 들어갔다 | 보내지 않고 `INCREASED` (앞선 hash·version) |
+| 아직 블록에 없다, 확인하지 못했다 | 보내지 않고 `NO_RESPONSE` (앞선 hash). 지금 보내면 둘 다 들어갈 수 있다 |
+| 실패로 끝났다 | 이 요청의 서명으로 보낸다 |
+
+**이 보호는 hash를 잃지 않아야 성립한다.** 칸(`tx_increase`)이 머지되기 전에는 증액 API를 열지 않는다. `before_broadcast`에서 보내기 전에 칸을 채운다. 노드가 트랜잭션을 잃어 영원히 블록에 없는 경우의 정리는 §3의 ②와 같이 다음 범위다.
+
+**증액의 `REJECTED` 중 따로 처리할 것** (PRD §4.1). 앞선 hash가 들어가지 않은 것이 확인된 뒤의 결과다.
+
+- `SignatureExpired` — `PRESIDENT_SIGNED` → `PENDING`으로 되돌리고 회장에게 재서명을 요청한다
+- `VersionMismatch` — 서명한 version이 낡았다. 재서명한다
+
+**선점 규칙.**
+
+| 결과 | 칸 |
+| --- | --- |
+| `failed_tx_hash` 있음 | 체인에 남지 않은 hash다. 칸에 이 값이 있으면 비운다 |
+| `NO_RESPONSE`의 `tx_hash` | 결과를 모르는 hash다. 칸에 둔다 |
+| 앞선 hash가 실패해 새로 보냄 | `before_broadcast`에서 칸을 새 hash로 바꾼다 |
+
+`before_broadcast`가 던진 예외(선점 실패 등)는 그대로 올라간다. 이때는 보내지 않았다. `ALREADY_ISSUED`의 `failed_tx_hash`는 이번 시도의 hash라 `tx_issue`에 저장하지 않는다.
+
+**revert 사유는 `BudgetRevertReason`이다.** `RevertReason`과 따로 둔다. `TermRequired`처럼 이름이 같아도 컨트랙트가 다르고, 원장 호출에서는 이 에러들이 나지 않는다. 연결할 때 전부 BudgetToken ABI에 있는지 확인한다. 해석할 수 없는 revert는 여기서도 `RevertReason.UNKNOWN`이다.
+
+**`FakeChainClient`** — `IBudgetToken`의 검사 순서대로 흉내 낸다. 회장 여부는 `fail_next("issue_budget", BudgetRevertReason.NOT_PRESIDENT)`로만 나고, 증액의 두 서명자가 같으면 `NOT_AUDITOR`다. 발행한 예산은 원장의 예산 판정과 이어져 있지 않다 — 원장 쪽은 여전히 `block_next`·`fail_next`로 지정한다. 대기열과 실패로 끝난 트랜잭션은 만들지 못해, 그 경로는 `tests/test_budget_relay.py`의 실제 체인 시험이 본다.
+
+## 10. 회원권 조회 (MembershipSBT)
+
+| 메서드 | 컨트랙트 | 돌려주는 값 |
+| --- | --- | --- |
+| `has_valid_membership(account, term)` | `hasValidMembership` | 그 학기의 소각되지 않은 회원권이 있으면 `True` |
+| `membership_token_of(account, term)` | `tokenOf` | 유효한 tokenId. 없거나 소각됐으면 `0` |
+
+`term`은 학기 코드 `YYYYS`다. `account`는 학생 지갑 주소로, `app/services/student_wallet.py`가 `wallet_index`에서 파생한다 (니모닉은 `STUDENT_WALLET_MNEMONIC`).
+
+**`MembershipSBT`는 배포 기록에 있을 때만 쓴다.** 아직 배포 전이면 연결은 그대로 되고, 회원권 조회만 `ChainSetupError`다. 노드에 닿지 못하면 `ChainUnavailable`이다. 어느 쪽도 미보유가 아니다.
+
+**확인은 `app/services/membership.py`의 `check_membership(db, chain, user_id, term_id)`로 한다.** `GET /memberships/me`와 행사 입장 판정이 같은 함수를 쓴다 (PRD §10). 확인하지 못하면 `MembershipUnavailable`을 던지고, 부른 쪽은 미보유와 다르게 다룬다 — 조회 API는 503, 입장 판정은 `UNVERIFIABLE`. 보유의 기준은 체인이다. DB `Membership` 행은 화면의 발급 정보에만 쓴다.
+
+**`FakeChainClient`** — 시험은 `grant_membership(account, term)`·`burn_membership(account, term)`으로 서명 없이 체인 상태를 만들 수 있다 (nonce는 오르지 않는다). 이미 유효하면 같은 tokenId를 돌려주고(컨트랙트의 건너뛰기), 소각 뒤 재발행은 새 tokenId다.
+
+## 11. 회원권 발행·소각 (MembershipSBT 릴레이)
+
+| 메서드 | 컨트랙트 | 돌려주는 값 |
+| --- | --- | --- |
+| `membership_nonce(signer)` | `nonces` | 그 서명자의 다음 nonce. 발행·소각이 공유하고 성공마다 1 오른다 |
+| `mint_memberships(request, signature, before_broadcast)` | `mintBatchRelayed` | `MintBatchResult` — `minted`(주소·tokenId), `skipped`(이미 유효해 건너뛴 주소), `signer` |
+| `mint_tx_result(tx_hash)` | receipt | 같은 결과. 아직 블록에 없으면 `None` |
+| `burn_membership_relayed(request, signature, before_broadcast)` | `burnRelayed` | `BurnResult` — holder·tokenId·사유·signer |
+
+- 서명 대상은 `MintBatchRequest(recipients, term, nonce, deadline)`·`BurnRequest(holder, term, reason, nonce, deadline)`이고 도메인은 배포 기록의 `eip712["MembershipSBT"]`다 (`app/chain/eip712.py`). `signer_of`가 도메인을 고른다. 배포 기록에 그 도메인이 없으면 `ChainSetupError`다.
+- 배치 전체를 revert 하는 값(빈 배열, 100명 초과, 0 주소, 학기 코드 0, 같은 주소 두 번)은 모델을 만들 때 막는다.
+- revert 사유는 `MembershipRevertReason`(Solidity 에러 이름)이다. `INVALID_NONCE`는 같은 서명자의 다른 발행·소각이 먼저 들어갔거나 서명을 재사용한 것이다.
+- **응답을 잃으면(`ChainUnavailable`) 같은 서명을 다시 보내지 않는다.** 들어갔으면 nonce가 올라 재전송은 `INVALID_NONCE`로 보이고 결과를 잃는다. `before_broadcast`로 남긴 hash로 `mint_tx_result`를 본다.
+- 결과는 receipt의 `MembershipMinted`·`MembershipSkipped` 이벤트로 만든다. `MembershipSkipped`에는 tokenId가 없어 필요하면 `membership_token_of`로 읽는다.
+- 서비스는 `app/services/membership_mint.py`(준비·제출·결과 확인), API는 `docs/API.md` 「회원권 2」다. 소각 API는 아직 없다 (A14, P2).
+- **아직 실체인 시험은 없다.** `MembershipSBT` 구현·배포 전이라 Web3 경로는 `IMembershipSBT` 인터페이스 ABI(`tests/fixtures/IMembershipSBT.abi.json`)로 이벤트 해석·revert 이름·서명 복구만 노드 없이 확인한다. EIP-712 값은 앱 PR #90의 ethers 벡터 4건과 같다 (`tests/test_membership_chain.py`).

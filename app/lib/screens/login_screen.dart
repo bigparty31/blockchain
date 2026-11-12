@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../core/app_theme.dart';
 import '../core/enums.dart';
+import '../core/format.dart';
 import '../core/role_home.dart';
 import '../services/auth_service.dart';
 
@@ -68,7 +69,41 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
         .animate(CurvedAnimation(parent: _animController, curve: Curves.easeOut));
     _animController.forward();
 
-    if (_auth.lockRemaining != null) _startLockTicker();
+    // 기기에 남은 잠금을 읽어 **화면을 열자마자** 남은 시간을 보여준다.
+    // 이것이 없으면 잠긴 상태인데 입력이 열려 보이고, 눌러 본 뒤에야 막힌다.
+    _auth.loadLock().then((_) {
+      if (!mounted) return;
+      setState(() {});
+      if (_lockLeft != null) _startLockTicker();
+    });
+
+    if (_lockLeft != null) _startLockTicker();
+
+    // 기기에 토큰이 남은 사실을 **여기서도 알린다.**
+    //
+    // 세션 만료는 `main.dart` 가 로그인 화면으로 밀어내면서 스낵바로 말해 주지만,
+    // **앱을 켤 때의 복원 실패는 그 경로를 지나지 않는다** — `SessionGate` 가
+    // 조용히 로그인 화면을 세울 뿐이다. 그쪽에서 토큰 삭제까지 실패하면
+    // ([AuthService.restore] 의 `_Unauthorized` 분기) 깃발만 서고 아무도 말하지
+    // 않아, 공용 기기에 남의 토큰이 남은 것을 사용자가 모른다.
+    //
+    // 프레임이 끝난 뒤에 띄운다 — `initState` 에는 `ScaffoldMessenger` 가 아직 없다.
+    // `consume` 이라 만료 경로에서 두 번 뜨지는 않는다.
+    if (_auth.tokenClearFailed) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_auth.consumeTokenClearFailed()) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              '이 기기에서 이전 로그인 정보를 지우지 못했습니다 — '
+              '공용 기기라면 앱 데이터를 삭제해 주세요.',
+            ),
+            behavior: SnackBarBehavior.floating,
+            duration: Duration(seconds: 6),
+          ),
+        );
+      });
+    }
   }
 
   @override
@@ -84,9 +119,15 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
     if (mounted) setState(() {});
   }
 
+  /// **입력된 학번에 걸린** 잠금만 본다.
+  ///
+  /// 서버 잠금(`429`)은 학번 단위라, 기기 전체로 보면 A 가 잠긴 기기에서
+  /// B 가 로그인하지 못한다 ([AuthService.lockRemainingFor]).
+  Duration? get _lockLeft => _auth.lockRemainingFor(_studentNoController.text.trim());
+
   bool get _canSubmit =>
       !_busy &&
-      _auth.lockRemaining == null &&
+      _lockLeft == null &&
       _studentNoController.text.trim().isNotEmpty &&
       _pwController.text.isNotEmpty;
 
@@ -94,7 +135,7 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
     _lockTicker?.cancel();
     _lockTicker = Timer.periodic(const Duration(seconds: 1), (t) {
       if (!mounted) return t.cancel();
-      if (_auth.lockRemaining == null) t.cancel();
+      if (_lockLeft == null) t.cancel();
       setState(() {});
     });
   }
@@ -111,6 +152,24 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
         _pwController.text,
       );
       if (!mounted) return;
+
+      // **저장이 안 된 로그인은 그렇다고 말한다** ([AuthService.sessionNotPersisted]).
+      // 사용자는 「로그인 상태가 유지된다」고 알고 있어서, 다음에 앱을 켰을 때
+      // 로그인 화면이 뜨면 앱이 멋대로 로그아웃시킨 것으로 보인다. 위험하지는
+      // 않다 — 기기에 남은 토큰이 없다는 뜻이기도 하다.
+      //
+      // 홈으로 넘어간 뒤에도 남는다: `MaterialApp.scaffoldMessengerKey` 가
+      // 앱 전체의 messenger 라 화면 교체에 딸려 사라지지 않는다.
+      if (_auth.sessionNotPersisted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('이 기기에 로그인 상태를 저장하지 못했습니다 — 앱을 다시 켜면 다시 로그인해야 합니다.'),
+            behavior: SnackBarBehavior.floating,
+            duration: Duration(seconds: 6),
+          ),
+        );
+      }
+
       _goHome(session.role);
       return;
     } catch (e) {
@@ -133,7 +192,29 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
     }
     if (failure is LoginLocked) {
       _startLockTicker();
-      await _showFailureDialog(locked: true, remaining: failure.remaining);
+      await _showFailureDialog(
+        locked: true,
+        remaining: failure.remaining,
+        byServer: failure.byServer,
+      );
+      return;
+    }
+
+    // 학번·비밀번호는 맞았는데 **기기 보관소를 믿을 수 없어** 로그인을 확정하지
+    // 않은 경우다 ([SessionStoreUnsafe]). 「연결 실패」로 뭉개면 사용자는 다시
+    // 눌러 보다 끝나고, 왜 안 되는지 알 방법이 없다. 비밀번호도 비우지 않는다 —
+    // 틀린 게 아니다.
+    if (failure is SessionStoreUnsafe) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            '이 기기에 로그인 정보를 저장할 수 없어 로그인을 중단했습니다. '
+            '이전 사용자의 정보가 남아 있어 앱 데이터를 삭제한 뒤 다시 시도해 주세요.',
+          ),
+          behavior: SnackBarBehavior.floating,
+          duration: Duration(seconds: 8),
+        ),
+      );
       return;
     }
 
@@ -148,8 +229,15 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
   }
 
   /// 실패 팝업 ④. 바깥을 눌러도 닫힌다.
-  Future<void> _showFailureDialog({required bool locked, Duration? remaining}) {
-    final left = remaining ?? _auth.lockRemaining ?? AuthService.lockDuration;
+  /// [byServer] 면 **서버가 건 잠금**이다 (`429`). 이때 「비밀번호를 5회
+  /// 틀렸습니다」라고 말하면 안 된다 — 서버 잠금은 학번 단위라 남이 내 학번으로
+  /// 틀려도 걸리고, 그 사람은 자기 비밀번호를 의심하게 된다.
+  Future<void> _showFailureDialog({
+    required bool locked,
+    Duration? remaining,
+    bool byServer = false,
+  }) {
+    final left = remaining ?? _lockLeft ?? AuthService.lockDuration;
     return showDialog<void>(
       context: context,
       barrierDismissible: true,
@@ -163,8 +251,11 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
         title: Text(locked ? '로그인이 일시 차단되었습니다' : '로그인할 수 없습니다'),
         content: Text(
           locked
-              ? '비밀번호를 ${AuthService.maxAttempts}회 연속 틀렸습니다.\n'
-                  '${left.inSeconds}초 후에 다시 시도해 주세요.'
+              ? byServer
+                  ? '로그인 시도가 많아 서버가 이 학번을 잠시 잠갔습니다.\n'
+                      '${Fmt.duration(left)} 후에 다시 시도해 주세요.'
+                  : '비밀번호를 ${AuthService.maxAttempts}회 연속 틀렸습니다.\n'
+                      '${Fmt.duration(left)} 후에 다시 시도해 주세요.'
               // 학번이 없는 것인지 비밀번호가 틀린 것인지 구분하지 않는다.
               // 구분하면 학번만 넣어보며 등록된 사람을 알아낼 수 있다.
               : '학번 또는 비밀번호가 올바르지 않습니다.',
@@ -208,7 +299,7 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
 
   @override
   Widget build(BuildContext context) {
-    final lockLeft = _auth.lockRemaining;
+    final lockLeft = _lockLeft;
 
     return Scaffold(
       backgroundColor: AppTheme.bgPage,
@@ -398,7 +489,11 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
-                      '연속 실패로 차단되었습니다. ${lockLeft.inSeconds}초 후 다시 시도해 주세요.',
+                      _auth.lockByServer
+                          ? '서버가 이 학번의 로그인을 잠시 막았습니다. '
+                              '${Fmt.duration(lockLeft)} 후 다시 시도해 주세요.'
+                          : '연속 실패로 차단되었습니다. '
+                              '${Fmt.duration(lockLeft)} 후 다시 시도해 주세요.',
                       style: const TextStyle(color: AppTheme.expense, fontSize: 12),
                     ),
                   ),

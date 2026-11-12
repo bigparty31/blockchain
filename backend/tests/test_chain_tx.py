@@ -29,10 +29,11 @@ from app.chain import (
 from app.chain.deployment import DEFAULT_PATH, load_deployment
 from app.chain.models import ZERO_BYTES32, BlockReason
 from app.chain.web3_client import LEDGER
-from app.models import Base, Entry, Term, User
+from app.models import Base, Entry, Notification, Term, User
 from app.schemas.entry import EntryKind, EntryStatus
 from app.services import chain_tx
-from app.services.chain_tx import EntryAlreadyRecorded, EntryConflict, EntryInFlight, relay_confirm, relay_record
+from app.services.notifications import NotificationKind, create_notification
+from app.services.chain_tx import EntryAlreadyRecorded, EntryConflict, EntryInFlight, relay_confirm, relay_record, relay_reject
 from chain_support import (
     AUDITOR,
     AUDITOR_KEY,
@@ -79,6 +80,9 @@ class Chain(FakeChainClient):
 
     async def confirm_entry(self, approval, signature, before_broadcast=None):
         return await self._write(super().confirm_entry, approval, signature, before_broadcast)
+
+    async def reject_entry(self, decision, signature, before_broadcast=None):
+        return await self._write(super().reject_entry, decision, signature, before_broadcast)
 
     async def tx_result(self, tx_hash, entry_id):
         self.tx_result_calls += 1
@@ -161,7 +165,7 @@ def row(engine, entry_id: int) -> dict:
     """다른 연결로 읽은 DB 값 — 서비스가 commit 한 것만 보인다."""
     with Session(engine) as db:
         e = db.get(Entry, entry_id)
-        names = ("status", "block_reason", "tx_pending", "tx_confirm", "approved_by", "warning_ack_reason", "rejected_by")
+        names = ("status", "block_reason", "tx_pending", "tx_confirm", "approved_by", "warning_ack_reason", "rejected_by", "reject_reason")
         return {name: getattr(e, name) for name in names}
 
 
@@ -464,10 +468,11 @@ def test_concurrent_submits_record_once(engine):
     chain = Chain()
     entry_id = draft(engine)
     outcomes = run_together(engine, chain, entry_id)
+    # 둘째가 첫째의 선점을 읽은 뒤 결과를 확인하면 같은 내용이라 둘 다 성공이다 (같은 hash). 어느 쪽이든 체인에는 한 건이다
     results = [o for o in outcomes if not isinstance(o, BaseException)]
     conflicts = [o for o in outcomes if isinstance(o, EntryConflict)]
-    assert len(results) == 1 and len(conflicts) == 1, outcomes
-    assert row(engine, entry_id)["tx_pending"] == results[0].tx_hash
+    assert results and len(results) + len(conflicts) == 2, outcomes
+    assert {r.tx_hash for r in results} == {row(engine, entry_id)["tx_pending"]}
 
 
 def test_concurrent_submit_while_the_first_is_unknown_is_not_sent(engine):
@@ -587,8 +592,47 @@ def test_concurrent_confirmations_confirm_once(engine, db):
             return await asyncio.gather(approve(a, chain, entry_id), approve(b, chain, entry_id), return_exceptions=True)
 
     outcomes = asyncio.run(both())
-    assert sorted(type(o).__name__ for o in outcomes)[0] in ("EntryAlreadyRecorded", "EntryInFlight"), outcomes
-    assert sum(not isinstance(o, BaseException) for o in outcomes) == 1
+    # 둘째가 첫째의 선점을 읽은 뒤 결과를 확인하면 같은 내용이라 둘 다 성공이다 (아래 시험). 어느 쪽이든 체인에는 한 건이다
+    results = [o for o in outcomes if not isinstance(o, BaseException)]
+    conflicts = [o for o in outcomes if isinstance(o, EntryConflict)]
+    assert results and len(results) + len(conflicts) == 2, outcomes
+    saved = row(engine, entry_id)
+    assert saved["status"] == "CONFIRMED"
+    assert {r.tx_hash for r in results} == {saved["tx_confirm"]}
+
+
+def test_same_approval_arriving_while_the_first_is_being_saved_succeeds_without_sending(engine, db, monkeypatch):
+    # 간헐 실패의 원인인 순서를 고정한다. 첫 요청이 체인 전송을 끝내고 DB 반영 전일 때 같은 승인이 온다.
+    # 둘째는 보내지 않고 저장된 hash 로 결과를 확인해 성공한다. 체인에는 한 건이고 둘 다 같은 hash 다
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    sends_before = chain.sends
+    original = chain_tx._Store.settle
+
+    async def both():
+        landed, resume = asyncio.Event(), asyncio.Event()
+        calls = []
+
+        async def held(self, *args):
+            calls.append(args)
+            if len(calls) == 1:
+                landed.set()
+                await resume.wait()
+            await original(self, *args)
+
+        monkeypatch.setattr(chain_tx._Store, "settle", held)
+        with Session(engine) as a, Session(engine) as b:
+            first = asyncio.create_task(approve(a, chain, entry_id))
+            await landed.wait()
+            second = await approve(b, chain, entry_id)
+            resume.set()
+            return await first, second
+
+    first, second = asyncio.run(both())
+    assert first == second
+    assert first.status is EntryStatus.CONFIRMED
+    assert chain.sends == sends_before + 1
+    assert row(engine, entry_id)["tx_confirm"] == first.tx_hash
 
 
 @pytest.mark.parametrize("state", ["draft", "blocked"])
@@ -622,7 +666,7 @@ def test_confirmation_leaves_a_landed_rejection_to_the_rejection_flow(engine, db
     entry_id = recorded(engine, db, chain)
     entry = asyncio.run(chain.get_entry(entry_id))
     decision = RejectDecision(id=entry_id, entry_commit=entry_commit_of(entry), reason_hash="0x" + "77" * 32, deadline=FAR)
-    rejected = asyncio.run(chain.reject_entry(decision, fake_signature(AUDITOR)))
+    rejected = asyncio.run(FakeChainClient.reject_entry(chain, decision, fake_signature(AUDITOR)))  # 서비스를 거치지 않은 반려
     rejection_in_flight(engine, db, chain, entry_id, rejected.tx_hash)
     before = row(engine, entry_id)
     with pytest.raises(EntryInFlight, match="반려"):
@@ -649,6 +693,385 @@ def test_confirming_a_confirmed_entry_is_a_conflict(engine, db):
     with pytest.raises(EntryConflict):
         asyncio.run(approve(db, chain, entry_id))
     assert chain.sends == 2  # 등록 1 + 확정 1
+
+
+# ---------------------------------------------------------------- 알림 (docs/NOTIFICATION_API.md)
+
+
+def notices(engine, entry_id: int) -> list:
+    """(받는 사람, kind, 닫혔나) — 받는 사람·종류 순."""
+    with Session(engine) as db:
+        rows = db.query(Notification).filter(Notification.entry_id == entry_id).order_by(Notification.kind, Notification.user_id)
+        return [(n.user_id, n.kind, n.resolved_at is not None) for n in rows]
+
+
+def test_recorded_entry_asks_auditors_and_president(engine, db):
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    assert notices(engine, entry_id) == [(AUDITOR_ID, "ENTRY_REGISTERED", False), (PRESIDENT_ID, "ENTRY_REGISTERED", False)]
+
+
+def test_blocked_entry_is_only_reported_as_blocked(engine, db):
+    # BLOCKED 는 확정·반려할 수 없어 승인 요청을 보내면 닫히지 않는 재알림이 남는다
+    entry_id = draft(engine, kind="EXPENSE", amount=35_000)
+    assert submit(db, Chain(), entry_id, kind=EntryKind.EXPENSE, amount=35_000).status is EntryStatus.BLOCKED
+    assert notices(engine, entry_id) == [(TREASURER_ID, "ENTRY_BLOCKED", False), (PRESIDENT_ID, "ENTRY_BLOCKED", False)]
+
+
+def test_confirmation_closes_the_requests_and_tells_the_treasurer(engine, db):
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    with Session(engine) as other:
+        create_notification(other, NotificationKind.ENTRY_EDIT_REQUESTED, entry_id=entry_id)
+        other.commit()
+    asyncio.run(approve(db, chain, entry_id))
+    assert notices(engine, entry_id) == [
+        (TREASURER_ID, "ENTRY_CONFIRMED", False),
+        (AUDITOR_ID, "ENTRY_EDIT_REQUESTED", True),
+        (PRESIDENT_ID, "ENTRY_EDIT_REQUESTED", True),
+        (AUDITOR_ID, "ENTRY_REGISTERED", True),
+        (PRESIDENT_ID, "ENTRY_REGISTERED", True),
+    ]
+
+
+def test_rejection_closes_the_requests_and_tells_the_treasurer(engine, db):
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    asyncio.run(refuse(db, chain, entry_id))
+    assert notices(engine, entry_id) == [
+        (AUDITOR_ID, "ENTRY_REGISTERED", True),
+        (PRESIDENT_ID, "ENTRY_REGISTERED", True),
+        (TREASURER_ID, "ENTRY_REJECTED", False),
+    ]
+
+
+def test_result_found_again_by_a_retry_is_reported_once(engine, db):
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    lost_confirmation(engine, db, chain, entry_id)
+    asyncio.run(approve(db, chain, entry_id))  # 저장한 hash 로 결과를 맞춘다
+    with pytest.raises(EntryConflict):
+        asyncio.run(approve(db, chain, entry_id))
+    assert [n for n in notices(engine, entry_id) if n[1] == "ENTRY_CONFIRMED"] == [(TREASURER_ID, "ENTRY_CONFIRMED", False)]
+
+
+@pytest.mark.parametrize("reason", [RevertReason.INSUFFICIENT_BUDGET, RevertReason.BUDGET_EXPIRED])
+def test_confirmation_refused_for_the_budget_tells_the_treasurer_once_until_read(engine, db, reason):
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    for _ in range(2):
+        chain.fail_next("confirm_entry", reason)
+        with pytest.raises(ChainRevert):
+            asyncio.run(approve(db, chain, entry_id))
+    failed = [n for n in notices(engine, entry_id) if n[1] == "ENTRY_CONFIRM_FAILED"]
+    assert failed == [(TREASURER_ID, "ENTRY_CONFIRM_FAILED", False)]  # 안 읽은 알림이 있으면 다시 만들지 않는다
+    with Session(engine) as other:
+        other.query(Notification).filter(Notification.kind == "ENTRY_CONFIRM_FAILED").update({"read_at": datetime.now(timezone.utc)})
+        other.commit()
+    chain.fail_next("confirm_entry", reason)
+    with pytest.raises(ChainRevert):
+        asyncio.run(approve(db, chain, entry_id))
+    assert len([n for n in notices(engine, entry_id) if n[1] == "ENTRY_CONFIRM_FAILED"]) == 2
+    assert row(engine, entry_id)["status"] == "PENDING"
+
+
+def test_other_refusals_are_left_to_the_approver(engine, db):
+    # 서명·entryCommit 불일치 같은 거부는 총무가 할 일이 없다. 승인자 응답으로 끝난다
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    chain.fail_next("confirm_entry", RevertReason.ENTRY_COMMIT_MISMATCH)
+    with pytest.raises(ChainRevert):
+        asyncio.run(approve(db, chain, entry_id))
+    assert [n[1] for n in notices(engine, entry_id)] == ["ENTRY_REGISTERED", "ENTRY_REGISTERED"]
+
+
+def test_failing_to_record_the_failure_notice_does_not_hide_the_refusal(engine, db, monkeypatch):
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("알림 테이블 오류")
+
+    monkeypatch.setattr(chain_tx, "create_notification", broken)
+    chain.fail_next("confirm_entry", RevertReason.INSUFFICIENT_BUDGET)
+    with pytest.raises(ChainRevert) as raised:
+        asyncio.run(approve(db, chain, entry_id))
+    assert raised.value.reason is RevertReason.INSUFFICIENT_BUDGET
+
+
+def test_settling_and_its_notices_are_one_transaction(engine, db, monkeypatch):
+    # 알림을 기록하지 못하면 상태 반영도 남지 않는다 (②). 다시 요청하면 결과를 맞추면서 알림도 남긴다
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    real = chain_tx.create_notification
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("알림 테이블 오류")
+
+    monkeypatch.setattr(chain_tx, "create_notification", broken)
+    with pytest.raises(RuntimeError):
+        asyncio.run(approve(db, chain, entry_id))
+    assert row(engine, entry_id)["status"] == "PENDING" and row(engine, entry_id)["tx_confirm"] is not None
+    assert [n[1] for n in notices(engine, entry_id)] == ["ENTRY_REGISTERED", "ENTRY_REGISTERED"]
+    monkeypatch.setattr(chain_tx, "create_notification", real)
+    assert asyncio.run(approve(db, chain, entry_id)).status is EntryStatus.CONFIRMED
+    assert (TREASURER_ID, "ENTRY_CONFIRMED", False) in notices(engine, entry_id)
+
+
+# ---------------------------------------------------------------- T4 수정 요청과 확정
+
+
+def test_entry_with_an_edit_request_is_not_confirmed(engine, db):
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    write(engine, entry_id, revision_requested_at=datetime.now(timezone.utc))
+    before = row(engine, entry_id)
+    with pytest.raises(EntryConflict, match="수정 요청") as raised:
+        asyncio.run(approve(db, chain, entry_id))
+    assert not isinstance(raised.value, EntryInFlight)  # 다시 요청해도 결과가 바뀌지 않는다. 처리 중이라고 답하지 않는다
+    assert row(engine, entry_id) == before
+    assert asyncio.run(chain.get_entry(entry_id)).status is EntryStatus.PENDING
+
+
+def test_edit_request_arriving_after_the_router_check_still_stops_confirmation(engine, db):
+    # 라우터 검사를 지난 뒤 수정 요청이 들어온 경우. 선점의 조건부 UPDATE 가 마지막 방어선이다
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    chain.before_send = lambda: write(engine, entry_id, revision_requested_at=datetime.now(timezone.utc))
+    with pytest.raises(EntryConflict, match="수정 요청"):
+        asyncio.run(approve(db, chain, entry_id))
+    chain.before_send = None
+    assert row(engine, entry_id)["tx_confirm"] is None and row(engine, entry_id)["approved_by"] is None
+    assert asyncio.run(chain.get_entry(entry_id)).status is EntryStatus.PENDING
+
+
+def test_retry_after_a_failed_confirmation_is_stopped_by_an_edit_request(engine, db):
+    # 앞선 확정이 블록에서 실패해 이 요청의 서명으로 다시 보내려는 순간에도 수정 요청을 본다
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    write(
+        engine,
+        entry_id,
+        tx_confirm="0x" + "dd" * 32,
+        approved_by=AUDITOR_ID,
+        revision_requested_at=datetime.now(timezone.utc),
+    )
+    chain.tx_result_errors = [ChainRevert(RevertReason.UNKNOWN, "확정이 블록에서 실패")]
+    with pytest.raises(EntryConflict, match="수정 요청"):
+        asyncio.run(approve(db, chain, entry_id))
+    assert row(engine, entry_id)["tx_confirm"] is None and row(engine, entry_id)["approved_by"] is None
+    assert asyncio.run(chain.get_entry(entry_id)).status is EntryStatus.PENDING
+
+
+def test_confirmation_already_sent_is_recorded_even_if_an_edit_request_follows(engine, db):
+    # 선점한 뒤 온 수정 요청은 이미 나간 트랜잭션을 되돌리지 못한다. DB 는 체인 결과를 따른다
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    chain.on_broadcast = lambda tx_hash: write(engine, entry_id, revision_requested_at=datetime.now(timezone.utc))
+    assert asyncio.run(approve(db, chain, entry_id)).status is EntryStatus.CONFIRMED
+    assert row(engine, entry_id)["status"] == "CONFIRMED"
+
+
+def test_entry_with_an_edit_request_can_still_be_rejected(engine, db):
+    # T4 는 수정 요청 → 반려 → 재등록이다 (PRD §4.3)
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    write(engine, entry_id, revision_requested_at=datetime.now(timezone.utc))
+    assert asyncio.run(refuse(db, chain, entry_id)).status is EntryStatus.REJECTED
+    assert row(engine, entry_id)["status"] == "REJECTED"
+
+
+# ---------------------------------------------------------------- 반려
+
+
+REJECT_REASON = "영수증 식별 불가"
+
+
+def reason_hash_of(reason: str) -> str:
+    return "0x" + hashlib.sha256(reason.encode()).hexdigest()
+
+
+async def refuse(db, chain, entry_id: int, rejecter_id: int = AUDITOR_ID, signer: str = AUDITOR, reason=REJECT_REASON, **override):
+    entry = await chain.get_entry(entry_id)
+    fields = dict(id=entry_id, entry_commit=entry_commit_of(entry), reason_hash=reason_hash_of(REJECT_REASON), deadline=FAR)
+    decision = RejectDecision(**{**fields, **override})
+    return await relay_reject(db, chain, decision, fake_signature(signer), rejecter_id, reason)
+
+
+def test_rejection_records_the_rejecter_and_reason(engine, db):
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    result = asyncio.run(refuse(db, chain, entry_id))
+    assert result.status is EntryStatus.REJECTED
+    saved = row(engine, entry_id)
+    assert (saved["status"], saved["tx_confirm"], saved["rejected_by"], saved["reject_reason"]) == (
+        "REJECTED",
+        result.tx_hash,
+        AUDITOR_ID,
+        REJECT_REASON,
+    )
+    assert saved["approved_by"] is None
+
+
+@pytest.mark.parametrize("reason", ["다른 사유", REJECT_REASON + " ", "", None])
+def test_reject_reason_must_match_the_signed_hash(engine, db, reason):
+    # 다르면 체인에는 서명된 해시, DB 에는 다른 원문이 남아 학생 검증에서 위조로 보인다 (HASHING §3)
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    with pytest.raises(ValueError):
+        asyncio.run(refuse(db, chain, entry_id, reason=reason))
+    assert chain.sends == 1 and row(engine, entry_id)["tx_confirm"] is None  # 반려는 보내지 않았다
+
+
+def test_failed_rejection_releases_the_rejecter_too(engine, db):
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    chain.after_broadcast = ChainRevert(RevertReason.INVALID_STATUS)
+    with pytest.raises(ChainRevert):
+        asyncio.run(refuse(db, chain, entry_id))
+    saved = row(engine, entry_id)
+    assert saved["status"] == "PENDING" and saved["tx_confirm"] is None
+    assert saved["rejected_by"] is None and saved["reject_reason"] is None
+
+
+def test_lost_rejection_is_recovered(engine, db):
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    chain.unavailable_next("reject_entry", landed=True)
+    result = asyncio.run(refuse(db, chain, entry_id))
+    assert result.status is EntryStatus.REJECTED and row(engine, entry_id)["status"] == "REJECTED"
+
+
+def test_db_failure_after_the_chain_rejected_is_recovered_by_retrying(engine, db, monkeypatch):
+    # PRD §4.9 — 체인은 반려됐는데 DB 저장이 실패해도 DB 만 PENDING 으로 남지 않는다. ② 가 남아 다시 요청하면 결과를 맞춘다
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    settle = chain_tx._Store.settle
+    failures = [RuntimeError("DB 저장 실패 (흉내)")]
+
+    async def failing_once(self, *args):
+        if failures:
+            raise failures.pop()
+        return await settle(self, *args)
+
+    monkeypatch.setattr(chain_tx._Store, "settle", failing_once)
+    with pytest.raises(RuntimeError, match="DB 저장 실패"):
+        asyncio.run(refuse(db, chain, entry_id))
+    assert row(engine, entry_id)["status"] == "PENDING" and row(engine, entry_id)["tx_confirm"] is not None
+
+    result = asyncio.run(refuse(db, chain, entry_id))
+    assert result.status is EntryStatus.REJECTED and row(engine, entry_id)["status"] == "REJECTED"
+    assert chain.sends == 2  # 등록 1 + 반려 1. 다시 보내지 않았다
+
+
+def lost_rejection(engine, db, chain, entry_id):
+    chain.unavailable_next("reject_entry", landed=True)
+    chain.tx_result_errors = [ChainUnavailable("노드가 아직 응답하지 않음")]
+    with pytest.raises(ChainUnavailable):
+        asyncio.run(refuse(db, chain, entry_id))
+
+
+def test_the_same_rejecter_retrying_gets_their_result(engine, db):
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    lost_rejection(engine, db, chain, entry_id)
+    result = asyncio.run(refuse(db, chain, entry_id))
+    assert result.status is EntryStatus.REJECTED and chain.sends == 2  # 등록 1 + 반려 1. 다시 보내지 않았다
+
+
+@pytest.mark.parametrize(
+    "second",
+    [
+        {"rejecter_id": PRESIDENT_ID, "signer": PRESIDENT},  # 다른 반려자
+        {"reason": "다른 사유", "reason_hash": reason_hash_of("다른 사유")},  # 같은 반려자, 다른 사유
+    ],
+)
+def test_someone_elses_rejection_is_not_reported_as_theirs(engine, db, second):
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    lost_rejection(engine, db, chain, entry_id)
+    with pytest.raises(EntryAlreadyRecorded):
+        asyncio.run(refuse(db, chain, entry_id, **second))
+    saved = row(engine, entry_id)
+    assert (saved["status"], saved["rejected_by"], saved["reject_reason"]) == ("REJECTED", AUDITOR_ID, REJECT_REASON)
+    assert chain.sends == 2
+
+
+def test_rejection_leaves_a_confirmation_in_flight_to_the_confirmation_flow(engine, db):
+    # 확정이 tx_confirm 을 선점했다. 반려 흐름은 그 결과를 읽지도 비우지도 않고 409 로 끝낸다
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    write(engine, entry_id, tx_confirm="0x" + "dd" * 32, approved_by=AUDITOR_ID)
+    before = row(engine, entry_id)
+    with pytest.raises(EntryInFlight, match="확정"):
+        asyncio.run(refuse(db, chain, entry_id, rejecter_id=PRESIDENT_ID, signer=PRESIDENT))
+    assert row(engine, entry_id) == before and chain.tx_result_calls == 0 and chain.sends == 1
+
+
+def test_confirmation_and_rejection_at_once_only_one_goes_through(engine, db):
+    # 승인과 반려가 겹쳐도 한 건만 체인에 나간다 (PRD §4.9). 칸이 하나라 DB 도 그 결과만 남는다
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+
+    async def both():
+        with Session(engine) as a, Session(engine) as b:
+            return await asyncio.gather(
+                approve(a, chain, entry_id),
+                refuse(b, chain, entry_id, rejecter_id=PRESIDENT_ID, signer=PRESIDENT),
+                return_exceptions=True,
+            )
+
+    outcomes = asyncio.run(both())
+    results = [o for o in outcomes if not isinstance(o, BaseException)]
+    assert len(results) == 1 and sum(isinstance(o, EntryConflict) for o in outcomes) == 1, outcomes
+    saved = row(engine, entry_id)
+    assert saved["status"] == results[0].status.value and saved["tx_confirm"] == results[0].tx_hash
+    if results[0].status is EntryStatus.CONFIRMED:
+        assert saved["rejected_by"] is None and saved["reject_reason"] is None
+    else:
+        assert saved["approved_by"] is None
+    assert asyncio.run(chain.get_entry(entry_id)).status is results[0].status
+
+
+def test_losing_to_a_landed_confirmation_does_not_say_it_was_rejected(engine, db):
+    # 읽은 뒤 선점 전에 확정이 끝났다. 409 문구는 지금 요청의 단계가 아니라 실제 결과를 말한다
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    chain.before_send = lambda: write(engine, entry_id, status="CONFIRMED", tx_confirm="0x" + "ee" * 32, approved_by=AUDITOR_ID)
+    with pytest.raises(EntryAlreadyRecorded, match="status=CONFIRMED") as error:
+        asyncio.run(refuse(db, chain, entry_id, rejecter_id=PRESIDENT_ID, signer=PRESIDENT))
+    assert "반려" not in str(error.value)
+
+
+@pytest.mark.parametrize("state", ["draft", "blocked"])
+def test_only_pending_entries_can_be_rejected(engine, db, state):
+    chain = Chain()
+    entry_id = recorded(engine, db, chain, kind="EXPENSE", amount=35_000)
+    if state == "draft":
+        write(engine, entry_id, status=None, block_reason=None)
+    with pytest.raises(ValueError, match="반려할 수 있는 상태가 아니다"):
+        asyncio.run(refuse(db, chain, entry_id))
+    assert chain.sends == 1  # 반려는 보내지 않았다
+
+
+@pytest.mark.parametrize("rejecter_id", [TREASURER_ID, 999], ids=["self_rejection", "unknown_user"])
+def test_unrecordable_rejecter_is_refused_before_sending(engine, db, rejecter_id):
+    # 등록자 = 반려자(ck_entries_rejected_maker)·없는 사용자(FK) 는 선점에서 막혀 400(ValueError), 보내지 않는다
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    with pytest.raises(ValueError, match="선점을 기록할 수 없다"):
+        asyncio.run(refuse(db, chain, entry_id, rejecter_id=rejecter_id))
+    assert asyncio.run(chain.get_entry(entry_id)).status is EntryStatus.PENDING
+    assert row(engine, entry_id)["tx_confirm"] is None
+
+
+def test_rejecting_a_rejected_entry_is_a_conflict(engine, db):
+    chain = Chain()
+    entry_id = recorded(engine, db, chain)
+    asyncio.run(refuse(db, chain, entry_id))
+    with pytest.raises(EntryConflict):
+        asyncio.run(refuse(db, chain, entry_id))
+    assert chain.sends == 2  # 등록 1 + 반려 1
 
 
 # ---------------------------------------------------------------- FakeChainClient.tx_result
@@ -709,6 +1132,53 @@ def test_record_and_confirm_on_the_real_chain(node, engine, db, clean_chain_env)
     assert statuses == [1, 1]
     saved = row(engine, entry_id)
     assert (saved["status"], saved["tx_pending"], saved["tx_confirm"]) == ("CONFIRMED", recorded.tx_hash, confirmed.tx_hash)
+
+
+@pytest.mark.chain
+def test_record_and_reject_on_the_real_chain(node, engine, db, clean_chain_env):
+    # 실제 릴레이어로 ① → ③ → REJECTED. DB 의 hash 가 체인의 receipt 와 같고, 반려자가 체인에 남는다
+    entry_id = draft(engine, id=TEST_ID_BASE + 7003)
+
+    async def body(client, now):
+        request = request_for(entry_id, deadline=now + 600)
+        await relay_record(db, client, request, sign_as_app(request, DOMAIN, TREASURER_KEY))
+        entry = await client.get_entry(entry_id)
+        decision = RejectDecision(
+            id=entry_id, entry_commit=entry_commit_of(entry), reason_hash=reason_hash_of(REJECT_REASON), deadline=now + 600
+        )
+        rejected = await relay_reject(db, client, decision, sign_as_app(decision, DOMAIN, AUDITOR_KEY), AUDITOR_ID, REJECT_REASON)
+        receipt = await client._w3.eth.get_transaction_receipt(rejected.tx_hash)
+        return rejected, receipt["status"], await client.get_entry(entry_id)
+
+    rejected, status, entry = on_chain(body)
+    assert status == 1 and entry.status is EntryStatus.REJECTED and entry.approver == AUDITOR
+    saved = row(engine, entry_id)
+    assert (saved["status"], saved["tx_confirm"], saved["rejected_by"]) == ("REJECTED", rejected.tx_hash, AUDITOR_ID)
+
+
+@pytest.mark.chain
+def test_lost_rejection_is_recovered_on_the_real_chain(node, engine, db, clean_chain_env):
+    # 반려가 블록에 들어갔는데 응답을 잃었다 — 저장한 hash 로 receipt 를 읽어 REJECTED 를 맞춘다
+    entry_id = draft(engine, id=TEST_ID_BASE + 7004)
+
+    async def body(client, now):
+        request = request_for(entry_id, deadline=now + 600)
+        await relay_record(db, client, request, sign_as_app(request, DOMAIN, TREASURER_KEY))
+        entry = await client.get_entry(entry_id)
+        decision = RejectDecision(
+            id=entry_id, entry_commit=entry_commit_of(entry), reason_hash=reason_hash_of(REJECT_REASON), deadline=now + 600
+        )
+        relay = client._relay
+
+        async def lost(call, before_broadcast):
+            await relay(call, before_broadcast)
+            raise ChainUnavailable("receipt 를 받지 못했다 (흉내)")
+
+        client._relay = lost
+        return await relay_reject(db, client, decision, sign_as_app(decision, DOMAIN, AUDITOR_KEY), AUDITOR_ID, REJECT_REASON)
+
+    result = on_chain(body)
+    assert result.status is EntryStatus.REJECTED and row(engine, entry_id)["status"] == "REJECTED"
 
 
 @pytest.mark.chain

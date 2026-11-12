@@ -6,8 +6,9 @@ docs/CONTRACTS.md 이고, enum 의 온체인 숫자 순서는 docs/enums.md 표 
 """
 import re
 from enum import Enum
-from typing import Optional
+from typing import Optional, Tuple, Union
 
+from eth_utils import to_checksum_address
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.schemas.entry import EntryKind, EntryStatus
@@ -22,6 +23,7 @@ ZERO_ADDRESS = "0x" + "0" * 40
 
 _BYTES32 = re.compile(r"0x[0-9a-f]{64}")
 _SIGNATURE = re.compile(r"0x[0-9a-fA-F]{130}")
+_ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}")
 _KST_MIDNIGHT_REMAINDER = 54000  # KST 00:00 = UTC 15:00 → Unix 초 % 86400
 
 # 원장의 저장 필드 폭과 금액 상한 (IAccountingLedger "저장 필드 폭", MAX_AMOUNT). 넘으면 체인이 revert 한다
@@ -44,6 +46,18 @@ class BlockReason(str, Enum):
 BLOCK_REASON_ORDER = (BlockReason.BUDGET_EXCEEDED, BlockReason.BUDGET_EXPIRED, BlockReason.BUDGET_NOT_FOUND)
 
 
+class BurnReason(str, Enum):
+    """회원권 소각 사유. docs/enums.md burn_reason 표 순서 = IMembershipSBT.BurnReason 의 uint8 값."""
+
+    REFUND = "REFUND"
+    WITHDRAWAL = "WITHDRAWAL"
+
+
+BURN_REASON_ORDER = (BurnReason.REFUND, BurnReason.WITHDRAWAL)
+# IMembershipSBT.MAX_BATCH_SIZE. 빈 배열·초과는 배치 전체 revert (PRD §7.2)
+MAX_MINT_BATCH = 100
+
+
 def _bytes32(value: str) -> str:
     if not _BYTES32.fullmatch(value):
         raise ValueError("0x + 소문자 hex 64자여야 한다 (docs/HASHING.md §5)")
@@ -55,6 +69,15 @@ def _term(value: int) -> int:
     if not (10000 <= value <= 99999) or value % 10 not in _TERM_SEMESTERS:
         raise ValueError("term 은 학기 코드 YYYYS 여야 한다 (예: 20261). DB 의 Term.id 가 아니다")
     return value
+
+
+def _nonzero_address(value: str, name: str) -> str:
+    """0x + hex 40자, 0 주소 금지. EIP-55 체크섬으로 맞춘다 (컨트랙트 ZeroAddress 는 배치 전체 revert)."""
+    if not isinstance(value, str) or not _ADDRESS.fullmatch(value):
+        raise ValueError(f"{name}: 주소는 0x + hex 40자여야 한다")
+    if value.lower() == ZERO_ADDRESS:
+        raise ValueError(f"{name}: 0 주소다 (컨트랙트 ZeroAddress)")
+    return to_checksum_address(value)
 
 
 def check_signature(signature: str) -> str:
@@ -168,7 +191,101 @@ class RejectDecision(_Frozen):
         return _bytes32(v)
 
 
+# BudgetToken 의 서명 대상 (IBudgetToken). 도메인 name 은 "BudgetToken" 이라 원장 서명과 섞이지 않는다.
+# reclaim(A14, P2)은 아직 넣지 않았다.
+
+
+class IssueRequest(_Frozen):
+    """회장 기기가 서명한 예산 발행 요청."""
+
+    budget_id: int = Field(..., ge=1, le=UINT64_MAX, description="DB Budget.id 와 같다. 0 은 없음으로 예약 (컨트랙트 ReservedId)")
+    term: int = Field(..., description="학기 코드 YYYYS. DB 의 Term.id 가 아니다")
+    category: str = Field(..., description="keccak256(utf8(항목명)) (docs/CONTRACTS.md). 0 이면 CategoryRequired")
+    amount: int = Field(..., ge=1, le=MAX_AMOUNT, description="원 단위. 0 이면 ZeroAmount, 상한을 넘으면 AmountOutOfRange")
+    expires_at: int = Field(..., ge=0, le=UINT64_MAX, description="집행 마감 (Unix 초). 지났으면 BudgetExpired")
+    deadline: int = Field(..., ge=0, le=UINT256_MAX, description="서명 유효 시한 (Unix 초)")
+
+    @field_validator("term")
+    @classmethod
+    def _term(cls, v: int) -> int:
+        return _term(v)
+
+    @field_validator("category")
+    @classmethod
+    def _category(cls, v: str) -> str:
+        if _bytes32(v) == ZERO_BYTES32:
+            raise ValueError("category 가 0 이다 (컨트랙트 CategoryRequired)")
+        return v
+
+
+class IncreaseRequest(_Frozen):
+    """회장(요청)과 감사(승인)가 **같은 값에** 서명한 증액 요청 (PRD §4.1)."""
+
+    budget_id: int = Field(..., ge=1, le=UINT64_MAX)
+    amount: int = Field(..., ge=1, le=MAX_AMOUNT, description="증액분이다. 변경 후 총액이 아니다 (PRD §4.1)")
+    reason_hash: str = Field(..., description="개정 사유 해시. 0 이면 ReasonRequired")
+    version: int = Field(..., ge=1, le=UINT256_MAX, description="증액 **전** 현재 version. 다르면 VersionMismatch")
+    deadline: int = Field(..., ge=0, le=UINT256_MAX)
+
+    @field_validator("reason_hash")
+    @classmethod
+    def _reason_hash(cls, v: str) -> str:
+        if _bytes32(v) == ZERO_BYTES32:
+            raise ValueError("reason_hash 가 0 이다 (컨트랙트 ReasonRequired)")
+        return v
+
+
 # ---------------------------------------------------------------- 결과
+
+
+class MintBatchRequest(_Frozen):
+    """회장 또는 감사가 서명한 회원권 일괄 발행 요청 (IMembershipSBT.MintBatchRequest, 도메인 "MembershipSBT").
+
+    배치 전체를 revert 하는 값(빈 배열, 100명 초과, 0 주소, 학기 코드 0)은 모델을 만들 때 막는다 (PRD §7.2).
+    0 주소는 서버의 지갑 파생이 잘못됐다는 뜻이라 건너뛰지 않고 멈춘다. 같은 주소가 두 번 있는 것은 컨트랙트가
+    MembershipSkipped 로 넘기지만, 서버가 그런 명단을 만들면 결함이라 여기서 막는다.
+    recipients 의 순서가 서명 대상이다 — 배열 해시가 순서에 따라 달라진다. 주소는 EIP-55 체크섬으로 맞춘다.
+    """
+
+    recipients: Tuple[str, ...]
+    term: int = Field(..., description="학기 코드 YYYYS. DB 의 Term.id 가 아니다")
+    nonce: int = Field(..., ge=0, le=UINT256_MAX, description="서명자의 nonces(signer). 발행·소각이 공유한다")
+    deadline: int = Field(..., ge=0, le=UINT256_MAX, description="서명 유효 시한 (Unix 초)")
+
+    @field_validator("recipients")
+    @classmethod
+    def _recipients(cls, v: Tuple[str, ...]) -> Tuple[str, ...]:
+        if not 1 <= len(v) <= MAX_MINT_BATCH:
+            raise ValueError(f"recipients 는 1~{MAX_MINT_BATCH}명이어야 한다 (컨트랙트 EmptyBatch·BatchTooLarge)")
+        addresses = tuple(_nonzero_address(a, "recipients") for a in v)
+        if len({a.lower() for a in addresses}) != len(addresses):
+            raise ValueError("recipients 에 같은 주소가 두 번 있다")
+        return addresses
+
+    @field_validator("term")
+    @classmethod
+    def _term(cls, v: int) -> int:
+        return _term(v)
+
+
+class BurnRequest(_Frozen):
+    """회장 또는 감사가 서명한 회원권 소각 요청 (IMembershipSBT.BurnRequest, 도메인 "MembershipSBT")."""
+
+    holder: str
+    term: int = Field(..., description="학기 코드 YYYYS")
+    reason: BurnReason = Field(..., description="uint8 은 BURN_REASON_ORDER 의 인덱스")
+    nonce: int = Field(..., ge=0, le=UINT256_MAX, description="서명자의 nonces(signer). 발행·소각이 공유한다")
+    deadline: int = Field(..., ge=0, le=UINT256_MAX, description="서명 유효 시한 (Unix 초)")
+
+    @field_validator("holder")
+    @classmethod
+    def _holder(cls, v: str) -> str:
+        return _nonzero_address(v, "holder")
+
+    @field_validator("term")
+    @classmethod
+    def _term(cls, v: int) -> int:
+        return _term(v)
 
 
 class TxResult(_Frozen):
@@ -195,7 +312,74 @@ class ChainEntry(_Frozen):
     approver: str = Field(..., description="확정·반려 서명자 주소. 미처리면 address(0). 형식은 registrant 와 같다")
 
 
+class EntryTxDetail(_Frozen):
+    """트랜잭션 하나가 항목에 남긴 기록. 블록 번호(S10)와 반려·경고 사유 해시 대조(S4)가 읽는다."""
+
+    tx_hash: str
+    status: EntryStatus = Field(..., description="이 트랜잭션의 결과. 항목의 지금 status 와 다를 수 있다 (등록 뒤 확정)")
+    block_number: int
+    block_reason: Optional[BlockReason] = None
+    reason_hash: Optional[str] = Field(None, description="반려 사유 또는 경고 승인 사유의 해시. 원문은 DB 에 있다 (HASHING §3)")
+    had_warning: bool = False
+
+
+class BudgetTxResult(_Frozen):
+    """발행·증액 트랜잭션이 블록에 들어간 뒤의 결과. revert 는 ChainRevert 로 올라간다."""
+
+    tx_hash: str
+    budget_id: int
+    version: int = Field(..., description="이 트랜잭션 뒤의 version. 발행은 1, 증액은 올라간 값")
+
+
+class ChainBudget(_Frozen):
+    """getBudget(id) 결과."""
+
+    id: int
+    term: int
+    category: str
+    issued: int = Field(..., description="현재 한도 (원). 증액으로 오른다")
+    spent: int
+    expires_at: int
+    version: int
+    reclaim_count: int
+
+    @property
+    def remaining(self) -> int:
+        """BudgetToken.remaining 과 같은 식이다. getBudget 한 번으로 읽어, 잔량과 나머지 값이 같은 블록의 것이다."""
+        return self.issued - self.spent
+
+
 # ---------------------------------------------------------------- 에러
+
+
+class MintedMembership(_Frozen):
+    """MembershipMinted 이벤트 하나."""
+
+    address: str = Field(..., description="받은 주소 (EIP-55)")
+    token_id: int
+
+
+class MintBatchResult(_Frozen):
+    """일괄 발행 트랜잭션이 블록에 들어간 뒤의 결과. revert 는 ChainRevert 로 올라간다.
+
+    minted 는 새로 발행한 주소, skipped 는 이미 유효해 컨트랙트가 건너뛴 주소다 (MembershipSkipped — tokenId 가 없어
+    필요하면 membership_token_of 로 읽는다). 둘 다 이벤트 순서 그대로다.
+    """
+
+    tx_hash: str
+    signer: str = Field(..., description="이벤트의 actor = 서명자")
+    minted: Tuple[MintedMembership, ...]
+    skipped: Tuple[str, ...]
+
+
+class BurnResult(_Frozen):
+    """소각 트랜잭션이 블록에 들어간 뒤의 결과 (MembershipBurned)."""
+
+    tx_hash: str
+    holder: str
+    token_id: int
+    reason: BurnReason
+    signer: str
 
 
 class RevertReason(str, Enum):
@@ -204,8 +388,8 @@ class RevertReason(str, Enum):
     범위는 원장을 부를 때 날 수 있는 에러다 (ChainClient 가 원장만 부른다). 원장 ABI 의 에러에 더해, 확정 안에서
     원장이 부르는 BudgetToken.spend·refund 가 내는 에러도 넣는다 — InsufficientBudget·BudgetExpired 는 원장 ABI 에도
     같은 시그니처로 있고, BudgetNotFound·RefundExceedsSpent·ZeroAmount() 는 BudgetToken ABI 에만 있다 (app/chain/revert.py).
-    BudgetToken·RoleManager 를 직접 부르게 되면 TermRequired·ReservedId 처럼 이름이 같은 에러가 있으니
-    이름만이 아니라 어느 컨트랙트에서 났는지까지 보고 분류한다. 순서는 IAccountingLedger 의 검사 순서다.
+    BudgetToken 을 직접 부르는 발행·증액의 에러는 BudgetRevertReason 이다 — TermRequired·ReservedId 처럼 이름이 같은 에러가 있어
+    어느 컨트랙트에서 났는지까지 보고 분류한다. 순서는 IAccountingLedger 의 검사 순서다.
     """
 
     # 서명·시한
@@ -251,6 +435,51 @@ class RevertReason(str, Enum):
     UNKNOWN = "Unknown"
 
 
+class BudgetRevertReason(str, Enum):
+    """BudgetToken 을 직접 부를 때(issue·increase) 나는 에러. 값은 Solidity 에러 이름이다.
+
+    RevertReason 과 따로 둔다. TermRequired 처럼 이름이 같아도 컨트랙트가 다르면 뜻과 시그니처가 다르고,
+    원장 호출에서는 이 에러들이 날 수 없다 — 원장 해석기에 섞으면 잘못 분류한다 (app/chain/revert.py).
+    해석할 수 없는 revert 는 여기서도 RevertReason.UNKNOWN 이다.
+    """
+
+    SIGNATURE_EXPIRED = "SignatureExpired"  # 증액이면 PRESIDENT_SIGNED → PENDING 으로 되돌리고 재서명 (PRD §4.1)
+    INVALID_SIGNATURE = "InvalidSignature"
+    NOT_PRESIDENT = "NotPresident"  # 발행·증액 요청 서명자가 회장이 아님. 앱이 다른 값에 서명해도 이것
+    NOT_AUDITOR = "NotAuditor"  # 증액 승인 서명자가 감사가 아님. 앱이 다른 값에 서명해도 이것
+    RESERVED_ID = "ReservedId"
+    FIELD_OUT_OF_RANGE = "FieldOutOfRange"
+    BUDGET_ALREADY_EXISTS = "BudgetAlreadyExists"  # 같은 budgetId 가 이미 있다. 내용이 같은지는 get_budget 으로 본다
+    BUDGET_ALREADY_ISSUED = "BudgetAlreadyIssued"  # 같은 (term, category) 가 다른 budgetId 로 이미 있다
+    TERM_REQUIRED = "TermRequired"
+    CATEGORY_REQUIRED = "CategoryRequired"
+    ZERO_AMOUNT = "ZeroAmount"
+    AMOUNT_OUT_OF_RANGE = "AmountOutOfRange"  # 증액은 증액 후 총액이 상한을 넘을 때도 난다
+    BUDGET_EXPIRED = "BudgetExpired"
+    BUDGET_NOT_FOUND = "BudgetNotFound"
+    VERSION_MISMATCH = "VersionMismatch"  # 서명한 version 이 지금 version 과 다르다 (다른 증액이 먼저 들어감·서명 재사용)
+    REASON_REQUIRED = "ReasonRequired"
+
+
+class MembershipRevertReason(str, Enum):
+    """MembershipSBT 를 부를 때(mintBatchRelayed·burnRelayed) 나는 에러. 값은 Solidity 에러 이름이다 (IMembershipSBT).
+
+    BudgetRevertReason 과 같은 이유로 따로 둔다. 해석할 수 없는 revert 는 RevertReason.UNKNOWN 이다.
+    """
+
+    NOT_APPROVER = "NotApprover"  # 서명자가 PRESIDENT·AUDITOR 가 아님. 앱이 다른 값에 서명해도 이것
+    EMPTY_BATCH = "EmptyBatch"
+    BATCH_TOO_LARGE = "BatchTooLarge"
+    TERM_REQUIRED = "TermRequired"
+    ZERO_ADDRESS = "ZeroAddress"
+    SOULBOUND = "Soulbound"
+    NO_MEMBERSHIP = "NoMembership"  # 소각할 (holder, term) 회원권이 없음
+    INVALID_BURN_REASON = "InvalidBurnReason"
+    INVALID_SIGNATURE = "InvalidSignature"
+    SIGNATURE_EXPIRED = "SignatureExpired"
+    INVALID_NONCE = "InvalidNonce"  # 서명한 nonce 가 지금 값과 다름 — 같은 서명자의 다른 발행·소각이 먼저 들어감, 서명 재사용
+
+
 class ChainError(Exception):
     """체인 호출 실패의 공통 부모."""
 
@@ -258,7 +487,7 @@ class ChainError(Exception):
 class ChainRevert(ChainError):
     """트랜잭션이 revert 됐다. 온체인 상태는 바뀌지 않는다."""
 
-    def __init__(self, reason: RevertReason, detail: str = ""):
+    def __init__(self, reason: Union[RevertReason, BudgetRevertReason, "MembershipRevertReason"], detail: str = ""):
         self.reason = reason
         self.detail = detail
         super().__init__(f"{reason.value}: {detail}" if detail else reason.value)

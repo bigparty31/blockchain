@@ -66,9 +66,26 @@ Future<void> confirmAndLogout(BuildContext context) async {
 
   if (confirmed != true) return;
 
+  final messenger = ScaffoldMessenger.maybeOf(context);
+
   // **토큰을 먼저 지운다.** 화면을 먼저 보내면 그 사이 남아 있는 세션으로
   // 조회가 한 번 더 나갈 수 있다.
-  await AuthService().logout();
+  //
+  // 지우지 못했으면 **「로그아웃됐다」고 말하지 않는다.** 세션은 비워졌으니
+  // 화면은 로그인으로 보내지만, 기기에는 토큰이 남아 다음 실행의 `restore` 가
+  // 그것을 되살린다 ([TokenClearFailed]). 공용 기기에서 이 차이가 「다음 사람이
+  // 내 세션으로 들어가는지」를 가른다 — 사용자가 알아야 다른 수단을 쓸 수 있다.
+  var cleared = true;
+  try {
+    await AuthService().logout();
+  } on TokenClearFailed {
+    cleared = false;
+    // **깃발을 여기서 내린다.** 아래에서 우리가 직접 알리는데, 깃발을 세워
+    // 두면 뒤따라 서는 로그인 화면이 `initState` 에서 같은 경고를 한 번 더
+    // 띄운다 ([AuthService.consumeTokenClearFailed]). 같은 말을 두 번 하면
+    // 사용자는 두 번 실패한 것으로 읽는다.
+    AuthService().consumeTokenClearFailed();
+  }
 
   // 쌓인 화면을 모두 버린다 — 뒤로 가서 로그아웃 전 화면으로 돌아갈 수 없게 한다
   // (`main.dart` 의 세션 만료 처리와 같은 방식).
@@ -76,4 +93,17 @@ Future<void> confirmAndLogout(BuildContext context) async {
     MaterialPageRoute(builder: (_) => const LoginScreen()),
     (route) => false,
   );
+
+  if (!cleared) {
+    messenger?.showSnackBar(
+      const SnackBar(
+        content: Text(
+          '이 기기에서 로그인 정보를 지우지 못했습니다. '
+          '공용 기기라면 앱 데이터를 삭제해 주세요.',
+        ),
+        behavior: SnackBarBehavior.floating,
+        duration: Duration(seconds: 6),
+      ),
+    );
+  }
 }

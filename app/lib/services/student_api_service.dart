@@ -23,6 +23,18 @@ class ObjectionFailed implements Exception {
   String toString() => 'ObjectionFailed';
 }
 
+/// 실서버를 보고 있는데 그 조회를 읽지 못했다.
+///
+/// **[SessionExpired] 와 다른 사건이다.** 세션은 멀쩡하고 그 요청만 실패한
+/// 것이므로 로그아웃시킬 이유가 없다. 그렇다고 예시 데이터로 메울 자리도
+/// 아니다 — 실제 장부 옆에 예시 숫자가 섞이면 어느 쪽이 진짜인지 알 수 없다.
+/// 화면은 이것을 받아 「조회 실패」를 말한다 (스토리보드 2 ⑥).
+class LedgerUnavailable implements Exception {
+  const LedgerUnavailable();
+  @override
+  String toString() => 'LedgerUnavailable';
+}
+
 /// SBT 조회 결과 — **미보유와 조회 실패를 구분한다** (스토리보드 6 ②·③).
 ///
 /// 둘을 뭉개면 조회가 안 됐을 뿐인데 SBT 를 가진 학생에게 「없다」고 말하게 되고,
@@ -118,13 +130,22 @@ class StudentApiService {
   /// 이 그것을 `PENDING` 으로 채워 넣어서 그냥 두면 **학생 목록에 「승인대기」로
   /// 섞여 보인다.** 아직 아무 데도 올라가지 않아 검증할 대상조차 없는 건이다.
   Future<List<EntryModel>> fetchEntries() async {
+    // 세션이 바뀐 뒤에 돌아온 응답은 **싱글턴 깃발을 건드리지 않는다**
+    // ([_staleSession]). 목록 자체는 부른 화면에 돌려준다 — 그 화면은 이미
+    // 닫히는 중이고, 돌려주지 않으면 여기서 던질 곳도 없다.
+    final generation = AuthService().sessionGeneration;
     final json = await _getJson(ApiConfig.entries);
+    final stale = _staleSession(generation);
+
     if (json is List) {
-      _usingDemoData = false;
-      return parseEntries(json);
+      final entries = stale ? parseEntriesOnly(json) : parseEntries(json);
+      if (!stale) _usingDemoData = false;
+      return entries;
     }
-    _usingDemoData = true;
-    _skippedEntryCount = 0;
+    if (!stale) {
+      _usingDemoData = true;
+      _skippedEntryCount = 0;
+    }
     return _demoEntries();
   }
 
@@ -141,6 +162,18 @@ class StudentApiService {
   /// `fromJson` 이 아니라 여기서 걸러야 하는 이유는 [EntryModel.fromJson] 이
   /// 실패를 던져서 알리는 계약이기 때문이다. 판단은 호출자 몫이다.
   List<EntryModel> parseEntries(List<dynamic> json) {
+    final (entries, skipped) = _parse(json);
+    _skippedEntryCount = skipped;
+    return entries;
+  }
+
+  /// [parseEntries] 와 같지만 [skippedEntryCount] 를 **갱신하지 않는다.**
+  ///
+  /// 지난 세션의 응답을 변환할 때 쓴다 — 그 건수를 써 두면 다음 사용자의 화면이
+  /// 「n 건을 읽지 못했습니다」를 자기 조회 결과로 읽는다 ([_staleSession]).
+  List<EntryModel> parseEntriesOnly(List<dynamic> json) => _parse(json).$1;
+
+  (List<EntryModel>, int) _parse(List<dynamic> json) {
     final entries = <EntryModel>[];
     var skipped = 0;
     for (final e in json) {
@@ -152,16 +185,20 @@ class StudentApiService {
         skipped++;
       }
     }
-    _skippedEntryCount = skipped;
-    return entries;
+    return (entries, skipped);
   }
 
   /// GET /budgets — 예산 항목별 잔량·집행률·개정 이력 (S6)
+  ///
+  /// **실서버를 보고 있으면 폴백하지 않는다** ([fetchLatestSnapshot] 과 같은 이유).
+  /// 실제 장부 옆에 예시 예산이 뜨면 집행률·잔량이 전부 거짓인데 배너는 없다.
+  /// 못 읽었으면 던져서 화면이 「조회 실패」를 말하게 한다 (스토리보드 2 ⑥).
   Future<List<BudgetModel>> fetchBudgets() async {
     final json = await _getJson(ApiConfig.budgets);
     if (json is List) {
       return json.map((e) => BudgetModel.fromJson(e)).toList();
     }
+    if (!_usingDemoData) throw const LedgerUnavailable();
     return _demoBudgets();
   }
 
@@ -235,29 +272,54 @@ class StudentApiService {
   ///
   /// **바이트를 그대로** 받아야 한다. 서버·CDN 이 재인코딩하거나 EXIF 회전을
   /// 보정하면 재계산이 깨진다.
+  /// **우리 서버가 아니면 토큰을 붙이지 않는다.** `receipt_path` 는 절대 URL 일
+  /// 수 있고(S3·CDN) 백엔드에는 출처 제한이 없다 — 그대로 보내면 **남의 서버가
+  /// 학생 JWT 를 받아 간다.** presigned URL 은 `Authorization` 헤더가 붙었다는
+  /// 이유만으로 요청을 거부하기도 해서, 붙이는 쪽이 더 잘 동작하는 것도 아니다.
+  ///
+  /// 같은 이유로 **남의 서버 401 을 세션 만료로 보지 않는다.** 외부 저장소의
+  /// 거부 한 번으로 멀쩡한 로그인이 끊기면, 학생은 영수증을 열었다가 로그아웃된다.
   Future<List<int>?> fetchReceiptBytes(EntryModel entry) async {
     final path = entry.receiptPath;
     if (path == null) return null;
 
     final url = path.startsWith('http') ? path : '${ApiConfig.baseUrl}$path';
-    try {
-      final res = await client.get(Uri.parse(url), headers: _headers).timeout(_timeout);
-      if (res.statusCode == 200) return res.bodyBytes;
-      await _checkUnauthorized(res.statusCode);
-    } catch (_) {}
+    final ours = ApiConfig.isOwnOrigin(url);
+    final auth = _auth;
 
-    // 서버 항목의 영수증을 못 받았을 때 데모 바이트를 돌려주면 「영수증이 바뀌었다」는
-    // 거짓 판정이 된다. 못 받았으면 못 받은 것으로 둔다 ([fetchOnChainEntry] 참고).
+    final http.Response res;
+    try {
+      res = await client
+          .get(
+            Uri.parse(url),
+            headers: ours ? auth.headers : const <String, String>{},
+          )
+          .timeout(_timeout);
+    } catch (_) {
+      // 서버 항목의 영수증을 못 받았을 때 데모 바이트를 돌려주면 「영수증이 바뀌었다」는
+      // 거짓 판정이 된다. 못 받았으면 못 받은 것으로 둔다 ([fetchOnChainEntry] 참고).
+      return _usingDemoData ? _demoReceiptBytes(entry.id) : null;
+    }
+
+    if (res.statusCode == 200) return res.bodyBytes;
+    if (ours) await _checkUnauthorized(res.statusCode, token: auth.token);
+
     return _usingDemoData ? _demoReceiptBytes(entry.id) : null;
   }
 
   // ── 아직 백엔드에 없는 엔드포인트 ──────────────────────────
 
   /// GET /snapshots/latest — 통장 잔액 스냅샷과 미등록 건 (S11)
-  Future<SnapshotModel> fetchLatestSnapshot() async {
+  ///
+  /// **실서버를 보고 있으면 폴백하지 않는다.** 이 엔드포인트는 백엔드에 아직
+  /// 없어서 실모드에서 404 가 확정인데, 그때 예시 스냅샷을 돌려주면 **실제
+  /// 장부와 가짜 통장 잔액·미등록 거래가 한 화면에 섞인다.** [usingDemoData] 는
+  /// `fetchEntries` 가 성공해서 false 이므로 데모 배너도 뜨지 않아, 학생은 그
+  /// 혼합을 알아챌 방법이 없다 ([fetchOnChainEntry]·[fetchMyMembership] 의 같은 판단).
+  Future<SnapshotModel?> fetchLatestSnapshot() async {
     final json = await _getJson('${ApiConfig.baseUrl}/snapshots/latest');
     if (json is Map<String, dynamic>) return SnapshotModel.fromJson(json);
-    return _demoSnapshot();
+    return _usingDemoData ? _demoSnapshot() : null;
   }
 
   /// GET /objections?entry_id= — 이의 목록 (S8)
@@ -286,23 +348,50 @@ class StudentApiService {
   /// 조용히 로컬 폴백으로 넘어가면 **접수되지도 않은 이의가 「접수되었습니다」로
   /// 뜬다** — 학생은 답변을 기다리지만 학생회에는 아무것도 가 있지 않다
   /// (스토리보드 5 ③ 「실패: 서버 무응답 → 토스트 · 입력 내용은 남겨둔다」).
+  /// Throws [ObjectionFailed], [SessionExpired].
   Future<ObjectionModel> raiseObjection({
     required int entryId,
     required String content,
   }) async {
+    final auth = _auth;
+
+    http.Response? res;
     try {
-      final res = await client
+      res = await client
           .post(
             Uri.parse('${ApiConfig.baseUrl}/objections'),
-            headers: {'Content-Type': 'application/json', ..._headers},
+            headers: {'Content-Type': 'application/json', ...auth.headers},
             body: jsonEncode({'entry_id': entryId, 'content': content}),
           )
           .timeout(_timeout);
+    } catch (_) {
+      res = null; // 서버에 닿지 못했다
+    }
+
+    if (res != null) {
+      // 401 은 여기서 던진다 — 아래 폴백으로 내려가면 세션이 끊긴 것을
+      // 「서버 무응답」으로 말하게 된다.
+      await _checkUnauthorized(res.statusCode, token: auth.token);
+
       if (res.statusCode == 200 || res.statusCode == 201) {
-        return ObjectionModel.fromJson(jsonDecode(utf8.decode(res.bodyBytes)));
+        try {
+          return ObjectionModel.fromJson(jsonDecode(utf8.decode(res.bodyBytes)));
+        } catch (_) {
+          // 접수는 됐는데 응답을 못 읽었다. 폴백으로 내려가지 않는다 —
+          // 로컬 사본을 만들면 같은 이의가 두 번 접수된 것처럼 보인다.
+          throw const ObjectionFailed();
+        }
       }
-      await _checkUnauthorized(res.statusCode);
-    } catch (_) {}
+    }
+
+    // **보낸 세션이 아직 그 세션인지 먼저 본다.** 로그아웃·세션 만료가 이
+    // 응답보다 먼저 도착하면 [resetSessionState] 가 목록을 비우고 데모 깃발을
+    // 다시 켜 두는데, 그 상태에서 아래 폴백으로 내려가면 **지난 사용자가 쓴
+    // 이의가 목록에 들어간다.** 다음 사람의 조회가 실패하면(그때 폴백이
+    // `_pendingObjections` 를 돌려준다) 남의 이의 내용이 자기 것으로 보인다.
+    //
+    // 세션이 바뀌었으면 폴백도 성공도 아니다 — 받을 화면 자체가 없다.
+    if (_staleSession(auth.generation)) throw const ObjectionFailed();
 
     if (!_usingDemoData) throw const ObjectionFailed();
 
@@ -342,16 +431,24 @@ class StudentApiService {
   /// 학생에게 「학생회비 납부 확인이 필요합니다」가 뜨고 이의 제기 버튼이 잠긴다.**
   /// 못 읽은 것은 「모름」으로 두는 쪽이 안전하다 ([canObject] 의 같은 판단).
   Future<MembershipResult> fetchMyMembership() async {
+    final auth = _auth;
     try {
       final res = await client
-          .get(Uri.parse('${ApiConfig.baseUrl}/memberships/me'), headers: _headers)
+          .get(Uri.parse('${ApiConfig.baseUrl}/memberships/me'), headers: auth.headers)
           .timeout(_timeout);
       if (res.statusCode == 200) {
         return parseMembership(jsonDecode(utf8.decode(res.bodyBytes)));
       }
       // 401 도 「모름」이다 — 미보유가 아니다. 세션이 끊긴 것뿐이라, 미납으로 읽으면
       // 납부한 학생에게 「납부 확인이 필요합니다」가 뜬다.
-      await _checkUnauthorized(res.statusCode);
+      //
+      // **여기서는 던지지 않는다.** 이 화면에 필요한 답은 이미 「모름」으로
+      // 정해져 있고(아래 `MembershipResult.failed`), 던지면 호출자가 그 답을
+      // 받지 못해 배지가 「조회 중」에 멈춘다. 세션 정리는 보고만으로 충분하다 —
+      // `onUnauthorized` 가 로그인 화면으로 보낸다.
+      if (res.statusCode == 401) {
+        await AuthService().reportUnauthorized(token: auth.token);
+      }
 
       // 서버가 **대답은 했는데** 읽을 수 없는 경우다 (404 · 5xx · 모양이 다른 200).
       // **여기서 데모 값을 끼워 넣지 않는다.** `_usingDemoData` 는 초기값이 true 이고
@@ -412,6 +509,7 @@ class StudentApiService {
   // ── 미확인 항목 뱃지 카운트 (S12) ──────────────────────────
 
   Future<int> lastSeenEntryId() async {
+    await _sessionReset; // 지난 사용자의 기준을 읽지 않는다 ([_sessionReset])
     try {
       final raw = await _storage.read(key: _lastSeenKey);
       return int.tryParse(raw ?? '') ?? 0;
@@ -421,6 +519,7 @@ class StudentApiService {
   }
 
   Future<void> markEntriesSeen(int maxEntryId) async {
+    await _sessionReset; // 지난 사용자의 삭제가 이 값을 지우지 않게 ([_sessionReset])
     try {
       await _storage.write(key: _lastSeenKey, value: maxEntryId.toString());
     } catch (_) {
@@ -430,29 +529,103 @@ class StudentApiService {
 
   // ── 내부 ────────────────────────────────────────────────────
 
+  /// Throws [SessionExpired] — `401`. **그 밖의 실패는 null 이다.**
+  ///
+  /// 401 만 예외인 이유: 못 읽은 것을 null 로 돌려주면 호출자가 예시 데이터로
+  /// 폴백하는데, 세션 만료는 폴백할 자리가 아니다 ([SessionExpired] 설명).
+  /// try 블록 **밖에서** 판정하는 것도 그래서다 — 안에서 던지면 바로 아래
+  /// `catch (_)` 가 삼켜 다시 null 이 된다.
   Future<dynamic> _getJson(String url) async {
+    final auth = _auth;
+
+    final http.Response res;
     try {
-      final res = await client.get(Uri.parse(url), headers: _headers).timeout(_timeout);
-      if (res.statusCode == 200) {
-        return jsonDecode(utf8.decode(res.bodyBytes));
-      }
-      await _checkUnauthorized(res.statusCode);
-    } catch (_) {}
-    return null;
+      res = await client.get(Uri.parse(url), headers: auth.headers).timeout(_timeout);
+    } catch (_) {
+      return null; // 서버에 닿지 못했다 — 데모 모드의 뜻이다
+    }
+
+    if (res.statusCode == 401) {
+      await AuthService().reportUnauthorized(token: auth.token);
+      throw const SessionExpired();
+    }
+    if (res.statusCode != 200) return null;
+
+    try {
+      return jsonDecode(utf8.decode(res.bodyBytes));
+    } catch (_) {
+      return null;
+    }
   }
 
-  /// 로그인한 세션의 토큰. 로그인 전이면 비어 있다.
+  /// 로그인한 세션의 인증 헤더와 **그때 쓴 토큰**.
   ///
   /// 조회 API 는 지금 토큰 없이도 되지만(docs/API.md 「인증」 3), 붙여 두면
   /// 서버가 인증을 요구하도록 바뀔 때 앱이 조용히 빈 화면이 되지 않는다.
-  Map<String, String> get _headers => AuthService().authHeaders;
-
-  /// `401` 이면 세션을 비우고 로그인 화면으로 돌려보낸다 (`main.dart` 가 받는다).
   ///
-  /// **데모 폴백으로 넘기지 않는다.** 만료된 세션에 예시 데이터를 보여주면
-  /// 학생은 로그인이 끊긴 줄 모르고 예시 장부를 실제 장부로 읽는다.
-  Future<void> _checkUnauthorized(int statusCode) async {
-    if (statusCode == 401) await AuthService().reportUnauthorized();
+  /// 토큰까지 들고 다니는 이유는 [AuthService.authSnapshot] 설명에 있다 —
+  /// 401 을 보고할 때 「그 요청이 쓴 토큰」이어야 늦게 온 응답이 새 세션을
+  /// 지우지 않는다.
+  ({Map<String, String> headers, String? token, int generation}) get _auth =>
+      AuthService().authSnapshot;
+
+  /// 이 요청을 보낸 세션이 **이미 다른 세션으로 바뀌었는지**.
+  ///
+  /// 이 클래스는 싱글턴이라 로그아웃·세션 만료를 넘어 살아 있고, 그때
+  /// [resetSessionState] 가 세션에 묶인 상태를 비운다. 그런데 **그 전에 나간
+  /// 요청은 비운 뒤에 돌아온다** — 돌아와서 싱글턴에 뭔가 쓰면 비운 것이
+  /// 되살아나고, 그것을 다음 사용자가 본다.
+  ///
+  /// 토큰 비교로는 모자라다: 로그아웃하면 토큰이 null 이라 비교할 대상이 없다
+  /// ([AuthService.sessionGeneration]).
+  bool _staleSession(int generation) => generation != AuthService().sessionGeneration;
+
+  /// 우리 서버가 준 `401` 인가. 남의 서버 401 은 세션과 무관하다.
+  ///
+  /// Throws [SessionExpired] — 우리 서버의 401 인 경우.
+  Future<void> _checkUnauthorized(int statusCode, {required String? token}) async {
+    if (statusCode != 401) return;
+    await AuthService().reportUnauthorized(token: token);
+    throw const SessionExpired();
+  }
+
+  /// 로그아웃·세션 만료 때 **세션에 묶인 상태를 비운다** (`main.dart` 가 연결).
+  ///
+  /// 이 클래스는 싱글턴이라 로그아웃해도 살아 있다. 비우지 않으면 같은 기기의
+  /// 다음 사람에게 **이전 사용자가 제기한 이의 목록**이 보이고, 미확인 뱃지가
+  /// 이전 사용자의 「마지막으로 본 항목」을 기준으로 계산된다. 데모 깃발도
+  /// 되돌려 두어야 다음 사용자의 첫 조회가 실패했을 때 예시 데이터를 실제
+  /// 원장으로 읽지 않는다.
+  /// 진행 중인 [resetSessionState] 의 보관소 삭제. 없으면 null 이다.
+  ///
+  /// `main.dart` 는 `onSessionCleared` 가 `void` 라 **이것을 기다리지 않는다.**
+  /// 메모리 상태는 아래에서 `await` 전에 비우므로 문제가 없지만, 뱃지 기준
+  /// 삭제는 비동기라 **다음 사용자의 읽기·쓰기와 겹칠 수 있다** — 지난 사용자의
+  /// 「마지막으로 본 항목」을 다음 사람이 읽거나, 그 삭제가 다음 사람이 방금 쓴
+  /// 값을 지운다. 여기에 들고 있다가 그 두 곳에서 기다린다.
+  Future<void>? _sessionReset;
+
+  Future<void> resetSessionState() {
+    // **`await` 전에 비운다.** `onSessionCleared` 는 세션이 비워지는 순간
+    // 동기로 불리므로, 여기까지는 다음 사용자의 요청이 끼어들 틈이 없다.
+    _pendingObjections.clear();
+    _usingDemoData = true;
+    _skippedEntryCount = 0;
+    final reset = _clearLastSeen();
+    _sessionReset = reset;
+    reset.whenComplete(() {
+      // 그 사이 또 로그아웃했으면 그쪽 삭제가 진행 중이다 — 그것을 덮지 않는다.
+      if (_sessionReset == reset) _sessionReset = null;
+    });
+    return reset;
+  }
+
+  Future<void> _clearLastSeen() async {
+    try {
+      await _storage.delete(key: _lastSeenKey);
+    } catch (_) {
+      // 뱃지 기준이 남을 뿐이다. 로그아웃 자체를 막을 이유는 아니다.
+    }
   }
 
   // ══ 데모 데이터 ════════════════════════════════════════════
