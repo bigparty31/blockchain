@@ -1,0 +1,76 @@
+# 학생 서버 수평 확장 구성 (PRD v0.15 §9.1, 서버-분리-설계안 §4).
+#
+# 루트 docker-compose.yml 과 **겹쳐서** 쓴다 — db·chain 은 그쪽 것을 그대로 쓴다:
+#
+#   docker compose -f docker-compose.yml -f deploy/docker-compose.student.yml up -d
+#
+# 학생 서버는 조회 전용이다. 릴레이어 키를 주지 않고, 루트 이미지의 ENTRYPOINT 도 비운다 —
+# docker-entrypoint.sh 가 키가 없으면 Hardhat 릴레이어 키를 채워 넣기 때문이다
+# (docs/SERVER_ENV.md §9.1 — 학생 서버가 릴레이어 키를 갖게 되면 신뢰 모델이 깨진다).
+
+services:
+  redis:
+    image: redis:7-alpine
+    # 캐시다. 날아가도 되는 데이터라 영속화하지 않는다
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  student-api-1: &student-api
+    build: ./backend
+    entrypoint: []          # 릴레이어 키 주입을 막는다 (위 설명)
+    command: ["uvicorn", "app.main_student:app", "--host", "0.0.0.0", "--port", "8001"]
+    depends_on:
+      db:
+        condition: service_healthy
+      chain:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # 읽기 전용 계정을 따로 만들면 여기를 그 계정으로 바꾼다 (docs/SERVER_ENV.md §5)
+      DATABASE_URL: postgresql+psycopg://council:${POSTGRES_PASSWORD}@db:5432/council
+      JWT_SECRET: ${JWT_SECRET:?.env 에 JWT_SECRET 이 필요합니다}
+      CHAIN_RPC_URL: http://chain:8545
+      # RELAYER_PRIVATE_KEY 를 **주지 않는다** — 학생 서버는 체인을 조회만 한다
+      DEPLOYMENTS_FILE: /deployments/localhost.json
+      STUDENT_WALLET_MNEMONIC: ${STUDENT_WALLET_MNEMONIC:?.env 에 STUDENT_WALLET_MNEMONIC 이 필요합니다 (회원권 조회)}
+      NOTIFICATION_WORKER: "0"
+      # 캐시 켜고/끄고 비교가 이 측정의 핵심이다. 끌 때는 CACHE_ENABLED=0 으로 올린다
+      CACHE_ENABLED: ${CACHE_ENABLED:-1}
+      REDIS_URL: redis://redis:6379/0
+      CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-30}
+      INSTANCE_NAME: student-api-1
+    volumes:
+      - deployments:/deployments:ro
+    restart: unless-stopped
+
+  student-api-2:
+    <<: *student-api
+    environment:
+      DATABASE_URL: postgresql+psycopg://council:${POSTGRES_PASSWORD}@db:5432/council
+      JWT_SECRET: ${JWT_SECRET:?.env 에 JWT_SECRET 이 필요합니다}
+      CHAIN_RPC_URL: http://chain:8545
+      DEPLOYMENTS_FILE: /deployments/localhost.json
+      STUDENT_WALLET_MNEMONIC: ${STUDENT_WALLET_MNEMONIC:?.env 에 STUDENT_WALLET_MNEMONIC 이 필요합니다 (회원권 조회)}
+      NOTIFICATION_WORKER: "0"
+      CACHE_ENABLED: ${CACHE_ENABLED:-1}
+      REDIS_URL: redis://redis:6379/0
+      CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-30}
+      INSTANCE_NAME: student-api-2
+
+  student-lb:
+    image: nginx:1.27-alpine
+    depends_on:
+      - student-api-1
+      - student-api-2
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      # 학생 앱과 k6 가 때리는 곳. 임원 API(8000)와 포트를 나눈다
+      - "${BIND_ADDR:-127.0.0.1}:${STUDENT_PORT:-8001}:8001"
+    restart: unless-stopped

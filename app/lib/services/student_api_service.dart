@@ -220,6 +220,21 @@ class StudentApiService {
     return _usingDemoData ? _demoOnChain(entryId) : null;
   }
 
+  /// GET /entries/{id} — 단건 상세.
+  ///
+  /// **목록(`GET /entries`)에 없는 값이 여기에만 있다.** 지금은 `block_number` 가 그렇다 —
+  /// 서버가 트랜잭션 영수증을 읽어 채우는데(backend `entries.py` `_fetch_entry_chain_detail`),
+  /// 항목마다 RPC 왕복이라 목록에서는 하지 않는다. 목록 응답에서는 `null` 이다
+  /// (2026-11-12 실연동에서 확인: 목록 `null` / 상세 `11`).
+  ///
+  /// 못 읽으면 null 이다. **예시 데이터로 메우지 않는다** — 상세 화면은 이미 목록에서 받은
+  /// 값을 그리고 있고, 여기서 데모 값을 섞으면 실제 항목에 가짜 블록 번호가 붙는다.
+  Future<EntryModel?> fetchEntry(int entryId) async {
+    final json = await _getJson('${ApiConfig.entries}/$entryId');
+    if (json is Map<String, dynamic>) return EntryModel.fromJson(json);
+    return null;
+  }
+
   /// GET /users/wallets — **지갑 주소 → user id** 매핑 (검증 2단계)
   ///
   /// 체인의 `registrant`·`approver` 는 지갑 주소이고 DB 의 `created_by`·
@@ -310,6 +325,11 @@ class StudentApiService {
   // ── 아직 백엔드에 없는 엔드포인트 ──────────────────────────
 
   /// GET /snapshots/latest — 통장 잔액 스냅샷과 미등록 건 (S11)
+  ///
+  /// 대조 기능 자체는 서버에 `GET /bank/snapshots` · `/bank/snapshots/{id}` 로 있지만
+  /// **학생은 그쪽을 쓸 수 없다** — 둘 다 `council_only` 라 학생 토큰은 403 이고,
+  /// `bank` 라우터가 `STUDENT_QUERY_ROUTERS` 에 없어 학생 서버에는 경로가 생기지 않는다
+  /// (2026-11-12 실연동에서 확인, `docs/backend_requests.md` §1-5). 경로를 바꾸면 안 되는 이유다.
   ///
   /// **실서버를 보고 있으면 폴백하지 않는다.** 이 엔드포인트는 백엔드에 아직
   /// 없어서 실모드에서 404 가 확정인데, 그때 예시 스냅샷을 돌려주면 **실제

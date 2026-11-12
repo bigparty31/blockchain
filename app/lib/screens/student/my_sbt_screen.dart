@@ -336,17 +336,21 @@ class _MySbtScreenState extends State<MySbtScreen> {
           _kv('토큰 번호', '#${m.tokenId}'),
           _kv('발급 일시', Fmt.date(m.mintedAt)),
           _kv('학기', TermInfo.currentTerm),
-          _kv('커밋 해시', Fmt.shortHash(m.commitHash)),
-          const SizedBox(height: 6),
-          Text(
-            '커밋 해시는 학번에 무작위 값을 섞어 만든 값입니다. 블록체인에는 이 값만 '
-            '올라가며 학번 자체는 올라가지 않습니다.',
-            style: TextStyle(
-              fontSize: 10,
-              color: AppTheme.textSub.withOpacity(0.9),
-              height: 1.4,
+          // 서버 응답(`MembershipResponse`)에는 `commit_hash` 가 없다 — 빈 값이면 라벨만 남은
+          // 줄과 그 줄을 설명하는 문단이 함께 뜨므로 둘 다 감춘다 (2026-11-12 실연동에서 확인).
+          if (m.commitHash.isNotEmpty) ...[
+            _kv('커밋 해시', Fmt.shortHash(m.commitHash)),
+            const SizedBox(height: 6),
+            Text(
+              '커밋 해시는 학번에 무작위 값을 섞어 만든 값입니다. 블록체인에는 이 값만 '
+              '올라가며 학번 자체는 올라가지 않습니다.',
+              style: TextStyle(
+                fontSize: 10,
+                color: AppTheme.textSub.withOpacity(0.9),
+                height: 1.4,
+              ),
             ),
-          ),
+          ],
         ],
       ),
     );
