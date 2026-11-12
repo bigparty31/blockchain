@@ -1,5 +1,10 @@
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:student_council_app/core/enums.dart';
 import 'package:student_council_app/core/hashing.dart';
 import 'package:student_council_app/screens/council/correction_screen.dart';
@@ -306,6 +311,84 @@ void main() {
       expect(find.textContaining('② 사업비 -₩ 35,000 (나중)'), findsOneWidget);
     });
 
+    // 조회 전에 고른 새 예산이 다른 학기 것이면, 조회 뒤 후보에서 빠지는데 선택값만 남아 드롭다운이 깨졌다 (#72 리뷰).
+    testWidgets('조회 전에 고른 다른 학기 예산은 조회 뒤 후보에서 빠지며 선택도 비워진다', (tester) async {
+      Map<String, dynamic> budget(int id, int termId, String category, int remaining) => {
+            'id': id,
+            'term_id': termId,
+            'category': category,
+            'planned_amount': 1000000,
+            'remaining_amount': remaining,
+            'execution_rate': 0,
+            'version': 1,
+            'expires_at': 1797260399,
+          };
+      ApiService.client = MockClient((req) async {
+        if (req.url.path == '/budgets') {
+          return http.Response(
+              jsonEncode([
+                budget(1, 1, '행사비', 2470000),
+                budget(2, 1, '사업비', 1465000),
+                budget(3, 1, '운영비', 1000000),
+                budget(11, 2, '행사비', 900000),
+                budget(12, 2, '사업비', 800000),
+              ]),
+              200,
+              headers: {'content-type': 'application/json; charset=utf-8'});
+        }
+        return http.Response('{}', 404); // 내역은 더미로 폴백 — #1 은 학기 1 의 사업비
+      });
+      addTearDown(() => ApiService.client = http.Client());
+      await pumpScreen(tester);
+      await chooseReclassify(tester);
+
+      await tester.ensureVisible(find.byType(DropdownButtonFormField<int>));
+      await tester.tap(find.byType(DropdownButtonFormField<int>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.textContaining('행사비 · 잔량 ₩ 900,000').last); // 학기 2 의 행사비
+      await tester.pumpAndSettle();
+      expect(find.textContaining('행사비 · 잔량 ₩ 900,000'), findsWidgets);
+
+      await lookup(tester, '1'); // 학기 1 의 사업비 — 후보는 학기 1 의 다른 예산뿐
+      expect(tester.takeException(), isNull, reason: '후보에 없는 값이 남으면 드롭다운이 깨진다');
+      expect(find.textContaining('행사비 · 잔량 ₩ 900,000'), findsNothing, reason: '다른 학기 예산 선택은 비워진다');
+      expect(find.text('옮겨 갈 예산 항목을 고르세요'), findsOneWidget);
+    });
+
+    // 영수증 업로드를 기다리는 사이 금액을 비우면, 업로드 뒤에 입력을 다시 읽다 던졌고
+    // 그 예외를 아무도 받지 않아 「제출 중」이 풀리지 않았다 (#72 리뷰).
+    testWidgets('업로드를 기다리는 사이 금액을 비워도 제출한 값으로 끝까지 가고, 제출 중 상태가 풀린다', (tester) async {
+      tester.view.physicalSize = const Size(411, 2800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+      final gated = _UploadGateRegistrar();
+      await tester.pumpWidget(MaterialApp(home: CorrectionScreen(registrar: gated, pickReceipt: fakeReceipt)));
+      await tester.pumpAndSettle();
+      await lookup(tester, '1');
+      final attach = find.text('수정 증빙 자료 재첨부 (영수증, 선택)');
+      await tester.ensureVisible(attach);
+      await tester.tap(attach);
+      await tester.pumpAndSettle();
+      await tester.enterText(amountField(), '30000');
+      await tester.enterText(detailField(), '실제 영수증 확인 결과 금액 정정');
+      await tester.ensureVisible(find.text('정정 제출하기'));
+      await tester.tap(find.text('정정 제출하기')); // 업로드 대기 중 — 아직 끝내지 않는다
+      await tester.pump();
+
+      await tester.enterText(amountField(), ''); // 기다리는 사이 지움
+      gated.uploadGate.complete();
+      for (var i = 0; i < 10; i++) {
+        await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 10)));
+        await tester.pump();
+      }
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull, reason: '비운 금액을 다시 읽다 예외가 나면 안 된다');
+      expect(find.text('정정 등록 완료!'), findsOneWidget);
+      expect(gated.drafts.single.amount, -5000, reason: '제출 버튼을 누른 때의 값(35,000 → 30,000)');
+      expect(find.text('제출 중...'), findsNothing, reason: '제출 중 상태가 풀려야 한다');
+    });
+
     testWidgets('새 예산 항목을 고르지 않으면 제출되지 않는다', (tester) async {
       await pumpScreen(tester);
       await lookup(tester, '1');
@@ -484,4 +567,15 @@ void main() {
       expect(find.text('답변은 블록체인에 기록되어 수정할 수 없어요'), findsNWidgets(2));
     });
   });
+}
+
+/// 영수증 업로드를 시험이 풀어 줄 때까지 붙잡아 두는 등록기 — 업로드를 기다리는 사이의 화면을 본다.
+class _UploadGateRegistrar extends FakeRegistrar {
+  final uploadGate = Completer<void>();
+
+  @override
+  Future<ReceiptUpload> uploadReceipt(List<int> bytes, {required String filename}) async {
+    await uploadGate.future;
+    return super.uploadReceipt(bytes, filename: filename);
+  }
 }
