@@ -175,6 +175,7 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
     if (_submitting || !_formKey.currentState!.validate()) return;
     final draft = _buildDraft(forSubmit: false);
     if (draft == null) return;
+    final category = _selectedBudgetCategory; // 응답을 기다리는 사이 바꿔도 안내는 보낸 값으로 한다
     setState(() => _submitting = true);
     try {
       await _ensureDraft(draft);
@@ -186,7 +187,7 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
     }
     if (!mounted) return;
     setState(() => _submitting = false);
-    await _showResult(const RegistrationResult.draft());
+    await _showResult(const RegistrationResult.draft(), draft, category);
   }
 
   /// ② 제출 — 기기 키로 서명해 체인에 올린다. 결과는 `PENDING` 또는 `BLOCKED`.
@@ -195,6 +196,7 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
     if (_submitting || !_formKey.currentState!.validate()) return;
     final draft = _buildDraft(forSubmit: true);
     if (draft == null) return;
+    final category = _selectedBudgetCategory; // 응답을 기다리는 사이 바꿔도 안내는 보낸 값으로 한다
     setState(() => _submitting = true);
 
     final RegistrationResult result;
@@ -214,35 +216,37 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
     }
     if (!mounted) return;
     setState(() => _submitting = false);
-    await _showResult(result);
+    await _showResult(result, draft, category);
   }
 
-  Future<void> _showResult(RegistrationResult result) async {
+  /// 결과 안내 — **입력칸이 아니라 보낸 초안**으로 만든다. 응답을 기다리는 사이 입력을 바꿔도(금액을 비워도)
+  /// 서버에 기록된 값을 보이고, 비운 금액을 다시 읽다 예외가 나지 않는다.
+  Future<void> _showResult(RegistrationResult result, EntryDraft draft, String category) async {
     final done = await showRegistrationResultDialog(
       context,
       kindLabel: '지출',
       rows: [
-        ('목적', _titleController.text),
-        ('사용처', _merchantController.text),
-        ('금액', '${int.parse(_amountController.text)}원'),
-        ('예산 항목', _selectedBudgetCategory),
+        ('목적', draft.purpose),
+        ('사용처', draft.counterparty),
+        ('금액', '${draft.amount}원'),
+        ('예산 항목', category),
       ],
       result: result,
-      occurredAtNote: '전송값 occurred_at: $_occurredAt (사용일 KST 00:00)',
-      onBudgetRevision: _openBudgetRevision,
+      occurredAtNote: '전송값 occurred_at: ${draft.occurredAt} (사용일 KST 00:00)',
+      onBudgetRevision: () => _openBudgetRevision(draft, category),
     );
     if (done && mounted) Navigator.pop(context);
   }
 
-  /// 차단 안내 → 예산 개정 요청. 차단된 지출이 근거로 붙고 예산 항목이 골라져 넘어간다.
-  void _openBudgetRevision() {
+  /// 차단 안내 → 예산 개정 요청. 차단된 지출(보낸 초안)이 근거로 붙고 예산 항목이 골라져 넘어간다.
+  void _openBudgetRevision(EntryDraft draft, String category) {
     Navigator.push(
       context,
       MaterialPageRoute(
         builder: (_) => BudgetRevisionScreen(
-          initialCategory: _selectedBudgetCategory,
-          basisTitle: _titleController.text,
-          basisAmount: int.tryParse(_amountController.text),
+          initialCategory: category,
+          basisTitle: draft.purpose,
+          basisAmount: draft.amount,
         ),
       ),
     );

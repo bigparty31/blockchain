@@ -138,6 +138,10 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
       occurredAt: _occurredAt,
       receiptHash: _receiptHash,
     );
+    // 응답을 기다리는 사이 입력을 바꿔도 안내는 보낸 값으로 한다 — 입력칸을 다시 읽지 않는다
+    final shownType = _incomeType;
+    final shownDate =
+        '${_selectedDate.year}-${_selectedDate.month.toString().padLeft(2, '0')}-${_selectedDate.day.toString().padLeft(2, '0')}';
     setState(() => _submitting = true);
     final RegistrationResult result;
     try {
@@ -160,20 +164,18 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
     if (!mounted) return;
     setState(() => _submitting = false);
 
-    final date =
-        '${_selectedDate.year}-${_selectedDate.month.toString().padLeft(2, '0')}-${_selectedDate.day.toString().padLeft(2, '0')}';
     final done = await showRegistrationResultDialog(
       context,
       kindLabel: '수입',
       rows: [
-        ('분류', _incomeType),
-        ('출처', _sourceController.text),
-        ('금액', '${_amountController.text}원'),
-        ('일자', date),
-        ('영수증', _hasReceipt ? '첨부' : '없음'),
+        ('분류', shownType),
+        ('출처', draft.counterparty),
+        ('금액', '${draft.amount}원'),
+        ('일자', shownDate),
+        ('영수증', draft.receiptHash != null ? '첨부' : '없음'),
       ],
       result: result,
-      occurredAtNote: '전송값 occurred_at: $_occurredAt (사용일 KST 00:00)',
+      occurredAtNote: '전송값 occurred_at: ${draft.occurredAt} (사용일 KST 00:00)',
       gradient: AppTheme.incomeGradient,
     );
     if (done && mounted) Navigator.pop(context);
