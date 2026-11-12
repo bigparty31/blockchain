@@ -150,7 +150,11 @@ void main() {
     });
     int? id;
     Object? error;
-    service().saveDraft(expense()).then((v) => id = v, onError: (Object e) => error = e);
+    service().saveDraft(expense()).then((v) {
+      id = v;
+    }, onError: (Object e) {
+      error = e;
+    });
     await tester.pump(const Duration(seconds: 11));
     expect(error, isNull, reason: '10초 걸려도 45초 안이면 응답을 받는다');
     expect(id, 11);
