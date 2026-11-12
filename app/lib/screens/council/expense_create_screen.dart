@@ -57,7 +57,7 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
   final List<String> _budgetCategories = ['행사비', '사업비', '운영비'];
 
   /// 예산 항목별 잔량 (`GET /budgets`). 고르기 전에 남은 예산을 보여 준다 (스토리보드 7 ③).
-  Map<String, int> _remaining = const {};
+  int? _currentTermId; // 현재 학기 — 같은 분류의 예산이 학기마다 있어서 이 학기의 것을 고른다
 
   @override
   void initState() {
@@ -71,11 +71,18 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
   Future<void> _loadBudgets() async {
     try {
       final budgets = await ApiService().fetchBudgets();
+      // 현재 학기를 못 읽어도 예산은 보인다 — 그때는 가장 최근 학기의 예산을 쓴다
+      int? termId;
+      try {
+        termId = await ApiService().fetchCurrentTermId();
+      } on ApiUnavailable {
+        termId = null;
+      }
       if (!mounted) return;
       setState(() {
         _budgetsError = null;
         _budgets = budgets;
-        _remaining = {for (final b in budgets) b.category: b.remainingAmount};
+        _currentTermId = termId;
       });
     } on ApiUnavailable catch (e) {
       if (mounted) setState(() => _budgetsError = e.message);
@@ -83,7 +90,7 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
   }
 
   String _budgetLabel(String category) {
-    final left = _remaining[category];
+    final left = _budgetFor(category)?.remainingAmount;
     return left == null ? category : '$category · 잔량 ${Fmt.won(left)}';
   }
 
@@ -139,12 +146,7 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
     );
   }
 
-  BudgetModel? _budgetFor(String category) {
-    for (final b in _budgets) {
-      if (b.category == category) return b;
-    }
-    return null;
-  }
+  BudgetModel? _budgetFor(String category) => pickBudget(_budgets, category, currentTermId: _currentTermId);
 
   /// 입력으로 초안을 만든다. 만들 수 없으면 이유를 알리고 null.
   EntryDraft? _buildDraft({required bool forSubmit, String? receiptPath}) {

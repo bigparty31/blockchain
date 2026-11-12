@@ -1,0 +1,111 @@
+import 'dart:convert';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:student_council_app/screens/council/budget_revision_screen.dart';
+import 'package:student_council_app/screens/council/expense_create_screen.dart';
+import 'package:student_council_app/services/api_service.dart';
+
+import 'support/registration.dart';
+
+/// 같은 분류의 예산이 학기마다 있을 때 — `GET /budgets` 는 전 학기를 준다.
+/// 분류 이름만으로 고르면 가장 오래된 학기의 예산에 지출이 올라간다.
+void main() {
+  late List<String> requested;
+
+  http.Response json(Object body) =>
+      http.Response(jsonEncode(body), 200, headers: {'content-type': 'application/json; charset=utf-8'});
+
+  Map<String, dynamic> budget(int id, int termId, String category, int remaining) => {
+        'id': id,
+        'term_id': termId,
+        'category': category,
+        'planned_amount': 1000000,
+        'remaining_amount': remaining,
+        'execution_rate': 0,
+        'version': 1,
+        'expires_at': 1797260399,
+      };
+
+  setUp(() {
+    ApiService.useDemoData = false;
+    requested = [];
+    ApiService.client = MockClient((req) async {
+      requested.add('${req.method} ${req.url.path}');
+      switch (req.url.path) {
+        case '/budgets':
+          // 지난 학기(1)가 먼저 나오고 현재 학기(2)가 뒤에 온다
+          return json([
+            budget(1, 1, '행사비', 100000),
+            budget(2, 1, '사업비', 200000),
+            budget(3, 1, '운영비', 300000),
+            budget(11, 2, '행사비', 900000),
+            budget(12, 2, '사업비', 800000),
+            budget(13, 2, '운영비', 700000),
+          ]);
+        case '/terms':
+          return json([
+            {'id': 1, 'term_code': 20261, 'started_at': '2000-01-01T00:00:00', 'ended_at': '2000-12-31T23:59:59'},
+            {'id': 2, 'term_code': 20262, 'started_at': '2001-01-01T00:00:00', 'ended_at': '2999-12-31T23:59:59'},
+          ]);
+      }
+      return http.Response('{}', 404);
+    });
+  });
+
+  tearDown(() {
+    ApiService.client = http.Client();
+    ApiService.useDemoData = true;
+  });
+
+  Future<void> pump(WidgetTester tester, Widget home) async {
+    tester.view.physicalSize = const Size(411, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(MaterialApp(home: home));
+    for (var i = 0; i < 20; i++) {
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 20)));
+      await tester.pump();
+    }
+    await tester.pumpAndSettle();
+  }
+
+  testWidgets('예산 항목은 현재 학기의 예산으로 보이고, 그 예산 번호·학기로 제출한다', (tester) async {
+    final registrar = FakeRegistrar();
+    await pump(tester, ExpenseCreateScreen(registrar: registrar, pickReceipt: fakeReceipt));
+
+    expect(find.textContaining('잔량 ₩ 900,000'), findsOneWidget, reason: '현재 학기(2) 행사비의 잔량');
+    expect(find.textContaining('잔량 ₩ 100,000'), findsNothing, reason: '지난 학기 행사비의 잔량이 아니다');
+
+    await tester.tap(find.text('영수증 촬영 또는 사진 첨부'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.widgetWithText(TextFormField, '목적 *'), '신입생 환영회 명찰');
+    await tester.enterText(find.widgetWithText(TextFormField, '사용처(상호명) *'), '한결문구');
+    await tester.enterText(find.widgetWithText(TextFormField, '지출 금액(원) *'), '35000');
+    await tester.ensureVisible(find.text('제출하기'));
+    await tester.tap(find.text('제출하기'));
+    for (var i = 0; i < 10; i++) {
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 10)));
+      await tester.pump();
+    }
+    await tester.pumpAndSettle();
+
+    final draft = registrar.submits.single.$2;
+    expect(draft.budgetId, 11, reason: '현재 학기 행사비 — 지난 학기 #1 이 아니다');
+    expect(draft.termId, 2);
+  });
+  testWidgets('예산 개정 — 항목은 분류마다 하나씩 현재 학기의 예산으로 보이고, 부족분도 그 잔량으로 센다', (tester) async {
+    await pump(tester, const BudgetRevisionScreen(initialCategory: '행사비', basisTitle: '현수막', basisAmount: 950000));
+
+    expect(tester.takeException(), isNull, reason: '같은 분류가 둘이면 드롭다운 항목 값이 겹쳐 화면이 깨졌다');
+    expect(find.textContaining('행사비 잔량이 ₩ 50,000 모자라요'), findsOneWidget, reason: '현재 학기 잔량(900,000) 기준 — 지난 학기(100,000)가 아니다');
+
+    await tester.tap(find.byType(DropdownButtonFormField<String>));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('행사비 · 잔량'), findsNWidgets(2), reason: '닫힌 칸과 펼친 목록에 하나씩 — 학기마다 둘이 아니다');
+    expect(find.textContaining('잔량 ₩ 100,000'), findsNothing);
+    expect(find.textContaining('잔량 ₩ 800,000'), findsWidgets);
+  });
+}
