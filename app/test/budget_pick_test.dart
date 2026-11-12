@@ -29,8 +29,9 @@ void main() {
       expect(pickBudget(all.reversed.toList(), '행사비')?.id, 11, reason: '목록 순서와 무관하다');
     });
 
-    test('현재 학기에 그 분류가 없으면 가장 최근 학기로 물러난다', () {
-      expect(pickBudget([b(1, 1, '운영비'), b(11, 2, '행사비')], '운영비', currentTermId: 2)?.id, 1);
+    // 현재 학기에 그 분류가 없을 때 다른 학기 예산으로 물러나면 지출이 지난 학기(termId: 1)로 올라간다 (#69 리뷰).
+    test('현재 학기를 알면 그 학기에 없는 분류는 고르지 않는다 — 다른 학기로 물러나지 않는다', () {
+      expect(pickBudget([b(1, 1, '운영비'), b(11, 2, '행사비')], '운영비', currentTermId: 2), isNull);
     });
 
     test('고정한 예산 번호가 그 분류의 예산이면 학기와 상관없이 그것을 고른다 — 지난 학기 건을 다시 등록할 때', () {
@@ -52,6 +53,11 @@ void main() {
     test('분류마다 하나씩, 고르는 규칙은 pickBudget 과 같다 — 처음 나온 분류 순서를 지킨다', () {
       final shown = budgetsPerCategory(all, currentTermId: 2);
       expect(shown.map((x) => x.id), [11, 12]);
+    });
+
+    test('현재 학기에 없는 분류는 보이지 않는다', () {
+      final partial = [b(1, 1, '운영비'), b(11, 2, '행사비')];
+      expect(budgetsPerCategory(partial, currentTermId: 2).map((x) => x.id), [11]);
     });
 
     test('고정한 예산이 있으면 그 분류는 그것으로 보인다', () {
