@@ -229,4 +229,10 @@ void main() {
         ['BUDGET_EXCEEDED', 'BUDGET_EXPIRED', 'BUDGET_NOT_FOUND']);
     expect(BlockReason.fromCode('BUDGET_EXPIRED'), BlockReason.BUDGET_EXPIRED);
   });
+
+  test('모르는 차단 사유·정정 사유는 다른 값으로 바꿔 읽지 않고 던진다 (#69 리뷰)', () {
+    // 예전에는 BUDGET_EXCEEDED(잔량 부족)·INPUT_ERROR(입력 오류)로 떨어졌다 — 실제 원인이 다른데 잘못된 안내를 한다.
+    expect(() => BlockReason.fromCode('BUDGET_FROZEN'), throwsArgumentError);
+    expect(() => CorrectionReason.fromCode('DOUBLE_ENTRY'), throwsArgumentError);
+  });
 }

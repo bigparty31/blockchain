@@ -185,4 +185,96 @@ void main() {
       expect(registrar.downloads, isEmpty);
     });
   });
+
+  /// 영수증 바꿔치기는 OCR·카테고리 경고에 걸리지 않고 `meta_hash` 도 그대로라, 승인자가 해시 대조를 보지 않으면
+  /// 어디서도 걸리지 않는다. 대조 결과가 승인 버튼을 누르기 전에 카드에 보이고, 불일치면 승인할 수 없어야 한다 (#74 리뷰).
+  group('승인 전 영수증 대조 (#74 리뷰)', () {
+    Future<void> settle(WidgetTester tester) async {
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 20)));
+      await tester.pump();
+      await tester.pump();
+    }
+
+    Future<void> openList(WidgetTester tester, FakeRegistrar registrar, EntryModel e) async {
+      tester.view.physicalSize = const Size(411, 2400);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(MaterialApp(
+        home: ApprovalListScreen(role: UserRole.AUDITOR, currentUserId: 3, items: [approvalItemFromEntry(e)], registrar: registrar),
+      ));
+      await tester.pump();
+      await settle(tester);
+    }
+
+    testWidgets('목록이 뜨면 영수증을 대조해 결과를 카드에 보인다 — 누르지 않아도', (tester) async {
+      await openList(tester, FakeRegistrar()..stored[path] = png, entry(receiptHash: pngHash));
+      expect(find.byKey(const Key('approval_receipt_match')), findsOneWidget);
+      expect(find.byKey(const Key('approval_receipt_mismatch')), findsNothing);
+    });
+
+    testWidgets('해시가 다르면 카드에 불일치를 보이고, 승인 서명을 눌러도 서명 단계로 가지 않는다', (tester) async {
+      await openList(tester, FakeRegistrar()..stored[path] = [...png, 0], entry(receiptHash: pngHash));
+      expect(find.byKey(const Key('approval_receipt_mismatch')), findsOneWidget);
+      expect(find.byKey(const Key('approval_receipt_match')), findsNothing);
+
+      await tester.tap(find.text('승인 서명'));
+      await settle(tester);
+      expect(find.byKey(const Key('receipt_blocks_approval')), findsOneWidget);
+      expect(find.text('집행 최종 승인'), findsNothing, reason: '서명 단계로 넘어가지 않는다');
+      await tester.tap(find.text('닫기'));
+      await settle(tester);
+      expect(find.text('집행 최종 승인'), findsNothing, reason: '안내를 닫은 뒤에도 서명 단계로 가지 않는다');
+    });
+
+    testWidgets('목록에서는 일치였어도 승인하는 순간 다시 대조한다 — 그 사이 바뀐 파일을 잡는다', (tester) async {
+      final registrar = FakeRegistrar()..stored[path] = png;
+      await openList(tester, registrar, entry(receiptHash: pngHash));
+      expect(find.byKey(const Key('approval_receipt_match')), findsOneWidget);
+
+      registrar.stored[path] = [...png, 0]; // 목록을 본 뒤 서버의 파일만 바꿔치기
+      await tester.tap(find.text('승인 서명'));
+      await settle(tester);
+      expect(find.byKey(const Key('receipt_blocks_approval')), findsOneWidget);
+      await tester.tap(find.text('닫기'));
+      await settle(tester);
+      expect(find.text('집행 최종 승인'), findsNothing, reason: '안내를 닫은 뒤에도 서명 단계로 가지 않는다');
+    });
+
+    testWidgets('해시가 같으면 승인 서명이 서명 단계로 넘어간다', (tester) async {
+      await openList(tester, FakeRegistrar()..stored[path] = png, entry(receiptHash: pngHash));
+      await tester.tap(find.text('승인 서명'));
+      await settle(tester);
+      expect(find.byKey(const Key('receipt_blocks_approval')), findsNothing);
+      expect(find.text('집행 최종 승인'), findsOneWidget);
+    });
+
+    testWidgets('원본을 받지 못하면 대조하지 못했다고 알리고, 그래도 승인할지 확인받는다 — 일치로 두지 않는다', (tester) async {
+      await openList(tester, FakeRegistrar(), entry(receiptHash: pngHash));
+      expect(find.byKey(const Key('approval_receipt_unavailable')), findsOneWidget);
+      expect(find.byKey(const Key('approval_receipt_match')), findsNothing);
+
+      await tester.tap(find.text('승인 서명'));
+      await settle(tester);
+      expect(find.byKey(const Key('receipt_unavailable_confirm')), findsOneWidget);
+      await tester.tap(find.text('취소'));
+      await settle(tester);
+      expect(find.text('집행 최종 승인'), findsNothing);
+
+      await tester.tap(find.text('승인 서명'));
+      await settle(tester);
+      await tester.tap(find.text('그래도 승인'));
+      await settle(tester);
+      expect(find.text('집행 최종 승인'), findsOneWidget);
+    });
+
+    testWidgets('영수증이 없는 수입 건은 대조하지 않고 승인 흐름이 그대로다', (tester) async {
+      final registrar = FakeRegistrar();
+      await openList(tester, registrar, entry(receiptHash: null, receiptPath: null, kind: EntryKind.INCOME));
+      expect(registrar.downloads, isEmpty);
+      await tester.tap(find.text('승인 서명'));
+      await settle(tester);
+      expect(find.text('집행 최종 승인'), findsOneWidget);
+      expect(registrar.downloads, isEmpty);
+    });
+  });
 }
