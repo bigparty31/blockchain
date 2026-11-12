@@ -16,7 +16,7 @@ def use_repo_deployment(monkeypatch):
     """개발자가 DEPLOYMENTS_FILE 을 켜 둬도 저장소의 배포 기록과 비교하게 한다. 필요한 테스트는 다시 설정한다."""
     monkeypatch.delenv("DEPLOYMENTS_FILE", raising=False)
 
-SIGNING_CONTRACTS = {"AccountingLedger", "BudgetToken", "RoleManager"}
+SIGNING_CONTRACTS = {"AccountingLedger", "BudgetToken", "MembershipSBT", "RoleManager"}
 _DOMAIN_TYPEHASH = keccak(text="EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)")
 
 

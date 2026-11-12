@@ -1,0 +1,150 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [develop, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contracts:
+    name: Contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: contracts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # Lock files are intentionally not committed; npm ci/cache needs a lock file.
+      - run: npm install
+      - run: npx hardhat compile
+      - run: npx hardhat test
+
+  backend:
+    name: Backend
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - run: python -m pip install -r requirements.txt
+      # pytest.ini supplies pythonpath/testpaths; chain tests run in their own job.
+      - run: python -m pytest -m "not chain"
+
+  backend-chain:
+    name: Backend chain integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: python -m pip install -r backend/requirements.txt
+      - run: npm install
+        working-directory: contracts
+      - name: Start Hardhat and wait for JSON-RPC
+        working-directory: contracts
+        shell: bash
+        run: |
+          npx hardhat node --hostname 127.0.0.1 > "$RUNNER_TEMP/hardhat-node.log" 2>&1 &
+          node_pid=$!
+          echo "$node_pid" > "$RUNNER_TEMP/hardhat-node.pid"
+          for attempt in {1..60}; do
+            if ! kill -0 "$node_pid" 2>/dev/null; then
+              cat "$RUNNER_TEMP/hardhat-node.log"
+              exit 1
+            fi
+            if curl --silent --show-error --fail --max-time 2 \
+              -H 'Content-Type: application/json' \
+              --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' \
+              http://127.0.0.1:8545 | python -c 'import json, sys; assert json.load(sys.stdin).get("result") == "0x7a69"'; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/hardhat-node.log"
+          exit 1
+      - name: Deploy local contracts and write addresses/ABIs
+        run: npm run deploy:local
+        working-directory: contracts
+      - name: Run chain tests
+        working-directory: backend
+        env:
+          CHAIN_RPC_URL: http://127.0.0.1:8545
+          DEPLOYMENTS_FILE: ${{ github.workspace }}/contracts/deployments/localhost.json
+        # chain_support uses LOCAL_RPC_URL and DEFAULT_PATH directly. Fixtures
+        # clear these overrides where needed and derive Hardhat test keys locally;
+        # a global RELAYER_PRIVATE_KEY would break read-only client tests.
+        run: python -m pytest -m chain -rs --junitxml="$RUNNER_TEMP/chain-results.xml"
+      - name: Reject skipped or missing chain tests
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          report = Path(os.environ["RUNNER_TEMP"]) / "chain-results.xml"
+          root = ET.parse(report).getroot()
+          cases = list(root.iter("testcase"))
+          skipped = [case.attrib.get("name") for case in cases if case.find("skipped") is not None]
+          if not cases or skipped:
+              raise SystemExit(f"Chain tests must run without skips: cases={len(cases)}, skipped={skipped}")
+          print(f"Verified {len(cases)} chain tests without skips")
+          PY
+      - name: Show node log and stop node
+        if: always()
+        shell: bash
+        run: |
+          if [ -f "$RUNNER_TEMP/hardhat-node.log" ]; then
+            tail -n 100 "$RUNNER_TEMP/hardhat-node.log"
+          fi
+          if [ -f "$RUNNER_TEMP/hardhat-node.pid" ]; then
+            kill "$(cat "$RUNNER_TEMP/hardhat-node.pid")" 2>/dev/null || true
+          fi
+
+  app:
+    name: Flutter app
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          # pubspec.lock requires Flutter >=3.44.0 / Dart >=3.12.0 <4.0.0.
+          flutter-version: '3.44.0'
+          cache: true
+      - run: flutter pub get
+      # Keep warnings/errors fatal; existing style/deprecation infos are advisory.
+      - run: flutter analyze --no-fatal-infos
+      # Includes docs/hashing_vectors.json and shared EIP-712 vector checks.
+      - run: flutter test
