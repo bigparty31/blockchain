@@ -145,6 +145,20 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
       _snack(_termError != null ? '$_termError 제출하지 않았어요.' : '학기 정보를 불러오는 중이에요. 잠시 후 다시 시도해 주세요.');
       return;
     }
+    // 출처(납부자)는 거래처, 분류는 수입 사유로 기록한다. 메모는 장부에 올리지 않는다
+    final draft = EntryDraft(
+      kind: EntryKind.INCOME,
+      termId: termId,
+      amount: int.parse(_amountController.text),
+      counterparty: _sourceController.text,
+      purpose: _incomeType,
+      occurredAt: _occurredAt,
+      receiptHash: _receiptHash,
+    );
+    // 응답을 기다리는 사이 입력을 바꿔도 안내는 보낸 값으로 한다 — 입력칸을 다시 읽지 않는다
+    final shownType = _incomeType;
+    final shownDate =
+        '${_selectedDate.year}-${_selectedDate.month.toString().padLeft(2, '0')}-${_selectedDate.day.toString().padLeft(2, '0')}';
     setState(() => _submitting = true);
     final RegistrationResult result;
     try {
@@ -181,20 +195,18 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
     if (!mounted) return;
     setState(() => _submitting = false);
 
-    final date =
-        '${_selectedDate.year}-${_selectedDate.month.toString().padLeft(2, '0')}-${_selectedDate.day.toString().padLeft(2, '0')}';
     final done = await showRegistrationResultDialog(
       context,
       kindLabel: '수입',
       rows: [
-        ('분류', _incomeType),
-        ('출처', _sourceController.text),
-        ('금액', '${_amountController.text}원'),
-        ('일자', date),
-        ('영수증', _hasReceipt ? '첨부' : '없음'),
+        ('분류', shownType),
+        ('출처', draft.counterparty),
+        ('금액', '${draft.amount}원'),
+        ('일자', shownDate),
+        ('영수증', draft.receiptHash != null ? '첨부' : '없음'),
       ],
       result: result,
-      occurredAtNote: '전송값 occurred_at: $_occurredAt (사용일 KST 00:00)',
+      occurredAtNote: '전송값 occurred_at: ${draft.occurredAt} (사용일 KST 00:00)',
       gradient: AppTheme.incomeGradient,
     );
     if (done && mounted) Navigator.pop(context);

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -209,6 +210,54 @@ void main() {
     });
   });
 
+  /// 서버 응답을 기다리는 동안 입력을 바꿀 수 있어도, 완료 안내는 **제출한 값**으로 만든다 (#69 리뷰).
+  /// 응답 뒤에 입력칸을 다시 읽으면 금액을 비웠을 때 예외가 나 안내가 뜨지 않거나, 서버에 기록된 것과 다른 값을 보인다.
+  group('제출 중 입력을 바꿔도 안내는 제출한 값이다', () {
+    Future<void> pressWithoutSettling(WidgetTester tester, String text) async {
+      await tester.ensureVisible(find.text(text));
+      await tester.tap(find.text(text));
+      await tester.pump();
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 20)));
+      await tester.pump(); // 제출은 응답 대기 중
+    }
+
+    testWidgets('지출 — 금액을 비워도 안내가 뜨고 제출한 금액을 보인다', (tester) async {
+      final registrar = _GatedRegistrar();
+      await pump(tester, ExpenseCreateScreen(registrar: registrar, pickReceipt: fakeReceipt));
+      await tapText(tester, '영수증 촬영 또는 사진 첨부');
+      await fillExpense(tester, amount: '35000');
+      await pressWithoutSettling(tester, '제출하기');
+      expect(registrar.gate.isCompleted, isFalse);
+
+      await tester.enterText(find.widgetWithText(TextFormField, '지출 금액(원) *'), ''); // 응답을 기다리는 사이 지움
+      registrar.gate.complete();
+      await settle(tester);
+
+      expect(tester.takeException(), isNull, reason: '비운 금액을 다시 읽다 예외가 나면 안 된다');
+      expect(find.text('지출 제출 완료!'), findsOneWidget);
+      expect(find.textContaining('금액: 35000원', findRichText: true), findsOneWidget, reason: '서버에 기록된 금액');
+    });
+
+    testWidgets('수입 — 금액·출처를 바꿔도 제출한 값을 보인다', (tester) async {
+      final registrar = _GatedRegistrar();
+      await pump(tester, IncomeCreateScreen(registrar: registrar, pickReceipt: fakeReceipt));
+      await tester.enterText(find.widgetWithText(TextFormField, '상세 출처 / 내용 *'), '학생회비 수납');
+      await tester.enterText(find.widgetWithText(TextFormField, '입금 금액(원) *'), '1000000');
+      await pressWithoutSettling(tester, '제출하기');
+
+      await tester.enterText(find.widgetWithText(TextFormField, '입금 금액(원) *'), '5');
+      await tester.enterText(find.widgetWithText(TextFormField, '상세 출처 / 내용 *'), '다른 출처');
+      registrar.gate.complete();
+      await settle(tester);
+
+      expect(find.text('수입 제출 완료!'), findsOneWidget);
+      expect(find.textContaining('금액: 1000000원', findRichText: true), findsOneWidget, reason: '서버에 기록된 금액');
+      expect(find.textContaining('출처: 학생회비 수납', findRichText: true), findsOneWidget);
+      expect(find.descendant(of: find.byType(Dialog), matching: find.textContaining('다른 출처', findRichText: true)), findsNothing,
+          reason: '안내는 입력칸이 아니라 제출한 값이다');
+    });
+  });
+
   group('수입 등록', () {
     testWidgets('예산 없이 현재 학기로 제출하고, 영수증은 골랐을 때만 해시를 싣는다', (tester) async {
       final registrar = FakeRegistrar();
@@ -241,4 +290,15 @@ void main() {
       expect(registrar.submits.single.$2.receiptPath, FakeRegistrar.pathOf(fakeReceiptBytes));
     });
   });
+}
+
+/// 제출 응답을 시험이 풀어 줄 때까지 붙잡아 두는 등록기 — 응답을 기다리는 사이의 화면을 본다.
+class _GatedRegistrar extends FakeRegistrar {
+  final gate = Completer<void>();
+
+  @override
+  Future<SubmitOutcome> submit(int id, EntryDraft draft) async {
+    await gate.future;
+    return super.submit(id, draft);
+  }
 }
