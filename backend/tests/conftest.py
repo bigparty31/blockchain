@@ -71,6 +71,42 @@ def clean_chain_env(monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
 
+# ---------------------------------------------------------------- 로그인
+
+
+@pytest.fixture
+def login_db(tmp_path):
+    """로그인 API 가 쓰는 DB(login_attempts)를 시험마다 새 SQLite 파일로 바꾼다. 엔진을 돌려준다.
+
+    메모리 DB 가 아니라 파일로 둔다. 동시 요청 시험에서 스레드마다 다른 연결이 같은 DB 를 봐야 한다.
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.database import Base, get_db
+    from app.main import app
+
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'login.db'}",
+        # 동시 요청이 쓰기 잠금을 기다리게 한다 (기본 5초로도 되지만 느린 CI 를 위해 넉넉히)
+        connect_args={"check_same_thread": False, "timeout": 30},
+    )
+    Base.metadata.create_all(bind=engine)
+    session = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+    def override():
+        db = session()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    app.dependency_overrides[get_db] = override
+    yield engine
+    app.dependency_overrides.pop(get_db, None)
+    engine.dispose()
+
+
 @pytest.fixture(autouse=True)
 def setup_test_receipts(tmp_path, monkeypatch):
     """각 테스트마다 영수증 저장소 디렉터리를 격리하고, 테스트용 영수증 파일 fixture를 준비한다 (운영 코드 하드코딩 배제)."""

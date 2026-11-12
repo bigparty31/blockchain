@@ -13,7 +13,8 @@ class Role(str, Enum):
 
 
 class LoginRequest(BaseModel):
-    student_no: str = Field(..., description="학번")
+    # 길이 상한은 users.student_no·login_attempts.student_no 와 같다. 넘는 학번은 있을 수 없어 422 로 끊는다
+    student_no: str = Field(..., min_length=1, max_length=20, description="학번")
     password: str = Field(..., description="비밀번호")
 
 
