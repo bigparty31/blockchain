@@ -145,7 +145,14 @@ void main() {
     expect(receiptFilename([0x89, 0x50, 0x4E, 0x47, 0x0D]), 'receipt.png');
     expect(receiptFilename('%PDF-1.7'.codeUnits), 'receipt.pdf');
     expect(receiptFilename([...'RIFF'.codeUnits, 0, 0, 0, 0, ...'WEBP'.codeUnits]), 'receipt.webp');
-    expect(receiptFilename([1, 2]), 'receipt.jpg');
+  });
+
+  test('알아보지 못한 형식은 .jpg 라고 지어 붙이지 않고 막는다 — 서버는 확장자만 보고 저장·제공한다 (#71 리뷰)', () {
+    expect(() => receiptFilename([1, 2]), throwsArgumentError);
+    expect(() => receiptFilename('GIF89a'.codeUnits), throwsArgumentError);
+    expect(() => receiptFilename(const []), throwsArgumentError);
+    expect(receiptFormatProblem([1, 2]), contains('JPEG'));
+    expect(receiptFormatProblem(const []), isNotNull);
   });
 
   group('HEIC 사진 — 서버가 받지 않는 형식이라 고를 때 막는다 (#71 리뷰)', () {
