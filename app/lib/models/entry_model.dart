@@ -44,6 +44,10 @@ class EntryModel {
   /// 그때 학기 대조는 「모름」으로 남는다 — 승인·반려 서명은 학기 코드가 없으면 서명 전에 멈춘다.
   final int? termCode;
 
+  /// 등록자 지갑 주소 (#65). 체인을 읽었으면 체인의 registrant, 못 읽었으면 DB 등록자 지갑이다 — 검증용
+  /// 체인 값으로 쓰지 않는다(그건 `/entries/{id}/onchain`). 서명의 `entryCommit` 에만 쓴다. 옛 서버는 null.
+  final String? registrant;
+
   final int? correctsEntryId;
   final CorrectionReason? correctionReason;
 
@@ -51,6 +55,7 @@ class EntryModel {
     required this.id,
     required this.termId,
     this.termCode,
+    this.registrant,
     required this.kind,
     required this.amount,
     required this.counterparty,
@@ -82,6 +87,7 @@ class EntryModel {
       id: json['id'] ?? 0,
       termId: json['term_id'] ?? 1,
       termCode: json['term_code'],
+      registrant: json['registrant'] is String && (json['registrant'] as String).isNotEmpty ? json['registrant'] as String : null,
       kind: EntryKind.fromCode(json['kind'] ?? 'EXPENSE'),
       amount: json['amount'] ?? 0,
       counterparty: json['counterparty'] ?? '',

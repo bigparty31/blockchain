@@ -32,6 +32,10 @@ class EntryDraft {
   /// 영수증 원본 바이트의 SHA-256 (`0x` + 소문자). 수입은 선택.
   final String? receiptHash;
 
+  /// 서버에 올린 영수증 파일 경로 (`POST /receipts` 응답, `/receipts/{해시}.{확장자}`).
+  /// 서버는 해시만 있고 파일이 없으면 400 으로 막는다 (#66 B2).
+  final String? receiptPath;
+
   const EntryDraft({
     required this.kind,
     required this.termId,
@@ -41,7 +45,21 @@ class EntryDraft {
     this.budgetId,
     required this.occurredAt,
     this.receiptHash,
+    this.receiptPath,
   });
+
+  /// 같은 초안에 서버에 올린 영수증 경로를 붙인 것 — 입력을 다시 읽지 않고 제출 시점의 값을 그대로 쓴다.
+  EntryDraft withReceiptPath(String? path) => EntryDraft(
+        kind: kind,
+        termId: termId,
+        amount: amount,
+        counterparty: counterparty,
+        purpose: purpose,
+        budgetId: budgetId,
+        occurredAt: occurredAt,
+        receiptHash: receiptHash,
+        receiptPath: path,
+      );
 
   String get canonicalCounterparty => Hashing.canonical(counterparty);
   String get canonicalPurpose => Hashing.canonical(purpose);
@@ -65,6 +83,7 @@ class EntryDraft {
         if (budgetId != null) 'budget_id': budgetId!,
         'occurred_at': occurredAt,
         if (receiptHash != null) 'receipt_hash': receiptHash!,
+        if (receiptPath != null) 'receipt_path': receiptPath!,
       };
 
   @override
@@ -77,10 +96,12 @@ class EntryDraft {
       other.canonicalPurpose == canonicalPurpose &&
       other.budgetId == budgetId &&
       other.occurredAt == occurredAt &&
-      other.receiptHash == receiptHash;
+      other.receiptHash == receiptHash &&
+      other.receiptPath == receiptPath;
 
   @override
-  int get hashCode => Object.hash(kind, termId, amount, canonicalCounterparty, canonicalPurpose, budgetId, occurredAt, receiptHash);
+  int get hashCode =>
+      Object.hash(kind, termId, amount, canonicalCounterparty, canonicalPurpose, budgetId, occurredAt, receiptHash, receiptPath);
 }
 
 /// 제출 결과 — 체인에 기록된 상태. 예산 문제는 revert 가 아니라 `BLOCKED` 로 **기록된다** (IAccountingLedger).
@@ -90,8 +111,18 @@ class SubmitOutcome {
   const SubmitOutcome(this.status, this.blockReason);
 }
 
+/// 서버에 올린 영수증 — 서버가 다시 계산한 해시(앱 계산과 같음을 확인한 값)와 저장 경로.
+class ReceiptUpload {
+  final String hash;
+  final String path;
+  const ReceiptUpload(this.hash, this.path);
+}
+
 /// 등록 화면이 쓰는 입구. 테스트는 가짜를 넣는다.
 abstract class EntryRegistrar {
+  /// 영수증 원본을 올린다 — 초안보다 먼저. 서버 해시가 원본과 다르면 던진다.
+  Future<ReceiptUpload> uploadReceipt(List<int> bytes, {required String filename});
+
   /// 초안 저장 — 발급된 id.
   Future<int> saveDraft(EntryDraft draft);
 
@@ -124,6 +155,39 @@ class EntryRegistrationService implements EntryRegistrar {
   EntryRegistrationService({SigningService? signer, DateTime Function()? now})
       : _signer = signer ?? SigningService(),
         _now = now ?? DateTime.now;
+
+  /// 업로드는 사진 크기에 따라 오래 걸릴 수 있다.
+  static const uploadTimeout = Duration(seconds: 60);
+
+  /// 영수증 원본 바이트를 그대로 `POST /receipts`(multipart `file`)로 올린다 — 재인코딩하지 않는다 (HASHING §4).
+  ///
+  /// 서버는 받은 바이트로 SHA-256 을 다시 계산해 돌려준다. **앱이 계산한 해시와 다르면 멈춘다** — 전송 중에
+  /// 바뀌었거나 서버가 다른 파일을 저장했다는 뜻이고, 그 해시로 등록하면 학생이 내려받은 영수증과 기록이 어긋난다.
+  @override
+  Future<ReceiptUpload> uploadReceipt(List<int> bytes, {required String filename}) async {
+    final body = await sendAndDecode(
+      (authHeaders) async {
+        final request = http.MultipartRequest('POST', Uri.parse('${ApiConfig.baseUrl}/receipts'))
+          ..headers.addAll(authHeaders)
+          ..files.add(http.MultipartFile.fromBytes('file', bytes, filename: filename));
+        // 제한은 본문을 다 받을 때까지 건다 — 헤더만 오고 본문이 끝나지 않으면 `send()` 의 제한만으로는 영영 안 끝난다.
+        return (() async => http.Response.fromStream(await client.send(request)))().timeout(uploadTimeout);
+      },
+      what: '영수증 업로드',
+    );
+    final hash = body['receipt_hash'];
+    final path = body['receipt_path'];
+    if (hash is! String || path is! String) {
+      throw const EntryDecisionException(EntryDecisionFailure.unknownOutcome, '영수증 업로드 결과를 읽지 못했어요. 다시 첨부해 주세요.');
+    }
+    if (!Hashing.hashEquals(hash, Hashing.fileHash(bytes))) {
+      throw const EntryDecisionException(
+        EntryDecisionFailure.mismatch,
+        '서버에 저장된 영수증이 고른 사진과 달라요. 다시 첨부해 주세요.',
+      );
+    }
+    return ReceiptUpload(hash.toLowerCase(), path);
+  }
 
   /// ① 초안 저장. 발급된 id 를 돌려준다. 체인에는 아무것도 올라가지 않는다.
   @override

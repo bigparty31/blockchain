@@ -554,11 +554,13 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
   /// 확정 실패 안내. 항목은 `PENDING` 그대로다 (컨트랙트: 확정 실패 시 전체 revert).
   /// 예산 문제(`InsufficientBudget`·`BudgetExpired`)면 반려 흐름으로 넘긴다.
   ///
-  /// 서버 건은 실패 코드(`fail_reason`)가 아직 응답에 없어 [serverMessage](서버 설명)를 그대로 보여 주고,
-  /// 반려로 넘길지는 사람이 설명을 읽고 정한다 — 앱이 문구를 해석해 분기하지 않는다.
+  /// 서버 건은 실패 코드(`fail_reason`, #65)로 나눈다 — 예산 사유일 때만 반려로 넘기고, 다른 코드면 다시 서명할 일이라
+  /// 반려를 권하지 않는다. 코드가 없는 서버(#65 이전)면 [serverMessage](서버 설명)를 보여 주고 사람이 읽고 정한다
+  /// — 어느 쪽이든 앱이 문구를 해석해 분기하지 않는다.
   Future<void> _showApprovalFailure(Map<String, dynamic> item, String? failReason, {String? serverMessage}) async {
     final budgetReason = failReason == null ? null : _budgetFailReasons[failReason];
-    final offerReject = budgetReason != null || serverMessage != null;
+    final unknownCause = failReason == null && serverMessage != null;
+    final offerReject = budgetReason != null || unknownCause;
     final goReject = await showDialog<bool>(
       context: context,
       builder: (ctx) => Dialog(
@@ -592,7 +594,7 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
               _DetailRow(
                 icon: Icons.report_gmailerrorred_rounded,
                 label: '사유',
-                value: serverMessage ?? budgetReason ?? '체인이 확정을 거부했어요 ($failReason)',
+                value: budgetReason ?? serverMessage ?? '체인이 확정을 거부했어요 ($failReason)',
               ),
               const SizedBox(height: 10),
               Container(
@@ -602,13 +604,13 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
                   borderRadius: BorderRadius.circular(12),
                 ),
                 child: Text(
-                  serverMessage != null
-                      ? '이 항목은 아직 승인 대기(PENDING) 상태예요. 위 사유가 예산 부족·집행 기간 지남처럼 '
-                          '확정할 수 없는 이유라면 반려로 처리해 주세요.'
-                      : budgetReason != null
-                          ? '이 항목은 아직 승인 대기(PENDING) 상태예요. 등록할 때는 잔량이 있었지만 '
-                              '다른 건이 먼저 확정되면서 예산이 부족해졌을 수 있어요. '
-                              '확정할 수 없으므로 반려로 처리해 주세요.'
+                  budgetReason != null
+                      ? '이 항목은 아직 승인 대기(PENDING) 상태예요. 등록할 때는 잔량이 있었지만 '
+                          '다른 건이 먼저 확정되면서 예산이 부족해졌을 수 있어요. '
+                          '확정할 수 없으므로 반려로 처리해 주세요.'
+                      : unknownCause
+                          ? '이 항목은 아직 승인 대기(PENDING) 상태예요. 위 사유가 예산 부족·집행 기간 지남처럼 '
+                              '확정할 수 없는 이유라면 반려로 처리해 주세요.'
                           : '이 항목은 아직 승인 대기(PENDING) 상태예요. 잠시 뒤 다시 서명해 주세요.',
                   style: const TextStyle(fontSize: 12, height: 1.5, color: AppTheme.textMain),
                 ),
@@ -719,7 +721,7 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
 
     if (failed != null) {
       if (failed.failure == EntryDecisionFailure.refused) {
-        await _showApprovalFailure(item, null, serverMessage: failed.message);
+        await _showApprovalFailure(item, failed.failReason, serverMessage: failed.message);
       } else {
         _snack(failed.message, AppTheme.expense);
       }

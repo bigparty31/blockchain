@@ -49,7 +49,12 @@ enum EntryDecisionFailure {
 class EntryDecisionException implements Exception {
   final EntryDecisionFailure failure;
   final String message;
-  const EntryDecisionException(this.failure, this.message);
+
+  /// 체인이 거부한 이유 코드 (Solidity 에러 이름, 예: `InsufficientBudget`). 400 응답의 `fail_reason` — #65 이전
+  /// 서버나 검증 오류에는 없다. **화면은 문구가 아니라 이 코드로 분기한다.**
+  final String? failReason;
+
+  const EntryDecisionException(this.failure, this.message, {this.failReason});
 
   @override
   String toString() => 'EntryDecisionException(${failure.name}): $message';
@@ -84,18 +89,34 @@ Future<Map<String, dynamic>> postSigned(
   required String what,
   required Duration timeout,
   String? conflictMessage,
+}) =>
+    sendAndDecode(
+      (authHeaders) => client
+          .post(
+            Uri.parse(url),
+            headers: {...authHeaders, 'Content-Type': 'application/json'},
+            body: jsonEncode(body),
+          )
+          .timeout(timeout),
+      what: what,
+      conflictMessage: conflictMessage,
+    );
+
+/// 요청을 보내고 상태 코드로만 결과를 나눈다 ([postSigned]·영수증 업로드 공통).
+/// 성공(200·201)이면 응답 본문(JSON 객체)을, 아니면 [EntryDecisionException] 을 던진다.
+///
+/// [send] 는 **이 함수가 잡은 로그인 헤더**를 받아 요청을 만든다 — 요청에 쓴 토큰과 401 때 비교하는 토큰이 같아야
+/// 늦게 온 401 이 그 사이 다시 로그인해 만든 새 세션을 지우지 않는다. 헤더를 [AuthService] 에서 따로 읽지 말 것.
+Future<Map<String, dynamic>> sendAndDecode(
+  Future<http.Response> Function(Map<String, String> authHeaders) send, {
+  required String what,
+  String? conflictMessage,
 }) async {
   final http.Response res;
   // 보내기 직전의 토큰을 잡아 둔다 — 늦게 온 401 이 그 사이 다시 로그인해 만든 새 세션을 지우지 않게
   final auth = AuthService().authSnapshot;
   try {
-    res = await client
-        .post(
-          Uri.parse(url),
-          headers: {...auth.headers, 'Content-Type': 'application/json'},
-          body: jsonEncode(body),
-        )
-        .timeout(timeout);
+    res = await send(auth.headers);
   } catch (_) {
     throw EntryDecisionException(
       EntryDecisionFailure.unknownOutcome,
@@ -130,6 +151,7 @@ Future<Map<String, dynamic>> postSigned(
       throw EntryDecisionException(
         EntryDecisionFailure.refused,
         detail == null ? '$what 요청이 거부되었어요.' : '$what 요청이 거부되었어요: $detail',
+        failReason: _failReason(res),
       );
     default:
       throw EntryDecisionException(
@@ -137,6 +159,15 @@ Future<Map<String, dynamic>> postSigned(
         '$what 결과를 확인하지 못했어요 (서버 ${res.statusCode}). 목록을 새로 고쳐 처리됐는지 확인해 주세요.',
       );
   }
+}
+
+/// 400 응답의 `fail_reason` (문자열일 때만).
+String? _failReason(http.Response res) {
+  try {
+    final body = jsonDecode(utf8.decode(res.bodyBytes));
+    if (body is Map && body['fail_reason'] is String) return body['fail_reason'] as String;
+  } catch (_) {}
+  return null;
 }
 
 /// FastAPI 오류 응답의 `detail` (문자열일 때만).

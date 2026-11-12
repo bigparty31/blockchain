@@ -9,6 +9,7 @@ import 'package:student_council_app/core/enums.dart';
 import 'package:student_council_app/core/hashing.dart';
 import 'package:student_council_app/screens/council/expense_create_screen.dart';
 import 'package:student_council_app/screens/council/income_create_screen.dart';
+import 'package:student_council_app/screens/council/receipt_picker.dart';
 import 'package:student_council_app/services/api_service.dart';
 import 'package:student_council_app/services/entry_registration_service.dart';
 
@@ -71,7 +72,21 @@ void main() {
       expect(draft.amount, 35000);
       expect(draft.canonicalPurpose, '신입생 환영회 명찰');
       expect(draft.receiptHash, Hashing.fileHash(fakeReceiptBytes));
+      expect(registrar.uploads.single, fakeReceiptBytes, reason: '초안보다 먼저 원본을 올린다');
+      expect(draft.receiptPath, FakeRegistrar.pathOf(fakeReceiptBytes), reason: '서버는 파일 없는 해시를 막는다 (#66)');
       expect(find.textContaining('목업'), findsNothing);
+    });
+
+    testWidgets('영수증 업로드가 실패하면 알리고 초안을 만들지 않는다', (tester) async {
+      final registrar = FakeRegistrar()
+        ..failNextUpload = const EntryDecisionException(EntryDecisionFailure.mismatch, '서버에 저장된 영수증이 고른 사진과 달라요.');
+      await pump(tester, ExpenseCreateScreen(registrar: registrar, pickReceipt: fakeReceipt));
+      await tapText(tester, '영수증 촬영 또는 사진 첨부');
+      await fillExpense(tester);
+      await tapText(tester, '제출하기');
+      expect(find.textContaining('서버에 저장된 영수증이 고른 사진과 달라요.'), findsOneWidget);
+      expect(registrar.drafts, isEmpty);
+      expect(registrar.submits, isEmpty);
     });
 
     testWidgets('영수증 없이는 제출하지 않는다 — 초안 저장은 된다', (tester) async {
@@ -101,6 +116,7 @@ void main() {
       await tapText(tester, '제출하기');
       expect(find.text('지출 제출 완료!'), findsOneWidget);
       expect(registrar.drafts, hasLength(1), reason: '초안은 한 번만 만든다');
+      expect(registrar.uploads, hasLength(1), reason: '같은 사진은 다시 올리지 않는다');
       expect(registrar.submits.map((s) => s.$1).toSet(), {100});
     });
 
@@ -122,6 +138,57 @@ void main() {
       await tapText(tester, '제출하기');
       expect(find.textContaining('예산 목록을 불러오지 못해'), findsOneWidget);
       expect(registrar.drafts, isEmpty);
+    });
+  });
+
+  test('업로드 파일 이름은 내용의 앞 바이트로 형식을 정한다 — 서버가 확장자로 내려줄 형식을 고른다', () {
+    expect(receiptFilename([0xFF, 0xD8, 0xFF, 0xE0]), 'receipt.jpg');
+    expect(receiptFilename([0x89, 0x50, 0x4E, 0x47, 0x0D]), 'receipt.png');
+    expect(receiptFilename('%PDF-1.7'.codeUnits), 'receipt.pdf');
+    expect(receiptFilename([...'RIFF'.codeUnits, 0, 0, 0, 0, ...'WEBP'.codeUnits]), 'receipt.webp');
+  });
+
+  test('알아보지 못한 형식은 .jpg 라고 지어 붙이지 않고 막는다 — 서버는 확장자만 보고 저장·제공한다 (#71 리뷰)', () {
+    expect(() => receiptFilename([1, 2]), throwsArgumentError);
+    expect(() => receiptFilename('GIF89a'.codeUnits), throwsArgumentError);
+    expect(() => receiptFilename(const []), throwsArgumentError);
+    expect(receiptFormatProblem([1, 2]), contains('JPEG'));
+    expect(receiptFormatProblem(const []), isNotNull);
+  });
+
+  group('HEIC 사진 — 서버가 받지 않는 형식이라 고를 때 막는다 (#71 리뷰)', () {
+    final heic = [0, 0, 0, 0x18, ...'ftypheic'.codeUnits];
+    final heif = [0, 0, 0, 0x18, ...'ftypmif1'.codeUnits];
+
+    test('HEIC·HEIF 는 안내 문구가 나오고, JPEG·PNG·WebP·PDF 는 문제가 없다', () {
+      expect(receiptFormatProblem(heic), contains('HEIC'));
+      expect(receiptFormatProblem(heif), contains('HEIC'));
+      expect(receiptFormatProblem([0xFF, 0xD8, 0xFF, 0xE0]), isNull);
+      expect(receiptFormatProblem([0x89, 0x50, 0x4E, 0x47]), isNull);
+      expect(receiptFormatProblem('%PDF-1.7'.codeUnits), isNull);
+      expect(receiptFormatProblem([...'RIFF'.codeUnits, 0, 0, 0, 0, ...'WEBP'.codeUnits]), isNull);
+    });
+
+    test('이름을 만들 때도 HEIC 는 서버가 거부할 .heic 를 만들지 않고 던진다', () {
+      expect(() => receiptFilename(heic), throwsArgumentError);
+      expect(() => receiptFilename(heif), throwsArgumentError);
+    });
+
+    testWidgets('지출 등록에서 HEIC 를 고르면 첨부하지 않고 안내한다 — 영수증이 없어 제출도 못 한다', (tester) async {
+      final registrar = FakeRegistrar();
+      await pump(tester, ExpenseCreateScreen(registrar: registrar, pickReceipt: (_) async => heic));
+      await tapText(tester, '영수증 촬영 또는 사진 첨부');
+      expect(find.textContaining('HEIC'), findsOneWidget);
+      await fillExpense(tester);
+      await tapText(tester, '제출하기');
+      expect(registrar.drafts, isEmpty);
+    });
+
+    testWidgets('수입 등록에서도 HEIC 는 첨부하지 않고 안내한다', (tester) async {
+      final registrar = FakeRegistrar();
+      await pump(tester, IncomeCreateScreen(registrar: registrar, pickReceipt: (_) async => heic));
+      await tapText(tester, '영수증 첨부 (선택)');
+      expect(find.textContaining('HEIC'), findsOneWidget);
     });
   });
 
@@ -189,6 +256,68 @@ void main() {
       expect(find.descendant(of: find.byType(Dialog), matching: find.textContaining('다른 출처', findRichText: true)), findsNothing,
           reason: '안내는 입력칸이 아니라 제출한 값이다');
     });
+
+    // 영수증 업로드를 기다리는 사이 금액을 비우면, 업로드 뒤에 입력을 다시 읽어 초안을 만들다 던졌고
+    // 그 예외를 아무도 받지 않아 「제출 중」이 풀리지 않았다 (#71 리뷰).
+    testWidgets('지출 — 업로드를 기다리는 사이 금액을 비워도 제출한 값으로 끝까지 가고, 제출 중 상태가 풀린다', (tester) async {
+      final registrar = _GatedRegistrar()..gateUploads = true;
+      await pump(tester, ExpenseCreateScreen(registrar: registrar, pickReceipt: fakeReceipt));
+      await tapText(tester, '영수증 촬영 또는 사진 첨부');
+      await fillExpense(tester, amount: '35000');
+      await pressWithoutSettling(tester, '제출하기'); // 업로드 대기 중
+      expect(registrar.uploads, isEmpty);
+
+      await tester.enterText(find.widgetWithText(TextFormField, '지출 금액(원) *'), '');
+      registrar.uploadGate.complete();
+      registrar.gate.complete();
+      await settle(tester);
+
+      expect(tester.takeException(), isNull, reason: '비운 금액을 업로드 뒤에 읽다 예외가 나면 안 된다');
+      expect(find.text('지출 제출 완료!'), findsOneWidget);
+      expect(registrar.submits.single.$2.amount, 35000, reason: '제출 시점의 금액');
+      expect(registrar.submits.single.$2.receiptPath, isNotNull, reason: '올린 원본의 경로');
+    });
+
+    testWidgets('수입 — 업로드를 기다리는 사이 금액을 비워도 제출한 값으로 끝까지 간다', (tester) async {
+      final registrar = _GatedRegistrar()..gateUploads = true;
+      await pump(tester, IncomeCreateScreen(registrar: registrar, pickReceipt: fakeReceipt));
+      await tapText(tester, '영수증 첨부 (선택)');
+      await tester.enterText(find.widgetWithText(TextFormField, '상세 출처 / 내용 *'), '학생회비 수납');
+      await tester.enterText(find.widgetWithText(TextFormField, '입금 금액(원) *'), '1000000');
+      await pressWithoutSettling(tester, '제출하기');
+
+      await tester.enterText(find.widgetWithText(TextFormField, '입금 금액(원) *'), '');
+      registrar.uploadGate.complete();
+      registrar.gate.complete();
+      await settle(tester);
+
+      expect(tester.takeException(), isNull);
+      expect(find.text('수입 제출 완료!'), findsOneWidget);
+      expect(registrar.submits.single.$2.amount, 1000000);
+    });
+
+    testWidgets('제출 중에는 영수증을 바꾸지 못한다 — 올리던 사진과 다른 사진의 해시·경로가 섞이지 않게', (tester) async {
+      final registrar = _GatedRegistrar()..gateUploads = true;
+      var picks = 0;
+      final other = [0xFF, 0xD8, 0xFF, 0xE0, ...utf8.encode('another receipt')];
+      await pump(
+        tester,
+        ExpenseCreateScreen(registrar: registrar, pickReceipt: (_) async => picks++ == 0 ? fakeReceiptBytes : other),
+      );
+      await tapText(tester, '영수증 촬영 또는 사진 첨부');
+      await fillExpense(tester);
+      await pressWithoutSettling(tester, '제출하기'); // 첫 사진을 올리는 중
+
+      await tester.tap(find.text('영수증 첨부 완료'));
+      await tester.pump();
+      expect(picks, 1, reason: '제출 중에는 사진 선택기를 다시 열지 않는다');
+      expect(find.textContaining('제출 중'), findsWidgets);
+
+      registrar.uploadGate.complete();
+      registrar.gate.complete();
+      await settle(tester);
+      expect(registrar.submits.single.$2.receiptHash, Hashing.fileHash(fakeReceiptBytes));
+    });
   });
 
   group('수입 등록', () {
@@ -220,6 +349,7 @@ void main() {
       await tester.enterText(find.widgetWithText(TextFormField, '입금 금액(원) *'), '500000');
       await tapText(tester, '제출하기');
       expect(registrar.submits.single.$2.receiptHash, Hashing.fileHash(fakeReceiptBytes));
+      expect(registrar.submits.single.$2.receiptPath, FakeRegistrar.pathOf(fakeReceiptBytes));
     });
   });
 }
@@ -227,6 +357,16 @@ void main() {
 /// 제출 응답을 시험이 풀어 줄 때까지 붙잡아 두는 등록기 — 응답을 기다리는 사이의 화면을 본다.
 class _GatedRegistrar extends FakeRegistrar {
   final gate = Completer<void>();
+
+  /// 켜 두면 영수증 업로드도 [uploadGate] 가 풀릴 때까지 붙잡는다.
+  bool gateUploads = false;
+  final uploadGate = Completer<void>();
+
+  @override
+  Future<ReceiptUpload> uploadReceipt(List<int> bytes, {required String filename}) async {
+    if (gateUploads) await uploadGate.future;
+    return super.uploadReceipt(bytes, filename: filename);
+  }
 
   @override
   Future<SubmitOutcome> submit(int id, EntryDraft draft) async {

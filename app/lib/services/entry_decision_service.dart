@@ -138,8 +138,9 @@ class EntryDecisionService {
         '학기 코드를 받지 못해 서명할 수 없어요. 목록을 새로 고쳐 주세요.',
       );
     }
-    await _checkStillSame(entry);
-    final registrant = await _registrantOf(entry.createdBy);
+    final fresh = await _checkStillSame(entry);
+    // 서버가 등록자 주소를 주면(#65) 그대로 쓰고, 옛 서버면 지갑 매핑을 뒤집어 찾는다
+    final registrant = fresh.registrant ?? await _registrantOf(entry.createdBy);
     final domain = await ledgerDomainForSigning();
     final deadline = _now().millisecondsSinceEpoch ~/ 1000 + signatureTtl.inSeconds;
     return (registrant: registrant, domain: domain, deadline: deadline);
@@ -182,7 +183,7 @@ class EntryDecisionService {
   ///
   /// 목록은 15초마다 읽으니 그 사이 다른 임원이 먼저 확정·반려했거나 정정·수정 요청으로 값이 바뀌었을 수 있다.
   /// 그대로 서명하면 서버가 400·409 로 돌려보내는데, 그때는 이미 지문을 댄 뒤다 — 묻기 전에 멈춘다.
-  Future<void> _checkStillSame(EntryModel shown) async {
+  Future<EntryModel> _checkStillSame(EntryModel shown) async {
     const unreadable = EntryDecisionException(
       EntryDecisionFailure.notReady,
       '이 건의 최신 상태를 확인하지 못해 서명하지 않았어요. 잠시 후 다시 시도해 주세요.',
@@ -220,6 +221,7 @@ class EntryDecisionService {
         '이 건의 등록 내용이 화면과 달라졌어요. 목록을 새로 고쳐 다시 확인한 뒤 서명해 주세요.',
       );
     }
+    return fresh;
   }
 
   /// 서명(`entryCommit`·`meta_hash`·`hadWarning`)에 들어가거나 화면이 보여 준 값이 같은가.
