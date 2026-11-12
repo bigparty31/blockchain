@@ -19,6 +19,7 @@ import 'correction_approval_screen.dart';
 import 'correction_screen.dart';
 import 'my_entries_screen.dart';
 import 'inquiry_response_screen.dart';
+import 'sbt_mint_screen.dart';
 import 'hardware_test_screen.dart';
 import '../president/budget_plan_screen.dart';
 
@@ -433,6 +434,14 @@ class _CouncilHomeScreenState extends State<CouncilHomeScreen> with WidgetsBindi
             icon: Icons.assessment_rounded,
             badge: '준비 중',
             gradient: LinearGradient(colors: [Color(0xFFF59E0B), Color(0xFFFB923C)]),
+          ),
+          _MenuData(
+            title: '회원권 발행',
+            subtitle: '납부자 명단으로 SBT 일괄 발행',
+            icon: Icons.badge_rounded,
+            badge: '기기 서명',
+            gradient: LinearGradient(colors: [Color(0xFF8B5CF6), Color(0xFF6366F1)]),
+            target: SbtMintScreen(),
           ),
           _MenuData(
             title: 'QR 스캐너',
