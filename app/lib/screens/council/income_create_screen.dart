@@ -105,6 +105,11 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
 
   /// 첨부돼 있으면 해제, 아니면 고른다 — 원본 바이트를 그대로 해시한다 (HASHING §4).
   Future<void> _toggleReceipt() async {
+    // 제출 중에는 바꾸지 못한다 — 올리던 사진의 경로가 다른 사진의 해시와 섞이지 않게 (#71 리뷰)
+    if (_submitting) {
+      _snack('제출 중에는 영수증을 바꿀 수 없어요.');
+      return;
+    }
     if (_hasReceipt) {
       setState(() {
         _receiptHash = null;
@@ -114,7 +119,7 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
       return;
     }
     final bytes = await (widget.pickReceipt ?? pickReceiptBytes)(context);
-    if (bytes == null || !mounted) return;
+    if (bytes == null || !mounted || _submitting) return;
     final problem = receiptFormatProblem(bytes);
     if (problem != null) {
       _snack(problem);
@@ -182,23 +187,28 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
       _snack(_termError != null ? '$_termError 제출하지 않았어요.' : '학기 정보를 불러오는 중이에요. 잠시 후 다시 시도해 주세요.');
       return;
     }
+    // 입력은 여기서 한 번만 읽는다 — 업로드·저장·제출을 기다리는 사이 바꿔도(금액을 비워도) 보낸 값과 안내가 같다.
+    // 출처(납부자)는 거래처, 분류는 수입 사유로 기록한다. 메모는 장부에 올리지 않는다
+    final base = EntryDraft(
+      kind: EntryKind.INCOME,
+      termId: termId,
+      amount: int.parse(_amountController.text),
+      counterparty: _sourceController.text,
+      purpose: _incomeType,
+      occurredAt: _occurredAt,
+      receiptHash: _receiptHash,
+    );
+    final bytes = _receiptBytes;
+    final shownType = _incomeType;
+    final shownDate =
+        '${_selectedDate.year}-${_selectedDate.month.toString().padLeft(2, '0')}-${_selectedDate.day.toString().padLeft(2, '0')}';
     setState(() => _submitting = true);
     final RegistrationResult result;
+    final EntryDraft draft;
     try {
       // 영수증을 붙였으면 원본을 먼저 올린다 — 같은 사진은 한 번만 (#66: 파일 없는 해시는 400)
-      final bytes = _receiptBytes;
       if (bytes != null) _upload ??= await _registrar.uploadReceipt(bytes, filename: receiptFilename(bytes));
-      // 출처(납부자)는 거래처, 분류는 수입 사유로 기록한다. 메모는 장부에 올리지 않는다
-      final draft = EntryDraft(
-        kind: EntryKind.INCOME,
-        termId: termId,
-        amount: int.parse(_amountController.text),
-        counterparty: _sourceController.text,
-        purpose: _incomeType,
-        occurredAt: _occurredAt,
-        receiptHash: _receiptHash,
-        receiptPath: _upload?.path,
-      );
+      draft = base.withReceiptPath(_upload?.path);
       if (_draftId == null || _savedDraft != draft) {
         _draftId = await _registrar.saveDraft(draft);
         _savedDraft = draft;
@@ -214,24 +224,28 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
       setState(() => _submitting = false);
       _snack(e.message);
       return;
+    } catch (_) {
+      // 예상 못 한 실패도 「제출 중」에 갇히지 않게 푼다 — 서버에는 이미 기록됐을 수 있어 확인을 권한다
+      if (!mounted) return;
+      setState(() => _submitting = false);
+      _snack('등록을 마치지 못했어요. 내 등록 현황에서 확인한 뒤 다시 시도해 주세요.');
+      return;
     }
     if (!mounted) return;
     setState(() => _submitting = false);
 
-    final date =
-        '${_selectedDate.year}-${_selectedDate.month.toString().padLeft(2, '0')}-${_selectedDate.day.toString().padLeft(2, '0')}';
     final done = await showRegistrationResultDialog(
       context,
       kindLabel: '수입',
       rows: [
-        ('분류', _incomeType),
-        ('출처', _sourceController.text),
-        ('금액', '${_amountController.text}원'),
-        ('일자', date),
-        ('영수증', _hasReceipt ? '첨부' : '없음'),
+        ('분류', shownType),
+        ('출처', draft.counterparty),
+        ('금액', '${draft.amount}원'),
+        ('일자', shownDate),
+        ('영수증', draft.receiptHash != null ? '첨부' : '없음'),
       ],
       result: result,
-      occurredAtNote: '전송값 occurred_at: $_occurredAt (사용일 KST 00:00)',
+      occurredAtNote: '전송값 occurred_at: ${draft.occurredAt} (사용일 KST 00:00)',
       gradient: AppTheme.incomeGradient,
     );
     if (done && mounted) Navigator.pop(context);

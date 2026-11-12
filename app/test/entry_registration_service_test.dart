@@ -333,4 +333,25 @@ void main() {
       expect(body['receipt_path'], up.path);
     });
   });
+
+  test('영수증 경로를 붙여도 정정 필드와 나머지 입력은 그대로다 — 정정 초안이 일반 초안으로 바뀌지 않는다 (#71 리뷰)', () {
+    const draft = EntryDraft(
+      kind: EntryKind.EXPENSE,
+      termId: 1,
+      amount: -5000,
+      counterparty: '한결문구',
+      purpose: '금액 입력 오류',
+      budgetId: 1,
+      occurredAt: 1790694000,
+      receiptHash: '0xabc',
+      correctsEntryId: 7,
+      correctionReason: CorrectionReason.INPUT_ERROR,
+    );
+    final withPath = draft.withReceiptPath('/receipts/abc.jpg');
+    expect(withPath.receiptPath, '/receipts/abc.jpg');
+    expect(withPath.correctsEntryId, 7);
+    expect(withPath.correctionReason, CorrectionReason.INPUT_ERROR);
+    expect(withPath.isCorrection, isTrue);
+    expect(withPath.toCreateJson(), {...draft.toCreateJson(), 'receipt_path': '/receipts/abc.jpg'});
+  });
 }
