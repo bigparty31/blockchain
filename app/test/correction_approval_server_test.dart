@@ -261,6 +261,57 @@ void main() {
       expect(unknown.insufficient, isFalse);
     });
 
+    test('재분류 감액(−)은 증액(+)이 확정되기 전에는 확정할 수 없다 — 서버(#81)가 순서를 강제한다', () {
+      List<CorrectionItem> pair(String plusStatus) => correctionItemsFromEntries([
+            entry(1),
+            entry(2, amount: 35000, status: plusStatus, budgetId: 2, corrects: 1, reason: 'RECLASSIFY'),
+            entry(3, amount: -35000, status: 'PENDING', corrects: 1, reason: 'RECLASSIFY'),
+          ]);
+      CorrectionItem byId(List<CorrectionItem> l, int id) => l.firstWhere((c) => c.id == id);
+
+      final waiting = pair('PENDING');
+      expect(byId(waiting, 3).awaitsPlusFirst, isTrue);
+      expect(byId(waiting, 2).awaitsPlusFirst, isFalse, reason: '증액 쪽은 언제든 확정할 수 있다');
+
+      expect(byId(pair('CONFIRMED'), 3).awaitsPlusFirst, isFalse, reason: '증액이 확정되면 감액을 확정할 수 있다');
+      expect(byId(pair('REJECTED'), 3).awaitsPlusFirst, isTrue, reason: '증액이 반려됐으면 감액도 확정할 수 없다');
+    });
+
+    test('이미 재분류된 증액 건을 다시 재분류하면, 그 건을 대상으로 한 증액이 확정돼야 감액을 확정할 수 있다 (#98 리뷰)', () {
+      final items = correctionItemsFromEntries([
+        entry(1, amount: 100000, budgetId: 1),
+        entry(2, amount: 100000, budgetId: 2, corrects: 1, reason: 'RECLASSIFY'), // A→B 완료
+        entry(3, amount: -100000, budgetId: 1, corrects: 1, reason: 'RECLASSIFY'),
+        entry(4, amount: 100000, budgetId: 3, status: 'PENDING', corrects: 2, reason: 'RECLASSIFY'), // B→C 대기
+        entry(5, amount: -100000, budgetId: 2, status: 'PENDING', corrects: 2, reason: 'RECLASSIFY'),
+      ]);
+      expect(items.firstWhere((c) => c.id == 5).awaitsPlusFirst, isTrue,
+          reason: '과거 A→B 의 확정 증액(#2)은 B→C 의 증액이 아니다 — 서버는 #2 를 대상으로 한 확정 증액을 본다');
+    });
+
+    test('한 번 확정된 감액이 가져간 만큼은 다시 쓸 수 없다 — 대상별 가용 증액으로 판정한다 (#98 리뷰)', () {
+      List<CorrectionItem> run(int plus) => correctionItemsFromEntries([
+            entry(1, amount: 100000, budgetId: 1),
+            entry(2, amount: plus, budgetId: 2, corrects: 1, reason: 'RECLASSIFY'),
+            entry(3, amount: -60000, budgetId: 1, corrects: 1, reason: 'RECLASSIFY'), // 이미 확정된 감액
+            entry(4, amount: -40000, budgetId: 1, status: 'PENDING', corrects: 1, reason: 'RECLASSIFY'),
+          ]);
+      expect(run(60000).firstWhere((c) => c.id == 4).awaitsPlusFirst, isTrue, reason: '60,000 − 60,000 = 0 < 40,000');
+      expect(run(100000).firstWhere((c) => c.id == 4).awaitsPlusFirst, isFalse, reason: '100,000 − 60,000 = 40,000 ≥ 40,000');
+    });
+
+    test('재분류가 아닌 감액과 증액 짝을 찾지 못한 건은 미리 막지 않는다', () {
+      final items = correctionItemsFromEntries([
+        entry(1),
+        entry(2, amount: -5000, status: 'PENDING', corrects: 1, reason: 'INPUT_ERROR'),
+      ]);
+      expect(items.single.awaitsPlusFirst, isFalse);
+      final orphan = correctionItemsFromEntries([
+        entry(3, amount: -5000, status: 'PENDING', corrects: 99, reason: 'RECLASSIFY'),
+      ]);
+      expect(orphan.single.awaitsPlusFirst, isFalse, reason: '원본을 못 읽었으면 서버가 판정한다');
+    });
+
     test('잔량을 읽었고 증액분이 잔량을 넘으면 확정할 수 없다', () {
       final items = correctionItemsFromEntries(
         [entry(1), entry(2, amount: 1600000, status: 'PENDING', corrects: 1, reason: 'RECEIPT_RECHECK')],
@@ -422,6 +473,21 @@ void main() {
       await tester.tap(find.text('승인'));
       await tester.pumpAndSettle();
       expect(find.text('확정할 수 없어요'), findsOneWidget);
+      expect(find.text('생체인증 승인'), findsNothing);
+      expect(confirms, isEmpty);
+    });
+
+    testWidgets('재분류 감액(−)은 증액(+)이 확정되기 전에 승인하면 서명을 받기 전에 막는다', (tester) async {
+      serverEntries = [
+        entryJson(1),
+        entryJson(2, amount: 35000, status: 'PENDING', budgetId: 2, corrects: 1, reason: 'RECLASSIFY', purpose: '금액 입력 오류 — 재분류 증액'),
+        entryJson(3, amount: -35000, status: 'PENDING', corrects: 1, reason: 'RECLASSIFY', purpose: '금액 입력 오류 — 재분류 감액'),
+      ];
+      await pump(tester);
+      expect(find.text('승인'), findsNWidgets(2));
+      await tester.tap(find.text('승인').last); // 대기 건은 등록 순 — 마지막이 감액(−)
+      await tester.pumpAndSettle();
+      expect(find.text('먼저 확정할 건이 있어요'), findsOneWidget);
       expect(find.text('생체인증 승인'), findsNothing);
       expect(confirms, isEmpty);
     });

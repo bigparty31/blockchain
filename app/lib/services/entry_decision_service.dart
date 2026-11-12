@@ -141,7 +141,8 @@ class EntryDecisionService {
       );
     }
     final fresh = await _checkStillSame(entry, forConfirm: forConfirm);
-    // 서버가 등록자 주소를 주면(#65) 그대로 쓰고, 옛 서버면 지갑 매핑을 뒤집어 찾는다
+    // 서버가 등록자 주소를 주면(#65, 체인에서 읽은 값) 그대로 쓴다. null 이면(옛 서버·체인 조회 실패) 지갑 매핑을
+    // 뒤집어 찾되, 주소가 정확히 하나가 아니면(키를 교체한 사람) 서명하지 않는다
     final registrant = fresh.registrant ?? await _registrantOf(entry.createdBy);
     final domain = await ledgerDomainForSigning();
     final deadline = _now().millisecondsSinceEpoch ~/ 1000 + signatureTtl.inSeconds;
