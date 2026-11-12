@@ -15,6 +15,7 @@ import 'package:student_council_app/services/api_service.dart';
 import 'package:student_council_app/services/chain_domain_service.dart';
 import 'package:student_council_app/services/entry_decision_service.dart';
 
+import 'support/registration.dart';
 import 'support/session.dart';
 import 'support/signing.dart';
 
@@ -35,6 +36,8 @@ void main() {
     String? reason,
     String? ocrStatus,
     int? revisionRequestedAt,
+    String? receiptHash,
+    String? receiptPath,
   }) =>
       {
         'id': id,
@@ -46,8 +49,10 @@ void main() {
         'purpose': purpose,
         'budget_id': budgetId,
         'occurred_at': occurredAt,
-        'receipt_hash': null,
-        'meta_hash': Hashing.metaHash(amount: amount, counterparty: '한결문구', purpose: purpose, occurredAt: occurredAt),
+        'receipt_hash': receiptHash,
+        'receipt_path': receiptPath,
+        'meta_hash': Hashing.metaHash(
+            amount: amount, counterparty: '한결문구', purpose: purpose, occurredAt: occurredAt, receiptHash: receiptHash),
         'ocr_status': ocrStatus,
         'category_warning': false,
         'status': status,
@@ -349,12 +354,13 @@ void main() {
 
     bool shows(Finder f) => f.evaluate().isNotEmpty;
 
-    Future<void> pump(WidgetTester tester) async {
+    Future<void> pump(WidgetTester tester, {FakeRegistrar? registrar}) async {
       tester.view.physicalSize = const Size(411, 2400);
       tester.view.devicePixelRatio = 1.0;
       addTearDown(tester.view.reset);
       await tester.pumpWidget(MaterialApp(
         home: CorrectionApprovalScreen(
+          registrar: registrar,
           decisions: EntryDecisionService(
             signer: SigningService(authenticator: FakeAuthenticator()),
             now: () => DateTime.utc(2026, 11, 6, 9),
@@ -468,6 +474,57 @@ void main() {
       await tester.tap(find.text('반려하기'));
       await waitUntil(tester, () => shows(find.textContaining('정정이 반려되었습니다.')));
       expect(rejects, hasLength(1));
+    });
+
+    // 정정 승인에도 영수증 해시 대조가 있어야 한다 — 일반 승인에서만 막으면 파일이 바뀐 정정이 이쪽으로 서명·전송된다 (#74 리뷰).
+    group('승인 전 영수증 대조', () {
+      final original = [1, 2, 3, 4];
+      final path = FakeRegistrar.pathOf(original);
+      final hash = Hashing.fileHash(original);
+
+      void withReceipt() {
+        serverEntries[1] = entryJson(2,
+            amount: -5000, status: 'PENDING', corrects: 1, reason: 'INPUT_ERROR', purpose: '금액 입력 오류', receiptHash: hash, receiptPath: path);
+      }
+
+      testWidgets('서버의 파일이 등록 때와 다르면 사유·서명 단계로 가지 않고 안내만 한다', (tester) async {
+        withReceipt();
+        final registrar = FakeRegistrar()..stored[path] = [9, 9, 9];
+        await pump(tester, registrar: registrar);
+        await tester.tap(find.text('승인'));
+        await tester.pumpAndSettle();
+        await waitUntil(tester, () => shows(find.byKey(const Key('receipt_blocks_approval'))));
+        expect(find.text('영수증이 등록 때와 달라요'), findsOneWidget);
+        await tester.tap(find.text('닫기'));
+        await tester.pumpAndSettle();
+        expect(find.text('생체인증 승인'), findsNothing, reason: '서명 단계로 가지 않는다');
+        expect(confirms, isEmpty);
+      });
+
+      testWidgets('파일이 같으면 그대로 서명 단계로 간다', (tester) async {
+        withReceipt();
+        final registrar = FakeRegistrar()..stored[path] = original;
+        await pump(tester, registrar: registrar);
+        await tester.tap(find.text('승인'));
+        await tester.pumpAndSettle();
+        await waitUntil(tester, () => shows(find.text('생체인증 승인')));
+        await tester.tap(find.text('생체인증 승인'));
+        await waitUntil(tester, () => shows(find.textContaining('정정 승인 완료!')));
+        expect(confirms, hasLength(1));
+      });
+
+      testWidgets('원본을 받지 못하면 대조하지 못했다고 알리고, 취소하면 서명하지 않는다', (tester) async {
+        withReceipt();
+        final registrar = FakeRegistrar(); // 서버에 파일이 없다
+        await pump(tester, registrar: registrar);
+        await tester.tap(find.text('승인'));
+        await tester.pumpAndSettle();
+        await waitUntil(tester, () => shows(find.byKey(const Key('receipt_unavailable_confirm'))));
+        await tester.tap(find.text('취소'));
+        await tester.pumpAndSettle();
+        expect(find.text('생체인증 승인'), findsNothing);
+        expect(confirms, isEmpty);
+      });
     });
 
     testWidgets('반려하면 사유를 서명해 보낸다', (tester) async {

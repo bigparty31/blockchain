@@ -7,6 +7,8 @@ import '../../models/entry_model.dart';
 import '../../services/api_service.dart';
 import '../../services/auth_service.dart';
 import '../../services/entry_decision_service.dart';
+import '../../services/entry_registration_service.dart';
+import 'receipt_view_dialog.dart';
 import 'reason_dialog.dart';
 import 'sending_dialog.dart';
 
@@ -261,7 +263,10 @@ class CorrectionApprovalScreen extends StatefulWidget {
 
   /// **로그인했으면 세션([AuthService.session])의 역할·id 만 믿는다** — [role]·[currentUserId] 인자로
   /// 다른 역할을 주장할 수 없다. 인자는 로그인 없이 화면을 그리는 위젯 테스트용이다.
-  const CorrectionApprovalScreen({super.key, this.role, this.currentUserId, this.items, this.decisions});
+  /// 영수증 원본을 받아 오는 입구. 주지 않으면 서버. 테스트에서 가짜를 넣는다.
+  final EntryRegistrar? registrar;
+
+  const CorrectionApprovalScreen({super.key, this.role, this.currentUserId, this.items, this.decisions, this.registrar});
 
   UserRole? get effectiveRole => AuthService().session?.role ?? role;
   int? get effectiveUserId => AuthService().session?.userId ?? currentUserId;
@@ -279,6 +284,8 @@ class _CorrectionApprovalScreenState extends State<CorrectionApprovalScreen> {
   late List<CorrectionItem> _items = List.of(widget.items ?? const []);
 
   late final EntryDecisionService _decisions = widget.decisions ?? EntryDecisionService();
+  late final EntryRegistrar _registrar = widget.registrar ?? EntryRegistrationService();
+  bool _approving = false; // 영수증을 대조하는 동안 승인을 또 누르지 못하게
 
   /// 서버 목록을 읽는 중인가 / 마지막 읽기가 실패한 이유.
   late bool _loading = _fromServer && widget.allowed;
@@ -354,8 +361,19 @@ class _CorrectionApprovalScreenState extends State<CorrectionApprovalScreen> {
       return;
     }
 
-    // 경고가 있는 건(영수증 판독 불일치·중복, 카테고리 경고)은 사유를 먼저 받는다 — 서버 건만.
+    // 영수증이 있는 정정은 사유·서명 단계로 가기 전에 파일 해시부터 대조한다 — 일반 승인과 같다. 불일치면 여기서 끝난다.
     final entry = e.entry;
+    if (entry != null && entry.receiptHash != null && entry.receiptPath != null) {
+      if (_approving) return;
+      _approving = true;
+      try {
+        if (!await receiptAllowsApproval(context, _registrar, entry) || !mounted) return;
+      } finally {
+        _approving = false;
+      }
+    }
+
+    // 경고가 있는 건(영수증 판독 불일치·중복, 카테고리 경고)은 사유를 먼저 받는다 — 서버 건만.
     String? warningReason;
     if (entry != null && EntryDecisionService.hadWarning(entry)) {
       warningReason = await showReasonDialog(
