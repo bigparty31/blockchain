@@ -165,7 +165,7 @@
 > 은 앱에서 다르게 읽힙니다 — 후자를 그냥 넘기면 빈 필드가 기본값으로 채워져
 > **미보유가 「보유」로 뒤집힙니다.** 어느 쪽이든 맞춰 두겠습니다.
 
-### 1-5. `GET /snapshots/latest` — S11
+### 1-5. `GET /snapshots/latest` — S11 · **담당 문승준 (11/12 갱신)**
 
 ```json
 {
@@ -179,20 +179,56 @@
 }
 ```
 
+> **11/12 로컬 실연동에서 확인한 것 — 앱이 혼자 해결할 수 없습니다.**
+>
+> 대조 기능 자체는 `/bank/snapshots`(목록) · `/bank/snapshots/{id}`(대조 결과)로 **이미 있습니다.**
+> 그런데 앱이 그쪽으로 경로만 바꿔서는 안 됩니다. 두 가지가 막습니다:
+>
+> 1. **권한** — 두 경로 모두 `council_only`(총무·감사·회장)입니다. 학생 토큰으로 부르면 **403** 입니다
+>    (실측: 학생 403 / 총무 200).
+> 2. **서버 분리** — `bank_command_router` 가 `bundles.py` 의 `COUNCIL_*` 에만 있고
+>    `STUDENT_QUERY_ROUTERS` 에는 없습니다. 학생 서버에는 경로 자체가 생기지 않습니다.
+>
+> 그래서 **학생이 읽을 수 있는 조회 경로가 하나 필요합니다.** 계산은 그대로 쓰고 응답만 줄이면 되므로,
+> 기존 `ReconciliationReport` 에서 아래처럼 뽑아 주시면 앱은 손댈 것이 없습니다:
+>
+> | 앱이 읽는 키 | `ReconciliationReport` 의 출처 | 비고 |
+> |:---|:---|:---|
+> | `id` | `snapshot_id` | 이름만 다릅니다 |
+> | `term_id` | `term_id` | 그대로 |
+> | `bank_balance` | `bank_balance` | 그대로 |
+> | `snapshot_at` | `snapshot_at` | **ISO datetime → Unix 초**로 바꿔 주세요 (앱은 int 로 읽습니다) |
+> | `tx_hash` | 없음 | `recordBankSnapshot` 트랜잭션. 없으면 `null` 로 두셔도 됩니다 |
+> | `unrecorded[]` | `transactions` 중 **원장에 짝이 없는 출금 행** | `{amount, counterparty, occurred_at}` 세 키만 |
+>
+> **`unbacked_entries` 는 넣지 마세요.** 그쪽은 「원장에 있는데 계좌에 없음」이라 방향이 반대입니다.
+> 학생 화면 S11 이 보여 주는 것은 「계좌에는 있는데 원장에 없는 지출」 한 방향뿐입니다 (도메인 규칙 7).
+>
+> **학생에게 공개해도 되는 범위인지 먼저 봐 주세요.** `file_hash` · `uploaded_by` · 거래 원문
+> (`description` · `balance_after`)은 앱이 쓰지 않으니 빼 주시면 됩니다.
+>
+> **없으면**: 404 가 확정이라 앱은 차액 배너를 아예 그리지 않습니다. 예시 데이터로 메우지 않습니다 —
+> 실제 장부 옆에 가짜 통장 잔액이 섞이면 학생이 구분할 방법이 없습니다.
+
 ---
 
 ## 2. 기존 응답에 추가가 필요한 필드
 
 | 필드 | 위치 | 쓰는 곳 | 앱 상태 |
 |:---|:---|:---|:---|
-| `block_number` | `EntryResponse` | S10 트랜잭션 표시 | **파싱 코드 작성 완료.** 실려 오면 즉시 표시됨 |
+| ~~`block_number`~~ | `EntryResponse` | S10 트랜잭션 표시 | **들어왔습니다 (11/12 확인).** 아래 참고 |
 | `had_warning` | `EntryResponse` | S7 「경고 무시 승인」 뱃지 판정 (PRD §293) | 현재 `warning_ack_reason` 유무로 추정 중 |
 | `rejected_by` | `Entry` (DB) | 반려 항목의 서명자 대조 | 컬럼이 없어 `REJECTED` 는 승인자 비교를 건너뜀 |
 | 이전 버전 금액 | `BudgetResponse` | S6 `200만 → 250만` 의 **앞** 금액 | 현재 뒤 금액만 표시 |
 | 학기 이름 | `GET /terms/{id}` 또는 `EntryResponse` | 대시보드 헤더·SBT 화면 | `term_id` 만 있고 이름이 없어 **앱에 문자열을 고정해 둔 상태** (`core/term_info.dart`) |
 
-`block_number` 는 앱에 `EntryModel.blockNumber` 로 이미 자리를 만들어 뒀습니다.
-응답에 키만 실리면 앱 수정 없이 화면에 나옵니다.
+~~`block_number` 는 앱에 `EntryModel.blockNumber` 로 이미 자리를 만들어 뒀습니다.
+응답에 키만 실리면 앱 수정 없이 화면에 나옵니다.~~
+
+**11/12 로컬 실연동에서 확인 — `block_number` 가 내려옵니다.** `GET /entries/{id}` 와
+`GET /entries/{id}/onchain` 양쪽에 실려 있고(각각 확정 트랜잭션·기록 트랜잭션의 블록),
+앱은 수정 없이 화면 4 에 표시됩니다. 「아직 안 내려온다」고 적어 둔 주석 두 곳만 정리했습니다.
+**남은 요청은 §1-5 와 이 표의 나머지 4줄입니다.**
 
 ### 2-1. `/budgets` 목업에 개정된 예산을 한 건 넣어 주세요
 

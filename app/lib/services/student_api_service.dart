@@ -311,6 +311,11 @@ class StudentApiService {
 
   /// GET /snapshots/latest — 통장 잔액 스냅샷과 미등록 건 (S11)
   ///
+  /// 대조 기능 자체는 서버에 `GET /bank/snapshots` · `/bank/snapshots/{id}` 로 있지만
+  /// **학생은 그쪽을 쓸 수 없다** — 둘 다 `council_only` 라 학생 토큰은 403 이고,
+  /// `bank` 라우터가 `STUDENT_QUERY_ROUTERS` 에 없어 학생 서버에는 경로가 생기지 않는다
+  /// (2026-11-12 실연동에서 확인, `docs/backend_requests.md` §1-5). 경로를 바꾸면 안 되는 이유다.
+  ///
   /// **실서버를 보고 있으면 폴백하지 않는다.** 이 엔드포인트는 백엔드에 아직
   /// 없어서 실모드에서 404 가 확정인데, 그때 예시 스냅샷을 돌려주면 **실제
   /// 장부와 가짜 통장 잔액·미등록 거래가 한 화면에 섞인다.** [usingDemoData] 는

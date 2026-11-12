@@ -793,13 +793,13 @@ class _EntryDetailScreenState extends State<EntryDetailScreen> {
           const SizedBox(height: 12),
           _txRow('Pending 트랜잭션', _entry.txPending),
           _txRow(_secondTxLabel, _entry.txConfirm),
-          // `block_number` 가 응답에 실려 오면 자동으로 값이 뜬다 (S10).
-          // 그때까지만 아래 안내가 대신 자리를 지킨다.
+          // 서버가 `block_number` 를 내려준다 (S10). 아직 체인에 올라가지 않은 건과
+          // 옛 서버에서는 없어서, 그때만 아래 안내가 자리를 지킨다.
           if (_entry.blockNumber != null)
             _txRow('블록 번호', '#${_entry.blockNumber}')
           else
             Text(
-              '블록 번호는 API 에서 아직 내려오지 않습니다.',
+              '이 항목은 블록 번호가 기록되어 있지 않습니다.',
               style: TextStyle(
                 fontSize: 10,
                 color: AppTheme.textSub.withOpacity(0.9),

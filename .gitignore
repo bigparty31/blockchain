@@ -40,6 +40,9 @@ htmlcov/
 *.db
 *.sqlite*
 
+# 런타임에 업로드된 영수증 원본. 소스가 아니고, 공개 저장소라 올라가면 안 된다
+backend/uploads/
+
 # Dart / Flutter
 .dart_tool/
 .flutter-plugins
