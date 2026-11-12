@@ -15,6 +15,9 @@ import 'input_rules.dart';
 class BudgetRevisionScreen extends StatefulWidget {
   final String? initialCategory;
 
+  /// 처음 골라 둘 예산 번호. 차단된 지출이 지난 학기 예산에서 났다면 현재 학기 예산에 가려지지 않게 그 예산으로 고정한다.
+  final int? initialBudgetId;
+
   /// 근거가 되는 차단 지출 (차단 안내에서 넘어올 때만).
   final String? basisTitle;
   final int? basisAmount;
@@ -28,6 +31,7 @@ class BudgetRevisionScreen extends StatefulWidget {
   const BudgetRevisionScreen({
     super.key,
     this.initialCategory,
+    this.initialBudgetId,
     this.basisTitle,
     this.basisAmount,
     this.blockedEntryId,
@@ -94,7 +98,7 @@ class _BudgetRevisionScreenState extends State<BudgetRevisionScreen> {
     });
   }
 
-  BudgetModel? get _selected => _category == null ? null : pickBudget(_budgets, _category!, currentTermId: _currentTermId);
+  BudgetModel? get _selected => _category == null ? null : pickBudget(_budgets, _category!, pinnedId: widget.initialBudgetId, currentTermId: _currentTermId);
 
   /// 근거 지출이 선택한 항목의 잔량을 넘는 금액.
   int? get _shortfall {
@@ -265,7 +269,7 @@ class _BudgetRevisionScreenState extends State<BudgetRevisionScreen> {
                 isExpanded: true,
                 decoration: _decoration('증액할 항목'),
                 items: [
-                  for (final b in budgetsPerCategory(_budgets, currentTermId: _currentTermId))
+                  for (final b in budgetsPerCategory(_budgets, pinnedId: widget.initialBudgetId, currentTermId: _currentTermId))
                     DropdownMenuItem(
                       value: b.category,
                       child: Text('${b.category} · 잔량 ${Fmt.won(b.remainingAmount)}', overflow: TextOverflow.ellipsis),

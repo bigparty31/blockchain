@@ -337,6 +337,7 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
       MaterialPageRoute(
         builder: (_) => BudgetRevisionScreen(
           initialCategory: category,
+          initialBudgetId: draft.budgetId,
           basisTitle: draft.purpose,
           basisAmount: draft.amount,
           blockedEntryId: _blockedId,
