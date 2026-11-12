@@ -151,6 +151,11 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
   /// 입력으로 초안을 만든다. 만들 수 없으면 이유를 알리고 null.
   EntryDraft? _buildDraft({required bool forSubmit, String? receiptPath}) {
     final budget = _budgetFor(_selectedBudgetCategory);
+    // 현재 학기를 모르면 어느 학기 예산인지 정할 수 없다 — 지난 학기 예산으로 올라가지 않게 막는다 (#69 리뷰)
+    if (budget != null && _currentTermId == null) {
+      _snack('현재 학기를 확인하지 못해 예산 항목을 정할 수 없어요. 잠시 후 다시 시도해 주세요.');
+      return null;
+    }
     if (budget == null) {
       _snack(_budgetsError != null
           ? '예산 목록을 불러오지 못해 예산 항목을 확인할 수 없어요. 잠시 후 다시 시도해 주세요.'
