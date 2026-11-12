@@ -275,6 +275,7 @@ class _MyEntriesScreenState extends State<MyEntriesScreen> {
             Icons.trending_up_rounded,
             () => _go(BudgetRevisionScreen(
                   initialCategory: item.category,
+                  initialBudgetId: e.budgetId,
                   basisTitle: item.title,
                   basisAmount: e.amount,
                   blockedEntryId: e.id,
