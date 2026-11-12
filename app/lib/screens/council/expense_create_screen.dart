@@ -114,8 +114,13 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
 
   /// 영수증을 고른다 — 원본 바이트를 그대로 해시한다 (HASHING §4). 원본 업로드는 서버 API 가 생기면 붙인다 (보드 kky-rcp).
   Future<void> _attachReceipt() async {
+    // 제출 중에는 바꾸지 못한다 — 올리던 사진의 경로가 다른 사진의 해시와 섞이지 않게 (#71 리뷰)
+    if (_submitting) {
+      _snack('제출 중에는 영수증을 바꿀 수 없어요.');
+      return;
+    }
     final bytes = await (widget.pickReceipt ?? pickReceiptBytes)(context);
-    if (bytes == null || !mounted) return;
+    if (bytes == null || !mounted || _submitting) return;
     final problem = receiptFormatProblem(bytes);
     if (problem != null) {
       _snack(problem);
@@ -195,17 +200,25 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
   /// ① 초안 저장 — 서버에만 저장한다. 체인 검사(BLOCKED)도 서명도 하지 않는다.
   Future<void> _saveDraft() async {
     if (_submitting || !_formKey.currentState!.validate()) return;
-    final draft = _buildDraft(forSubmit: false);
-    if (draft == null) return;
-    final category = _selectedBudgetCategory; // 응답을 기다리는 사이 바꿔도 안내는 보낸 값으로 한다
+    // 입력은 여기서 한 번만 읽는다 — 업로드·저장을 기다리는 사이 바꿔도(금액을 비워도) 보낸 값과 안내가 같다 (#71 리뷰)
+    final base = _buildDraft(forSubmit: false); // 예산 확인 — 올리기 전에 막는다
+    if (base == null) return;
+    final category = _selectedBudgetCategory;
     setState(() => _submitting = true);
+    final EntryDraft draft;
     try {
-      final draft = _buildDraft(forSubmit: false, receiptPath: await _ensureUploaded())!;
+      draft = base.withReceiptPath(await _ensureUploaded());
       await _ensureDraft(draft);
     } on EntryDecisionException catch (e) {
       if (!mounted) return;
       setState(() => _submitting = false);
       _snack(e.message);
+      return;
+    } catch (_) {
+      // 예상 못 한 실패도 「제출 중」에 갇히지 않게 푼다 — 서버에는 이미 기록됐을 수 있어 확인을 권한다
+      if (!mounted) return;
+      setState(() => _submitting = false);
+      _snack('등록을 마치지 못했어요. 내 등록 현황에서 확인한 뒤 다시 시도해 주세요.');
       return;
     }
     if (!mounted) return;
@@ -217,14 +230,15 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
   /// 실패하면 초안 번호를 들고 있다가 다시 제출할 때 쓴다.
   Future<void> _submitExpense() async {
     if (_submitting || !_formKey.currentState!.validate()) return;
-    final draft = _buildDraft(forSubmit: true);
-    if (draft == null) return;
-    final category = _selectedBudgetCategory; // 응답을 기다리는 사이 바꿔도 안내는 보낸 값으로 한다
+    final base = _buildDraft(forSubmit: true); // 예산·영수증 확인 — 올리기 전에 막는다. 입력은 여기서 한 번만 읽는다
+    if (base == null) return;
+    final category = _selectedBudgetCategory;
     setState(() => _submitting = true);
 
     final RegistrationResult result;
+    final EntryDraft draft;
     try {
-      final draft = _buildDraft(forSubmit: true, receiptPath: await _ensureUploaded())!;
+      draft = base.withReceiptPath(await _ensureUploaded());
       final id = await _ensureDraft(draft);
       final outcome = await _registrar.submit(id, draft);
       result = outcome.status == EntryStatus.BLOCKED
@@ -236,6 +250,12 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
       if (!mounted) return;
       setState(() => _submitting = false);
       _snack(e.message);
+      return;
+    } catch (_) {
+      // 예상 못 한 실패도 「제출 중」에 갇히지 않게 푼다 — 서버에는 이미 기록됐을 수 있어 확인을 권한다
+      if (!mounted) return;
+      setState(() => _submitting = false);
+      _snack('등록을 마치지 못했어요. 내 등록 현황에서 확인한 뒤 다시 시도해 주세요.');
       return;
     }
     if (!mounted) return;
