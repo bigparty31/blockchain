@@ -1,5 +1,6 @@
 """재알림 작업 (app/services/notification_worker.py): 재알림, 서명 시한 임박, 서명 시한 만료 정리, 주기 실행."""
 import asyncio
+import importlib
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -307,9 +308,11 @@ def test_disabled_worker_starts_nothing(monkeypatch):
     assert worker.start(lambda: None) is None
 
 
-def test_app_starts_and_stops_the_worker(monkeypatch):
-    # 학생회 서버(main.py)는 시작할 때 작업과 전송 스레드를 띄우고, 끝날 때 멈춘다
-    from app.main import app
+@pytest.mark.parametrize("entrypoint", ["app.main", "app.main_council"])
+def test_app_starts_and_stops_the_worker(monkeypatch, entrypoint):
+    # 학생회 서버는 시작할 때 작업과 전송 스레드를 띄우고, 끝날 때 멈춘다.
+    # 운영 진입점은 app.main_council 이다 (docs/SERVER_ENV.md) — 여기서 빠지면 푸시·재알림·시한 만료 정리가 돌지 않는다 (#79 팀장 리뷰)
+    app = importlib.import_module(entrypoint).app
 
     ran = []
     monkeypatch.setenv("NOTIFICATION_WORKER", "1")
@@ -322,3 +325,18 @@ def test_app_starts_and_stops_the_worker(monkeypatch):
             time.sleep(0.01)
         assert ran and push._thread is not None and push._thread.is_alive()
     assert push._thread is None
+
+
+def test_student_server_never_starts_the_worker(monkeypatch):
+    # 학생 서버는 NOTIFICATION_WORKER 를 잘못 1 로 두어도 작업을 띄우지 않는다 (읽기 전용 DB, FCM 키 없음)
+    from app.main_student import app
+
+    started = []
+    monkeypatch.setenv("NOTIFICATION_WORKER", "1")
+    monkeypatch.setenv("CHAIN_FAKE", "1")
+    monkeypatch.delenv("CHAIN_RPC_URL", raising=False)
+    monkeypatch.setattr(worker, "start", lambda session_factory: started.append(1))
+    monkeypatch.setattr(push, "start_dispatcher", lambda session_factory: started.append(2))
+    with TestClient(app):
+        pass
+    assert started == [] and push._thread is None

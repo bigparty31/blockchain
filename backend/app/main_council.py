@@ -14,13 +14,20 @@ from fastapi.responses import JSONResponse
 
 from app.chain import ChainSetupError
 from app.chain.provider import check_chain_config, close_chain_client
+from app.database import SessionLocal
 from app.routers.bundles import COUNCIL_ALL_ROUTERS
+from app.services import notification_worker
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     check_chain_config()
+    # 재알림·서명 시한 임박 알림·서명 시한 만료 정리와 FCM 푸시 전송 (PRD §4.1, §4.8 — API 프로세스 안에서 돈다).
+    # 학생회 서버에서만 띄운다. 학생 서버(main_student.py)는 읽기 전용 DB 라 띄우지 않는다
+    notification_worker.check_config()
+    worker = notification_worker.start(SessionLocal)
     yield
+    await notification_worker.stop(worker)
     await close_chain_client()
 
 
