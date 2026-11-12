@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../core/app_theme.dart';
 import '../../core/enums.dart';
 import '../../core/hashing.dart';
+import '../../models/draft_entry.dart';
 import '../../models/entry_model.dart';
 import '../../services/entry_registration_service.dart';
 
@@ -30,9 +31,11 @@ DateTime pickerDateOf(int occurredAt) {
 /// 받은 바이트를 앱이 다시 해시해 보고 서명한다 — 서버가 준 해시를 그대로 서명하지 않는다. 받지 못했거나
 /// (옛 서버에는 `GET /receipts` 가 없다) 해시가 다르면 null 이고, 화면은 다시 첨부하라고 한다.
 /// 같은 파일이 이미 서버에 있으니 다시 올리지 않고 그 경로를 쓴다.
-Future<(List<int>, ReceiptUpload)?> restoreReceipt(EntryRegistrar registrar, EntryModel e) async {
-  final hash = e.receiptHash;
-  final path = e.receiptPath;
+Future<(List<int>, ReceiptUpload)?> restoreReceipt(EntryRegistrar registrar, EntryModel e) =>
+    restoreReceiptFile(registrar, e.receiptHash, e.receiptPath);
+
+/// [restoreReceipt] 의 해시·경로만 받는 형태 — 저장해 둔 초안([DraftEntry])도 같은 규칙으로 되살린다.
+Future<(List<int>, ReceiptUpload)?> restoreReceiptFile(EntryRegistrar registrar, String? hash, String? path) async {
   if (hash == null || path == null) return null;
   final bytes = await registrar.downloadReceipt(path);
   if (bytes == null || !Hashing.hashEquals(Hashing.fileHash(bytes), hash)) return null;
@@ -86,6 +89,54 @@ class ResubmitBanner extends StatelessWidget {
             const SizedBox(height: 6),
             Text(receiptNote!,
                 key: const Key('resubmit_receipt_note'),
+                style: const TextStyle(fontSize: 12, height: 1.4, color: AppTheme.expense)),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// 저장해 둔 초안을 이어서 제출하는 입력 화면 맨 위 안내.
+class DraftBanner extends StatelessWidget {
+  final int draftId;
+
+  /// 저장한 영수증을 다시 쓸 수 없었으면 그 안내 (null 이면 문제 없음).
+  final String? receiptNote;
+
+  const DraftBanner({super.key, required this.draftId, this.receiptNote});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      key: const Key('draft_banner'),
+      margin: const EdgeInsets.only(bottom: 20),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: AppTheme.info.withOpacity(0.08),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: AppTheme.info.withOpacity(0.35)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.edit_note_rounded, color: AppTheme.info, size: 18),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text('저장해 둔 초안 #$draftId 을 이어서 제출해요',
+                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: AppTheme.textMain)),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          const Text('저장한 값으로 채웠어요. 고치지 않고 제출하면 이 초안 그대로, 고치면 새 초안으로 저장해 제출해요.',
+              style: TextStyle(fontSize: 12, height: 1.4, color: AppTheme.textSub)),
+          if (receiptNote != null) ...[
+            const SizedBox(height: 6),
+            Text(receiptNote!,
+                key: const Key('draft_receipt_note'),
                 style: const TextStyle(fontSize: 12, height: 1.4, color: AppTheme.expense)),
           ],
         ],

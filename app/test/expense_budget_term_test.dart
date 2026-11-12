@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:student_council_app/core/enums.dart';
+import 'package:student_council_app/models/draft_entry.dart';
 import 'package:student_council_app/models/entry_model.dart';
 import 'package:student_council_app/screens/council/budget_revision_screen.dart';
 import 'package:student_council_app/screens/council/expense_create_screen.dart';
@@ -183,6 +184,37 @@ void main() {
     );
     await pump(tester, ExpenseCreateScreen(registrar: registrar, resubmitOf: old, pickReceipt: fakeReceipt));
     expect(find.textContaining('잔량 ₩ 100,000'), findsOneWidget, reason: '그 건의 예산(지난 학기 행사비)의 잔량');
+
+    await tester.tap(find.text('영수증 촬영 또는 사진 첨부'));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('제출하기'));
+    await tester.tap(find.text('제출하기'));
+    for (var i = 0; i < 10; i++) {
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 10)));
+      await tester.pump();
+    }
+    await tester.pumpAndSettle();
+
+    final draft = registrar.submits.single.$2;
+    expect(draft.budgetId, 1);
+    expect(draft.termId, 1);
+  });
+
+  // 저장해 둔 초안을 이어서 제출할 때도 그 초안의 예산(지난 학기 #1)을 지킨다.
+  testWidgets('지난 학기 초안을 이어서 제출하면 그 초안의 예산·학기 그대로 제출한다', (tester) async {
+    final registrar = FakeRegistrar();
+    const saved = DraftEntry(
+      id: 9,
+      termId: 1,
+      kind: EntryKind.EXPENSE,
+      amount: 85000,
+      counterparty: '현수막나라',
+      purpose: '동아리 연합 행사 현수막',
+      occurredAt: 1789225200,
+      budgetId: 1,
+    );
+    await pump(tester, ExpenseCreateScreen(registrar: registrar, resumeDraft: saved, pickReceipt: fakeReceipt));
+    expect(find.textContaining('잔량 ₩ 100,000'), findsOneWidget, reason: '그 초안의 예산(지난 학기 행사비)의 잔량');
 
     await tester.tap(find.text('영수증 촬영 또는 사진 첨부'));
     await tester.pumpAndSettle();

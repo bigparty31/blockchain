@@ -4,6 +4,7 @@ import '../../core/app_theme.dart';
 import '../../core/format.dart';
 import '../../core/hashing.dart';
 import '../../models/budget_model.dart';
+import '../../models/draft_entry.dart';
 import '../../models/entry_model.dart';
 import '../../services/api_service.dart';
 import '../../services/entry_registration_service.dart';
@@ -25,7 +26,10 @@ class ExpenseCreateScreen extends StatefulWidget {
   /// 반려·차단된 지출을 고쳐 새로 등록할 때 그 건 ([canResubmit]). 이전 값으로 채워 연다 (PRD §4.3 T4 3단계).
   final EntryModel? resubmitOf;
 
-  const ExpenseCreateScreen({super.key, this.registrar, this.pickReceipt, this.resubmitOf});
+  /// 저장해 둔 초안을 이어서 제출할 때 그 초안.
+  final DraftEntry? resumeDraft;
+
+  const ExpenseCreateScreen({super.key, this.registrar, this.pickReceipt, this.resubmitOf, this.resumeDraft});
 
   @override
   State<ExpenseCreateScreen> createState() => _ExpenseCreateScreenState();
@@ -41,6 +45,11 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
   String _selectedBudgetCategory = '행사비';
   DateTime _selectedDate = kstToday();
   bool _submitting = false;
+
+  /// 이전·저장해 둔 영수증을 서버에서 받는 중. 받기 전에 제출하면 영수증 없이 올라가 해시가 비고, 뒤늦게 온 영수증은 붙지 못한다.
+  bool _restoringReceipt = false;
+
+  bool get _receiptPending => _restoringReceipt && _receiptHash == null;
 
   /// 영수증 원본 바이트의 SHA-256. 지출은 제출에 필수다 (초안은 없어도 저장된다).
   String? _receiptHash;
@@ -75,6 +84,8 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
     super.initState();
     final source = widget.resubmitOf;
     if (source != null) _prefill(source);
+    final draft = widget.resumeDraft;
+    if (draft != null) _prefillDraft(draft);
     _loadBudgets();
   }
 
@@ -86,11 +97,38 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
     _selectedDate = pickerDateOf(e.occurredAt);
     if (e.status == EntryStatus.BLOCKED) _blockedId = e.id;
     if (e.receiptHash == null) return;
+    _restoringReceipt = true;
     restoreReceipt(_registrar, e).then((restored) {
+      _restoringReceipt = false;
       if (!mounted || _receiptHash != null) return; // 그새 다른 사진을 골랐으면 그대로 둔다
       setState(() {
         if (restored == null) {
           _receiptNote = '이전 영수증을 불러오지 못했어요. 영수증을 다시 첨부해 주세요.';
+          return;
+        }
+        _receiptBytes = restored.$1;
+        _receiptHash = restored.$2.hash;
+        _upload = restored.$2;
+      });
+    });
+  }
+
+  /// 저장해 둔 초안의 값으로 채운다. 그 번호와 저장 내용을 들고 있어서, 고치지 않고 제출하면 새 초안을 만들지 않는다.
+  void _prefillDraft(DraftEntry d) {
+    _titleController.text = d.purpose;
+    _merchantController.text = d.counterparty;
+    _amountController.text = '${d.amount}';
+    _selectedDate = pickerDateOf(d.occurredAt);
+    _draftId = d.id;
+    _savedDraft = d.toEntryDraft();
+    if (d.receiptHash == null) return;
+    _restoringReceipt = true;
+    restoreReceiptFile(_registrar, d.receiptHash, d.receiptPath).then((restored) {
+      _restoringReceipt = false;
+      if (!mounted || _receiptHash != null) return; // 그새 다른 사진을 골랐으면 그대로 둔다
+      setState(() {
+        if (restored == null) {
+          _receiptNote = '저장해 둔 영수증을 불러오지 못했어요. 영수증을 다시 첨부해 주세요.';
           return;
         }
         _receiptBytes = restored.$1;
@@ -187,8 +225,8 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
     );
   }
 
-  /// 다시 등록하는 건의 예산 번호. 그 분류의 예산은 학기와 상관없이 이것으로 고정한다.
-  int? get _pinnedBudgetId => widget.resubmitOf?.budgetId;
+  /// 다시 등록하거나 이어서 쓰는 건의 예산 번호. 그 분류의 예산은 학기와 상관없이 이것으로 고정한다.
+  int? get _pinnedBudgetId => widget.resubmitOf?.budgetId ?? widget.resumeDraft?.budgetId;
 
   BudgetModel? _budgetFor(String category) =>
       pickBudget(_budgets, category, pinnedId: _pinnedBudgetId, currentTermId: _currentTermId);
@@ -252,7 +290,12 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
 
   /// ① 초안 저장 — 서버에만 저장한다. 체인 검사(BLOCKED)도 서명도 하지 않는다.
   Future<void> _saveDraft() async {
-    if (_submitting || !_formKey.currentState!.validate()) return;
+    if (_submitting) return;
+    if (_receiptPending) {
+      _snack('이전 영수증을 불러오는 중이에요. 잠시 후 다시 눌러 주세요.');
+      return;
+    }
+    if (!_formKey.currentState!.validate()) return;
     // 입력은 여기서 한 번만 읽는다 — 업로드·저장을 기다리는 사이 바꿔도(금액을 비워도) 보낸 값과 안내가 같다 (#71 리뷰)
     final base = _buildDraft(forSubmit: false); // 예산 확인 — 올리기 전에 막는다
     if (base == null) return;
@@ -282,7 +325,12 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
   /// ② 제출 — 기기 키로 서명해 체인에 올린다. 결과는 `PENDING` 또는 `BLOCKED`.
   /// 실패하면 초안 번호를 들고 있다가 다시 제출할 때 쓴다.
   Future<void> _submitExpense() async {
-    if (_submitting || !_formKey.currentState!.validate()) return;
+    if (_submitting) return;
+    if (_receiptPending) {
+      _snack('이전 영수증을 불러오는 중이에요. 잠시 후 다시 눌러 주세요.');
+      return;
+    }
+    if (!_formKey.currentState!.validate()) return;
     final base = _buildDraft(forSubmit: true); // 예산·영수증 확인 — 올리기 전에 막는다. 입력은 여기서 한 번만 읽는다
     if (base == null) return;
     final category = _selectedBudgetCategory;
@@ -372,6 +420,7 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               if (widget.resubmitOf != null) ResubmitBanner(source: widget.resubmitOf!, receiptNote: _receiptNote),
+              if (widget.resumeDraft != null) DraftBanner(draftId: widget.resumeDraft!.id, receiptNote: _receiptNote),
               // 영수증 첨부 영역
               GestureDetector(
                 onTap: _attachReceipt,

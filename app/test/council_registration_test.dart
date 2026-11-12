@@ -236,6 +236,39 @@ void main() {
       expect(draft.amount, 85000);
       expect(draft.receiptPath, oldPath);
     });
+
+    // 이전 영수증을 내려받는 중에 제출하면 영수증 없이 올라가 해시가 비고, 뒤늦게 도착한 영수증은 이미 제출한 건에 붙지 못한다 (#93 리뷰).
+    testWidgets('지출 — 이전 영수증을 받는 중에는 제출하지 않고, 받은 뒤 영수증을 실어 제출한다', (tester) async {
+      final registrar = _SlowDownloadRegistrar()..stored[oldPath] = fakeReceiptBytes;
+      await pump(tester, ExpenseCreateScreen(registrar: registrar, resubmitOf: rejected()));
+      expect(find.text('영수증 첨부 완료'), findsNothing);
+
+      await tapText(tester, '제출하기');
+      expect(registrar.drafts, isEmpty, reason: '영수증을 받기 전에는 아무것도 서버에 보내지 않는다');
+      expect(registrar.submits, isEmpty);
+      expect(find.text('이전 영수증을 불러오는 중이에요. 잠시 후 다시 눌러 주세요.'), findsOneWidget);
+
+      registrar.release.complete();
+      await settle(tester);
+      expect(find.text('영수증 첨부 완료'), findsOneWidget);
+      await tapText(tester, '제출하기');
+      expect(registrar.submits.single.$2.receiptHash, Hashing.fileHash(fakeReceiptBytes));
+    });
+
+    testWidgets('수입 — 이전 영수증을 받는 중에는 제출하지 않고, 받은 뒤 영수증을 실어 제출한다', (tester) async {
+      final registrar = _SlowDownloadRegistrar()..stored[oldPath] = fakeReceiptBytes;
+      await pump(tester, IncomeCreateScreen(registrar: registrar, resubmitOf: rejected(kind: EntryKind.INCOME)));
+
+      await tapText(tester, '제출하기');
+      expect(registrar.drafts, isEmpty);
+      expect(registrar.submits, isEmpty);
+      expect(find.text('이전 영수증을 불러오는 중이에요. 잠시 후 다시 눌러 주세요.'), findsOneWidget);
+
+      registrar.release.complete();
+      await settle(tester);
+      await tapText(tester, '제출하기');
+      expect(registrar.submits.single.$2.receiptHash, Hashing.fileHash(fakeReceiptBytes));
+    });
   });
 
   group('날짜는 한국 시간으로 보인다', () {
@@ -486,5 +519,16 @@ class _GatedRegistrar extends FakeRegistrar {
   Future<SubmitOutcome> submit(int id, EntryDraft draft) async {
     await gate.future;
     return super.submit(id, draft);
+  }
+}
+
+/// 이전 영수증 내려받기를 시험이 풀어 줄 때까지 붙잡아 두는 등록기 — 받는 중의 화면을 본다.
+class _SlowDownloadRegistrar extends FakeRegistrar {
+  final release = Completer<void>();
+
+  @override
+  Future<List<int>?> downloadReceipt(String receiptPath) async {
+    await release.future;
+    return super.downloadReceipt(receiptPath);
   }
 }
