@@ -434,6 +434,19 @@ void main() {
       await expectStops(() => service().confirm(pending()), EntryDecisionFailure.changed);
     });
 
+    // 승인 창을 연 뒤 총무가 수정을 요청하면, 목록의 값만 믿고 서명한 뒤에야 서버가 거절해 이유를 알 수 없다 (#92 리뷰).
+    test('서명 직전 재조회에서 수정 요청이 걸려 있으면 승인은 멈춘다', () async {
+      freshOverride = {...responseOf(pending()), 'revision_requested_at': 1790700000};
+      await expectStops(() => service().confirm(pending()), EntryDecisionFailure.changed);
+    });
+
+    test('수정 요청이 걸려 있어도 반려는 서명해 보낼 수 있다', () async {
+      freshOverride = {...responseOf(pending()), 'revision_requested_at': 1790700000};
+      await service().reject(pending(), '사유');
+      expect(posts, hasLength(1));
+      expect(auth.calls, greaterThan(0));
+    });
+
     test('다시 읽지 못하면', () async {
       freshStatus = 503;
       await expectStops(() => service().confirm(pending()), EntryDecisionFailure.notReady);

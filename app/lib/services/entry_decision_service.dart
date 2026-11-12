@@ -95,7 +95,7 @@ class EntryDecisionService {
     if (warned && canon!.isEmpty) {
       throw const EntryDecisionException(EntryDecisionFailure.invalidReason, '경고 무시 사유를 입력해 주세요.');
     }
-    final ready = await _prepare(entry);
+    final ready = await _prepare(entry, forConfirm: true);
     final message = confirmMessage(
       entry: entry,
       registrant: ready.registrant,
@@ -130,7 +130,9 @@ class EntryDecisionService {
 
   /// 서명 직전까지의 공통 준비 — 화면 값 검산, 학기 코드, 최신 상태 재조회, 등록자 주소, 서명 도메인, 시한.
   /// 여기서 막히면 본인 확인을 묻지 않는다.
-  Future<({String registrant, Eip712Domain domain, int deadline})> _prepare(EntryModel entry) async {
+  ///
+  /// [forConfirm] 이면 수정 요청이 걸린 건도 여기서 멈춘다 — 반려는 수정 요청 중에도 할 수 있다.
+  Future<({String registrant, Eip712Domain domain, int deadline})> _prepare(EntryModel entry, {bool forConfirm = false}) async {
     _checkShownValues(entry);
     if (entry.termCode == null) {
       throw const EntryDecisionException(
@@ -138,7 +140,7 @@ class EntryDecisionService {
         '학기 코드를 받지 못해 서명할 수 없어요. 목록을 새로 고쳐 주세요.',
       );
     }
-    final fresh = await _checkStillSame(entry);
+    final fresh = await _checkStillSame(entry, forConfirm: forConfirm);
     // 서버가 등록자 주소를 주면(#65, 체인에서 읽은 값) 그대로 쓴다. null 이면(옛 서버·체인 조회 실패) 지갑 매핑을
     // 뒤집어 찾되, 주소가 정확히 하나가 아니면(키를 교체한 사람) 서명하지 않는다
     final registrant = fresh.registrant ?? await _registrantOf(entry.createdBy);
@@ -184,7 +186,7 @@ class EntryDecisionService {
   ///
   /// 목록은 15초마다 읽으니 그 사이 다른 임원이 먼저 확정·반려했거나 정정·수정 요청으로 값이 바뀌었을 수 있다.
   /// 그대로 서명하면 서버가 400·409 로 돌려보내는데, 그때는 이미 지문을 댄 뒤다 — 묻기 전에 멈춘다.
-  Future<EntryModel> _checkStillSame(EntryModel shown) async {
+  Future<EntryModel> _checkStillSame(EntryModel shown, {bool forConfirm = false}) async {
     const unreadable = EntryDecisionException(
       EntryDecisionFailure.notReady,
       '이 건의 최신 상태를 확인하지 못해 서명하지 않았어요. 잠시 후 다시 시도해 주세요.',
@@ -214,6 +216,13 @@ class EntryDecisionService {
       throw EntryDecisionException(
         EntryDecisionFailure.changed,
         '이 건은 이미 「${fresh.status.label}」 상태예요. 목록을 새로 고쳐 확인해 주세요.',
+      );
+    }
+    // 목록을 본 뒤 총무가 수정을 요청했을 수 있다 — 서버는 그 건의 확정을 막으니, 서명하기 전에 이유와 함께 멈춘다.
+    if (forConfirm && fresh.revisionRequestedAt != null) {
+      throw const EntryDecisionException(
+        EntryDecisionFailure.changed,
+        '총무가 이 건에 수정을 요청해서 승인할 수 없어요. 반려만 할 수 있어요. 목록을 새로 고쳐 확인해 주세요.',
       );
     }
     if (!_sameSignedValues(shown, fresh)) {

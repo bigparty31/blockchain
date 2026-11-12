@@ -53,6 +53,9 @@ class EntryModel {
   final int? correctsEntryId;
   final CorrectionReason? correctionReason;
 
+  /// 총무가 수정을 요청한 시각 (unix seconds). 대기 건에만 생긴다.
+  final int? revisionRequestedAt;
+
   /// 영수증 중복(`ocr_status == DUPLICATE`)일 때 겹치는 **기존 건의 id**. 아니면 null.
   /// 서버가 아직 안 내려주면(옛 서버) 항상 null 이고, 그때 승인 화면은 「중복」만 적는다.
   final int? duplicateOf;
@@ -92,6 +95,7 @@ class EntryModel {
     this.blockNumber,
     this.correctsEntryId,
     this.correctionReason,
+    this.revisionRequestedAt,
     this.duplicateOf,
     this.blockReason,
     this.creatorName,
@@ -129,6 +133,8 @@ class EntryModel {
       correctionReason: json['correction_reason'] != null
           ? CorrectionReason.fromCode(json['correction_reason'])
           : null,
+      // 숫자가 아니면 「요청 안 함」으로 둔다 — 시각을 지어내지 않는다
+      revisionRequestedAt: json['revision_requested_at'] is int ? json['revision_requested_at'] as int : null,
       duplicateOf: json['duplicate_of'] is int ? json['duplicate_of'] as int : null,
       blockReason: BlockReason.tryParse(json['block_reason']),
       creatorName: _nonBlank(json['creator_name']),

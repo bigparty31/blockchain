@@ -6,7 +6,9 @@ import '../../models/budget_model.dart';
 import '../../models/entry_model.dart';
 import '../../services/api_service.dart';
 import '../../services/auth_service.dart';
+import '../../services/entry_decision_service.dart';
 import '../../services/entry_registration_service.dart';
+import '../../services/entry_revision_service.dart';
 import 'budget_revision_screen.dart';
 import 'correction_screen.dart';
 import 'expense_create_screen.dart';
@@ -187,7 +189,10 @@ class MyEntriesScreen extends StatefulWidget {
   /// 다시 등록·정정 화면에 넘길 등록기 (테스트용). 주지 않으면 각 화면이 서버를 쓴다.
   final EntryRegistrar? registrar;
 
-  const MyEntriesScreen({super.key, this.items, this.currentUserId, this.loadEntries, this.registrar});
+  /// 수정 요청 보내기 (테스트용). 주지 않으면 `POST /entries/{id}/request-revision`.
+  final Future<EntryModel> Function(int entryId)? requestRevision;
+
+  const MyEntriesScreen({super.key, this.items, this.currentUserId, this.loadEntries, this.registrar, this.requestRevision});
 
   @override
   State<MyEntriesScreen> createState() => _MyEntriesScreenState();
@@ -256,7 +261,11 @@ class _MyEntriesScreenState extends State<MyEntriesScreen> {
       case MyEntryState.processing:
         return (('처리 중 — 다시 보낼 수 없어요', Icons.hourglass_top_rounded, null), null);
       case MyEntryState.pending:
-        return (('승인 대기 중 — 고치려면 수정 요청이 필요해요 (준비 중)', Icons.hourglass_empty_rounded, null), null);
+        // 수정을 이미 요청한 건 — 승인권자는 반려만 할 수 있다. 반려되면 「고쳐서 다시 제출」이 열린다
+        if (e.revisionRequestedAt != null) {
+          return (('수정 요청함 — 감사·회장이 반려하면 고쳐서 다시 제출할 수 있어요', Icons.hourglass_empty_rounded, null), null);
+        }
+        return (('수정 요청', Icons.edit_note_rounded, () => _confirmRequestRevision(e)), null);
       case MyEntryState.confirmed:
         return (
           (
@@ -284,6 +293,48 @@ class _MyEntriesScreenState extends State<MyEntriesScreen> {
           ('증액 승인 뒤 다시 등록', Icons.refresh_rounded, () => _go(_resubmitScreen(e))),
         );
     }
+  }
+
+  bool _requesting = false;
+
+  /// 수정 요청 — 보내면 승인권자가 확정할 수 없고 반려만 할 수 있으므로, 보내기 전에 한 번 묻는다.
+  Future<void> _confirmRequestRevision(EntryModel e) async {
+    if (_requesting) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('수정을 요청할까요?'),
+        content: Text(
+          '#${e.id} ${e.counterparty} 건은 승인 대기 중이라 고칠 수 없어요.\n'
+          '요청하면 감사·회장이 이 건을 확정할 수 없고 반려만 할 수 있어요. '
+          '반려되면 고쳐서 새로 제출해요.',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('취소')),
+          FilledButton(
+            key: const Key('revision_confirm'),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('수정 요청 보내기'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+
+    _requesting = true;
+    String message;
+    try {
+      await (widget.requestRevision ?? EntryRevisionService.requestRevision)(e.id);
+      message = '수정 요청을 보냈어요. 감사·회장이 반려하면 고쳐서 다시 제출할 수 있어요.';
+    } on EntryDecisionException catch (ex) {
+      message = ex.message;
+    } finally {
+      _requesting = false;
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+    // 결과가 어떻든 목록이 정답이다 — 요청됐는지 모를 때도, 그 사이 확정됐을 때도
+    if (_fromServer) _load();
   }
 
   /// 반려·차단된 건을 다시 올리는 화면. **정정 건은 정정 화면으로** 보낸다 — 일반 등록 화면에는 정정 대상·사유가 없어서

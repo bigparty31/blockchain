@@ -156,6 +156,8 @@ Map<String, dynamic> approvalItemFromEntry(EntryModel e, {Map<int, String> categ
       'receiptInfo': e.receiptHash == null ? '영수증 없음' : '영수증 첨부 (${Fmt.shortHash(e.receiptHash!)})',
       if (e.rejectReason != null) 'rejectReason': e.rejectReason,
       if (e.warningAckReason != null) 'warningAckReason': e.warningAckReason,
+      // 총무가 수정을 요청한 건 — 서버가 확정을 막고 반려만 받는다 (API §2.3)
+      if (e.revisionRequestedAt != null) 'revisionRequested': true,
       'entry': e,
     };
 
@@ -1169,6 +1171,12 @@ class _ApprovalCard extends StatelessWidget {
             const Divider(color: AppTheme.divider, height: 1),
             const SizedBox(height: 12),
 
+            if (status == EntryStatus.PENDING && !own && item['revisionRequested'] == true) ...[
+              const Text('총무가 수정을 요청했어요 — 반려만 할 수 있어요',
+                style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: AppTheme.textSub),
+              ),
+              const SizedBox(height: 10),
+            ],
             if (status == EntryStatus.PENDING && own) ...[
               Text('등록자와 승인자가 같아 처리할 수 없어요',
                 style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: AppTheme.textSub),
@@ -1227,7 +1235,10 @@ class _ApprovalCard extends StatelessWidget {
                   const SizedBox(width: 8),
                   Expanded(
                     flex: 2,
-                    child: Container(
+                    // 수정 요청 중인 건은 서명하게 두지 않는다 — 서명한 뒤에야 서버가 거절하면 이유를 알 수 없다
+                    child: item['revisionRequested'] == true
+                        ? const _DisabledAction(label: '승인 서명')
+                        : Container(
                       decoration: BoxDecoration(
                         gradient: const LinearGradient(
                           colors: [Color(0xFF8B5CF6), Color(0xFF6C63FF)],
