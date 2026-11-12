@@ -271,6 +271,9 @@ class _EntryListScreenState extends State<EntryListScreen> {
     // 확인). 글자 크기를 키우면 칩 4개만으로도 넘치므로, 폭·글자 크기와 무관하게
     // 닫으려면 개수를 줄이는 것이 아니라 스크롤이 맞다.
     return Container(
+      // **폭을 못 박는다.** 스크롤뷰는 가로로 콘텐츠만큼만 차지해서, 지정하지
+      // 않으면 흰 배경이 칩 너비에서 끊기고 오른쪽이 페이지 배경으로 비친다.
+      width: double.infinity,
       color: Colors.white,
       padding: const EdgeInsets.symmetric(vertical: 12),
       child: SingleChildScrollView(
@@ -383,7 +386,11 @@ class _EntryChainCard extends StatelessWidget {
               ),
               const SizedBox(height: 10),
 
-              Row(
+              // 금액 칸의 **상한**을 알려면 바깥 제약을 읽어야 한다. 금액을 Row 의
+              // 유연 자식으로 두면 남는 폭을 절반씩 나눠 가져서, 거래처 이름이
+              // 절반에서 일찍 줄바꿈되고 금액도 카드 끝이 아니라 가운데에 붙는다.
+              LayoutBuilder(
+                builder: (context, rowConstraints) => Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Expanded(
@@ -414,7 +421,13 @@ class _EntryChainCard extends StatelessWidget {
                   // 두면 「₩5,000,0…」 처럼 **자릿수가 사라진 금액**이 보이는데,
                   // 장부 화면에서 그것은 틀린 숫자를 보여주는 것과 같다.
                   // [FittedBox] 는 글자를 작게 만들 뿐 자릿수를 지우지 않는다.
-                  Flexible(
+                  //
+                  // 유연 자식이 아니라 **제 크기대로 두고 상한만** 건다 — 그래야
+                  // 금액이 카드 오른쪽 끝에 붙는다.
+                  ConstrainedBox(
+                    constraints: BoxConstraints(
+                      maxWidth: rowConstraints.maxWidth * 0.55,
+                    ),
                     child: FittedBox(
                       fit: BoxFit.scaleDown,
                       alignment: Alignment.centerRight,
@@ -446,6 +459,7 @@ class _EntryChainCard extends StatelessWidget {
                     ),
                   ),
                 ],
+                ),
               ),
 
               const SizedBox(height: 12),

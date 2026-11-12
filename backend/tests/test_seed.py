@@ -108,6 +108,8 @@ def test_seed_after_alembic_upgrade_is_idempotent_and_enables_entry_flow(tmp_pat
                 "purpose": "빈 DB 시드 후 외래키 통과 확인",
                 "budget_id": 1,
                 "occurred_at": 1788793200,
+                "receipt_hash": "0x" + "aa" * 32,
+                "receipt_path": "/receipts/sample_01.jpg",
             },
             headers=auth_header(Role.TREASURER),
         )

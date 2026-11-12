@@ -1,7 +1,7 @@
 {
   "network": "localhost",
   "chainId": 31337,
-  "deployedAt": "2026-09-30T02:25:33.000Z",
+  "deployedAt": "2026-11-09T02:43:10.000Z",
   "solidity": "0.8.28",
   "pathBase": "abi 경로는 이 파일이 있는 폴더(contracts/deployments/) 기준",
   "contracts": {
@@ -19,6 +19,11 @@
       "address": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
       "deployBlock": 3,
       "abi": "abi/AccountingLedger.json"
+    },
+    "MembershipSBT": {
+      "address": "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9",
+      "deployBlock": 5,
+      "abi": "abi/MembershipSBT.json"
     }
   },
   "setLedgerBlock": 4,
@@ -43,6 +48,13 @@
       "chainId": 31337,
       "verifyingContract": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
       "domainSeparator": "0x7887f5ba6910ea3e84a905c6e45288e1cd7b0f62a455182c7bc12b4208109294"
+    },
+    "MembershipSBT": {
+      "name": "MembershipSBT",
+      "version": "1",
+      "chainId": 31337,
+      "verifyingContract": "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9",
+      "domainSeparator": "0xf444fbbb6b315e54e4c5cb770eb1db1669ce7880e8bbccd8eba12ecb8127281f"
     }
   },
   "roles": {
@@ -52,6 +64,7 @@
   },
   "maxAmount": "1000000000000000",
   "recoveryDelaySeconds": 259200,
+  "maxBatchSize": 100,
   "accounts": {
     "deployer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
     "president": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",

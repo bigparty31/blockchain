@@ -161,6 +161,61 @@ void main() {
     });
   });
 
+  /// 6차 리뷰 Medium — 서버 잠금은 **학번 단위**인데 기기 전체를 막고 있었다.
+  ///
+  /// A 학번으로 429 를 받으면 B 학번으로 바꿔도 버튼이 잠기고, 재시작해도
+  /// 그대로였다. 공용 기기나 발표용 기기에서 **한 사람의 잠금이 전원을 막는다.**
+  group('서버 잠금은 그 학번에만 걸린다', () {
+    test('A 가 429 로 잠겨도 B 는 로그인할 수 있다', () async {
+      AuthService.client = _locked(retryAfter: '600');
+      await _loginError(); // 20240001 이 잠긴다
+
+      expect(AuthService().lockRemainingFor('20240001'), isNotNull);
+      expect(
+        AuthService().lockRemainingFor('20240002'),
+        isNull,
+        reason: '학번 단위 잠금을 기기 전체에 적용하면 공용 기기에서 전원이 막힌다',
+      );
+    });
+
+    test('앱을 다시 켜도 B 는 막히지 않는다', () async {
+      final lockStore = MemoryLoginLockStore();
+      AuthService.lockStore = lockStore;
+      AuthService.client = _locked(retryAfter: '600');
+      await _loginError();
+
+      expect(lockStore.studentNo, '20240001', reason: '학번을 안 남기면 재시작 뒤 구분할 수 없다');
+
+      // 앱을 다시 켠 것과 같다 — 메모리를 비우고 보관소에서 읽는다.
+      await AuthService().resetAttempts();
+      AuthService.lockStore = lockStore
+        ..attempts = AuthService.maxAttempts
+        ..lockedUntil = DateTime.now().add(const Duration(minutes: 10))
+        ..byServer = true
+        ..studentNo = '20240001';
+      await AuthService().loadLock();
+
+      expect(AuthService().lockRemainingFor('20240001'), isNotNull);
+      expect(AuthService().lockRemainingFor('20240002'), isNull);
+    });
+
+    /// 앱이 센 5회는 반대다 — 기기 단위가 맞다(앱 데이터를 지우면 풀리는
+    /// 편의 장치다). 학번을 바꿔 가며 우회할 수 있으면 의미가 없다.
+    test('앱이 센 5회 잠금은 학번을 가리지 않는다', () async {
+      AuthService.client = MockClient((_) async => http.Response('{}', 401));
+      for (var i = 0; i < AuthService.maxAttempts; i++) {
+        await _loginError();
+      }
+
+      expect(AuthService().lockRemainingFor('20240001'), isNotNull);
+      expect(
+        AuthService().lockRemainingFor('20240002'),
+        isNotNull,
+        reason: '학번만 바꾸면 풀리는 기기 잠금은 잠금이 아니다',
+      );
+    });
+  });
+
   group('남은 시간 문구', () {
     /// `${d.inSeconds}초` 로 적으면 15분 잠금이 **「900초 후에 다시 시도해
     /// 주세요」**가 된다 — 읽는 사람이 암산을 해야 한다.
@@ -193,7 +248,7 @@ MockClient _locked({required String? retryAfter}) => MockClient((req) async {
 ///
 /// 보관소 형식의 **하위 호환**을 보는 유일한 자리다. `MemoryLoginLockStore` 는
 /// 문자열을 거치지 않아서 형식이 바뀌어도 모른다.
-Future<({int attempts, DateTime? lockedUntil, bool byServer})?>
+Future<({int attempts, DateTime? lockedUntil, bool byServer, String? studentNo})?>
     _readFromSecureStore(String raw) async {
   TestWidgetsFlutterBinding.ensureInitialized();
   const channel = MethodChannel('plugins.it_nomads.com/flutter_secure_storage');

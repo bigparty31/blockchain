@@ -35,7 +35,10 @@ from app.chain.models import (
     KIND_ORDER,
     STATUS_ORDER,
     ZERO_ADDRESS,
+    BURN_REASON_ORDER,
     BudgetTxResult,
+    BurnRequest,
+    BurnResult,
     ChainBudget,
     ChainEntry,
     EntryTxDetail,
@@ -46,6 +49,9 @@ from app.chain.models import (
     ConfirmApproval,
     IncreaseRequest,
     IssueRequest,
+    MintBatchRequest,
+    MintBatchResult,
+    MintedMembership,
     RecordRequest,
     RejectDecision,
     RevertReason,
@@ -53,7 +59,7 @@ from app.chain.models import (
     check_tx_hash,
 )
 from app.schemas.entry import EntryStatus
-from app.chain.revert import RevertDecoder, budget_revert_decoder, rpc_error_of
+from app.chain.revert import RevertDecoder, budget_revert_decoder, membership_revert_decoder, rpc_error_of
 
 LEDGER = "AccountingLedger"
 ROLE_MANAGER = "RoleManager"
@@ -263,6 +269,9 @@ class Web3ChainClient:
         # 확정 안에서 원장이 부르는 BudgetToken 의 에러도 원장 호출의 revert 로 올라온다 (app/chain/revert.py)
         self._reverts = RevertDecoder(self._ledger.abi, self._budget_token.abi if self._budget_token is not None else None)
         self._budget_reverts = budget_revert_decoder(self._budget_token.abi) if self._budget_token is not None else None
+        self._membership_reverts = (
+            membership_revert_decoder(self._membership_sbt.abi) if self._membership_sbt is not None else None
+        )
         self._entry_fields = _entry_fields(self._ledger.abi)
         self._budget_fields = _budget_fields(self._budget_token.abi) if self._budget_token is not None else None
         self._stamps = self._file_stamps()
@@ -451,10 +460,22 @@ class Web3ChainClient:
     # ------------------------------------------------------------ ChainClient
 
     def signer_of(
-        self, payload: Union[RecordRequest, ConfirmApproval, RejectDecision, IssueRequest, IncreaseRequest], signature: str
+        self,
+        payload: Union[
+            RecordRequest, ConfirmApproval, RejectDecision, IssueRequest, IncreaseRequest, MintBatchRequest, BurnRequest
+        ],
+        signature: str,
     ) -> str:
+        if isinstance(payload, eip712.MEMBERSHIP_PAYLOADS):
+            return eip712.recover_signer(eip712.typed_data_for(payload, self._sbt_domain()), signature)
         contract = BUDGET_TOKEN if isinstance(payload, eip712.BUDGET_PAYLOADS) else LEDGER
         return eip712.recover_signer(eip712.typed_data_for(payload, self._deployment.eip712[contract]), signature)
+
+    def _sbt_domain(self):
+        domain = self._deployment.eip712.get(MEMBERSHIP_SBT)
+        if domain is None:
+            raise ChainSetupError("배포 기록에 MembershipSBT 서명 도메인이 없다. 회원권 서명을 확인할 수 없다")
+        return domain
 
     async def get_entry(self, entry_id: int) -> Optional[ChainEntry]:
         self._ensure_open()
@@ -628,6 +649,79 @@ class Web3ChainClient:
         if self._membership_sbt is None:
             raise ChainSetupError("배포 기록에 MembershipSBT 가 없다. 회원권을 조회할 수 없다")
         return self._membership_sbt
+
+    async def membership_nonce(self, signer: str) -> int:
+        sbt = self._sbt_contract()
+        try:
+            return int(await sbt.functions.nonces(AsyncWeb3.to_checksum_address(signer)).call())
+        except Exception as e:
+            self._raise_call_failure(e, self._membership_reverts)
+
+    async def mint_memberships(
+        self, request: MintBatchRequest, signature: str, before_broadcast: Optional[BeforeBroadcast] = None
+    ) -> MintBatchResult:
+        sbt = self._sbt_contract()
+        message = eip712.typed_data_for(request, self._sbt_domain())["message"]
+        call = sbt.functions.mintBatchRelayed(message, _signature_bytes(signature))
+        tx_hash, receipt = await self._relay(call, before_broadcast, self._membership_reverts)
+        return self._mint_result(tx_hash, receipt)
+
+    async def mint_tx_result(self, tx_hash: str) -> Optional[MintBatchResult]:
+        self._sbt_contract()
+        receipt = await self._receipt_or_none(tx_hash)
+        if receipt is None:
+            return None
+        return self._mint_result(check_tx_hash(tx_hash), receipt)
+
+    async def burn_membership_relayed(
+        self, request: BurnRequest, signature: str, before_broadcast: Optional[BeforeBroadcast] = None
+    ) -> BurnResult:
+        sbt = self._sbt_contract()
+        message = eip712.typed_data_for(request, self._sbt_domain())["message"]
+        call = sbt.functions.burnRelayed(message, _signature_bytes(signature))
+        tx_hash, receipt = await self._relay(call, before_broadcast, self._membership_reverts)
+        for log in sbt.events.MembershipBurned().process_receipt(receipt, errors=DISCARD):
+            if log["address"] == sbt.address:
+                args = log["args"]
+                return BurnResult(
+                    tx_hash=tx_hash,
+                    holder=args["from"],
+                    token_id=args["tokenId"],
+                    reason=BURN_REASON_ORDER[args["reason"]],
+                    signer=args["actor"],
+                )
+        raise ChainUnavailable(f"결과 이벤트를 찾지 못했다 (tx={tx_hash})")
+
+    def _mint_result(self, tx_hash: str, receipt: dict) -> MintBatchResult:
+        """receipt 의 MembershipMinted·MembershipSkipped 로 결과를 만든다. 발행 상태를 다시 읽어 대신 판정하지 않는다."""
+        sbt = self._membership_sbt
+        minted, skipped, signers = [], [], set()
+        for log in sbt.events.MembershipMinted().process_receipt(receipt, errors=DISCARD):
+            if log["address"] == sbt.address:
+                minted.append(MintedMembership(address=log["args"]["to"], token_id=log["args"]["tokenId"]))
+                signers.add(log["args"]["actor"])
+        for log in sbt.events.MembershipSkipped().process_receipt(receipt, errors=DISCARD):
+            if log["address"] == sbt.address:
+                skipped.append(log["args"]["to"])
+                signers.add(log["args"]["actor"])
+        if len(signers) != 1:
+            # 배치는 비어 있을 수 없어(EmptyBatch) 성공한 발행에는 이벤트가 하나 이상 있다
+            raise ChainUnavailable(f"결과 이벤트를 찾지 못했다 (tx={tx_hash})")
+        return MintBatchResult(tx_hash=tx_hash, signer=signers.pop(), minted=tuple(minted), skipped=tuple(skipped))
+
+    async def _receipt_or_none(self, tx_hash: str) -> Optional[dict]:
+        """성공한 receipt. 아직 블록에 없으면 None, 실패로 끝났으면 ChainRevert(UNKNOWN), 읽지 못하면 ChainUnavailable."""
+        self._ensure_open()
+        tx_hash = check_tx_hash(tx_hash)
+        try:
+            receipt = await self._w3.eth.get_transaction_receipt(tx_hash)
+        except TransactionNotFound:
+            return None  # 아직 블록에 없다. 들어가지 않았다고 단정하지 않는다
+        except (*UNREACHABLE, Web3Exception) as e:
+            raise ChainUnavailable(f"receipt 를 읽지 못했다 ({type(e).__name__}, tx={tx_hash})") from e
+        if receipt["status"] != 1:
+            raise ChainRevert(RevertReason.UNKNOWN, f"트랜잭션이 실패로 끝났다 (tx={tx_hash})")
+        return receipt
 
     async def issue_budget(
         self, request: IssueRequest, signature: str, before_broadcast: Optional[BeforeBroadcast] = None

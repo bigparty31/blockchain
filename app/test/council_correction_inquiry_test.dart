@@ -388,6 +388,107 @@ void main() {
       ]);
     });
 
+    testWidgets('재분류의 뒤쪽(−)이 실패한 뒤 입력을 바꿔 다시 내면, 옛 건은 결과에 섞이지 않고 따로 알린다 (#111 리뷰)', (tester) async {
+      tester.view.physicalSize = const Size(411, 2800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+      final flaky = _FailSecondSubmitRegistrar();
+      await tester.pumpWidget(MaterialApp(home: CorrectionScreen(registrar: flaky, pickReceipt: fakeReceipt)));
+      await tester.pumpAndSettle();
+      await lookup(tester, '1');
+      await chooseReclassify(tester);
+      await tester.ensureVisible(find.byType(DropdownButtonFormField<int>));
+      await tester.tap(find.byType(DropdownButtonFormField<int>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.textContaining('행사비 · 잔량').last);
+      await tester.pumpAndSettle();
+      await tester.enterText(detailField(), '예산 항목을 잘못 골랐어요');
+      await tester.ensureVisible(find.text('정정 제출하기'));
+      await tester.tap(find.text('정정 제출하기'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('#100 은 등록됐어요'), findsOneWidget, reason: '앞쪽(+)만 올라간 채 실패');
+
+      await tester.enterText(detailField(), '사유를 고쳐서 다시 냅니다'); // 입력이 달라져 초안이 달라진다
+      await tester.tap(find.text('정정 제출하기'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('재분류 정정 2건 등록 완료!'), findsOneWidget);
+      expect(find.textContaining('① 먼저'), findsOneWidget);
+      expect(find.textContaining('② 나중'), findsOneWidget, reason: '이번 제출의 2건만 — 옛 건이 행으로 섞이면 안 된다');
+      expect(find.textContaining('#102 '), findsOneWidget);
+      expect(find.textContaining('#103 '), findsOneWidget);
+      expect(find.textContaining('이전 입력으로 올라간 #100'), findsOneWidget, reason: '옛 + 건은 승인 대기에 남아 있다 — 알려야 한다');
+    });
+
+    testWidgets('재분류의 뒤쪽(−)이 실패한 뒤 같은 입력으로 다시 내면 나머지만 올린다', (tester) async {
+      tester.view.physicalSize = const Size(411, 2800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+      final flaky = _FailSecondSubmitRegistrar();
+      await tester.pumpWidget(MaterialApp(home: CorrectionScreen(registrar: flaky, pickReceipt: fakeReceipt)));
+      await tester.pumpAndSettle();
+      await lookup(tester, '1');
+      await chooseReclassify(tester);
+      await tester.ensureVisible(find.byType(DropdownButtonFormField<int>));
+      await tester.tap(find.byType(DropdownButtonFormField<int>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.textContaining('행사비 · 잔량').last);
+      await tester.pumpAndSettle();
+      await tester.enterText(detailField(), '예산 항목을 잘못 골랐어요');
+      await tester.ensureVisible(find.text('정정 제출하기'));
+      await tester.tap(find.text('정정 제출하기'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('정정 제출하기'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('재분류 정정 2건 등록 완료!'), findsOneWidget);
+      expect(flaky.submits.map((s) => s.$2.amount).toList(), [35000, -35000, -35000], reason: '+ 는 한 번만, − 는 실패 뒤 한 번 더');
+      expect(find.textContaining('이전 입력으로 올라간'), findsNothing);
+    });
+
+    testWidgets('제출 중(업로드를 기다리는 사이)에는 영수증을 바꿀 수 없다 (#71·#111 리뷰)', (tester) async {
+      tester.view.physicalSize = const Size(411, 2800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+      final gated = _UploadGateRegistrar();
+      var picks = 0;
+      await tester.pumpWidget(MaterialApp(
+        home: CorrectionScreen(
+          registrar: gated,
+          pickReceipt: (_) async {
+            picks++;
+            return fakeReceiptBytes;
+          },
+        ),
+      ));
+      await tester.pumpAndSettle();
+      await lookup(tester, '1');
+      final attach = find.text('수정 증빙 자료 재첨부 (영수증, 선택)');
+      await tester.ensureVisible(attach);
+      await tester.tap(attach);
+      await tester.pumpAndSettle();
+      await tester.enterText(amountField(), '30000');
+      await tester.enterText(detailField(), '실제 영수증 확인 결과 금액 정정');
+      await tester.ensureVisible(find.text('정정 제출하기'));
+      await tester.tap(find.text('정정 제출하기')); // 업로드 대기 중
+      await tester.pump();
+
+      final again = find.textContaining('수정 증빙 첨부 완료됨');
+      await tester.ensureVisible(again);
+      await tester.tap(again);
+      await tester.pump();
+      expect(find.text('제출 중에는 영수증을 바꿀 수 없어요.'), findsOneWidget);
+      expect(picks, 1, reason: '제출 중에는 사진 고르는 창을 열지도 않는다');
+
+      gated.uploadGate.complete();
+      for (var i = 0; i < 10; i++) {
+        await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 10)));
+        await tester.pump();
+      }
+      await tester.pumpAndSettle();
+      expect(find.text('정정 등록 완료!'), findsOneWidget);
+    });
+
     testWidgets('재분류의 증액(+)이 차단되면 감액(−)은 올리지 않는다', (tester) async {
       await pumpScreen(tester);
       reg.remaining[1] = 10000; // 새 예산(행사비)에 35,000원이 없다
@@ -518,5 +619,20 @@ class _UploadGateRegistrar extends FakeRegistrar {
   Future<ReceiptUpload> uploadReceipt(List<int> bytes, {required String filename}) async {
     await uploadGate.future;
     return super.uploadReceipt(bytes, filename: filename);
+  }
+}
+
+/// 두 번째 제출을 한 번 실패시킨다 — 재분류의 앞쪽(+)만 올라간 채 끝나는 상황.
+class _FailSecondSubmitRegistrar extends FakeRegistrar {
+  var _count = 0;
+
+  @override
+  Future<SubmitOutcome> submit(int id, EntryDraft draft) async {
+    _count++;
+    if (_count == 2) {
+      submits.add((id, draft));
+      throw const EntryDecisionException(EntryDecisionFailure.signing, '서명을 취소했어요.');
+    }
+    return super.submit(id, draft);
   }
 }

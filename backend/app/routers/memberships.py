@@ -25,6 +25,7 @@ from app.services.membership import MembershipUnavailable, current_term, members
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/memberships", tags=["Memberships"])
+query_router = router
 
 
 @router.get("/me", response_model=Optional[MembershipResponse], summary="내 학기 회원권(SBT)과 입장 QR")

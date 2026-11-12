@@ -151,11 +151,20 @@ Map<String, dynamic> approvalItemFromEntry(EntryModel e, {Map<int, String> categ
       'status': e.status,
       'ocrStatus': e.ocrStatus,
       'categoryWarning': e.categoryWarning,
+      if (e.duplicateOf != null) 'duplicateOf': e.duplicateOf,
+      if (e.creatorName != null) 'creatorName': e.creatorName,
       'receiptInfo': e.receiptHash == null ? '영수증 없음' : '영수증 첨부 (${Fmt.shortHash(e.receiptHash!)})',
       if (e.rejectReason != null) 'rejectReason': e.rejectReason,
       if (e.warningAckReason != null) 'warningAckReason': e.warningAckReason,
       'entry': e,
     };
+
+/// 승인 화면에 적는 등록자. 서버가 이름을 주면 이름, 안 주면 번호(`사용자 #id`). 목업 건은 `김총무`.
+String registrantLabel(Map<String, dynamic> item) {
+  final name = item['creatorName'];
+  if (name is String && name.isNotEmpty) return name;
+  return item['entry'] is EntryModel ? '사용자 #${item['createdBy']}' : '김총무';
+}
 
 /// 승인 화면에 보이는 상태 (탭 셋). `BLOCKED` 는 승인 대상이 아니다.
 const _shownStatuses = {EntryStatus.PENDING, EntryStatus.CONFIRMED, EntryStatus.REJECTED};
@@ -439,12 +448,8 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
                     _DetailRow(icon: Icons.monetization_on_rounded, label: '금액', value: '${item['amount']}원 (${item['category']})'),
                     // 서명 대상 — 승인자가 무엇에 서명하는지 보고 서명한다 (entryCommit: 종류·날짜·예산·등록자)
                     _DetailRow(icon: Icons.event_rounded, label: '사용일', value: '${item['date']}'.split(' ').first),
-                    // 서버 건은 이름이 응답에 없어 user id 로 적는다 (목업 건만 이름)
-                    _DetailRow(
-                      icon: Icons.person_rounded,
-                      label: '등록자',
-                      value: item['entry'] is EntryModel ? '사용자 #${item['createdBy']}' : '김총무',
-                    ),
+                    // 서버가 `creator_name` 을 주면 이름, 아니면 user id (목업 건만 김총무)
+                    _DetailRow(icon: Icons.person_rounded, label: '등록자', value: registrantLabel(item)),
                   ],
                 ),
               ),
