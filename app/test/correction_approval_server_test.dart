@@ -149,6 +149,81 @@ void main() {
       expect(plus.category, '사업비');
     });
 
+    test('재분류로 옮겨 간 증액 건을 다시 정정하면 그 건의 금액에서 시작한다 — 최초 원본에서 시작하지 않는다 (#74 리뷰)', () {
+      final items = correctionItemsFromEntries(
+        [
+          entry(1, amount: 100000, budgetId: 1),
+          entry(2, amount: 100000, budgetId: 2, corrects: 1, reason: 'RECLASSIFY'), // A → B 증액, 확정
+          entry(3, amount: -100000, budgetId: 1, corrects: 1, reason: 'RECLASSIFY'), // A 감액, 확정
+          entry(4, amount: -20000, budgetId: 2, status: 'PENDING', corrects: 2, reason: 'REFUND'), // B 의 증액 건을 대상으로 환불
+        ],
+        budgets: [budget(1, '운영비', 0), budget(2, '사업비', 500000)],
+      );
+      final refund = items.firstWhere((c) => c.id == 4);
+      expect(refund.original, 100000, reason: 'B 의 현재 금액. 0 이 아니다');
+      expect(refund.finalAmount, 80000);
+      expect(refund.title, '신입생 환영회 명찰', reason: '이름은 맨 처음 원본에서 온다');
+    });
+
+    test('정정 전 금액에는 등록 번호와 상관없이 지금 확정된 같은 대상의 정정이 모두 들어간다 (#74 리뷰)', () {
+      final items = correctionItemsFromEntries([
+        entry(1, amount: 50000),
+        entry(2, amount: -10000, status: 'PENDING', corrects: 1, reason: 'INPUT_ERROR'),
+        entry(3, amount: 5000, corrects: 1, reason: 'INPUT_ERROR'), // 번호는 뒤지만 먼저 확정됨
+      ]);
+      final waiting = items.firstWhere((c) => c.id == 2);
+      expect(waiting.original, 55000, reason: '50,000 + 확정된 +5,000');
+      expect(waiting.finalAmount, 45000);
+    });
+
+    test('이미 처리된 건은 확정 순서를 알 수 없으면 정정 전·후 금액을 비워 둔다 — 지어내지 않는다', () {
+      final items = correctionItemsFromEntries([
+        entry(1, amount: 50000),
+        entry(2, amount: -10000, corrects: 1, reason: 'INPUT_ERROR'),
+        entry(3, amount: 5000, corrects: 1, reason: 'INPUT_ERROR'),
+        entry(4, amount: 100, corrects: 9, reason: 'INPUT_ERROR'), // 원본 없음(별개)
+        entry(5, amount: 70000),
+        entry(6, amount: -7000, corrects: 5, reason: 'INPUT_ERROR'), // 같은 대상의 다른 확정 정정이 없다
+      ]);
+      expect(items.firstWhere((c) => c.id == 2).original, isNull);
+      expect(items.firstWhere((c) => c.id == 3).original, isNull);
+      expect(items.firstWhere((c) => c.id == 6).original, 70000, reason: '다른 확정 정정이 없으면 정확히 안다');
+      expect(items.firstWhere((c) => c.id == 6).finalAmount, 63000);
+    });
+
+    test('재분류 짝은 같은 정정 대상·반대 부호·같은 금액으로 고른다 — 과거 재분류의 확정 건과 묶지 않는다 (#74 리뷰)', () {
+      final items = correctionItemsFromEntries(
+        [
+          entry(1, amount: 100000, budgetId: 1),
+          entry(2, amount: 100000, budgetId: 2, corrects: 1, reason: 'RECLASSIFY'), // A→B 완료
+          entry(3, amount: -100000, budgetId: 1, corrects: 1, reason: 'RECLASSIFY'),
+          entry(4, amount: 100000, budgetId: 3, status: 'PENDING', corrects: 2, reason: 'RECLASSIFY'), // B→C 대기
+          entry(5, amount: -100000, budgetId: 2, status: 'PENDING', corrects: 2, reason: 'RECLASSIFY'),
+        ],
+        budgets: [budget(1, '운영비', 0), budget(2, '사업비', 0), budget(3, '홍보비', 0)],
+      );
+      final minus = items.firstWhere((c) => c.id == 5);
+      expect(minus.pairNote, '홍보비 +100,000 대기 · 사업비 −100,000 대기 (짝 0/2)');
+      expect(minus.status, '재분류 진행 중');
+      final plus = items.firstWhere((c) => c.id == 4);
+      expect(plus.pairNote, '홍보비 +100,000 대기 · 사업비 −100,000 대기 (짝 0/2)');
+    });
+
+    test('재분류 짝 후보가 하나로 정해지지 않으면 짝 상태를 단정하지 않는다 (#74 리뷰)', () {
+      final items = correctionItemsFromEntries(
+        [
+          entry(1, amount: 100000, budgetId: 1),
+          entry(2, amount: -30000, budgetId: 1, status: 'PENDING', corrects: 1, reason: 'RECLASSIFY'),
+          entry(3, amount: 30000, budgetId: 2, status: 'PENDING', corrects: 1, reason: 'RECLASSIFY'),
+          entry(4, amount: 30000, budgetId: 3, status: 'PENDING', corrects: 1, reason: 'RECLASSIFY'),
+        ],
+        budgets: [budget(1, '운영비', 0), budget(2, '사업비', 0), budget(3, '홍보비', 0)],
+      );
+      final minus = items.firstWhere((c) => c.id == 2);
+      expect(minus.pairNote, isNull, reason: '+30,000 후보가 둘이라 어느 쪽이 짝인지 모른다');
+      expect(minus.status, '대기');
+    });
+
     test('원본이 목록에 없으면 정정 후 금액을 지어내지 않는다', () {
       final items = correctionItemsFromEntries([entry(2, amount: -5000, status: 'PENDING', corrects: 77, reason: 'REFUND')]);
       expect(items.single.original, isNull);
@@ -187,6 +262,29 @@ void main() {
 
       expect(byId(pair('CONFIRMED'), 3).awaitsPlusFirst, isFalse, reason: '증액이 확정되면 감액을 확정할 수 있다');
       expect(byId(pair('REJECTED'), 3).awaitsPlusFirst, isTrue, reason: '증액이 반려됐으면 감액도 확정할 수 없다');
+    });
+
+    test('이미 재분류된 증액 건을 다시 재분류하면, 그 건을 대상으로 한 증액이 확정돼야 감액을 확정할 수 있다 (#98 리뷰)', () {
+      final items = correctionItemsFromEntries([
+        entry(1, amount: 100000, budgetId: 1),
+        entry(2, amount: 100000, budgetId: 2, corrects: 1, reason: 'RECLASSIFY'), // A→B 완료
+        entry(3, amount: -100000, budgetId: 1, corrects: 1, reason: 'RECLASSIFY'),
+        entry(4, amount: 100000, budgetId: 3, status: 'PENDING', corrects: 2, reason: 'RECLASSIFY'), // B→C 대기
+        entry(5, amount: -100000, budgetId: 2, status: 'PENDING', corrects: 2, reason: 'RECLASSIFY'),
+      ]);
+      expect(items.firstWhere((c) => c.id == 5).awaitsPlusFirst, isTrue,
+          reason: '과거 A→B 의 확정 증액(#2)은 B→C 의 증액이 아니다 — 서버는 #2 를 대상으로 한 확정 증액을 본다');
+    });
+
+    test('한 번 확정된 감액이 가져간 만큼은 다시 쓸 수 없다 — 대상별 가용 증액으로 판정한다 (#98 리뷰)', () {
+      List<CorrectionItem> run(int plus) => correctionItemsFromEntries([
+            entry(1, amount: 100000, budgetId: 1),
+            entry(2, amount: plus, budgetId: 2, corrects: 1, reason: 'RECLASSIFY'),
+            entry(3, amount: -60000, budgetId: 1, corrects: 1, reason: 'RECLASSIFY'), // 이미 확정된 감액
+            entry(4, amount: -40000, budgetId: 1, status: 'PENDING', corrects: 1, reason: 'RECLASSIFY'),
+          ]);
+      expect(run(60000).firstWhere((c) => c.id == 4).awaitsPlusFirst, isTrue, reason: '60,000 − 60,000 = 0 < 40,000');
+      expect(run(100000).firstWhere((c) => c.id == 4).awaitsPlusFirst, isFalse, reason: '100,000 − 60,000 = 40,000 ≥ 40,000');
     });
 
     test('재분류가 아닌 감액과 증액 짝을 찾지 못한 건은 미리 막지 않는다', () {
