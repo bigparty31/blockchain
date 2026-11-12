@@ -1,5 +1,9 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:student_council_app/screens/council/correction_screen.dart';
 import 'package:student_council_app/screens/council/input_rules.dart';
 import 'package:student_council_app/screens/council/inquiry_response_screen.dart';
@@ -153,6 +157,50 @@ void main() {
       expect(find.text('새 예산 항목 *'), findsOneWidget);
       expect(find.textContaining('① 새 예산 +₩ 35,000 (먼저)'), findsOneWidget);
       expect(find.textContaining('② 사업비 -₩ 35,000 (나중)'), findsOneWidget);
+    });
+
+    // 조회 전에 고른 새 예산이 다른 학기 것이면, 조회 뒤 후보에서 빠지는데 선택값만 남아 드롭다운이 깨졌다 (#72 리뷰).
+    testWidgets('조회 전에 고른 다른 학기 예산은 조회 뒤 후보에서 빠지며 선택도 비워진다', (tester) async {
+      Map<String, dynamic> budget(int id, int termId, String category, int remaining) => {
+            'id': id,
+            'term_id': termId,
+            'category': category,
+            'planned_amount': 1000000,
+            'remaining_amount': remaining,
+            'execution_rate': 0,
+            'version': 1,
+            'expires_at': 1797260399,
+          };
+      ApiService.client = MockClient((req) async {
+        if (req.url.path == '/budgets') {
+          return http.Response(
+              jsonEncode([
+                budget(1, 1, '행사비', 2470000),
+                budget(2, 1, '사업비', 1465000),
+                budget(3, 1, '운영비', 1000000),
+                budget(11, 2, '행사비', 900000),
+                budget(12, 2, '사업비', 800000),
+              ]),
+              200,
+              headers: {'content-type': 'application/json; charset=utf-8'});
+        }
+        return http.Response('{}', 404); // 내역은 더미로 폴백 — #1 은 학기 1 의 사업비
+      });
+      addTearDown(() => ApiService.client = http.Client());
+      await pumpScreen(tester);
+      await chooseReclassify(tester);
+
+      await tester.ensureVisible(find.byType(DropdownButtonFormField<int>));
+      await tester.tap(find.byType(DropdownButtonFormField<int>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.textContaining('행사비 · 잔량 ₩ 900,000').last); // 학기 2 의 행사비
+      await tester.pumpAndSettle();
+      expect(find.textContaining('행사비 · 잔량 ₩ 900,000'), findsWidgets);
+
+      await lookup(tester, '1'); // 학기 1 의 사업비 — 후보는 학기 1 의 다른 예산뿐
+      expect(tester.takeException(), isNull, reason: '후보에 없는 값이 남으면 드롭다운이 깨진다');
+      expect(find.textContaining('행사비 · 잔량 ₩ 900,000'), findsNothing, reason: '다른 학기 예산 선택은 비워진다');
+      expect(find.text('옮겨 갈 예산 항목을 고르세요'), findsOneWidget);
     });
 
     testWidgets('새 예산 항목을 고르지 않으면 제출되지 않는다', (tester) async {

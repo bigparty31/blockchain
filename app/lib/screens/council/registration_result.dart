@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import '../../core/app_theme.dart';
 import '../../core/enums.dart';
-import '../../services/api_service.dart';
 
 /// 등록(제출) 결과 — 온체인에 기록된 뒤의 상태.
 ///
@@ -30,28 +29,6 @@ class RegistrationResult {
 
   bool get isDraft => status == null;
   bool get isBlocked => status == EntryStatus.BLOCKED;
-}
-
-/// **목업** — 서버 연동 전 예산 검사를 흉내 낸다.
-///
-/// 실제 판정은 컨트랙트가 등록 시점에 한다. 서버가 붙으면 이 함수 대신
-/// 제출 응답(`status`, `block_reason`)을 [RegistrationResult] 로 바꿔 쓴다.
-/// 수입은 예산 검사 대상이 아니라 항상 `PENDING` 이다 (INCOME 은 `budgetId = 0`).
-Future<RegistrationResult> simulateExpenseRegistration({
-  required String category,
-  required int amount,
-}) async {
-  final budgets = await ApiService().fetchBudgets();
-  final matched = budgets.where((b) => b.category == category);
-  if (matched.isEmpty) {
-    return const RegistrationResult.blocked(BlockReason.BUDGET_NOT_FOUND);
-  }
-  final budget = matched.first;
-  // BUDGET_EXPIRED 는 흉내 내지 않는다 — 목업 예산의 expires_at 이 지난 값이라 전부 차단돼 버린다.
-  if (amount > budget.remainingAmount) {
-    return const RegistrationResult.blocked(BlockReason.BUDGET_EXCEEDED);
-  }
-  return const RegistrationResult.pending();
 }
 
 /// 등록 결과 다이얼로그. 초안·`PENDING` 이면 true(화면을 닫아도 됨), `BLOCKED` 면 false(입력 화면에 남음).
@@ -159,10 +136,6 @@ Future<bool> showRegistrationResultDialog(
                 const SizedBox(height: 8),
                 Text(occurredAtNote, style: const TextStyle(color: AppTheme.textSub, fontSize: 11)),
               ],
-              const SizedBox(height: 4),
-              const Text('※ 서버 연동 전 목업 결과예요',
-                style: TextStyle(color: AppTheme.textSub, fontSize: 11),
-              ),
               const SizedBox(height: 16),
               if (blocked && onBudgetRevision != null) ...[
                 SizedBox(

@@ -3,15 +3,24 @@ import '../../core/enums.dart';
 import '../../core/app_theme.dart';
 import '../../core/format.dart';
 import '../../core/hashing.dart';
+import '../../models/budget_model.dart';
 import '../../services/api_service.dart';
+import '../../services/entry_registration_service.dart';
 import 'budget_revision_screen.dart';
 import 'input_rules.dart';
+import 'receipt_picker.dart';
 import 'registration_result.dart';
 
 /// [이승호 담당: app/lib/screens/council/]
 /// 1. 지출 등록 화면
 class ExpenseCreateScreen extends StatefulWidget {
-  const ExpenseCreateScreen({super.key});
+  /// 초안 저장·서명 제출. 주지 않으면 서버 ([EntryRegistrationService]).
+  final EntryRegistrar? registrar;
+
+  /// 영수증 원본 바이트를 고른다. 주지 않으면 카메라·갤러리 ([pickReceiptBytes]).
+  final ReceiptPicker? pickReceipt;
+
+  const ExpenseCreateScreen({super.key, this.registrar, this.pickReceipt});
 
   @override
   State<ExpenseCreateScreen> createState() => _ExpenseCreateScreenState();
@@ -26,14 +35,25 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
 
   String _selectedBudgetCategory = '행사비';
   DateTime _selectedDate = DateTime.now();
-  bool _hasReceiptImage = false;
-  OcrStatus _ocrStatus = OcrStatus.MATCH;
   bool _submitting = false;
+
+  /// 영수증 원본 바이트의 SHA-256. 지출은 제출에 필수다 (초안은 없어도 저장된다).
+  String? _receiptHash;
+  bool get _hasReceiptImage => _receiptHash != null;
+
+  late final EntryRegistrar _registrar = widget.registrar ?? EntryRegistrationService();
+
+  /// 저장한 초안 번호와 그때의 입력. 입력이 그대로면 다시 제출할 때 같은 번호를 쓴다 (서명 시한 안 재제출, API §2.3).
+  int? _draftId;
+  EntryDraft? _savedDraft;
+
+  /// 서버 예산 (`GET /budgets`). 지출의 예산 id·학기는 고른 항목의 것을 쓴다.
+  List<BudgetModel> _budgets = const [];
 
   final List<String> _budgetCategories = ['행사비', '사업비', '운영비'];
 
   /// 예산 항목별 잔량 (`GET /budgets`). 고르기 전에 남은 예산을 보여 준다 (스토리보드 7 ③).
-  Map<String, int> _remaining = const {};
+  int? _currentTermId; // 현재 학기 — 같은 분류의 예산이 학기마다 있어서 이 학기의 것을 고른다
 
   @override
   void initState() {
@@ -47,10 +67,18 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
   Future<void> _loadBudgets() async {
     try {
       final budgets = await ApiService().fetchBudgets();
+      // 현재 학기를 못 읽어도 예산은 보인다 — 그때는 가장 최근 학기의 예산을 쓴다
+      int? termId;
+      try {
+        termId = await ApiService().fetchCurrentTermId();
+      } on ApiUnavailable {
+        termId = null;
+      }
       if (!mounted) return;
       setState(() {
         _budgetsError = null;
-        _remaining = {for (final b in budgets) b.category: b.remainingAmount};
+        _budgets = budgets;
+        _currentTermId = termId;
       });
     } on ApiUnavailable catch (e) {
       if (mounted) setState(() => _budgetsError = e.message);
@@ -58,7 +86,7 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
   }
 
   String _budgetLabel(String category) {
-    final left = _remaining[category];
+    final left = _budgetFor(category)?.remainingAmount;
     return left == null ? category : '$category · 잔량 ${Fmt.won(left)}';
   }
 
@@ -87,28 +115,58 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
     if (picked != null) setState(() => _selectedDate = picked);
   }
 
-  void _simulatePickReceipt() {
-    setState(() {
-      _hasReceiptImage = true;
-      if (_titleController.text.isEmpty) _titleController.text = '신입생 오리엔테이션 다과 구매';
-      if (_merchantController.text.isEmpty) _merchantController.text = '한결문구점';
-      if (_amountController.text.isEmpty) _amountController.text = '35000';
-    });
+  /// 영수증을 고른다 — 원본 바이트를 그대로 해시한다 (HASHING §4). 원본 업로드는 서버 API 가 생기면 붙인다 (보드 kky-rcp).
+  Future<void> _attachReceipt() async {
+    final bytes = await (widget.pickReceipt ?? pickReceiptBytes)(context);
+    if (bytes == null || !mounted) return;
+    setState(() => _receiptHash = Hashing.fileHash(bytes));
+  }
+
+  void _snack(String text) {
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: const Row(
-          children: [
-            Icon(Icons.check_circle_rounded, color: Colors.white, size: 18),
-            SizedBox(width: 10),
-            Expanded(child: Text('영수증 첨부 완료 (목업: 예시 값을 채웠어요)')),
-          ],
-        ),
-        backgroundColor: AppTheme.primary,
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        margin: const EdgeInsets.all(16),
-      ),
+      SnackBar(content: Text(text), behavior: SnackBarBehavior.floating),
     );
+  }
+
+  BudgetModel? _budgetFor(String category) => pickBudget(_budgets, category, currentTermId: _currentTermId);
+
+  /// 입력으로 초안을 만든다. 만들 수 없으면 이유를 알리고 null.
+  EntryDraft? _buildDraft({required bool forSubmit}) {
+    final budget = _budgetFor(_selectedBudgetCategory);
+    // 현재 학기를 모르면 어느 학기 예산인지 정할 수 없다 — 지난 학기 예산으로 올라가지 않게 막는다 (#69 리뷰)
+    if (budget != null && _currentTermId == null) {
+      _snack('현재 학기를 확인하지 못해 예산 항목을 정할 수 없어요. 잠시 후 다시 시도해 주세요.');
+      return null;
+    }
+    if (budget == null) {
+      _snack(_budgetsError != null
+          ? '예산 목록을 불러오지 못해 예산 항목을 확인할 수 없어요. 잠시 후 다시 시도해 주세요.'
+          : '「$_selectedBudgetCategory」 예산을 찾지 못했어요. 예산 목록을 확인해 주세요.');
+      return null;
+    }
+    if (forSubmit && _receiptHash == null) {
+      _snack('지출은 영수증을 첨부해야 제출할 수 있어요.');
+      return null;
+    }
+    return EntryDraft(
+      kind: EntryKind.EXPENSE,
+      termId: budget.termId, // 지출의 학기는 예산의 학기 — 다르면 체인이 TermMismatch
+      amount: int.parse(_amountController.text),
+      counterparty: _merchantController.text,
+      purpose: _titleController.text,
+      budgetId: budget.id,
+      occurredAt: _occurredAt,
+      receiptHash: _receiptHash,
+    );
+  }
+
+  /// 같은 입력으로 이미 저장한 초안이 있으면 그 번호를, 없으면 새로 저장한 번호를.
+  Future<int> _ensureDraft(EntryDraft draft) async {
+    if (_draftId != null && _savedDraft == draft) return _draftId!;
+    final id = await _registrar.saveDraft(draft);
+    _draftId = id;
+    _savedDraft = draft;
+    return id;
   }
 
   /// 사용일 → `occurred_at`. **KST 자정** Unix 초 (HASHING §1.3).
@@ -122,61 +180,80 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
   /// ① 초안 저장 — 서버에만 저장한다. 체인 검사(BLOCKED)도 서명도 하지 않는다.
   Future<void> _saveDraft() async {
     if (_submitting || !_formKey.currentState!.validate()) return;
-    await _showResult(const RegistrationResult.draft());
-  }
-
-  /// ② 제출 — 서명해 체인에 올린다. 결과는 `PENDING` 또는 `BLOCKED`.
-  Future<void> _submitExpense() async {
-    if (_submitting || !_formKey.currentState!.validate()) return;
+    final draft = _buildDraft(forSubmit: false);
+    if (draft == null) return;
+    final category = _selectedBudgetCategory; // 응답을 기다리는 사이 바꿔도 안내는 보낸 값으로 한다
     setState(() => _submitting = true);
-
-    // 목업: 서버 연동 전에는 예산 잔량으로 BLOCKED 를 흉내 낸다.
-    final RegistrationResult result;
     try {
-      result = await simulateExpenseRegistration(
-        category: _selectedBudgetCategory,
-        amount: int.parse(_amountController.text),
-      );
-    } on ApiUnavailable catch (e) {
-      // 예산을 확인하지 못했으면 제출하지 않는다 — 통과로 간주하지 않는다.
+      await _ensureDraft(draft);
+    } on EntryDecisionException catch (e) {
       if (!mounted) return;
       setState(() => _submitting = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('${e.message} 제출하지 않았어요.'), behavior: SnackBarBehavior.floating),
-      );
+      _snack(e.message);
       return;
     }
     if (!mounted) return;
     setState(() => _submitting = false);
-    await _showResult(result);
+    await _showResult(const RegistrationResult.draft(), draft, category);
   }
 
-  Future<void> _showResult(RegistrationResult result) async {
+  /// ② 제출 — 기기 키로 서명해 체인에 올린다. 결과는 `PENDING` 또는 `BLOCKED`.
+  /// 실패하면 초안 번호를 들고 있다가 다시 제출할 때 쓴다.
+  Future<void> _submitExpense() async {
+    if (_submitting || !_formKey.currentState!.validate()) return;
+    final draft = _buildDraft(forSubmit: true);
+    if (draft == null) return;
+    final category = _selectedBudgetCategory; // 응답을 기다리는 사이 바꿔도 안내는 보낸 값으로 한다
+    setState(() => _submitting = true);
+
+    final RegistrationResult result;
+    try {
+      final id = await _ensureDraft(draft);
+      final outcome = await _registrar.submit(id, draft);
+      result = outcome.status == EntryStatus.BLOCKED
+          ? RegistrationResult.blocked(outcome.blockReason!)
+          : const RegistrationResult.pending();
+      _draftId = null; // 체인에 올라갔다 — 다음 제출은 새 초안이다
+      _savedDraft = null;
+    } on EntryDecisionException catch (e) {
+      if (!mounted) return;
+      setState(() => _submitting = false);
+      _snack(e.message);
+      return;
+    }
+    if (!mounted) return;
+    setState(() => _submitting = false);
+    await _showResult(result, draft, category);
+  }
+
+  /// 결과 안내 — **입력칸이 아니라 보낸 초안**으로 만든다. 응답을 기다리는 사이 입력을 바꿔도(금액을 비워도)
+  /// 서버에 기록된 값을 보이고, 비운 금액을 다시 읽다 예외가 나지 않는다.
+  Future<void> _showResult(RegistrationResult result, EntryDraft draft, String category) async {
     final done = await showRegistrationResultDialog(
       context,
       kindLabel: '지출',
       rows: [
-        ('목적', _titleController.text),
-        ('사용처', _merchantController.text),
-        ('금액', '${int.parse(_amountController.text)}원'),
-        ('예산 항목', _selectedBudgetCategory),
+        ('목적', draft.purpose),
+        ('사용처', draft.counterparty),
+        ('금액', '${draft.amount}원'),
+        ('예산 항목', category),
       ],
       result: result,
-      occurredAtNote: '전송값 occurred_at: $_occurredAt (사용일 KST 00:00)',
-      onBudgetRevision: _openBudgetRevision,
+      occurredAtNote: '전송값 occurred_at: ${draft.occurredAt} (사용일 KST 00:00)',
+      onBudgetRevision: () => _openBudgetRevision(draft, category),
     );
     if (done && mounted) Navigator.pop(context);
   }
 
-  /// 차단 안내 → 예산 개정 요청. 차단된 지출이 근거로 붙고 예산 항목이 골라져 넘어간다.
-  void _openBudgetRevision() {
+  /// 차단 안내 → 예산 개정 요청. 차단된 지출(보낸 초안)이 근거로 붙고 예산 항목이 골라져 넘어간다.
+  void _openBudgetRevision(EntryDraft draft, String category) {
     Navigator.push(
       context,
       MaterialPageRoute(
         builder: (_) => BudgetRevisionScreen(
-          initialCategory: _selectedBudgetCategory,
-          basisTitle: _titleController.text,
-          basisAmount: int.tryParse(_amountController.text),
+          initialCategory: category,
+          basisTitle: draft.purpose,
+          basisAmount: draft.amount,
         ),
       ),
     );
@@ -203,7 +280,7 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
             children: [
               // 영수증 첨부 영역
               GestureDetector(
-                onTap: _simulatePickReceipt,
+                onTap: _attachReceipt,
                 child: AnimatedContainer(
                   duration: const Duration(milliseconds: 300),
                   // 고정 height 대신 최소 높이 — 큰 글자에서 내용이 커져도 세로로 넘치지 않는다
@@ -242,7 +319,7 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
                                 borderRadius: BorderRadius.circular(20),
                               ),
                               child: Text(
-                                'OCR: ${_ocrStatus.label} ✓',
+                                '원본 해시 ${Fmt.shortHash(_receiptHash!)}',
                                 style: const TextStyle(fontSize: 12, color: Colors.white, fontWeight: FontWeight.bold),
                               ),
                             ),
@@ -269,8 +346,8 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
                               style: TextStyle(fontSize: 14, color: AppTheme.textMain, fontWeight: FontWeight.w600),
                             ),
                             const SizedBox(height: 4),
-                            // OCR 은 값을 채워 주지 않는다 — 판독값을 입력값과 대조해 경고만 한다 (PRD §6)
-                            const Text('OCR이 영수증 금액을 입력값과 대조해요',
+                            // 원본 사진 바이트의 해시가 meta_hash 에 들어간다 (HASHING §4)
+                            const Text('제출하려면 영수증이 필요해요 · 원본 해시가 함께 기록돼요',
                               style: TextStyle(fontSize: 12, color: AppTheme.textSub),
                             ),
                           ],

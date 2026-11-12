@@ -1,13 +1,23 @@
 import 'package:flutter/material.dart';
 import '../../core/app_theme.dart';
+import '../../core/enums.dart';
 import '../../core/hashing.dart';
+import '../../services/api_service.dart';
+import '../../services/entry_registration_service.dart';
 import 'input_rules.dart';
+import 'receipt_picker.dart';
 import 'registration_result.dart';
 
 /// [이승호 담당: app/lib/screens/council/]
 /// 2. 수입 등록 화면
 class IncomeCreateScreen extends StatefulWidget {
-  const IncomeCreateScreen({super.key});
+  /// 초안 저장·서명 제출. 주지 않으면 서버 ([EntryRegistrationService]).
+  final EntryRegistrar? registrar;
+
+  /// 영수증 원본 바이트를 고른다. 주지 않으면 카메라·갤러리 ([pickReceiptBytes]).
+  final ReceiptPicker? pickReceipt;
+
+  const IncomeCreateScreen({super.key, this.registrar, this.pickReceipt});
 
   @override
   State<IncomeCreateScreen> createState() => _IncomeCreateScreenState();
@@ -22,8 +32,53 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
   DateTime _selectedDate = DateTime.now();
   String _incomeType = '학생회비 수납';
 
-  /// 영수증(입금 확인서 등) 첨부 여부. 수입은 영수증이 선택이다 (지출은 필수). 목업이라 파일은 고르지 않는다.
-  bool _hasReceipt = false;
+  /// 영수증(입금 확인서 등) 원본 바이트의 해시. 수입은 영수증이 선택이다 (지출은 필수).
+  String? _receiptHash;
+  bool get _hasReceipt => _receiptHash != null;
+
+  bool _submitting = false;
+
+  late final EntryRegistrar _registrar = widget.registrar ?? EntryRegistrationService();
+
+  /// 저장한 초안 번호와 그때의 입력 — 제출이 실패하면 다시 제출할 때 같은 번호를 쓴다 (API §2.3).
+  int? _draftId;
+  EntryDraft? _savedDraft;
+
+  /// 지금 학기 (`GET /terms`). 수입은 예산이 없어 학기를 따로 읽는다.
+  int? _termId;
+  String? _termError;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadTerm();
+  }
+
+  Future<void> _loadTerm() async {
+    try {
+      final id = await ApiService().fetchCurrentTermId();
+      if (mounted) setState(() => _termId = id);
+    } on ApiUnavailable catch (e) {
+      if (mounted) setState(() => _termError = e.message);
+    }
+  }
+
+  /// 첨부돼 있으면 해제, 아니면 고른다 — 원본 바이트를 그대로 해시한다 (HASHING §4).
+  Future<void> _toggleReceipt() async {
+    if (_hasReceipt) {
+      setState(() => _receiptHash = null);
+      return;
+    }
+    final bytes = await (widget.pickReceipt ?? pickReceiptBytes)(context);
+    if (bytes == null || !mounted) return;
+    setState(() => _receiptHash = Hashing.fileHash(bytes));
+  }
+
+  void _snack(String text) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(text), behavior: SnackBarBehavior.floating),
+    );
+  }
 
   final List<Map<String, dynamic>> _incomeTypeInfos = [
     {'label': '학생회비 수납', 'icon': Icons.people_rounded, 'color': const Color(0xFF06B6D4)},
@@ -65,24 +120,62 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
         _selectedDate.day,
       );
 
+  /// 초안 저장 → 기기 서명 → 제출. 수입은 예산 검사 대상이 아니라 결과는 `PENDING` 이다.
   Future<void> _submitIncome() async {
-    if (!_formKey.currentState!.validate()) return;
-
-    final date =
+    if (_submitting || !_formKey.currentState!.validate()) return;
+    final termId = _termId;
+    if (termId == null) {
+      _snack(_termError != null ? '$_termError 제출하지 않았어요.' : '학기 정보를 불러오는 중이에요. 잠시 후 다시 시도해 주세요.');
+      return;
+    }
+    // 출처(납부자)는 거래처, 분류는 수입 사유로 기록한다. 메모는 장부에 올리지 않는다
+    final draft = EntryDraft(
+      kind: EntryKind.INCOME,
+      termId: termId,
+      amount: int.parse(_amountController.text),
+      counterparty: _sourceController.text,
+      purpose: _incomeType,
+      occurredAt: _occurredAt,
+      receiptHash: _receiptHash,
+    );
+    // 응답을 기다리는 사이 입력을 바꿔도 안내는 보낸 값으로 한다 — 입력칸을 다시 읽지 않는다
+    final shownType = _incomeType;
+    final shownDate =
         '${_selectedDate.year}-${_selectedDate.month.toString().padLeft(2, '0')}-${_selectedDate.day.toString().padLeft(2, '0')}';
+    setState(() => _submitting = true);
+    final RegistrationResult result;
+    try {
+      if (_draftId == null || _savedDraft != draft) {
+        _draftId = await _registrar.saveDraft(draft);
+        _savedDraft = draft;
+      }
+      final outcome = await _registrar.submit(_draftId!, draft);
+      result = outcome.status == EntryStatus.BLOCKED
+          ? RegistrationResult.blocked(outcome.blockReason!)
+          : const RegistrationResult.pending();
+      _draftId = null;
+      _savedDraft = null;
+    } on EntryDecisionException catch (e) {
+      if (!mounted) return;
+      setState(() => _submitting = false);
+      _snack(e.message);
+      return;
+    }
+    if (!mounted) return;
+    setState(() => _submitting = false);
+
     final done = await showRegistrationResultDialog(
       context,
       kindLabel: '수입',
       rows: [
-        ('분류', _incomeType),
-        ('출처', _sourceController.text),
-        ('금액', '${_amountController.text}원'),
-        ('일자', date),
-        ('영수증', _hasReceipt ? '첨부' : '없음'),
+        ('분류', shownType),
+        ('출처', draft.counterparty),
+        ('금액', '${draft.amount}원'),
+        ('일자', shownDate),
+        ('영수증', draft.receiptHash != null ? '첨부' : '없음'),
       ],
-      // 수입은 예산 검사 대상이 아니라 BLOCKED 가 없다. 감사 승인 전까지 PENDING.
-      result: const RegistrationResult.pending(),
-      occurredAtNote: '전송값 occurred_at: $_occurredAt (사용일 KST 00:00)',
+      result: result,
+      occurredAtNote: '전송값 occurred_at: ${draft.occurredAt} (사용일 KST 00:00)',
       gradient: AppTheme.incomeGradient,
     );
     if (done && mounted) Navigator.pop(context);
@@ -262,7 +355,7 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
 
               // 영수증 첨부 (선택)
               GestureDetector(
-                onTap: () => setState(() => _hasReceipt = !_hasReceipt),
+                onTap: _toggleReceipt,
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
                   decoration: BoxDecoration(
@@ -304,7 +397,7 @@ class _IncomeCreateScreenState extends State<IncomeCreateScreen> {
 
               GradientButton(
                 onPressed: _submitIncome,
-                label: '제출하기',
+                label: _submitting ? '제출 중...' : '제출하기',
                 icon: Icons.add_circle_rounded,
                 gradient: AppTheme.incomeGradient,
               ),

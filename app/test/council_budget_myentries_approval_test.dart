@@ -8,6 +8,8 @@ import 'package:student_council_app/screens/council/expense_create_screen.dart';
 import 'package:student_council_app/screens/council/my_entries_screen.dart';
 import 'package:student_council_app/services/api_service.dart';
 
+import 'support/registration.dart';
+
 /// 차단 안내 → 예산 개정 요청, 내 등록 현황, 정정 승인.
 void main() {
   // 목업 화면 테스트 — 서버 없이 시연용 더미로 돈다. 실패 표시는 api_unavailable_test.dart 가 본다 (PRD v0.14 §7.3).
@@ -29,11 +31,20 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  Future<void> submitBlockedExpense(WidgetTester tester) async {
-    await pump(tester, const ExpenseCreateScreen());
+  /// 가짜 등록기·영수증으로 지출을 채운다 (서버·카메라 없음). 행사비 잔량은 시연용 2,470,000원.
+  Future<void> fillExpense(WidgetTester tester, String amount) async {
+    await pump(tester, ExpenseCreateScreen(registrar: FakeRegistrar(), pickReceipt: fakeReceipt));
+    await waitFor(tester, find.textContaining('행사비 · 잔량'));
     await tester.tap(find.text('영수증 촬영 또는 사진 첨부'));
     await tester.pumpAndSettle();
-    await tester.enterText(find.widgetWithText(TextFormField, '지출 금액(원) *'), '3000000');
+    await tester.enterText(find.widgetWithText(TextFormField, '목적 *'), '신입생 오리엔테이션 다과 구매');
+    await tester.enterText(find.widgetWithText(TextFormField, '사용처(상호명) *'), '한결문구점');
+    await tester.enterText(find.widgetWithText(TextFormField, '지출 금액(원) *'), amount);
+    await tester.ensureVisible(find.text('제출하기'));
+  }
+
+  Future<void> submitBlockedExpense(WidgetTester tester) async {
+    await fillExpense(tester, '3000000');
     await tester.tap(find.text('제출하기'));
     await waitFor(tester, find.text('지출 등록이 차단되었어요'));
   }
@@ -57,9 +68,7 @@ void main() {
     });
 
     testWidgets('예산이 충분하면 개정 요청 버튼이 없다', (tester) async {
-      await pump(tester, const ExpenseCreateScreen());
-      await tester.tap(find.text('영수증 촬영 또는 사진 첨부'));
-      await tester.pumpAndSettle();
+      await fillExpense(tester, '35000');
       await tester.tap(find.text('제출하기'));
       await waitFor(tester, find.text('지출 제출 완료!'));
       expect(find.text('예산 개정 요청'), findsNothing);
