@@ -222,6 +222,12 @@ void main() {
       final minus = items.firstWhere((c) => c.id == 2);
       expect(minus.pairNote, isNull, reason: '+30,000 후보가 둘이라 어느 쪽이 짝인지 모른다');
       expect(minus.status, '대기');
+      // 증액 카드 쪽에서 보면 감액 후보는 하나뿐이지만, 그 감액의 짝 후보가 둘이라 어느 쪽도 짝이라 단정할 수 없다 (#74 리뷰 4차)
+      for (final id in [3, 4]) {
+        final plus = items.firstWhere((c) => c.id == id);
+        expect(plus.pairNote, isNull, reason: '두 증액 카드가 같은 감액을 각자의 짝으로 보이면 안 된다');
+        expect(plus.status, '대기');
+      }
     });
 
     test('원본이 목록에 없으면 정정 후 금액을 지어내지 않는다', () {

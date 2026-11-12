@@ -159,16 +159,20 @@ List<CorrectionItem> correctionItemsFromEntries(List<EntryModel> entries, {List<
         }
         awaitsPlusFirst = available < -e.amount;
       }
-      final siblings = entries
+      // 짝 후보 — 같은 정정 대상을 가리키는 반대 부호·같은 금액의 재분류 건.
+      List<EntryModel> candidatesOf(EntryModel x) => entries
           .where((c) =>
-              c.id != e.id &&
-              c.correctsEntryId == e.correctsEntryId &&
+              c.id != x.id &&
+              c.correctsEntryId == x.correctsEntryId &&
               c.correctionReason == CorrectionReason.RECLASSIFY &&
-              c.amount == -e.amount &&
+              c.amount == -x.amount &&
               c.status != EntryStatus.REJECTED &&
               c.status != EntryStatus.BLOCKED)
           .toList();
-      if (siblings.length == 1) {
+      // 양쪽에서 서로가 유일한 후보일 때만 짝으로 본다 — 한쪽에서만 유일하면(감액 1건에 같은 금액의 증액 2건)
+      // 두 증액 카드가 같은 감액을 각자의 짝이라고 보이게 된다.
+      final siblings = candidatesOf(e);
+      if (siblings.length == 1 && candidatesOf(siblings.first).length == 1) {
         final other = siblings.first;
         final plus = e.amount > 0 ? e : other;
         final minus = e.amount > 0 ? other : e;
