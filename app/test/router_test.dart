@@ -5,6 +5,7 @@ import 'package:student_council_app/core/enums.dart';
 import 'package:student_council_app/models/entry_model.dart';
 import 'package:student_council_app/router.dart';
 import 'package:student_council_app/screens/council/approval_list_screen.dart';
+import 'package:student_council_app/screens/council/budget_revision_approval_screen.dart';
 import 'package:student_council_app/screens/council/correction_screen.dart';
 import 'package:student_council_app/screens/council/council_home_screen.dart';
 import 'package:student_council_app/screens/council/expense_create_screen.dart';
@@ -100,6 +101,7 @@ void main() {
       AppRoutes.councilApprovals: (ApprovalListScreen, {UserRole.AUDITOR, UserRole.PRESIDENT}),
       AppRoutes.councilInquiries: (InquiryResponseScreen, {UserRole.AUDITOR, UserRole.PRESIDENT}),
       AppRoutes.councilHardwareTest: (HardwareTestScreen, {UserRole.TREASURER, UserRole.AUDITOR, UserRole.PRESIDENT}),
+      AppRoutes.councilBudgetRevisions: (BudgetRevisionApprovalScreen, {UserRole.AUDITOR, UserRole.PRESIDENT}),
     };
 
     for (final e in cases.entries) {
