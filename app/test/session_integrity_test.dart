@@ -430,6 +430,38 @@ void main() {
       expect(cleared, 0);
     });
 
+    /// 4차 리뷰 Medium — 앱을 다시 켰을 때 저장된 토큰이 거부되는 경로.
+    ///
+    /// 메모리 세션이 애초에 없어서 `_setSession(null)` 의 「있던 세션이
+    /// 비워질 때」 조건에 안 걸린다. 그래서 정리 콜백이 불리지 않고,
+    /// `main.dart` 의 **FCM 토픽 해제에 도달하지 못한다** — 토픽은 기기 단위라
+    /// 로그인 화면에 있는데도 이전 사용자의 학기 알림이 계속 온다.
+    test('앱 시작 복원이 401 로 거부돼도 정리 콜백이 불린다', () async {
+      AuthService.store = MemoryTokenStore('stale-token', UserRole.STUDENT);
+      AuthService.client = MockClient((_) async => http.Response('{}', 401));
+      var cleared = 0;
+      AuthService().onSessionCleared = () => cleared++;
+
+      final restored = await AuthService().restore();
+
+      expect(restored, isNull);
+      expect(
+        cleared,
+        1,
+        reason: '해제에 도달하지 못하면 공용 기기에서 다음 사람이 이전 학기 알림을 받는다',
+      );
+    });
+
+    /// 반대쪽도 못 박는다 — 저장된 토큰이 없으면 정리할 것도 없다.
+    test('저장된 토큰이 없으면 정리 콜백을 부르지 않는다', () async {
+      AuthService.store = MemoryTokenStore();
+      var cleared = 0;
+      AuthService().onSessionCleared = () => cleared++;
+
+      expect(await AuthService().restore(), isNull);
+      expect(cleared, 0);
+    });
+
     test('resetSessionState 가 이의 목록과 데모 깃발을 되돌린다', () async {
       // 서버가 없는 상태로 이의를 제기하면 세션 동안 로컬에 남는다.
       StudentApiService.client = MockClient((_) async => throw http.ClientException('no server'));
@@ -507,6 +539,55 @@ void main() {
 
       expect(store.value, isNull, reason: '모를 때 그냥 두면 A 의 토큰이 남는다');
       expect(AuthService().sessionNotPersisted, isTrue);
+    });
+
+    // 3차 리뷰 Medium — 테스트 저장소가 읽기 실패를 **던져서** 통과했던 경로.
+    // 실기기(`SecureTokenStore.read`)는 실패를 null 로 돌려주므로, `_persist` 가
+    // `read` 를 쓰면 읽기 실패가 「남은 것이 없다」로 판정돼 A 의 토큰을 지우지
+    // 않고 B 의 로그인이 확정된다. 그래서 두 가지를 같이 못 박는다.
+    test('읽기 실패를 null 로 돌려주는 기기에서도 남은 토큰을 지운다', () async {
+      final store = withPreviousUser()
+        ..failOnWrite = true
+        ..failOnRead = true;
+
+      // 실기기와 같은 모양이어야 이 테스트가 뜻을 가진다.
+      expect(
+        await store.read(),
+        isNull,
+        reason: 'SecureTokenStore.read 는 실패를 삼킨다 — 테스트 저장소도 같아야 회귀가 잡힌다',
+      );
+      await expectLater(() => store.readStrict(), throwsA(isA<TokenReadFailed>()));
+
+      await loginStudent();
+
+      expect(
+        store.value,
+        isNull,
+        reason: '읽기 실패를 「남은 것 없음」으로 읽으면 A 의 토큰이 남은 채 B 로 로그인된다',
+      );
+      expect(AuthService().session?.token, 'token-abc');
+      expect(AuthService().sessionNotPersisted, isTrue);
+    });
+
+    test('정말로 비어 있을 때와 못 읽을 때를 가른다', () async {
+      // 비어 있다 → 지울 것이 없고, 남의 세션이 열릴 일도 없다.
+      final empty = MemoryTokenStore()..failOnWrite = true;
+      AuthService.store = empty;
+      await loginStudent();
+      expect(AuthService().session?.token, 'token-abc');
+
+      // 다음 경우를 깨끗한 상태에서 보려면 세션을 비워 둬야 한다.
+      await AuthService().logout();
+      expect(AuthService().session, isNull);
+
+      // 못 읽는다 + 지우지도 못한다 → 남의 토큰이 남을 수 있으므로 세션을 만들지 않는다.
+      final unknown = withPreviousUser()
+        ..failOnWrite = true
+        ..failOnRead = true
+        ..failOnClear = true;
+      await expectLater(() => loginStudent(), throwsA(isA<SessionStoreUnsafe>()));
+      expect(AuthService().session, isNull);
+      expect(unknown.value?.token, 'token-of-A');
     });
 
     test('저장이 되면 깃발이 내려간다', () async {
@@ -642,24 +723,42 @@ class _SlowLockStore implements LoginLockStore {
   final Duration delay;
   int attempts;
   DateTime? lockedUntil;
+  bool byServer;
+  String? studentNo;
 
-  _SlowLockStore(this.delay, {required this.attempts, this.lockedUntil});
+  _SlowLockStore(this.delay, {required this.attempts, this.lockedUntil})
+      : byServer = false;
 
   @override
-  Future<({int attempts, DateTime? lockedUntil})?> read() async {
+  Future<({int attempts, DateTime? lockedUntil, bool byServer, String? studentNo})?>
+      read() async {
     await Future<void>.delayed(delay);
-    return (attempts: attempts, lockedUntil: lockedUntil);
+    return (
+      attempts: attempts,
+      lockedUntil: lockedUntil,
+      byServer: byServer,
+      studentNo: studentNo,
+    );
   }
 
   @override
-  Future<void> write({required int attempts, DateTime? lockedUntil}) async {
+  Future<void> write({
+    required int attempts,
+    DateTime? lockedUntil,
+    bool byServer = false,
+    String? studentNo,
+  }) async {
     this.attempts = attempts;
     this.lockedUntil = lockedUntil;
+    this.byServer = byServer;
+    this.studentNo = studentNo;
   }
 
   @override
   Future<void> clear() async {
     attempts = 0;
     lockedUntil = null;
+    byServer = false;
+    studentNo = null;
   }
 }

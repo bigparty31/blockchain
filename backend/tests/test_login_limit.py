@@ -1,0 +1,251 @@
+"""로그인 실패 제한 (PRD v0.15 §9.1, §9.2 · docs/API.md 인증 §1)."""
+import threading
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from app.auth import login_limit
+from app.auth.users import SEED_PASSWORD
+from app.database import get_db
+from app.main import app
+from app.models import LoginAttempt
+from app.routers import auth as auth_router
+
+pytestmark = pytest.mark.usefixtures("login_db")
+
+client = TestClient(app)
+
+EXISTING = "20240003"  # 이감사
+UNKNOWN = "99999999"
+T0 = 1_800_000_000
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    """login_limit 의 시계. clock.t 를 바꾸면 그 시각이 된다."""
+
+    class Clock:
+        t = T0
+
+    c = Clock()
+    monkeypatch.setattr(login_limit, "now", lambda: c.t)
+    return c
+
+
+def login(student_no, password=SEED_PASSWORD, c=client):
+    return c.post("/auth/login", json={"student_no": student_no, "password": password})
+
+
+def fail(student_no, times):
+    return [login(student_no, "wrong-password") for _ in range(times)]
+
+
+def row(engine, student_no):
+    with sessionmaker(bind=engine)() as db:
+        return db.get(LoginAttempt, student_no)
+
+
+# ---------------------------------------------------------------- 잠금
+
+
+def test_fifth_failure_locks_and_right_password_is_refused(clock):
+    results = fail(EXISTING, login_limit.MAX_FAILURES)
+    assert [r.status_code for r in results] == [401] * login_limit.MAX_FAILURES
+
+    res = login(EXISTING)  # 맞는 비밀번호
+    assert res.status_code == 429
+    assert res.json() == {"detail": "로그인 시도가 너무 많습니다. 잠시 후 다시 시도해 주세요."}
+    assert res.headers["retry-after"] == str(login_limit.LOCK_SECONDS)
+
+
+def test_unknown_student_no_locks_the_same_way(clock):
+    # 없는 학번만 안 잠기면 잠기는지로 가입 여부를 알아낼 수 있다
+    known = fail(EXISTING, 6)
+    unknown = fail(UNKNOWN, 6)
+    assert [(r.status_code, r.json(), r.headers.get("retry-after")) for r in known] == [
+        (r.status_code, r.json(), r.headers.get("retry-after")) for r in unknown
+    ]
+
+
+def test_lock_is_per_student_no(clock):
+    fail(EXISTING, login_limit.MAX_FAILURES)
+    assert login("20240002").status_code == 200
+
+
+def test_lock_expires(clock):
+    fail(EXISTING, login_limit.MAX_FAILURES)
+    clock.t += login_limit.LOCK_SECONDS - 1
+    assert login(EXISTING).status_code == 429
+    clock.t += 1
+    assert login(EXISTING).status_code == 200
+
+
+def test_after_lock_expires_counting_starts_over(clock):
+    fail(EXISTING, login_limit.MAX_FAILURES)
+    clock.t += login_limit.LOCK_SECONDS
+    # 풀린 직후 한 번 틀렸다고 다시 잠기지 않는다
+    assert [r.status_code for r in fail(EXISTING, login_limit.MAX_FAILURES - 1)] == [401] * (login_limit.MAX_FAILURES - 1)
+    assert login(EXISTING).status_code == 200
+
+
+def test_hammering_while_locked_does_not_extend_the_lock(clock):
+    fail(EXISTING, login_limit.MAX_FAILURES)
+    clock.t += 600
+    res = login(EXISTING, "wrong-password")
+    assert res.status_code == 429
+    assert res.headers["retry-after"] == str(login_limit.LOCK_SECONDS - 600)
+
+
+# ---------------------------------------------------------------- 초기화
+
+
+def test_success_resets_the_count(clock, login_db):
+    fail(EXISTING, login_limit.MAX_FAILURES - 1)
+    assert login(EXISTING).status_code == 200
+    assert row(login_db, EXISTING) is None
+    assert [r.status_code for r in fail(EXISTING, login_limit.MAX_FAILURES - 1)] == [401] * (login_limit.MAX_FAILURES - 1)
+    assert login(EXISTING).status_code == 200
+
+
+def test_old_failures_are_forgotten(clock):
+    # 몇 주 전 오타 4번과 오늘 1번이 합쳐 잠기지 않는다
+    fail(EXISTING, login_limit.MAX_FAILURES - 1)
+    clock.t += login_limit.RESET_SECONDS
+    assert [r.status_code for r in fail(EXISTING, login_limit.MAX_FAILURES - 1)] == [401] * (login_limit.MAX_FAILURES - 1)
+    assert login(EXISTING).status_code == 200
+
+
+def test_recent_failures_are_kept(clock):
+    fail(EXISTING, login_limit.MAX_FAILURES - 1)
+    clock.t += login_limit.RESET_SECONDS - 1
+    assert login(EXISTING, "wrong-password").status_code == 401
+    assert login(EXISTING).status_code == 429
+
+
+# ---------------------------------------------------------------- 동시 요청
+
+
+def test_concurrent_attempts_check_the_password_at_most_max_times(login_db, monkeypatch):
+    # 확인 → bcrypt → 기록 순서였다면 동시에 들어온 요청이 모두 확인을 통과해 전부 검사된다.
+    # 시도를 먼저 세므로 비밀번호 검사는 MAX_FAILURES 번을 넘지 않는다
+    checks = []
+    lock = threading.Lock()
+    real_verify = auth_router.verify_password
+
+    def counting_verify(password, password_hash):
+        with lock:
+            checks.append(password)
+        return real_verify(password, password_hash)
+
+    monkeypatch.setattr(auth_router, "verify_password", counting_verify)
+
+    n = 12
+    barrier = threading.Barrier(n)
+    statuses = []
+
+    def worker():
+        c = TestClient(app)
+        barrier.wait()
+        res = login(EXISTING, "wrong-password", c=c)
+        with lock:
+            statuses.append(res.status_code)
+
+    threads = [threading.Thread(target=worker) for _ in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(checks) == login_limit.MAX_FAILURES
+    assert sorted(statuses) == [401] * login_limit.MAX_FAILURES + [429] * (n - login_limit.MAX_FAILURES)
+    assert login(EXISTING).status_code == 429
+
+
+# ---------------------------------------------------------------- 입력·오류
+
+
+@pytest.mark.parametrize("student_no", ["", "1" * 21])
+def test_student_no_out_of_bounds_is_422(student_no):
+    assert login(student_no).status_code == 422
+
+
+def test_db_error_is_503_not_a_free_pass(tmp_path):
+    # 실패 횟수를 확인할 수 없으면 로그인도 받지 않는다 (테이블이 없는 DB)
+    engine = create_engine(f"sqlite:///{tmp_path / 'empty.db'}", connect_args={"check_same_thread": False})
+    session = sessionmaker(bind=engine)
+
+    def broken():
+        db = session()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    app.dependency_overrides[get_db] = broken
+    try:
+        res = login(EXISTING)
+    finally:
+        engine.dispose()
+    # login_db 픽스처가 끝날 때 override 를 지운다
+    assert res.status_code == 503
+
+
+# ---------------------------------------------------------------- 성공과 실패가 겹칠 때 (#89 codex 1차)
+
+
+def test_late_failure_from_before_a_success_does_not_lock_the_new_count(clock, login_db):
+    # 3회 실패 → A(4번째 예약)·B(5번째 예약)가 겹침 → A 성공으로 기록 삭제 → C 가 새로 1회 → 늦게 끝난 B 실패.
+    # B 는 예약 때 5회였지만 지금 행은 성공 뒤 새로 센 1회다. 성공 뒤 실패 2번(C·B)으로 잠그면 안 된다
+    fail(EXISTING, 3)
+    with sessionmaker(bind=login_db)() as db:
+        a = login_limit.reserve(db, EXISTING)
+        b = login_limit.reserve(db, EXISTING)
+        assert (a.count, b.count) == (4, 5)
+        login_limit.clear(db, EXISTING)  # A 성공
+        c = login_limit.reserve(db, EXISTING)
+        assert c.count == 1
+        login_limit.record_failure(db, b)  # B 실패 (늦게 끝남)
+
+    assert row(login_db, EXISTING).locked_until is None
+    assert login(EXISTING).status_code == 200
+
+
+def test_fifth_failure_still_locks_when_the_row_holds_it(clock, login_db):
+    # 위 조건 때문에 정상적인 5번째 실패가 안 잠기면 안 된다
+    fail(EXISTING, login_limit.MAX_FAILURES - 1)
+    with sessionmaker(bind=login_db)() as db:
+        fifth = login_limit.reserve(db, EXISTING)
+        assert fifth.count == login_limit.MAX_FAILURES
+        login_limit.record_failure(db, fifth)
+    assert row(login_db, EXISTING).locked_until == T0 + login_limit.LOCK_SECONDS
+
+
+def _vanish_after_insert(monkeypatch, times):
+    """_insert_ignore 직후 처음 times 번은 행을 지운다 — 그 사이 같은 학번의 성공(clear)이 커밋된 것과 같다."""
+    real = login_limit._insert_ignore
+    left = [times]
+
+    def insert_then_vanish(db, student_no, at):
+        real(db, student_no, at)
+        if left[0] > 0:
+            left[0] -= 1
+            db.query(LoginAttempt).filter(LoginAttempt.student_no == student_no).delete(synchronize_session=False)
+
+    monkeypatch.setattr(login_limit, "_insert_ignore", insert_then_vanish)
+    return left
+
+
+def test_row_cleared_between_insert_and_update_is_recreated(clock, login_db, monkeypatch):
+    # 행을 만든 뒤 갱신하기 전에 성공한 로그인이 행을 지워도, 비밀번호를 검사하기 전에 503 이 나지 않는다 (#89 codex 2차)
+    fail(EXISTING, 2)
+    left = _vanish_after_insert(monkeypatch, 1)
+    assert login(EXISTING).status_code == 200
+    assert left == [0]
+
+
+def test_row_cleared_every_time_is_a_db_error_not_a_password_check(clock, login_db, monkeypatch):
+    # 매번 사라지면 횟수를 셀 수 없다. 비밀번호를 검사하지 않고 DB 오류(503)로 끝낸다
+    _vanish_after_insert(monkeypatch, login_limit._RESERVE_ATTEMPTS)
+    assert login(EXISTING).status_code == 503

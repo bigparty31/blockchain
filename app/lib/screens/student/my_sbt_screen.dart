@@ -1,10 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:qr_flutter/qr_flutter.dart';
+import 'package:screen_brightness/screen_brightness.dart';
 import '../../core/app_theme.dart';
 import '../../core/format.dart';
 import '../../core/term_info.dart';
 import '../../models/membership_model.dart';
 import '../../services/student_api_service.dart';
+
+/// QR 을 눌러 화면 밝기를 올리는 자리 (스토리보드 6 ②).
+const qrBrightnessToggleKey = Key('qr-brightness-toggle');
 
 /// 본인 SBT 보유 표시 + 참여용 QR (S5)
 ///
@@ -23,6 +27,49 @@ class _MySbtScreenState extends State<MySbtScreen> {
 
   bool _loading = true;
   MembershipResult? _result;
+
+  /// QR 을 눌러 화면 밝기를 올려 둔 상태인지 (스토리보드 6 ②).
+  ///
+  /// 행사장 조명 아래에서 어두운 화면의 QR 은 스캐너가 못 읽는다. 자동 밝기나
+  /// 절전 모드로 화면이 내려가 있으면 더 그렇다. 줄을 세워 둔 채 설정에
+  /// 들어가게 할 수는 없으므로 QR 자체를 누르면 올라가게 한다.
+  bool _brightened = false;
+
+  /// **밝기는 앱 범위로만 올린다** (`setApplicationScreenBrightness`).
+  /// 시스템 밝기를 바꾸면 앱을 나간 뒤에도 기기 전체가 밝은 채로 남아
+  /// 배터리를 먹는다. 앱 범위는 OS 가 앱을 떠날 때 되돌려 준다.
+  ///
+  /// 모든 호출을 삼킨다 — 밝기 조절은 **부가 기능**이라 실패해도 QR 은
+  /// 멀쩡히 떠야 한다. 플랫폼 채널이 없는 환경(테스트·데스크톱)에서는
+  /// `MissingPluginException` 이 나는데, 그걸로 화면이 깨지면 안 된다.
+  Future<void> _setBrightness(bool on) async {
+    try {
+      if (on) {
+        await ScreenBrightness().setApplicationScreenBrightness(1.0);
+      } else {
+        await ScreenBrightness().resetApplicationScreenBrightness();
+      }
+    } catch (_) {
+      // 밝기를 못 바꿨을 뿐이다. 화면은 그대로 쓴다.
+    }
+  }
+
+  Future<void> _toggleBrightness() async {
+    final next = !_brightened;
+    // 먼저 화면에 반영한다 — 플랫폼 호출을 기다리는 동안 눌러도 반응이
+    // 없으면 학생이 여러 번 누른다.
+    setState(() => _brightened = next);
+    await _setBrightness(next);
+  }
+
+  @override
+  void dispose() {
+    // **나갈 때 되돌린다** (스토리보드 6 ②). await 할 수 없는 자리라
+    // 띄워 보내고, [_setBrightness] 가 실패를 삼키므로 처리되지 않은
+    // 비동기 예외로 남지 않는다.
+    if (_brightened) _setBrightness(false);
+    super.dispose();
+  }
 
   @override
   void initState() {
@@ -192,27 +239,59 @@ class _MySbtScreenState extends State<MySbtScreen> {
           const SizedBox(height: 20),
 
           // QR — 행사 입장 시 제시한다.
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(18),
-              border: Border.all(color: AppTheme.divider, width: 1.5),
-            ),
-            child: QrImageView(
-              data: m.qrPayload,
-              version: QrVersions.auto,
-              size: 200,
-              backgroundColor: Colors.white,
-              eyeStyle: const QrEyeStyle(
-                eyeShape: QrEyeShape.square,
-                color: AppTheme.textMain,
+          GestureDetector(
+            // 테스트가 이 자리를 집어 누른다 (`student_unseen_and_brightness_test`).
+            key: qrBrightnessToggleKey,
+            onTap: _toggleBrightness,
+            child: Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(18),
+                border: Border.all(
+                  color: _brightened ? AppTheme.primary : AppTheme.divider,
+                  width: 1.5,
+                ),
               ),
-              dataModuleStyle: const QrDataModuleStyle(
-                dataModuleShape: QrDataModuleShape.square,
-                color: AppTheme.textMain,
+              child: QrImageView(
+                data: m.qrPayload,
+                version: QrVersions.auto,
+                size: 200,
+                backgroundColor: Colors.white,
+                eyeStyle: const QrEyeStyle(
+                  eyeShape: QrEyeShape.square,
+                  color: AppTheme.textMain,
+                ),
+                dataModuleStyle: const QrDataModuleStyle(
+                  dataModuleShape: QrDataModuleShape.square,
+                  color: AppTheme.textMain,
+                ),
               ),
             ),
+          ),
+          const SizedBox(height: 10),
+
+          // 누를 수 있다는 것을 적어 둔다 — 안 적으면 아무도 누르지 않는다.
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                _brightened
+                    ? Icons.brightness_7_rounded
+                    : Icons.brightness_5_rounded,
+                size: 15,
+                color: _brightened ? AppTheme.primary : AppTheme.textSub,
+              ),
+              const SizedBox(width: 5),
+              Text(
+                _brightened ? '밝기를 올렸습니다 · 다시 누르면 원래대로' : 'QR을 누르면 화면이 밝아집니다',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: _brightened ? FontWeight.w600 : FontWeight.w500,
+                  color: _brightened ? AppTheme.primary : AppTheme.textSub,
+                ),
+              ),
+            ],
           ),
           const SizedBox(height: 16),
           Text(

@@ -11,6 +11,7 @@ import 'package:student_council_app/screens/council/expense_create_screen.dart';
 import 'package:student_council_app/screens/council/hardware_test_screen.dart';
 import 'package:student_council_app/screens/council/income_create_screen.dart';
 import 'package:student_council_app/screens/council/inquiry_response_screen.dart';
+import 'package:student_council_app/screens/council/sbt_mint_screen.dart';
 import 'package:student_council_app/screens/council/settlement_screen.dart';
 import 'package:student_council_app/screens/council/bank_reconcile_screen.dart';
 import 'package:student_council_app/screens/student/entry_detail_screen.dart';
@@ -102,6 +103,7 @@ void main() {
       AppRoutes.councilApprovals: (ApprovalListScreen, {UserRole.AUDITOR, UserRole.PRESIDENT}),
       AppRoutes.councilInquiries: (InquiryResponseScreen, {UserRole.AUDITOR, UserRole.PRESIDENT}),
       AppRoutes.councilHardwareTest: (HardwareTestScreen, {UserRole.TREASURER, UserRole.AUDITOR, UserRole.PRESIDENT}),
+      AppRoutes.councilSbtMint: (SbtMintScreen, {UserRole.AUDITOR, UserRole.PRESIDENT}),
       AppRoutes.councilSettlement: (SettlementScreen, {UserRole.AUDITOR, UserRole.PRESIDENT}),
       AppRoutes.councilBankReconcile: (BankReconcileScreen, {UserRole.TREASURER, UserRole.AUDITOR, UserRole.PRESIDENT}),
     };
@@ -184,6 +186,7 @@ void main() {
       AppRoutes.councilCorrections,
       AppRoutes.councilInquiries,
       AppRoutes.councilHardwareTest,
+      AppRoutes.councilSbtMint,
     ];
     expect(names.toSet().length, names.length);
   });

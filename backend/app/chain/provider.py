@@ -1,6 +1,7 @@
 """요청에서 쓸 ChainClient 를 고른다. FastAPI 의존성으로 쓴다: chain: ChainClient = Depends(get_chain_client).
 
-CHAIN_RPC_URL 이 있으면 Web3ChainClient(RELAYER_PRIVATE_KEY 필요), CHAIN_FAKE=1 이면 FakeChainClient 다. 호출하는 쪽 코드는 같다.
+CHAIN_RPC_URL 이 있으면 Web3ChainClient, CHAIN_FAKE=1 이면 FakeChainClient 다. 호출하는 쪽 코드는 같다.
+RELAYER_PRIVATE_KEY 가 없으면 Web3ChainClient 는 읽기 전용이다 — 키를 두지 않는 학생 서버(PRD §9.1)가 조회를 쓴다. 쓰기는 보내지 않고 503 이다.
 둘 다 없거나 둘 다 있으면 서버가 뜨지 않는다 (check_chain_config). 가짜는 서명 앞 20바이트를 서명자로 믿어서
 (app/chain/fake.py) 남을 사칭한 서명도 signer_of 대조를 통과하고, 체인에 아무것도 남기지 않은 채 성공을 돌려준다.
 운영에서 설정 하나가 빠졌다고 조용히 가짜로 넘어가면 안 되므로, 가짜는 명시했을 때만 쓴다 (JWT_DEV_SECRET 과 같은 방식).
@@ -70,7 +71,7 @@ def check_chain_config() -> bool:
     if rpc_url:
         return False
     raise ChainSetupError(
-        "체인 설정이 없습니다. 실제 체인은 CHAIN_RPC_URL 과 RELAYER_PRIVATE_KEY 를, "
+        "체인 설정이 없습니다. 실제 체인은 CHAIN_RPC_URL 을(쓰기 서버는 RELAYER_PRIVATE_KEY 도), "
         "노드 없이 개발할 때는 CHAIN_FAKE=1 을 설정하세요 (환경변수 또는 저장소 루트의 .env)."
     )
 
@@ -85,7 +86,10 @@ async def _create() -> ChainClient:
     from app.chain.web3_client import Web3ChainClient  # 노드를 쓸 때만 web3 를 불러온다
 
     rpc_url = os.environ["CHAIN_RPC_URL"].strip()
-    return await Web3ChainClient.connect(rpc_url, os.environ.get("RELAYER_PRIVATE_KEY", "").strip())
+    private_key = os.environ.get("RELAYER_PRIVATE_KEY", "").strip() or None
+    if private_key is None:
+        logger.warning("RELAYER_PRIVATE_KEY 가 없어 체인을 읽기 전용으로 씁니다. 등록·확정·반려·예산 쓰기는 503 입니다.")
+    return await Web3ChainClient.connect(rpc_url, private_key)
 
 
 async def get_chain_client() -> ChainClient:

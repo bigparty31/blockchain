@@ -105,6 +105,16 @@ class Eip712 {
   /// 범위를 넘는 값은 조용히 자르지 않고 던진다 — 잘린 값으로 서명하면 화면에 보인 값과 다른 것에
   /// 서명하게 된다.
   static Uint8List encodeValue(String type, Object value) {
+    // 배열 — 원소를 각각 32바이트로 인코딩해 이어 붙인 것의 keccak256 (EIP-712 encodeData, 컨트랙트의
+    // `keccak256(abi.encodePacked(array))` 와 같다). 빈 배열은 빈 바이트의 해시다.
+    if (type.endsWith('[]')) {
+      final element = type.substring(0, type.length - 2);
+      if (value is! List) throw ArgumentError('목록이 아닙니다: $value');
+      return keccak256(concat([
+        for (final v in value)
+          encodeValue(element, v ?? (throw ArgumentError('$type 에 빈 원소가 있습니다'))),
+      ]));
+    }
     if (type == 'bool') {
       if (value is! bool) throw ArgumentError('bool 이 아닙니다: $value');
       return word(value ? BigInt.one : BigInt.zero);

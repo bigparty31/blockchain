@@ -68,3 +68,9 @@ docs/ERD_mermaid.md
 # 개인 메모 (로컬 전용)
 COUNCIL_NOTES.local.md
 .ua/
+
+# Firebase (PRD §4.8)
+# google-services.json 은 비밀이 아니라 커밋한다 — 없으면 팀원 빌드가 깨진다.
+# 커밋하면 안 되는 것은 서버 전송용 **서비스 계정 비공개 키**다.
+firebase-service-account*.json
+**/serviceAccountKey.json
