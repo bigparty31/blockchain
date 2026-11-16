@@ -11,9 +11,18 @@ from dataclasses import dataclass
 import pytest
 from eth_utils import keccak
 
-from app.chain import ChainRevert, ConfirmApproval, FakeChainClient, RecordRequest, RevertReason, fake_signature
+from app.chain import (
+    ChainRevert,
+    ConfirmApproval,
+    FakeChainClient,
+    RecordRequest,
+    RejectDecision,
+    RevertReason,
+    entry_commit_of,
+    fake_signature,
+)
 from app.chain.deployment import DEFAULT_PATH, load_deployment
-from app.chain.models import MAX_AMOUNT, UINT64_MAX, BlockReason
+from app.chain.models import MAX_AMOUNT, UINT64_MAX, ZERO_BYTES32, BlockReason
 from app.chain.web3_client import LEDGER, Web3ChainClient
 from app.schemas.entry import EntryKind, EntryStatus
 from chain_support import (
@@ -31,7 +40,7 @@ from chain_support import (
 )
 
 DOMAIN = load_deployment(DEFAULT_PATH).eip712[LEDGER]
-PENDING, BLOCKED, CONFIRMED = EntryStatus.PENDING, EntryStatus.BLOCKED, EntryStatus.CONFIRMED
+PENDING, BLOCKED, CONFIRMED, REJECTED = EntryStatus.PENDING, EntryStatus.BLOCKED, EntryStatus.CONFIRMED, EntryStatus.REJECTED
 REASON = "0x" + keccak(text="parity-warning-reason").hex()
 
 
@@ -69,6 +78,18 @@ class Confirm:
 
 def confirm(entry_id: int, **override) -> Confirm:
     return Confirm(entry_id, tuple(override.items()))
+
+
+@dataclass(frozen=True)
+class Reject:
+    """반려 단계. 감사가 체인에 등록된 값으로 entryCommit 을 계산해 서명한다. override 로 값을 바꿔 본다."""
+
+    entry_id: int
+    override: tuple = ()
+
+
+def reject(entry_id: int, **override) -> Reject:
+    return Reject(entry_id, tuple(override.items()))
 
 
 # 개발 노드에는 등록 API 가 DB id(1부터)로 기록한 실제 항목이 있다. 스냅샷은 테스트 안의 쓰기만 되돌리니 그 id 를 피한다
@@ -120,11 +141,25 @@ SCENARIOS = [
     ),
     ("confirm_twice", [req(B + 1), confirm(B + 1), confirm(B + 1)], [(PENDING, None), (CONFIRMED, None), RevertReason.INVALID_STATUS]),
     ("confirm_unknown", [confirm(B + 999)], [RevertReason.ENTRY_NOT_FOUND]),
+    # 반려 — 반려자 주소(approver)까지 get_entry 값이 같아야 한다
+    ("reject_income", [req(B + 1), reject(B + 1)], [(PENDING, None), (REJECTED, None)]),
+    ("reject_without_reason", [req(B + 1), reject(B + 1, reason_hash=ZERO_BYTES32)], [(PENDING, None), RevertReason.REASON_REQUIRED]),
+    (
+        "reject_entry_commit_mismatch",
+        [req(B + 1), reject(B + 1, entry_commit="0x" + "33" * 32)],
+        [(PENDING, None), RevertReason.ENTRY_COMMIT_MISMATCH],
+    ),
+    ("reject_expired", [req(B + 1), reject(B + 1, deadline=1)], [(PENDING, None), RevertReason.SIGNATURE_EXPIRED]),
+    ("reject_blocked", [expense(B + 1), reject(B + 1)], [(BLOCKED, BlockReason.BUDGET_NOT_FOUND), RevertReason.INVALID_STATUS]),
+    ("reject_twice", [req(B + 1), reject(B + 1), reject(B + 1)], [(PENDING, None), (REJECTED, None), RevertReason.INVALID_STATUS]),
+    ("reject_after_confirm", [req(B + 1), confirm(B + 1), reject(B + 1)], [(PENDING, None), (CONFIRMED, None), RevertReason.INVALID_STATUS]),
+    ("confirm_after_reject", [req(B + 1), reject(B + 1), confirm(B + 1)], [(PENDING, None), (REJECTED, None), RevertReason.INVALID_STATUS]),
+    ("reject_unknown", [reject(B + 999)], [RevertReason.ENTRY_NOT_FOUND]),
 ]
 
 
 async def play(client, sign, now: int, steps: list) -> list:
-    """단계를 차례로 실행하고 (결과, get_entry 값) 목록을 돌려준다. 단계는 등록 필드(dict) 또는 Confirm."""
+    """단계를 차례로 실행하고 (결과, get_entry 값) 목록을 돌려준다. 단계는 등록 필드(dict), Confirm 또는 Reject."""
     outcomes = []
     for step in steps:
         try:
@@ -132,6 +167,13 @@ async def play(client, sign, now: int, steps: list) -> list:
                 entry = await client.get_entry(step.entry_id)
                 payload = approval_for_id(entry, step.entry_id, **{"deadline": now + 600, **dict(step.override)})
                 result = await client.confirm_entry(payload, sign(payload))
+            elif isinstance(step, Reject):
+                entry = await client.get_entry(step.entry_id)
+                # 체인에 없는 id 는 ENTRY_NOT_FOUND 를 보려고 임시 commit 을 채운다
+                commit = entry_commit_of(entry) if entry is not None else "0x" + "22" * 32
+                fields = dict(id=step.entry_id, entry_commit=commit, reason_hash=REASON, deadline=now + 600)
+                payload = RejectDecision(**{**fields, **dict(step.override)})
+                result = await client.reject_entry(payload, sign(payload))
             else:
                 # 모델이 막는 값(zero_amount 등)도 Fake 와 컨트랙트가 같게 거부하는지 보려고 검증 없이 만든다
                 payload = RecordRequest.model_construct(**{"deadline": now + 600, **step})
@@ -147,16 +189,16 @@ async def play(client, sign, now: int, steps: list) -> list:
 
 
 def run_fake(requests: list) -> list:
-    # 가짜 서명의 주소가 서명자다. 등록은 총무, 확정은 감사 — 실제 체인과 같은 주소라 get_entry 값이 같다
+    # 가짜 서명의 주소가 서명자다. 등록은 총무, 확정·반려는 감사 — 실제 체인과 같은 주소라 get_entry 값이 같다
     def sign(payload):
-        return fake_signature(AUDITOR if isinstance(payload, ConfirmApproval) else TREASURER)
+        return fake_signature(AUDITOR if isinstance(payload, (ConfirmApproval, RejectDecision)) else TREASURER)
 
     return asyncio.run(play(FakeChainClient(), sign, int(time.time()), requests))
 
 
 def run_web3(requests: list) -> list:
     def sign(payload):
-        return sign_as_app(payload, DOMAIN, AUDITOR_KEY if isinstance(payload, ConfirmApproval) else TREASURER_KEY)
+        return sign_as_app(payload, DOMAIN, AUDITOR_KEY if isinstance(payload, (ConfirmApproval, RejectDecision)) else TREASURER_KEY)
 
     async def run():
         client = await Web3ChainClient.connect(RPC_URL, RELAYER_KEY, DEFAULT_PATH)

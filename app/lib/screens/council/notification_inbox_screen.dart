@@ -43,12 +43,29 @@ Widget? notificationDestination(AppNotification n, UserRole role) {
     case 'ENTRY_CONFIRM_FAILED':
     case 'ENTRY_BLOCKED':
       return role == UserRole.TREASURER ? const MyEntriesScreen() : null;
+    case 'REVISION_APPROVED':
+    case 'REVISION_REJECTED':
+      // 증액 결과를 받은 총무가 할 일은 차단 건을 다시 등록하거나 다시 요청하는 것이다 — 그 화면이 내 등록 현황.
+      // 회장은 결과 통보만 받고 이어서 할 일이 없다.
+      return role == UserRole.TREASURER ? const MyEntriesScreen() : null;
     case 'RECLASSIFY_PAIR_UNCONFIRMED':
       if (approver) return const CorrectionApprovalScreen();
       return role == UserRole.TREASURER ? const MyEntriesScreen() : null;
     default:
       return null;
   }
+}
+
+/// 누를 곳([notificationDestination])이 없을 때 알려 줄 말. 알릴 것이 없으면 null.
+///
+/// 눌렀는데 읽음 처리만 되고 아무 반응이 없으면 알림이 고장 난 것처럼 보인다. 모르는 종류에는 덧붙이지 않는다 —
+/// 서버가 준 본문이 그대로 보이기 때문이다.
+String? notificationNoDestinationNotice(AppNotification n, UserRole role) {
+  if (notificationDestination(n, role) != null) return null;
+  if (n.kind.startsWith('REVISION_') || n.kind == 'SIGNATURE_DEADLINE_NEAR') return '예산 개정 화면은 준비 중입니다.';
+  // 회장은 차단 알림을 받지만 차단 건을 보여 주는 화면이 없다 — 증액 요청이 오면 서명하는 쪽이다.
+  if (n.kind == 'ENTRY_BLOCKED') return '예산 검사에서 차단된 지출이에요. 증액 요청이 오면 서명 화면에서 처리해요. (서명 화면은 준비 중입니다)';
+  return null;
 }
 
 /// 알린 시각을 「방금 · N분 전 · N시간 전 · N일 전」으로.
@@ -130,10 +147,13 @@ class _NotificationInboxScreenState extends State<NotificationInboxScreen> with 
     if (destination != null) {
       await Navigator.push(context, MaterialPageRoute(builder: (_) => destination));
       if (mounted) await _load(silent: true);
-    } else if (n.kind.startsWith('REVISION_') || n.kind == 'SIGNATURE_DEADLINE_NEAR') {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('예산 개정 화면은 준비 중입니다.'), behavior: SnackBarBehavior.floating),
-      );
+    } else {
+      final notice = notificationNoDestinationNotice(n, widget.role);
+      if (notice != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(notice), behavior: SnackBarBehavior.floating),
+        );
+      }
     }
   }
 

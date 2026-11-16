@@ -13,6 +13,11 @@
     <!-- 네트워크 통신 (FastAPI 연동) -->
     <uses-permission android:name="android.permission.INTERNET"/>
 
+    <!-- 푸시 알림 (FCM, PRD §4.8).
+         Android 13(API 33)부터 알림은 런타임 권한이다 — 선언만 하고 받지 않으면
+         알림이 조용히 안 뜬다. 요청은 PushService.init 이 한다. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+
     <application
         android:label="학생회 회계 투명성"
         android:name="${applicationName}"
@@ -47,6 +52,13 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+
+        <!-- 앱이 꺼져 있을 때 OS 가 띄우는 알림이 쓸 채널.
+             지정하지 않으면 Android 8+ 에서 기본 채널로 가는데, 그 채널의
+             중요도가 낮으면 소리·헤드업 없이 조용히 쌓인다. -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="student_council_default" />
 
         <meta-data
             android:name="flutterEmbedding"

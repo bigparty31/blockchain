@@ -153,7 +153,7 @@ void main() {
       await tester.scrollUntilVisible(find.byKey(const Key('settlement_metrics')), 200);
       expect(find.byKey(const Key('settlement_budget_revised_1')), findsOneWidget, reason: '행사비 v2 개정');
       expect(find.byKey(const Key('settlement_budget_revised_2')), findsNothing, reason: '운영비는 개정 없음');
-      expect(find.text('입력 오류 1 · 환불 1 · 기타 1'), findsOneWidget, reason: '0건 사유는 빼고, OTHER 는 「기타」');
+      expect(find.text('입력 오류 1 · 반환 1 · 기타 1'), findsOneWidget, reason: '0건 사유는 빼고, OTHER 는 「기타」. 이름은 docs/enums.md (REFUND = 반환)');
       expect(find.text('2회, 그중 초과 집행 이후 1회 (50.0%)'), findsOneWidget);
     });
 
@@ -266,7 +266,7 @@ void main() {
 
     test('메타지표 표 — 0건 사유는 빼고, 이의 제기는 범위 밖으로 적는다', () {
       final rows = SettlementPdf.metricRows(SettlementModel.fromJson(settlement()).metrics);
-      expect(rows[2], ['정정', '3건 (입력 오류 1, 환불 1, 기타 1)']);
+      expect(rows[2], ['정정', '3건 (입력 오류 1, 반환 1, 기타 1)']);
       expect(rows[4].last, '2회 / 1회 (50.0%)');
       expect(rows.last, ['이의 제기 / 미답변', '이번 범위 밖']);
     });

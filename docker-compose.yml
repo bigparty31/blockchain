@@ -1,0 +1,62 @@
+# 팀 공용 개발 스택. 사용법은 docs/DEV_STACK.md.
+# 체인은 메모리에만 저장하므로 재시작하면 지워진다. 복구는 scripts/dev-stack-reset.sh 로 한다.
+# 임시 구성: 학생·학생회 진입점이 나뉘면 api 를 student_api·council_api 로 나눈다.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: council
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?.env 에 POSTGRES_PASSWORD 가 필요합니다}
+      POSTGRES_DB: council
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U council -d council"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  chain:
+    build: ./contracts
+    volumes:
+      - deployments:/app/deployments
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://127.0.0.1:8545',{method:'POST',headers:{'content-type':'application/json'},
+          body:JSON.stringify({jsonrpc:'2.0',id:1,method:'eth_chainId',params:[]})})
+          .then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  api:
+    build: ./backend
+    depends_on:
+      db:
+        condition: service_healthy
+      chain:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://council:${POSTGRES_PASSWORD}@db:5432/council
+      JWT_SECRET: ${JWT_SECRET:?.env 에 JWT_SECRET 이 필요합니다}
+      CHAIN_RPC_URL: http://chain:8545
+      RELAYER_PRIVATE_KEY: ${RELAYER_PRIVATE_KEY:-}
+      DEPLOYMENTS_FILE: /deployments/localhost.json
+      RECEIPTS_STORAGE_DIR: /app/uploads/receipts
+    volumes:
+      - deployments:/deployments:ro
+      - receipts-data:/app/uploads/receipts
+    ports:
+      # API 만 Tailscale 주소로 연다. RPC(8545)와 DB 는 밖으로 열지 않는다.
+      - "${BIND_ADDR:-127.0.0.1}:${API_PORT:-8000}:8000"
+    restart: unless-stopped
+
+volumes:
+  db-data:
+  deployments:
+  receipts-data:

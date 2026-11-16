@@ -261,6 +261,43 @@ void main() {
       await AuthService().resetAttempts();
       await tester.pumpWidget(const SizedBox());
     });
+
+    /// **서버 잠금(`429`)은 학번 단위다** (백엔드 #89). 남이 내 학번으로 다섯 번
+    /// 틀리면 나는 맞는 비밀번호를 넣고도 막히는데, 그때 「비밀번호를 5회 연속
+    /// 틀렸습니다」라고 하면 **사실이 아닌 말**이다 — 그 사람은 자기 계정이
+    /// 털린 줄 알고 비밀번호를 찾으러 간다.
+    testWidgets('서버가 잠근 것은 「5회 틀렸다」고 하지 않는다', (tester) async {
+      AuthService.client = MockClient((req) async {
+        sent.add(req);
+        return http.Response('{"detail":"too many"}', 429,
+            headers: {'retry-after': '600'});
+      });
+      await pumpLogin(tester);
+
+      await enter(tester, '20240001', 'correct-password');
+      await tester.tap(find.byKey(const Key('login_submit')));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('일시 차단'), findsOneWidget, reason: '잠금 팝업은 떠야 한다');
+      expect(
+        find.textContaining('비밀번호를 ${AuthService.maxAttempts}회'),
+        findsNothing,
+        reason: '내가 틀린 적이 없는데 틀렸다고 말하고 있다',
+      );
+      expect(find.textContaining('서버가 이 학번을'), findsOneWidget);
+      expect(find.textContaining('10분'), findsOneWidget,
+          reason: 'Retry-After 600초를 「600초」가 아니라 「10분」으로 적는다');
+
+      await tester.tap(find.text('확인'));
+      await tester.pumpAndSettle();
+
+      // 화면에 남는 안내도 같은 이유로 달라야 한다.
+      expect(find.textContaining('서버가 이 학번의 로그인을'), findsOneWidget);
+      expect(find.textContaining('연속 실패로 차단'), findsNothing);
+
+      await AuthService().resetAttempts();
+      await tester.pumpWidget(const SizedBox());
+    });
   });
 
   group('③ 실패 (3) — 서버 무응답', () {

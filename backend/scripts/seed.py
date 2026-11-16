@@ -45,27 +45,27 @@ DEFAULT_BUDGETS = (
         1,
         "행사비",
         (
-            (1, 2_000_000, None, 4),
-            (2, 2_500_000, "참가인원 증가", 3),
+            (1, 2_000_000, None, 4, None),
+            (2, 2_500_000, "참가인원 증가", 3, 1),
         ),
     ),
     (
         2,
         "사업비",
         (
-            (1, 1_500_000, None, 4),
+            (1, 1_500_000, None, 4, None),
         ),
     ),
     (
         3,
         "운영비",
         (
-            (1, 1_000_000, None, 4),
+            (1, 1_000_000, None, 4, None),
         ),
     ),
 )
 
-REQUIRED_TABLES = ("users", "terms", "budgets", "budget_versions", "entries")
+REQUIRED_TABLES = ("users", "terms", "budgets", "budget_versions", "entries", "budget_revision_requests")
 
 
 @dataclass(frozen=True)
@@ -122,6 +122,7 @@ def seed_database(db: Session, *, with_demo_entries: bool = False) -> SeedResult
     from app.auth import users as auth_users
     from app.models import (
         Budget as DBBudget,
+        BudgetRevisionRequest as DBBudgetRevisionRequest,
         BudgetVersion as DBBudgetVersion,
         Entry as DBEntry,
         Term as DBTerm,
@@ -272,7 +273,32 @@ def seed_database(db: Session, *, with_demo_entries: bool = False) -> SeedResult
                     )
             budget_ids_by_category[category] = budget.id
 
-            for ver_no, planned_amount, revision_reason, approver_id in versions:
+            # 행사비 v2에 연결할 근거 증액 요청 행 (PRD v0.13 §8: version > 1 은 revision_request_id 필수)
+            if category == "행사비":
+                seed_rev = db.query(DBBudgetRevisionRequest).filter(DBBudgetRevisionRequest.id == 1).first()
+                if not seed_rev:
+                    seed_rev = DBBudgetRevisionRequest(
+                        id=1,
+                        term_id=term.id,
+                        category="행사비",
+                        budget_id=budget.id,
+                        requested_amount=500_000,
+                        reason="참가인원 증가",
+                        requested_by=1,
+                        status="APPROVED",
+                        president_signed_by=2,
+                        president_signature="0x" + "11" * 65,
+                        president_signed_at=datetime(2026, 9, 5, 10, 0, 0, tzinfo=KST),
+                        signature_deadline=1793548800,
+                        signed_version=1,
+                        resolved_by=3,
+                        resolved_at=datetime(2026, 9, 5, 14, 0, 0, tzinfo=KST),
+                        tx_increase="0x" + "22" * 32,
+                    )
+                    db.add(seed_rev)
+                    db.flush()
+
+            for ver_no, planned_amount, revision_reason, approver_id, rev_req_id in versions:
                 ver_exists = (
                     db.query(DBBudgetVersion)
                     .filter(
@@ -291,6 +317,7 @@ def seed_database(db: Session, *, with_demo_entries: bool = False) -> SeedResult
                         planned_amount=planned_amount,
                         revision_reason=revision_reason,
                         approved_by=approver_id if approver_exists else None,
+                        revision_request_id=rev_req_id,
                         tx_hash=None,
                     )
                 )
