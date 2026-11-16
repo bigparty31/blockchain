@@ -441,6 +441,37 @@ void main() {
       expect(find.byKey(const Key('revision_empty')), findsOneWidget);
     });
 
+    testWidgets('사유가 아주 길어도 작은 화면의 확인 창에서 끝까지 보고 서명할 수 있다', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(360, 640));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final longReason = List.generate(60, (i) => '${i + 1}번째 줄 — 신학기 비품 구매로 인한 운영비 부족').join('\n');
+      final r = row(reason: longReason);
+      BudgetRevisionDecisionService.client = server(
+        list: [r],
+        single: r,
+        budgets: [
+          {'id': 3, 'version': 2}
+        ],
+        onPost: (_) => json(row(status: 'PRESIDENT_SIGNED', reason: longReason, signedVersion: 2, deadline: nowSec + 86400)),
+      );
+      await open(tester, UserRole.PRESIDENT, service());
+      await tester.ensureVisible(find.byKey(const Key('revision_sign_7')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('revision_sign_7')));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull, reason: '확인 창 내용이 넘쳐 잘리면 안 된다');
+
+      // 사유 마지막 줄과 그 아래 안내까지 창 안에서 스크롤해 볼 수 있다
+      final dialogScroll = find.descendant(
+          of: find.byKey(const Key('revision_sign_confirm')), matching: find.byType(Scrollable));
+      await tester.scrollUntilVisible(find.textContaining('시간 동안 유효해요'), 300, scrollable: dialogScroll.first);
+      expect(find.textContaining('60번째 줄'), findsWidgets);
+
+      await tester.tap(find.byKey(const Key('revision_sign_confirm_ok')));
+      await tester.pumpAndSettle();
+      expect(posts.single.url.path, '/budget-revisions/7/sign');
+    });
+
     testWidgets('확인 창에서 취소하면 서명하지 않는다', (tester) async {
       BudgetRevisionDecisionService.client = server(list: [row()], single: row());
       await open(tester, UserRole.PRESIDENT, service());

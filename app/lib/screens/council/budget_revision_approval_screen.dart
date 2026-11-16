@@ -129,6 +129,9 @@ class _BudgetRevisionApprovalScreenState extends State<BudgetRevisionApprovalScr
       context: context,
       builder: (ctx) => AlertDialog(
         key: const Key('revision_sign_confirm'),
+        // 사유는 길이 제한이 없다 — 길거나 화면이 작아도 서명할 내용을 끝까지 볼 수 있게 창 안에서 스크롤한다
+        // (Codex #80 3차). 버튼(actions)은 스크롤 밖이라 항상 보인다
+        scrollable: true,
         title: Text(_isPresident ? '증액 요청에 서명할까요?' : '증액을 승인할까요?'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
