@@ -62,6 +62,10 @@ class _SbtMintScreenState extends State<SbtMintScreen> {
   /// 제출 결과를 모른다 — 「결과 확인」만 허용한다.
   bool _mustCheck = false;
 
+  /// 제출이 409 였는데 조회해 보니 아직 「준비됨」 — 준비한 뒤 같은 지갑의 다른 발행·회수가 먼저 처리돼 nonce 가 바뀌었다.
+  /// 이 준비값으로 다시 서명하면 또 409 라서 「다시 준비」만 보인다 (#102 리뷰).
+  bool _stale = false;
+
   @override
   void dispose() {
     _paste.dispose();
@@ -79,10 +83,30 @@ class _SbtMintScreenState extends State<SbtMintScreen> {
       _useRoster(RosterParser.parseBytes(bytes));
     } on MintFailed catch (e) {
       setState(() => _error = e.message);
+    } on RosterFormatException catch (e) {
+      _rejectRoster(e);
     }
   }
 
-  void _readPaste() => _useRoster(RosterParser.parseText(_paste.text));
+  void _readPaste() {
+    try {
+      _useRoster(RosterParser.parseText(_paste.text));
+    } on RosterFormatException catch (e) {
+      _rejectRoster(e);
+    }
+  }
+
+  /// 학번을 확실히 고를 수 없는 명단 — 앞서 읽은 명단도 지워 그것으로 발행하지 않게 한다.
+  void _rejectRoster(RosterFormatException e) {
+    setState(() {
+      _roster = null;
+      _chunks = const [];
+      _batch = null;
+      _nobody = null;
+      _done.clear();
+      _error = e.message;
+    });
+  }
 
   void _useRoster(Roster roster) {
     setState(() {
@@ -120,7 +144,10 @@ class _SbtMintScreenState extends State<SbtMintScreen> {
         }
       });
       // 409 — 다른 제출이 진행 중이거나 이미 처리됨. 지금 상태를 다시 읽는다
-      if (e.kind == MintFailure.conflict && _batch != null) await _refresh(keepError: true);
+      if (e.kind == MintFailure.conflict && _batch != null) {
+        await _refresh(keepError: true);
+        if (mounted && _batch?.status == MintBatchStatus.prepared) setState(() => _stale = true);
+      }
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -132,6 +159,7 @@ class _SbtMintScreenState extends State<SbtMintScreen> {
         if (!mounted) return;
         setState(() {
           _batch = batch;
+          _stale = false;
           _nobody = null;
           _mustCheck = batch.status.outcomeUnknown;
         });
@@ -214,7 +242,7 @@ class _SbtMintScreenState extends State<SbtMintScreen> {
             const SizedBox(height: 12),
             _stepCard(),
           ],
-          if (_done.isNotEmpty) ...[
+          if (_finished.isNotEmpty) ...[
             const SizedBox(height: 12),
             _summaryCard(),
           ],
@@ -300,6 +328,12 @@ class _SbtMintScreenState extends State<SbtMintScreen> {
     }
     switch (batch.status) {
       case MintBatchStatus.prepared:
+        if (_stale) {
+          return [
+            _notice('준비한 뒤 다른 발행·회수가 먼저 처리돼 이 준비값으로는 보낼 수 없어요. 다시 준비해 주세요.', AppTheme.pending),
+            _reprepare(),
+          ];
+        }
         return [
           _notice('서명은 학번이 아니라 위 지갑 주소에 해요. 이름·학번은 서버가 주소와 짝지어 보여 준 것이에요.', AppTheme.info),
           _action('sbt_sign', '${batch.targets.length}명 서명하고 발행', _sign),
@@ -314,12 +348,15 @@ class _SbtMintScreenState extends State<SbtMintScreen> {
             ],
           'InvalidNonce' => [
               _notice(_rejectText(batch.reason), AppTheme.expense),
-              _action('sbt_reprepare', '다시 준비', () {
-                setState(() => _batch = null);
-                return _prepare();
-              }),
+              _reprepare(),
             ],
-          _ => [_notice(_rejectText(batch.reason), AppTheme.expense)],
+          // 권한 문제는 다시 해도 같다 — 안내만 하고, 명단을 바꾸거나 계정을 바꿔 처음부터 하게 한다
+          'NotApprover' => [_notice(_rejectText(batch.reason), AppTheme.expense)],
+          // 모르는 사유 — 같은 값으로 다시 서명하지 않고, 새로 준비해 서버가 값을 다시 정하게 한다
+          _ => [
+              _notice(_rejectText(batch.reason), AppTheme.expense),
+              _reprepare(),
+            ],
         };
       case MintBatchStatus.submitting:
       case MintBatchStatus.noResponse:
@@ -327,12 +364,18 @@ class _SbtMintScreenState extends State<SbtMintScreen> {
     }
   }
 
+  Widget _reprepare() => _action('sbt_reprepare', '다시 준비', () {
+        setState(() => _batch = null);
+        return _prepare();
+      });
+
   static String _rejectText(String? reason) => switch (reason) {
         'SignatureExpired' => '서명 유효 시간이 지나 체인이 거부했어요. 다시 서명하면 돼요.',
         'InvalidSignature' => '체인이 서명을 받아들이지 않았어요. 다시 서명해 주세요.',
         'InvalidNonce' => '그사이 다른 발행이 먼저 처리됐어요. 다시 준비해 주세요.',
-        'NotApprover' => '이 지갑은 체인에 회장·감사로 등록돼 있지 않아 발행할 수 없어요. 운영자에게 문의해 주세요.',
-        _ => '체인이 발행을 거부했어요${reason == null ? '' : ' ($reason)'}.',
+        'NotApprover' => '이 지갑은 체인에 회장·감사로 등록돼 있지 않아 발행할 수 없어요. '
+            '키를 등록한 회장·감사 계정으로 다시 로그인하거나 운영자에게 문의해 주세요.',
+        _ => '체인이 발행을 거부했어요${reason == null ? '' : ' ($reason)'}. 다시 준비해서 시도해 주세요.',
       };
 
   Widget _statusLine(MintBatch batch) {
@@ -389,12 +432,20 @@ class _SbtMintScreenState extends State<SbtMintScreen> {
         ],
       );
 
+  /// 발행이 끝난 묶음 — 넘어간 묶음([_done])과 지금 화면의 묶음(발행됐으면). 마지막 묶음은 [_next] 를 거치지 않아
+  /// [_done] 에 들어가지 않는다 (#102 리뷰).
+  List<MintBatch> get _finished => [
+        ..._done.where((b) => b.status == MintBatchStatus.minted),
+        if (_batch?.status == MintBatchStatus.minted) _batch!,
+      ];
+
   Widget _summaryCard() {
-    final minted = _done.fold<int>(0, (s, b) => s + b.mintedCount);
-    final skipped = _done.fold<int>(0, (s, b) => s + b.skippedCount);
+    final done = _finished;
+    final minted = done.fold<int>(0, (s, b) => s + b.mintedCount);
+    final skipped = done.fold<int>(0, (s, b) => s + b.skippedCount);
     return _card(
-      title: '끝난 묶음',
-      children: [Text('${_done.length}묶음 · 새로 발행 $minted명 · 이미 보유 $skipped명', key: const Key('sbt_done_summary'))],
+      title: '발행 결과',
+      children: [Text('${done.length}묶음 · 새로 발행 $minted명 · 이미 보유 $skipped명', key: const Key('sbt_done_summary'))],
     );
   }
 

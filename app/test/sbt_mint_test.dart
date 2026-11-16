@@ -76,6 +76,12 @@ void main() {
     };
   }
 
+  // 한글 엑셀 기본 CSV(CP949) 바이트 — 「학번」 제목을 못 알아보면 납부일 20261102 를 학번으로 읽게 된다
+  const hak = [0xC7, 0xD0, 0xB9, 0xF8]; // 「학번」
+  const ireum = [0xC0, 0xCC, 0xB8, 0xA7]; // 「이름」
+  const napbuil = [0xB3, 0xBB, 0xBA, 0xCE, 0xC0, 0xCF]; // 「납부일」
+  const kimhana = [0xB1, 0xE8, 0xC7, 0xCF, 0xB3, 0xAA]; // 「김하나」
+
   http.Response json(Object body, [int status = 200]) =>
       http.Response(jsonEncode(body), status, headers: {'content-type': 'application/json; charset=utf-8'});
 
@@ -93,9 +99,33 @@ void main() {
       expect(r.unreadLines, 1);
     });
 
-    test('CP949 로 깨진 한글 제목 — 바이트로 읽어도 학번은 그대로 나온다', () {
-      final bytes = [0xC7, 0xD0, 0xB9, 0xF8, 0x0A, ...utf8.encode('20240011\n20240012\n')];
-      expect(RosterParser.parseBytes(bytes).studentNos, ['20240011', '20240012']);
+    test('CP949 파일은 짐작하지 않고 거부한다 — 납부일을 학번으로 읽지 않는다', () {
+      final bytes = [
+        ...ireum, 0x2C, ...napbuil, 0x2C, ...hak, 0x0A, //
+        ...kimhana, ...utf8.encode(',20261102,20240011\n'),
+      ];
+      expect(
+        () => RosterParser.parseBytes(bytes),
+        throwsA(isA<RosterFormatException>().having((e) => e.message, 'message', contains('CSV UTF-8'))),
+      );
+    });
+
+    test('CP949 제목 + 숫자만 있는 파일도 거부한다 — 어느 칸이 학번인지 확인할 수 없다', () {
+      final bytes = [...hak, 0x0A, ...utf8.encode('20240011\n20240012\n')];
+      expect(() => RosterParser.parseBytes(bytes), throwsA(isA<RosterFormatException>()));
+    });
+
+    test('UTF-8 바이트는 그대로 읽는다', () {
+      expect(RosterParser.parseBytes(utf8.encode('학번,이름\n20240011,김하나\n')).studentNos, ['20240011']);
+    });
+
+    test('제목 줄 없이 한 줄에 학번 같은 숫자가 둘이면 거부한다 — 첫 칸을 짐작하지 않는다', () {
+      expect(
+        () => RosterParser.parseText('20261102,20240011\n'),
+        throwsA(isA<RosterFormatException>().having((e) => e.message, 'message', contains('2개'))),
+      );
+      // 숫자가 하나뿐인 줄은 그대로 읽는다
+      expect(RosterParser.parseText('김하나,20240011\n').studentNos, ['20240011']);
     });
 
     test('student_no 영문 제목도 알아본다', () {
@@ -204,6 +234,14 @@ void main() {
       expect(signed, isFalse);
     });
 
+    test('준비 503 은 「잠시 후 다시」 — 아직 서명도 제출도 안 했다', () async {
+      SbtMintService.client = MockClient((req) async => json({'detail': '이유'}, 503));
+      await expectLater(
+        service().prepare(termId: 1, studentNos: ['20240011']),
+        throwsA(isA<MintFailed>().having((e) => e.kind, 'kind', MintFailure.unavailable)),
+      );
+    });
+
     test('제출 응답이 없으면 「결과 모름」 — 다시 보내라고 하지 않는다', () async {
       SbtMintService.client = MockClient((req) async => throw http.ClientException('끊김'));
       await expectLater(
@@ -217,7 +255,8 @@ void main() {
         (500, MintFailure.unknownOutcome),
         (409, MintFailure.conflict),
         (403, MintFailure.forbidden),
-        (503, MintFailure.unavailable),
+        // 제출 중 503 — 서버가 체인에 보냈는지 모른다. 「잠시 후 다시」라고 하면 같은 서명을 또 보내게 된다
+        (503, MintFailure.unknownOutcome),
       ]) {
         SbtMintService.client = MockClient((req) async => json({'detail': '이유'}, code));
         await expectLater(
@@ -301,13 +340,13 @@ void main() {
       await signOutForTest();
     });
 
-    Widget app() => MaterialApp(
+    Widget app({List<int>? file}) => MaterialApp(
           home: SbtMintScreen(
             service: SbtMintService(
               sign: signerWith(presidentKey),
               domain: () async => domain,
             ),
-            picker: () async => utf8.encode('학번,이름\n20240011,김하나\n20240012,이두리\n20240012,이두리\n'),
+            picker: () async => file ?? utf8.encode('학번,이름\n20240011,김하나\n20240012,이두리\n20240012,이두리\n'),
           ),
         );
 
@@ -316,6 +355,14 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(Key(key)));
       await tester.pumpAndSettle();
+    }
+
+    Future<void> signFlow(WidgetTester tester) async {
+      await tester.pumpWidget(app());
+      await tap(tester, 'sbt_pick_file');
+      await tap(tester, 'sbt_prepare');
+      await tap(tester, 'sbt_sign');
+      await tap(tester, 'sbt_confirm');
     }
 
     testWidgets('파일 → 준비 → 확인 → 서명·제출 → 결과', (tester) async {
@@ -383,6 +430,61 @@ void main() {
       await tap(tester, 'sbt_reprepare');
       expect(calls.where((c) => c == 'POST /memberships/mint-batches').length, 2);
       expect(find.byKey(const Key('sbt_sign')), findsOneWidget);
+    });
+
+    testWidgets('CP949 명단은 읽지 않고 다시 저장하라고 안내한다', (tester) async {
+      await tester.pumpWidget(app(file: [...hak, 0x0A, ...utf8.encode('20240011\n')]));
+      await tap(tester, 'sbt_pick_file');
+      expect(find.byKey(const Key('sbt_error')), findsOneWidget);
+      expect(find.textContaining('CSV UTF-8'), findsOneWidget);
+      expect(find.byKey(const Key('sbt_roster_summary')), findsNothing);
+      expect(find.byKey(const Key('sbt_prepare')), findsNothing);
+    });
+
+    testWidgets('제출 409 뒤 아직 PREPARED 면 그 준비값으로 다시 서명하지 않고 「다시 준비」', (tester) async {
+      SbtMintService.client = MockClient((req) async {
+        calls.add('${req.method} ${req.url.path}');
+        final p = req.url.path;
+        if (p == '/terms') {
+          return json([
+            {'id': 1, 'term_code': 20262},
+          ]);
+        }
+        if (p == '/memberships/mint-batches') return json(batchJson(), 201);
+        if (p.endsWith('/submit')) return json({'detail': '다른 제출이 먼저 처리됐어요'}, 409);
+        if (p == '/memberships/mint-batches/7') return json(batchJson()); // 여전히 PREPARED
+        return http.Response('{}', 404);
+      });
+      await signFlow(tester);
+
+      expect(calls.last, 'GET /memberships/mint-batches/7', reason: '409 면 지금 상태를 다시 읽는다');
+      expect(find.byKey(const Key('sbt_sign')), findsNothing, reason: '낡은 nonce 로 또 서명하게 하지 않는다');
+      expect(find.byKey(const Key('sbt_error')), findsOneWidget);
+      await tap(tester, 'sbt_reprepare');
+      expect(calls.where((c) => c == 'POST /memberships/mint-batches').length, 2);
+      expect(find.byKey(const Key('sbt_sign')), findsOneWidget, reason: '새로 준비하면 다시 서명할 수 있다');
+    });
+
+    testWidgets('NotApprover 로 거부되면 안내만 — 다시 서명·다시 준비 버튼이 없다', (tester) async {
+      submitReply = () => batchJson(status: 'REJECTED', reason: 'NotApprover');
+      await signFlow(tester);
+      expect(find.textContaining('회장·감사로 등록돼 있지 않아'), findsOneWidget);
+      expect(find.byKey(const Key('sbt_sign')), findsNothing);
+      expect(find.byKey(const Key('sbt_reprepare')), findsNothing);
+    });
+
+    testWidgets('모르는 사유로 거부되면 같은 값에 다시 서명하지 않고 「다시 준비」', (tester) async {
+      submitReply = () => batchJson(status: 'REJECTED', reason: 'SomethingNew');
+      await signFlow(tester);
+      expect(find.byKey(const Key('sbt_sign')), findsNothing);
+      expect(find.byKey(const Key('sbt_reprepare')), findsOneWidget);
+    });
+
+    testWidgets('한 묶음만 발행해도 결과 요약에 들어간다', (tester) async {
+      await signFlow(tester);
+      await tester.scrollUntilVisible(find.byKey(const Key('sbt_done_summary')), 300,
+          scrollable: find.descendant(of: find.byType(ListView), matching: find.byType(Scrollable)).first);
+      expect(find.text('1묶음 · 새로 발행 2명 · 이미 보유 0명'), findsOneWidget);
     });
 
     testWidgets('100명이 넘으면 100명씩 차례로 준비한다', (tester) async {

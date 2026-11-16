@@ -252,6 +252,11 @@ class SbtMintService {
       case 422:
         return MintFailed(MintFailure.refused, text == null ? '서버가 $what을(를) 거부했어요.' : '서버가 $what을(를) 거부했어요: $text');
       case 503:
+        // 제출의 503 은 「체인에 들어간 뒤 DB 반영 실패」일 수도 있다 (#102 리뷰). 미발행으로 단정하고 다시 서명하게 하지 않고
+        // 조회부터 한다 — 서버가 체인을 다시 확인해 주고, 정말 안 나갔으면 「준비됨」이 와서 그때 다시 서명하면 된다
+        if (sent) {
+          return MintFailed(MintFailure.unknownOutcome, '$what 결과를 확인하지 못했어요 (서버 503). 같은 서명을 다시 보내지 말고 「결과 확인」을 눌러 주세요.');
+        }
         return MintFailed(MintFailure.unavailable, '체인이나 서버가 준비되지 않아 $what을(를) 하지 못했어요. 잠시 후 다시 시도해 주세요.');
       default:
         return MintFailed(

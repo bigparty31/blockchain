@@ -1,5 +1,14 @@
 import 'dart:convert';
 
+/// 명단에서 학번을 **확실히** 고를 수 없을 때. 짐작해서 다른 학생을 대상으로 넣지 않고 멈춘다.
+class RosterFormatException implements Exception {
+  final String message;
+  const RosterFormatException(this.message);
+
+  @override
+  String toString() => 'RosterFormatException: $message';
+}
+
 /// 납부자 명단을 읽은 결과.
 class Roster {
   /// 학번 (파일 순서, 중복 제거).
@@ -20,14 +29,26 @@ class Roster {
 /// - 제목 줄이 없으면(학번만 한 줄씩, 또는 붙여넣기) 줄마다 **첫 번째 숫자 칸**을 학번으로 본다.
 /// - 학번은 6~12자리 숫자. 엑셀이 붙이는 따옴표·`="…"`·앞뒤 공백은 벗긴다.
 ///
-/// 인코딩: 학번은 숫자라 UTF-8 이든 CP949(한글 엑셀 CSV)든 같은 바이트다. 한글 제목은 CP949 면 깨지는데,
-/// 그때는 제목 줄을 못 찾아 「줄마다 첫 숫자 칸」 방식으로 읽는다.
+/// **짐작하지 않는다** (#102 리뷰): 학번 칸을 잘못 고르면 다른 학생에게 회원권이 발행된다.
+/// - UTF-8 이 아닌 파일(한글 엑셀의 기본 CSV 는 CP949)은 읽지 않는다. 제목 「학번」이 깨져 칸을 못 찾고,
+///   그러면 `이름,납부일,학번` 의 납부일(20261102)을 학번으로 집게 된다. Dart 에는 CP949 디코더가 없어 다시 저장을 안내한다.
+/// - 제목 줄이 없는데 한 줄에 학번 모양 숫자가 둘 이상이면 어느 것이 학번인지 모르므로 멈춘다.
 class RosterParser {
   RosterParser._();
 
   static final _studentNo = RegExp(r'^\d{6,12}$');
 
-  static Roster parseBytes(List<int> bytes) => parseText(utf8.decode(bytes, allowMalformed: true));
+  static Roster parseBytes(List<int> bytes) {
+    final String text;
+    try {
+      text = utf8.decode(bytes);
+    } on FormatException {
+      throw const RosterFormatException(
+        'UTF-8 로 저장된 파일이 아니에요 (한글 엑셀 기본 CSV 로 보여요). 엑셀에서 「CSV UTF-8(쉼표로 분리)」로 다시 저장해 주세요.',
+      );
+    }
+    return parseText(text);
+  }
 
   static Roster parseText(String text) {
     final lines = const LineSplitter()
@@ -57,7 +78,14 @@ class RosterParser {
       if (column != null) {
         no = column < cells.length && _studentNo.hasMatch(cells[column]) ? cells[column] : null;
       } else {
-        no = cells.cast<String?>().firstWhere((c) => _studentNo.hasMatch(c!), orElse: () => null);
+        final candidates = cells.where(_studentNo.hasMatch).toList();
+        if (candidates.length > 1) {
+          throw RosterFormatException(
+            '한 줄에 학번처럼 보이는 숫자가 ${candidates.length}개 있어요 (「$line」). '
+            '어느 것이 학번인지 알 수 없어 읽지 않았어요. 제목 줄에 「학번」 칸을 넣어 주세요.',
+          );
+        }
+        no = candidates.isEmpty ? null : candidates.single;
       }
       if (no == null) {
         unread++;
