@@ -34,7 +34,7 @@
   "wallet_address": "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
 }
 ```
-- `wallet_address`: 임원만 값이 있고 학생은 `null`
+- `wallet_address`: 임원만 값이 있고 학생은 `null`. DB `users.wallet_address`에 값이 등록되어 있으면 `SEED_USERS`보다 DB 값을 우선 반환합니다(소문자).
 - 토큰 유효시간: 12시간
 
 **로그인 실패 (`401 Unauthorized`)** — 학번이 없는지 비밀번호가 틀렸는지 구분하지 않습니다.
@@ -77,7 +77,10 @@
 
 ### 3. 인증 헤더와 권한 오류 (공통)
 - 로그인이 필요한 API는 `Authorization: Bearer <access_token>` 헤더를 붙여 호출합니다.
-- 조회 API(`GET /entries`, `GET /balance`, `GET /budgets`)는 현재 토큰 없이 호출할 수 있습니다.
+- 조회 API(`GET /entries`, `GET /entries/{id}`, `GET /entries/{id}/onchain`, `GET /balance`, `GET /budgets`, `GET /terms`, `GET /terms/{id}`, `GET /users/wallets`, `GET /chain/domains`, `GET /receipts/{filename}`)는 토큰 없이 호출할 수 있습니다.
+- 별도 문서로 관리되는 API:
+  - 영수증 OCR 추출 (`POST /ocr/receipt`): [docs/OCR.md](OCR.md)
+  - 임원 알림 및 FCM 기기 토큰 (`GET /notifications`, `GET /notifications/unread-count`, `POST /notifications/{id}/read`, `POST /notifications/device-tokens`, `DELETE /notifications/device-tokens/{token}`): [docs/NOTIFICATION_API.md](NOTIFICATION_API.md)
 
 | 상황 | 응답 | `detail` |
 | :--- | :--- | :--- |
@@ -99,6 +102,25 @@
 | 3 | 20240003 | 이감사 | `AUDITOR` | `0x90F79bf6EB2c4f870365E785982E1f101E93b906` |
 | 4 | 20240004 | 박회장 | `PRESIDENT` | `0x70997970C51812dc3A010C7d01b50e0d17dc79C8` |
 | 5 | 20240005 | 최감사 | `AUDITOR` | `0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc` |
+
+---
+
+## 학기
+
+### 1. 학기 목록 및 단건 조회 (`GET /terms`, `GET /terms/{id}`)
+- **설명**: 모바일 앱에서 온체인 학기 코드(`term_code`, 예: `20262`)와 DB `term_id`를 대조하기 위한 공개 조회 API입니다 (토큰 불필요).
+
+**Response (`200 OK` - `GET /terms` 배열 요소 / `GET /terms/{id}` 단건)**
+```json
+{
+  "id": 1,
+  "term_code": 20262,
+  "name": "2026-2학기",
+  "started_at": "2026-09-01T00:00:00+09:00",
+  "ended_at": "2027-02-28T23:59:59+09:00"
+}
+```
+- `GET /terms/{id}`: 존재하지 않는 학기 ID면 `404 Not Found`를 반환합니다.
 
 ---
 
@@ -674,18 +696,24 @@
 
 ---
 
-### 3. 감사 기기 서명 승인 (`POST /entries/{id}/approve`)
-- **설명**: 감사가 기기 생체인증 서명(`ConfirmApproval`)을 제출하여 지출을 `CONFIRMED`로 최종 확정하고 연계 예산을 차감합니다.
+### 3. 감사·회장 기기 서명 승인 (`POST /entries/{id}/confirm`)
+- **설명**: 감사 또는 회장이 기기 생체인증 서명(`ConfirmApproval`)을 제출하여 `PENDING` 상태의 항목을 `CONFIRMED`로 최종 확정하고 연계 예산을 차감합니다.
 - **제약 (Maker-Checker)**: 작성자(`created_by`)와 승인자(`approved_by`)가 동일할 경우 `403 Forbidden`으로 즉시 거부됩니다.
   - `detail`: `본인이 등록한 항목은 승인·반려할 수 없습니다.` — 역할 오류(`이 작업을 할 권한이 없습니다.`)와 구분됩니다.
   - **반려에도 똑같이 적용**됩니다. 컨트랙트가 확정·반려 서명자 모두 등록자와 같으면 revert(`SelfApproval`)하기 때문입니다.
   - 서버 검사는 서명이 담긴 요청이 온 뒤에 돌기 때문에, 서명 전에 막으려면 **화면에서 먼저** 거릅니다. 승인 목록에서 `GET /auth/me`의 `id`와 항목의 `created_by`가 같으면 승인·반려 버튼을 비활성화합니다.
   - 서버 구현: `app/auth/approval.py`의 `ensure_not_self_approval(entry.created_by, user)`를 승인·반려 API에서 항목을 불러온 뒤 호출합니다.
+- **T4 수정 요청 / 경고 항목 / 재분류 순서**:
+  - `revision_requested_at`이 설정된 항목은 확정할 수 없습니다 (`400 Bad Request`).
+  - `ocr_status` 경고(`MISMATCH`, `DUPLICATE`, `UNREADABLE`) 또는 `category_warning = true`인 항목은 `warning_reason`이 필수입니다.
+  - `RECLASSIFY` 음수 정정은 새 예산의 양수 정정이 먼저 확정(`CONFIRMED`)되어야 승인 가능합니다.
 
 **Request**
 ```json
 {
-  "device_signature": "0x6f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a1b"
+  "signature": "0x6f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a1b",
+  "deadline": 1790700000,
+  "warning_reason": "필요 시 경고 승인 사유 (경고 없으면 생략 또는 null)"
 }
 ```
 
@@ -694,9 +722,8 @@
 {
   "id": 2,
   "status": "CONFIRMED",
-  "approved_by": 3,
   "tx_confirm": "0x2222222222222222222222222222222222222222222222222222222222222222",
-  "remaining_budget": 2380000
+  "message": "온체인에 성공적으로 확정(CONFIRMED) 기록되었습니다."
 }
 ```
 
@@ -894,32 +921,15 @@ PRD v0.15 §4.6. 총무가 은행에서 내려받은 거래내역 CSV를 올리�
 }
 ```
 
-### 2. 온체인 독립 검증 (`GET /entries/{id}/verify`)
-- **설명**: 모바일 앱이 내장 SHA-256 로직으로 `meta_hash`를 직접 계산하여 DB 및 블록체인 상의 데이터와 대조합니다.
+### 2. 온체인 독립 검증 (클라이언트 직접 검증 — `GET /entries/{id}/onchain` 연계)
+- **설명**: 별도의 서버 검증 엔드포인트(`GET /entries/{id}/verify`)는 두지 않습니다. 서버를 신뢰하지 않기 위해 모바일 앱이 `GET /entries/{id}`(DB 데이터), `GET /entries/{id}/onchain`(온체인 원장 원본), `GET /users/wallets`(지갑 매핑)를 받아 내장 SHA-256 로직으로 3단계(해시·등록자/승인자·금액/구분/상태/학기/발생일시/블록번호)를 직접 대조합니다 (`docs/HASHING.md` §2).
 - **해시 계산**: `SHA256( amount ␟ counterparty ␟ purpose ␟ occurred_at ␟ receipt_hash )` (`U+001F` 구분자)
-
-**Response (`200 OK`)**
-```json
-{
-  "entry_id": 1,
-  "hash_inputs": {
-    "amount": "35000",
-    "counterparty": "한결문구",
-    "purpose": "신입생 환영회 명찰 및 필기구 구매",
-    "occurred_at": "1788793200",
-    "receipt_hash": "0xabc1234567890abcdef1234567890abcdef1234567890abcdef1234567890abc"
-  },
-  "db_meta_hash": "0x24ae73988d927fb39f45eb6024e9ff8ffa19e8501603565bd82710ea8df4b937",
-  "onchain_meta_hash": "0x24ae73988d927fb39f45eb6024e9ff8ffa19e8501603565bd82710ea8df4b937",
-  "is_tampered": false
-}
-```
 
 ### 3. 사용자 지갑 매핑 (`GET /users/wallets`)
 - **설명**: 체인의 `registrant`·`approver`(지갑 주소)를 DB의 `created_by`·`approved_by`(user id)와 대조할 때 쓰는 매핑입니다. 학생 앱 단건 검증 2단계가 읽습니다 (HASHING.md §2, `docs/backend_requests.md` 1-2).
 - **권한**: 토큰 없이 호출할 수 있습니다 (다른 조회 API와 같음). 임원 주소는 체인에 이미 공개된 값입니다.
 - **범위**: 지갑이 등록된 사용자(현·전 임원)가 모두 들어 있습니다. 역할이 아니라 지갑 유무로 고르므로, 임기가 끝난 사람이 등록·승인한 과거 항목도 검증할 수 있습니다. 지갑이 없는 학생은 체인에 서명자로 나오지 않아 빠집니다.
-- **형식**: 키는 **소문자** 지갑 주소, 값은 user id(숫자)입니다. 앱은 체인의 `registrant`·`approver`를 소문자로 바꿔 그대로 찾습니다. 주소는 로컬 배포의 임원 계정(`contracts/deployments/localhost.json`)과 같습니다.
+- **형식**: 키는 **소문자** 지갑 주소, 값은 user id(숫자)입니다. 앱은 체인의 `registrant`·`approver`를 소문자로 바꿔 그대로 찾습니다. DB `users.wallet_address`가 등록되어 있으면 그 값을 우선 사용하고, 없으면 시드(`SEED_USERS`, `contracts/deployments/localhost.json`) 값을 사용합니다.
 - **주소가 키인 이유**: 한 사람이 주소를 여러 개 가질 수 있습니다. 임원이 기기를 바꿔 새 주소로 롤을 옮겨도(`RoleManager.changeRole`, 회장은 키 분실 때 `proposePresidentRecovery` → `executePresidentRecovery`) 옛 주소로 등록·승인한 과거 항목은 체인에 옛 주소로 남아 있어서, 사람마다 현재 주소 하나만 주면 그 항목이 모두 "등록자 불일치"로 판정됩니다. 지금은 사용자마다 현재 주소 하나만 들어 있고, 옛 주소는 롤 변경·회장 복구 릴레이를 붙일 때 같은 응답에 더해집니다 (형식은 그대로입니다).
 - **찾지 못하면**: 매핑에 없는 주소는 이 시스템의 사용자가 아닙니다. 대조 결과는 불일치입니다.
 
