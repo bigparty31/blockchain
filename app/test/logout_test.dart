@@ -163,6 +163,50 @@ void main() {
     expect(find.byType(LoginScreen), findsOneWidget);
   });
 
+  /// 3차 리뷰 Low — 삭제 실패 경고가 두 번 뜬다.
+  ///
+  /// `confirmAndLogout` 이 스낵바를 띄우고 로그인 화면으로 보내면, 로그인 화면의
+  /// `initState` 가 **같은 깃발**을 보고 같은 경고를 한 번 더 띄웠다. 사용자는
+  /// 같은 말을 두 번 들으면 두 번 실패한 것으로 읽는다.
+  testWidgets('삭제 실패 경고는 한 번만 뜬다', (tester) async {
+    await pumpLoggedIn(tester, UserRole.STUDENT);
+    store.failOnClear = true;
+
+    await tester.tap(find.byKey(const Key('logout_action')));
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.tap(find.byKey(const Key('logout_confirm')));
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.byType(LoginScreen), findsOneWidget);
+    // 화면 전환이 끝날 때까지는 같은 스낵바가 두 Scaffold 에 함께 들어가 있다
+    // (`ScaffoldMessenger` 가 등록된 Scaffold 마다 넣는다). 개수로 세지 않는다.
+    expect(
+      find.textContaining('이 기기에서 로그인 정보를 지우지 못했습니다'),
+      findsAtLeastNWidgets(1),
+      reason: '지우지 못한 사실을 알리지 않았다',
+    );
+    expect(
+      find.textContaining('이전 로그인 정보를 지우지 못했습니다'),
+      findsNothing,
+      reason: '로그인 화면이 같은 경고를 한 번 더 띄웠다',
+    );
+    expect(
+      AuthService().tokenClearFailed,
+      isFalse,
+      reason: '우리가 직접 알렸으면 깃발을 내려야 한다 — 로그인 화면이 같은 경고를 또 띄운다',
+    );
+
+    // tearDown 의 logout 이 또 던지지 않게 되돌린다.
+    store.failOnClear = false;
+
+    // 첫 경고가 사라진 뒤, 로그인 화면이 뒤이어 같은 말을 또 하지 않는다.
+    await tester.pump(const Duration(seconds: 7));
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.byType(SnackBar), findsNothing, reason: '같은 경고가 한 번 더 떴다');
+  });
+
   testWidgets('로그아웃 뒤에는 세션을 되살릴 수 없다', (tester) async {
     await pumpLoggedIn(tester, UserRole.STUDENT);
 

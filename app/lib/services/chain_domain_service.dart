@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 
 import '../core/api_config.dart';
 import '../core/signing/eip712.dart';
+import '../core/signing/budget_types.dart';
 import '../core/signing/ledger_types.dart';
 import 'auth_service.dart';
 
@@ -34,6 +35,7 @@ class ChainDomainService {
   /// 비어 있으면(기본) 비교하지 않는다. 테스트에서 바꿀 수 있게 상수가 아니라 필드로 둔다.
   static int expectedChainId = const int.fromEnvironment('EXPECTED_CHAIN_ID');
   static String expectedLedgerAddress = const String.fromEnvironment('EXPECTED_LEDGER_ADDRESS');
+  static String expectedBudgetAddress = const String.fromEnvironment('EXPECTED_BUDGET_ADDRESS');
 
   /// 모든 도메인 (컨트랙트 이름 → 도메인).
   static Future<Map<String, Eip712Domain>> fetchAll() async {
@@ -64,6 +66,14 @@ class ChainDomainService {
     final domain = (await fetchAll())[LedgerTypes.domainName];
     if (domain == null) throw const ChainDomainException('원장 서명 도메인이 서버에 없어요.');
     checkTrusted(domain, expectedAddress: expectedLedgerAddress);
+    return domain;
+  }
+
+  /// 예산 도메인 — 발행(`IssueRequest`)·증액(`IncreaseRequest`) 서명에 쓴다. 검산을 통과한 것만 돌려준다.
+  static Future<Eip712Domain> budget() async {
+    final domain = (await fetchAll())[BudgetTypes.domainName];
+    if (domain == null) throw const ChainDomainException('예산 서명 도메인이 서버에 없어요.');
+    checkTrusted(domain, expectedAddress: expectedBudgetAddress);
     return domain;
   }
 

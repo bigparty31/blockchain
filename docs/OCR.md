@@ -1,6 +1,6 @@
 # OCR API 후보 비교
 
-PRD §6 OCR 판정에 쓸 영수증 특화 OCR API를 조사한다. 판단 기준은 세 가지: ①금액·상호·결제일·**승인번호**를 필드 단위로 주는지(승인번호가 `DUPLICATE` 판정의 근거, PRD §8 유니크 인덱스 `ocr_approval_no+ocr_paid_at+amount`) ②무료 한도·요금 ③한국어 영수증 정확도. 일반 OCR(Tesseract 등)은 한국어 영수증 정확도가 부족해 후보에서 제외한다.
+PRD §6 OCR 판정에 쓸 영수증 특화 OCR API를 조사한다. 판단 기준은 세 가지: ①금액·상호·결제일·**승인번호**를 필드 단위로 주는지(승인번호가 `DUPLICATE` 판정의 근거, PRD §8 조회용 인덱스 `ocr_approval_no+ocr_paid_at+amount` — 유니크가 아니다. 중복이면 등록을 막지 않고 `DUPLICATE` 경고로 표시하고 승인 시 사유를 받는다, PRD §6) ②무료 한도·요금 ③한국어 영수증 정확도. 일반 OCR(Tesseract 등)은 한국어 영수증 정확도가 부족해 후보에서 제외한다.
 
 ## 비교표
 
