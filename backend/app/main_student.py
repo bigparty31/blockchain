@@ -21,6 +21,7 @@ from app.routers.bundles import STUDENT_QUERY_ROUTERS
 async def lifespan(app: FastAPI):
     # 체인 설정 확인 (학생 서버는 릴레이어 키 없이 RPC 조회만 사용)
     check_chain_config()
+    # 재알림 작업·푸시 전송(app.services.notification_worker)은 띄우지 않는다. DB 에 쓰고 FCM 키가 필요하다 — 학생회 서버만 한다
     yield
     await close_chain_client()
 

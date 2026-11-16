@@ -9,6 +9,8 @@ import 'package:student_council_app/core/hashing.dart';
 import 'package:student_council_app/models/entry_model.dart';
 import 'package:student_council_app/services/auth_service.dart';
 import 'package:student_council_app/services/entry_decision_service.dart';
+import 'package:student_council_app/services/entry_registration_service.dart';
+import 'package:student_council_app/services/signed_post.dart';
 
 /// 승인·반려가 보낸 요청의 401 이 **늦게** 돌아와도, 그 사이 다시 로그인해 만든 새 세션을 지우지 않는다 (PR #38 리뷰 — 정아).
 ///
@@ -71,6 +73,60 @@ void main() {
 
     final inFlight = EntryDecisionService().reject(entry(), '중복 영수증');
     await Future<void>.delayed(Duration.zero); // 재조회가 나갔다
+
+    await AuthService().logout();
+    await loginWith('token-new');
+    var notified = 0;
+    AuthService().onUnauthorized = () => notified++;
+
+    held.complete(http.Response('{"detail":"expired"}', 401));
+    await expectLater(inFlight, throwsA(isA<EntryDecisionException>()));
+
+    expect(sentAuth.single, 'Bearer token-old');
+    expect(AuthService().session?.token, 'token-new', reason: '늦게 온 401 이 방금 만든 세션을 지웠다');
+    expect(notified, 0);
+  });
+
+  test('서명 전송(POST)의 늦은 401 도 새 세션을 지우지 않는다 — 승인·반려·등록·증액 요청이 모두 쓰는 길', () async {
+    await loginWith('token-old');
+    final held = Completer<http.Response>();
+    final sentAuth = <String?>[];
+    final client = MockClient((req) {
+      sentAuth.add(req.headers['Authorization']);
+      return held.future;
+    });
+
+    final inFlight = postSigned(client, 'http://x.test/entries/7/confirm', {'a': 1}, what: '승인', timeout: const Duration(seconds: 5));
+    await Future<void>.delayed(Duration.zero);
+
+    await AuthService().logout();
+    await loginWith('token-new');
+    var notified = 0;
+    AuthService().onUnauthorized = () => notified++;
+
+    held.complete(http.Response('{"detail":"expired"}', 401));
+    await expectLater(inFlight, throwsA(isA<EntryDecisionException>()));
+
+    expect(sentAuth.single, 'Bearer token-old');
+    expect(AuthService().session?.token, 'token-new', reason: '늦게 온 401 이 방금 만든 세션을 지웠다');
+    expect(notified, 0);
+  });
+
+  test('영수증 업로드의 늦은 401 도 새 세션을 지우지 않는다 — 요청에 쓴 토큰으로만 판정', () async {
+    await loginWith('token-old');
+    final held = Completer<http.Response>();
+    final sentAuth = <String?>[];
+    EntryRegistrationService.client = MockClient((req) {
+      sentAuth.add(req.headers['Authorization']);
+      return held.future;
+    });
+    addTearDown(() => EntryRegistrationService.client = http.Client());
+
+    final inFlight = EntryRegistrationService().uploadReceipt([1, 2, 3], filename: 'r.jpg');
+    // multipart 본문을 다 만든 뒤에야 요청이 나간다
+    while (sentAuth.isEmpty) {
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+    }
 
     await AuthService().logout();
     await loginWith('token-new');

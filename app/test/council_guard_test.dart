@@ -11,6 +11,8 @@ import 'package:student_council_app/screens/council/income_create_screen.dart';
 import 'package:student_council_app/services/api_service.dart';
 import 'package:student_council_app/services/auth_service.dart';
 
+import 'support/registration.dart';
+
 /// 승인 화면의 역할 가드와 본인 등록 건 차단, 수입 영수증 첨부(선택).
 void main() {
   setUp(() {
@@ -127,27 +129,40 @@ void main() {
   });
 
   group('수입 영수증 첨부 (선택)', () {
+    /// 가짜 등록기·영수증 (서버·카메라 없음). 학기는 시연용 학기 1 이 도착할 때까지 기다린다.
+    Future<void> openIncome(WidgetTester tester) async {
+      await pump(tester, IncomeCreateScreen(registrar: FakeRegistrar(), pickReceipt: fakeReceipt));
+      for (var i = 0; i < 20; i++) {
+        await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 20)));
+        await tester.pump();
+      }
+    }
+
     testWidgets('첨부하지 않아도 제출되고, 첨부하면 결과에 표시된다', (tester) async {
-      await pump(tester, const IncomeCreateScreen());
+      await openIncome(tester);
       expect(find.text('영수증 첨부 (선택)'), findsOneWidget);
 
       await tester.enterText(find.widgetWithText(TextFormField, '상세 출처 / 내용 *'), '학생회비 수납');
       await tester.enterText(find.widgetWithText(TextFormField, '입금 금액(원) *'), '1000000');
       await tester.ensureVisible(find.text('제출하기'));
       await tester.tap(find.text('제출하기'));
+      for (var i = 0; i < 10 && find.text('수입 제출 완료!').evaluate().isEmpty; i++) {
+        await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 20)));
+        await tester.pump();
+      }
       await tester.pumpAndSettle();
       expect(find.text('수입 제출 완료!'), findsOneWidget);
       expect(find.textContaining('영수증: 없음'), findsOneWidget);
     });
 
     testWidgets('탭하면 첨부되고 다시 탭하면 해제된다', (tester) async {
-      await pump(tester, const IncomeCreateScreen());
+      await openIncome(tester);
       await tester.ensureVisible(find.text('영수증 첨부 (선택)'));
       await tester.tap(find.text('영수증 첨부 (선택)'));
-      await tester.pump();
+      await tester.pumpAndSettle();
       expect(find.text('영수증 첨부 완료 (탭하여 해제)'), findsOneWidget);
       await tester.tap(find.text('영수증 첨부 완료 (탭하여 해제)'));
-      await tester.pump();
+      await tester.pumpAndSettle();
       expect(find.text('영수증 첨부 (선택)'), findsOneWidget);
     });
   });

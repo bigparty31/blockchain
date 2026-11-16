@@ -43,6 +43,8 @@ from app.routers.notifications import router as notifications_command_router
 
 # 학생용 조회 전용 라우터 목록 (student_api)
 # 주의: 이 목록의 라우터는 DB 쓰기(INSERT/UPDATE/DELETE/Lazy Commit)를 전혀 수행하지 않아야 합니다.
+# 예외는 하나: POST /auth/login 이 로그인 실패 횟수(login_attempts)를 쓴다 (PRD §9.1 — 학생 서버가 여러 대여도 합쳐 센다).
+# 학생 서버 DB 계정에는 이 테이블에만 쓰기 권한을 준다 (docs/SERVER_ENV.md §5). 다른 쓰기는 추가하지 않는다.
 STUDENT_QUERY_ROUTERS: List[APIRouter] = [
     auth_query_router,
     entries_query_router,

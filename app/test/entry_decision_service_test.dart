@@ -434,9 +434,69 @@ void main() {
       await expectStops(() => service().confirm(pending()), EntryDecisionFailure.changed);
     });
 
+    // 승인 창을 연 뒤 총무가 수정을 요청하면, 목록의 값만 믿고 서명한 뒤에야 서버가 거절해 이유를 알 수 없다 (#92 리뷰).
+    test('서명 직전 재조회에서 수정 요청이 걸려 있으면 승인은 멈춘다', () async {
+      freshOverride = {...responseOf(pending()), 'revision_requested_at': 1790700000};
+      await expectStops(() => service().confirm(pending()), EntryDecisionFailure.changed);
+    });
+
+    test('수정 요청이 걸려 있어도 반려는 서명해 보낼 수 있다', () async {
+      freshOverride = {...responseOf(pending()), 'revision_requested_at': 1790700000};
+      await service().reject(pending(), '사유');
+      expect(posts, hasLength(1));
+      expect(auth.calls, greaterThan(0));
+    });
+
     test('다시 읽지 못하면', () async {
       freshStatus = 503;
       await expectStops(() => service().confirm(pending()), EntryDecisionFailure.notReady);
     });
   });
+
+  group('#65 응답 필드 — registrant·fail_reason', () {
+    test('재조회 응답에 registrant 가 있으면 그 주소로 entryCommit 을 만든다 — /users/wallets 를 쓰지 않는다', () async {
+      wallets = {}; // 역매핑으로는 등록자를 못 찾는다
+      freshOverride = {...responseOf(pending()), 'registrant': '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC'}; // 체인은 EIP-55
+      await service().confirm(pending());
+
+      final body = jsonDecode(confirms.single.body) as Map<String, dynamic>;
+      final serverSide = LedgerTypes.confirmApproval(
+        id: 7,
+        hash: pending().metaHash,
+        entryCommit: LedgerTypes.entryCommit(
+          hash: pending().metaHash,
+          amount: 35000,
+          kind: EntryKind.EXPENSE,
+          term: 20262,
+          occurredAt: 1790694000,
+          budgetId: 1,
+          correctsId: 0,
+          registrant: treasurer,
+        ),
+        hadWarning: false,
+        warningReasonHash: '0x${'00' * 32}',
+        deadline: body['deadline'] as int,
+      );
+      expect(SigningService.recoverSigner(Eip712.digest(domain, serverSide), body['signature'] as String), auditor);
+    });
+
+    test('400 에 fail_reason 이 있으면 예외에 실어 준다 — 문구가 아니라 코드로 판단한다', () async {
+      onConfirm = (_) => json({'detail': '온체인 승인이 거부되었습니다 (InsufficientBudget).', 'fail_reason': 'InsufficientBudget'}, 400);
+      await expectLater(
+        service().confirm(pending()),
+        throwsA(isA<EntryDecisionException>()
+            .having((e) => e.failure, 'failure', EntryDecisionFailure.refused)
+            .having((e) => e.failReason, 'failReason', 'InsufficientBudget')),
+      );
+    });
+
+    test('fail_reason 이 없는 400(옛 서버·검증 오류)은 failReason 이 null 이다', () async {
+      onConfirm = (_) => json({'detail': '서명자가 승인권자와 일치하지 않습니다.'}, 400);
+      await expectLater(
+        service().confirm(pending()),
+        throwsA(isA<EntryDecisionException>().having((e) => e.failReason, 'failReason', isNull)),
+      );
+    });
+  });
 }
+

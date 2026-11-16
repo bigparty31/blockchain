@@ -40,13 +40,29 @@ class Fmt {
     return s.endsWith('.0') ? s.substring(0, s.length - 2) : s;
   }
 
-  /// epoch 초 → `2026.09.08`
-  static String date(int epochSeconds) =>
-      _date.format(DateTime.fromMillisecondsSinceEpoch(epochSeconds * 1000));
+  /// epoch 초 → `2026.09.08` (**한국 시간**)
+  ///
+  /// 기기 시간대를 쓰지 않는다. `occurred_at` 은 사용일의 KST 자정이라(HASHING §1.3) 시간대가 UTC 인
+  /// 기기(에뮬레이터 기본값, 해외 로밍)에서 기기 시간으로 바꾸면 하루 전 날짜가 보인다.
+  static String date(int epochSeconds) => _date.format(_kst(epochSeconds));
 
-  /// epoch 초 → `2026.09.08 18:30`
-  static String dateTime(int epochSeconds) =>
-      _dateTime.format(DateTime.fromMillisecondsSinceEpoch(epochSeconds * 1000));
+  /// epoch 초 → `2026.09.08 18:30` (**한국 시간**)
+  static String dateTime(int epochSeconds) => _dateTime.format(_kst(epochSeconds));
+
+  /// epoch 초의 한국 시각. 연·월·일·시·분만 읽는 값이라 UTC 로 표시한 「벽시계」다.
+  static DateTime _kst(int epochSeconds) =>
+      DateTime.fromMillisecondsSinceEpoch((epochSeconds + 9 * 3600) * 1000, isUtc: true);
+
+  /// 서버가 주는 시각 문자열 → 시점. **시간대가 없으면 한국 시간으로 읽는다.**
+  ///
+  /// `DateTime.parse` 는 시간대가 없는 값을 기기 시간대로 읽어서, UTC 로 도는 기기(에뮬레이터 기본값)에서는
+  /// 학기 경계 같은 값이 9시간 어긋난다. 서버는 한국 시간 기준이다 (`Fmt.date` 와 같은 약속).
+  static DateTime parseServerTime(String text) {
+    var t = text.trim();
+    if (!t.contains('T')) t = '${t}T00:00:00'; // 날짜만 — 그날 0시
+    final hasZone = RegExp(r'(Z|[+-]\d{2}(:?\d{2})?)$').hasMatch(t);
+    return DateTime.parse(hasZone ? t : '$t+09:00');
+  }
 
   /// 해시를 앞뒤만 남겨 줄인다. `0x8a3f…6b4e`
   static String shortHash(String hash, {int head = 10, int tail = 6}) {

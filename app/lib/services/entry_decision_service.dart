@@ -10,53 +10,9 @@ import '../core/signing/ledger_types.dart';
 import '../core/signing/signing_service.dart';
 import '../models/entry_model.dart';
 import 'auth_service.dart';
-import 'chain_domain_service.dart';
+import 'signed_post.dart';
 
-/// 승인·반려를 끝내지 못한 이유. 화면은 [EntryDecisionException.message] 를 그대로 띄우고,
-/// 이 값으로 다음 동작(목록 새로 읽기·로그인 화면)을 고른다. **서버 문구로 분기하지 않는다.**
-enum EntryDecisionFailure {
-  /// 정본화한 사유가 비었다 (서버도 400).
-  invalidReason,
-
-  /// 화면 값으로 다시 계산한 `meta_hash` 가 서버가 준 값과 다르다 — 서명하지 않는다.
-  mismatch,
-
-  /// 서명에 필요한 값(최신 상태·학기 코드·등록자 주소·서명 도메인)을 받지 못했다.
-  notReady,
-
-  /// 서명 직전에 다시 읽었더니 이미 처리됐거나 등록 내용이 화면과 달라졌다 (보드 ②).
-  changed,
-
-  /// 키가 없거나 본인 확인을 취소·실패했다.
-  signing,
-
-  /// 401 — 로그인이 끝났다. 세션은 이미 비웠다.
-  unauthorized,
-
-  /// 403 — 역할이 아니거나 본인 등록 건이다.
-  forbidden,
-
-  /// 404 — 그런 내역이 없다.
-  notFound,
-
-  /// 409 — 다른 임원의 확정·반려가 먼저 진행 중이다.
-  conflict,
-
-  /// 400·422 — 서버나 체인이 거부했다. 항목은 그대로다.
-  refused,
-
-  /// 보냈지만 결과를 모른다 (503·연결 끊김·시간 초과). 다시 보내기 전에 목록부터 새로 읽는다.
-  unknownOutcome,
-}
-
-class EntryDecisionException implements Exception {
-  final EntryDecisionFailure failure;
-  final String message;
-  const EntryDecisionException(this.failure, this.message);
-
-  @override
-  String toString() => 'EntryDecisionException(${failure.name}): $message';
-}
+export 'signed_post.dart' show EntryDecisionException, EntryDecisionFailure;
 
 /// 감사·회장의 승인·반려 — 기기 키로 EIP-712 `ConfirmApproval`·`RejectDecision` 에 서명해
 /// `POST /entries/{id}/confirm`·`/reject` 로 보낸다. 체인 제출은 서버 릴레이어가 한다 (`relay_confirm`·`relay_reject`).
@@ -139,7 +95,7 @@ class EntryDecisionService {
     if (warned && canon!.isEmpty) {
       throw const EntryDecisionException(EntryDecisionFailure.invalidReason, '경고 무시 사유를 입력해 주세요.');
     }
-    final ready = await _prepare(entry);
+    final ready = await _prepare(entry, forConfirm: true);
     final message = confirmMessage(
       entry: entry,
       registrant: ready.registrant,
@@ -174,7 +130,9 @@ class EntryDecisionService {
 
   /// 서명 직전까지의 공통 준비 — 화면 값 검산, 학기 코드, 최신 상태 재조회, 등록자 주소, 서명 도메인, 시한.
   /// 여기서 막히면 본인 확인을 묻지 않는다.
-  Future<({String registrant, Eip712Domain domain, int deadline})> _prepare(EntryModel entry) async {
+  ///
+  /// [forConfirm] 이면 수정 요청이 걸린 건도 여기서 멈춘다 — 반려는 수정 요청 중에도 할 수 있다.
+  Future<({String registrant, Eip712Domain domain, int deadline})> _prepare(EntryModel entry, {bool forConfirm = false}) async {
     _checkShownValues(entry);
     if (entry.termCode == null) {
       throw const EntryDecisionException(
@@ -182,9 +140,11 @@ class EntryDecisionService {
         '학기 코드를 받지 못해 서명할 수 없어요. 목록을 새로 고쳐 주세요.',
       );
     }
-    await _checkStillSame(entry);
-    final registrant = await _registrantOf(entry.createdBy);
-    final domain = await _ledgerDomain();
+    final fresh = await _checkStillSame(entry, forConfirm: forConfirm);
+    // 서버가 등록자 주소를 주면(#65, 체인에서 읽은 값) 그대로 쓴다. null 이면(옛 서버·체인 조회 실패) 지갑 매핑을
+    // 뒤집어 찾되, 주소가 정확히 하나가 아니면(키를 교체한 사람) 서명하지 않는다
+    final registrant = fresh.registrant ?? await _registrantOf(entry.createdBy);
+    final domain = await ledgerDomainForSigning();
     final deadline = _now().millisecondsSinceEpoch ~/ 1000 + signatureTtl.inSeconds;
     return (registrant: registrant, domain: domain, deadline: deadline);
   }
@@ -226,7 +186,7 @@ class EntryDecisionService {
   ///
   /// 목록은 15초마다 읽으니 그 사이 다른 임원이 먼저 확정·반려했거나 정정·수정 요청으로 값이 바뀌었을 수 있다.
   /// 그대로 서명하면 서버가 400·409 로 돌려보내는데, 그때는 이미 지문을 댄 뒤다 — 묻기 전에 멈춘다.
-  Future<void> _checkStillSame(EntryModel shown) async {
+  Future<EntryModel> _checkStillSame(EntryModel shown, {bool forConfirm = false}) async {
     const unreadable = EntryDecisionException(
       EntryDecisionFailure.notReady,
       '이 건의 최신 상태를 확인하지 못해 서명하지 않았어요. 잠시 후 다시 시도해 주세요.',
@@ -258,12 +218,20 @@ class EntryDecisionService {
         '이 건은 이미 「${fresh.status.label}」 상태예요. 목록을 새로 고쳐 확인해 주세요.',
       );
     }
+    // 목록을 본 뒤 총무가 수정을 요청했을 수 있다 — 서버는 그 건의 확정을 막으니, 서명하기 전에 이유와 함께 멈춘다.
+    if (forConfirm && fresh.revisionRequestedAt != null) {
+      throw const EntryDecisionException(
+        EntryDecisionFailure.changed,
+        '총무가 이 건에 수정을 요청해서 승인할 수 없어요. 반려만 할 수 있어요. 목록을 새로 고쳐 확인해 주세요.',
+      );
+    }
     if (!_sameSignedValues(shown, fresh)) {
       throw const EntryDecisionException(
         EntryDecisionFailure.changed,
         '이 건의 등록 내용이 화면과 달라졌어요. 목록을 새로 고쳐 다시 확인한 뒤 서명해 주세요.',
       );
     }
+    return fresh;
   }
 
   /// 서명(`entryCommit`·`meta_hash`·`hadWarning`)에 들어가거나 화면이 보여 준 값이 같은가.
@@ -312,79 +280,17 @@ class EntryDecisionService {
     return addresses.single;
   }
 
-  static Future<Eip712Domain> _ledgerDomain() async {
-    try {
-      return await ChainDomainService.ledger();
-    } on ChainDomainException catch (e) {
-      throw EntryDecisionException(EntryDecisionFailure.notReady, e.message);
-    }
-  }
+  Future<String> _sign(Eip712Domain domain, Eip712Message message, String reason) =>
+      signOrThrow(_signer, domain, message, reason);
 
-  Future<String> _sign(Eip712Domain domain, Eip712Message message, String reason) async {
-    try {
-      return await _signer.sign(domain, message, reason: reason);
-    } on SigningException catch (e) {
-      throw EntryDecisionException(EntryDecisionFailure.signing, e.message);
-    }
-  }
-
-  /// 서명을 보낸다. 상태 코드로만 나누고, 400·403 은 서버 설명을 그대로 붙여 보여 준다.
   static Future<void> _post(String url, Map<String, Object> body, {required String what}) async {
-    final http.Response res;
-    // 보내기 직전의 토큰을 잡아 둔다 — 늦게 온 401 이 그 사이 다시 로그인해 만든 새 세션을 지우지 않게
-    final auth = AuthService().authSnapshot;
-    try {
-      res = await client
-          .post(
-            Uri.parse(url),
-            headers: {...auth.headers, 'Content-Type': 'application/json'},
-            body: jsonEncode(body),
-          )
-          .timeout(postTimeout);
-    } catch (_) {
-      throw EntryDecisionException(
-        EntryDecisionFailure.unknownOutcome,
-        '$what 결과를 확인하지 못했어요. 목록을 새로 고쳐 처리됐는지 확인해 주세요.',
-      );
-    }
-
-    final detail = _detail(res);
-    switch (res.statusCode) {
-      case 200:
-      case 201:
-        return;
-      case 401:
-        await AuthService().reportUnauthorized(token: auth.token);
-        throw const EntryDecisionException(EntryDecisionFailure.unauthorized, '로그인이 끝났어요. 다시 로그인해 주세요.');
-      case 403:
-        throw EntryDecisionException(EntryDecisionFailure.forbidden, detail ?? '이 작업을 할 권한이 없어요.');
-      case 404:
-        throw const EntryDecisionException(EntryDecisionFailure.notFound, '이 내역을 찾지 못했어요. 목록을 새로 고쳐 주세요.');
-      case 409:
-        throw const EntryDecisionException(
-          EntryDecisionFailure.conflict,
-          '다른 임원이 이 건을 먼저 처리하고 있어요. 목록을 새로 고쳐 결과를 확인해 주세요.',
-        );
-      case 400:
-      case 422:
-        throw EntryDecisionException(
-          EntryDecisionFailure.refused,
-          detail == null ? '$what 요청이 거부되었어요.' : '$what 요청이 거부되었어요: $detail',
-        );
-      default:
-        throw EntryDecisionException(
-          EntryDecisionFailure.unknownOutcome,
-          '$what 결과를 확인하지 못했어요 (서버 ${res.statusCode}). 목록을 새로 고쳐 처리됐는지 확인해 주세요.',
-        );
-    }
-  }
-
-  /// FastAPI 오류 응답의 `detail` (문자열일 때만).
-  static String? _detail(http.Response res) {
-    try {
-      final body = jsonDecode(utf8.decode(res.bodyBytes));
-      if (body is Map && body['detail'] is String) return body['detail'] as String;
-    } catch (_) {}
-    return null;
+    await postSigned(
+      client,
+      url,
+      body,
+      what: what,
+      timeout: postTimeout,
+      conflictMessage: '다른 임원이 이 건을 먼저 처리하고 있어요. 목록을 새로 고쳐 결과를 확인해 주세요.',
+    );
   }
 }

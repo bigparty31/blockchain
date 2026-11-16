@@ -80,10 +80,12 @@ enum CorrectionReason {
   final String label;
   const CorrectionReason(this.code, this.label);
 
+  /// 모르는 코드는 **고치지 않고 던진다** — 예전에는 `INPUT_ERROR` 로 떨어져 정정 사유를 잘못 기록했다
+  /// (규칙 5, [EntryStatus.fromCode] 와 같은 판단).
   static CorrectionReason fromCode(String code) {
     return CorrectionReason.values.firstWhere(
       (e) => e.code == code,
-      orElse: () => CorrectionReason.INPUT_ERROR,
+      orElse: () => throw ArgumentError.value(code, 'code', 'docs/enums.md 에 없는 correction_reason'),
     );
   }
 }
@@ -119,10 +121,22 @@ enum BlockReason {
   final String label;
   const BlockReason(this.code, this.label);
 
+  /// 모르는 코드는 **고치지 않고 던진다** — 예전에는 `BUDGET_EXCEEDED`(잔량 부족)로 떨어져, 실제 원인이
+  /// 다른데 총무가 증액을 요청하게 만들었다. 제출 결과를 읽는 쪽이 이 예외를 「결과를 알 수 없음」으로 받는다.
   static BlockReason fromCode(String code) {
     return BlockReason.values.firstWhere(
       (e) => e.code == code,
-      orElse: () => BlockReason.BUDGET_EXCEEDED,
+      orElse: () => throw ArgumentError.value(code, 'code', 'docs/enums.md 에 없는 block_reason'),
     );
+  }
+
+  /// 서버가 준 값으로 읽는다. **모르는 값은 null** — [fromCode] 처럼 「잔량 부족」으로 바꿔 보여 주지 않는다.
+  /// 사유를 잘못 알려 주면 총무가 엉뚱한 조치(증액 요청 등)를 한다.
+  static BlockReason? tryParse(Object? code) {
+    if (code is! String) return null;
+    for (final e in BlockReason.values) {
+      if (e.code == code) return e;
+    }
+    return null;
   }
 }
