@@ -38,6 +38,7 @@ void main() {
     String reason = '신학기 비품 구매로 인한 운영비 부족',
     int? signedVersion,
     int? deadline,
+    String? txIncrease,
   }) =>
       {
         'id': id,
@@ -55,7 +56,7 @@ void main() {
         'president_signed_at': null,
         'signature_deadline': deadline,
         'signed_version': signedVersion,
-        'tx_increase': null,
+        'tx_increase': txIncrease,
         'resolved_by': null,
         'resolved_at': null,
         'reject_reason': null,
@@ -237,6 +238,21 @@ void main() {
         expect(signed, isEmpty);
         expect(posts, isEmpty);
       }
+    });
+
+    test('앞선 승인이 증액 트랜잭션을 보냈으면(tx_increase) 시한이 지나도 결과 확인 재시도를 막지 않는다', () async {
+      // 503 → 결과 모름 → 그새 회장 시한 경과 → 다시 승인. 서버는 tx_increase 가 있으면 만료 롤백을 건너뛰고
+      // 앞선 트랜잭션 해시로 결과를 확인한다. 앱이 먼저 막으면 체인 증액이 성공했어도 APPROVED 로 못 만든다
+      final r = row(status: 'PRESIDENT_SIGNED', signedVersion: 2, deadline: nowSec - 60, txIncrease: '0xabc');
+      BudgetRevisionDecisionService.client = server(
+        single: r,
+        onPost: (_) => json(row(status: 'APPROVED', signedVersion: 2, deadline: nowSec - 60, txIncrease: '0xabc')),
+      );
+      final done = await service().auditorApprove(model(r));
+
+      expect(done.status, BudgetRevisionStatus.APPROVED);
+      expect(signed.single.values['deadline'], nowSec - 60, reason: '회장이 서명한 시한 그대로 — 새로 정하지 않는다');
+      expect(posts.single.url.path, '/budget-revisions/7/approve');
     });
 
     test('회장 서명 버전이 1 미만이면 서명하지 않는다 (API.md: signed_version >= 1)', () async {

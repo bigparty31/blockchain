@@ -162,7 +162,11 @@ class BudgetRevisionDecisionService {
       );
     }
     final nowSec = _now().millisecondsSinceEpoch ~/ 1000;
-    if (deadline - nowSec <= approveMargin.inSeconds) {
+    // 앞선 승인이 증액 트랜잭션을 이미 보냈으면(tx_increase) 시한이 지나도 막지 않는다 — 503 등으로 결과를 못 받은 뒤의
+    // 재시도는 새 증액이 아니라 그 트랜잭션의 결과 확인이다. 서버도 이때는 만료 롤백을 건너뛰고 앞선 해시로 확인한다
+    // (budget_revisions.py approve: `tx_increase` 가 있으면 마감 검사 생략, previous_tx_hash 로 relay). #80 Codex 2차
+    final recovering = latest.txIncrease != null;
+    if (!recovering && deadline - nowSec <= approveMargin.inSeconds) {
       throw const RevisionDecisionException(
         RevisionDecisionFailure.expired,
         '회장 서명 시한이 지나 승인할 수 없어요. 회장이 다시 서명해야 해요.',
