@@ -10,6 +10,7 @@ import 'screens/council/expense_create_screen.dart';
 import 'screens/council/hardware_test_screen.dart';
 import 'screens/council/income_create_screen.dart';
 import 'screens/council/inquiry_response_screen.dart';
+import 'screens/council/sbt_mint_screen.dart';
 import 'screens/council/settlement_screen.dart';
 import 'screens/president/budget_plan_screen.dart';
 import 'screens/student/entry_detail_screen.dart';
@@ -68,6 +69,9 @@ class AppRoutes {
   /// 카메라·생체인증 실기 테스트 (임원). 인자 없음
   static const councilHardwareTest = '/council/hardware-test';
 
+  /// 회원권(SBT) 일괄 발행 (A3). 인자 없음. 회장·감사만
+  static const councilSbtMint = '/council/sbt-mint';
+
   /// 학기 결산 — 요약·예산 집행·메타지표 (감사·회장). 인자 없음
   static const councilSettlement = '/council/settlement';
 
@@ -123,6 +127,8 @@ class AppRouter {
         return _guarded(settings, _approvers, (_) => const InquiryResponseScreen());
       case AppRoutes.councilHardwareTest:
         return _guarded(settings, _officers, (_) => const HardwareTestScreen());
+      case AppRoutes.councilSbtMint:
+        return _guarded(settings, _approvers, (_) => const SbtMintScreen());
       case AppRoutes.councilSettlement:
         return _guarded(settings, _approvers, (_) => const SettlementScreen());
 
