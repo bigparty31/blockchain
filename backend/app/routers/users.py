@@ -32,7 +32,7 @@ async def get_wallets(db: Session = Depends(get_db)):
             if addr:
                 db_wallets[uid] = addr
     except SQLAlchemyError:
-        pass
+        db.rollback()
 
     wallets: Dict[str, int] = {}
 

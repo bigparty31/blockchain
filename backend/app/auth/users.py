@@ -78,5 +78,6 @@ def resolve_wallet_address(db: Session, user_id: int, fallback: Optional[str]) -
     try:
         db_wallet = db.query(DBUser.wallet_address).filter(DBUser.id == user_id).scalar()
     except SQLAlchemyError:
+        db.rollback()
         return fallback
     return db_wallet if db_wallet is not None else fallback
