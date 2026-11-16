@@ -9,6 +9,7 @@ import 'package:http/testing.dart';
 import 'package:student_council_app/core/enums.dart';
 import 'package:student_council_app/screens/council/correction_approval_screen.dart';
 import 'package:student_council_app/screens/council/council_home_screen.dart';
+import 'package:student_council_app/screens/council/settlement_screen.dart';
 import 'package:student_council_app/screens/council/inquiry_response_screen.dart';
 import 'package:student_council_app/screens/president/budget_plan_screen.dart';
 import 'package:student_council_app/services/api_service.dart';
@@ -306,6 +307,17 @@ void main() {
       expect(find.byType(CorrectionApprovalScreen), findsOneWidget);
       expect(find.text('정정 건이 없어요'), findsOneWidget);
     });
+
+    for (final role in [UserRole.AUDITOR, UserRole.PRESIDENT]) {
+      testWidgets('${role.label} 홈의 결산은 결산 화면으로 이어진다', (tester) async {
+        await pump(tester, CouncilHomeScreen(role: role));
+        await tester.ensureVisible(find.text('결산'));
+        await tester.tap(find.text('결산'));
+        await tester.pumpAndSettle();
+        expect(find.byType(SettlementScreen), findsOneWidget);
+        expect(find.textContaining('결산 화면은 준비 중'), findsNothing);
+      });
+    }
 
     testWidgets('아직 만들지 않은 화면은 「준비 중」으로 안내한다', (tester) async {
       await pump(tester, const CouncilHomeScreen(role: UserRole.AUDITOR));
