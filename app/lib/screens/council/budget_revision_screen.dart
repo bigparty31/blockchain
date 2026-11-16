@@ -3,6 +3,7 @@ import '../../core/app_theme.dart';
 import '../../core/format.dart';
 import '../../models/budget_model.dart';
 import '../../services/api_service.dart';
+import '../../services/budget_revision_service.dart';
 import 'input_rules.dart';
 
 /// [이승호 담당: app/lib/screens/council/]
@@ -10,19 +11,31 @@ import 'input_rules.dart';
 ///
 /// - 증액만 할 수 있고(금액은 양수), 사유가 비어 있으면 제출할 수 없다.
 /// - 차단된 지출에서 넘어오면 [initialCategory] 항목이 골라져 있고, 그 지출이 근거로 붙는다.
-/// - 결재는 총무 요청 → 회장 요청 서명 → 감사 승인 서명 순이다. 이 화면은 첫 단계(요청)까지다.
+/// - 결재는 총무 요청 → 회장 요청 서명 → 감사 승인 서명 순이다. 이 화면은 첫 단계(요청, `POST /budget-revisions`)까지다.
 class BudgetRevisionScreen extends StatefulWidget {
   final String? initialCategory;
+
+  /// 처음 골라 둘 예산 번호. 차단된 지출이 지난 학기 예산에서 났다면 현재 학기 예산에 가려지지 않게 그 예산으로 고정한다.
+  final int? initialBudgetId;
 
   /// 근거가 되는 차단 지출 (차단 안내에서 넘어올 때만).
   final String? basisTitle;
   final int? basisAmount;
 
+  /// 근거 차단 지출의 번호 (`blocked_entry_id`). 있으면 그 지출의 예산으로 항목이 고정된다 — 서버는 다른 예산이면 400.
+  final int? blockedEntryId;
+
+  /// 요청 보내기. 주지 않으면 서버 ([BudgetRevisionService]).
+  final BudgetRevisionRequester? requester;
+
   const BudgetRevisionScreen({
     super.key,
     this.initialCategory,
+    this.initialBudgetId,
     this.basisTitle,
     this.basisAmount,
+    this.blockedEntryId,
+    this.requester,
   });
 
   @override
@@ -36,6 +49,7 @@ class _BudgetRevisionScreenState extends State<BudgetRevisionScreen> {
 
   List<BudgetModel> _budgets = const [];
   String? _category;
+  int? _currentTermId; // 현재 학기 — 같은 분류의 예산이 학기마다 있어서 이 학기의 것을 고른다
   bool _submitting = false;
 
   @override
@@ -63,10 +77,18 @@ class _BudgetRevisionScreenState extends State<BudgetRevisionScreen> {
       if (mounted) setState(() => _budgetsError = e.message);
       return;
     }
+    // 현재 학기를 못 읽어도 예산은 보인다 — 그때는 가장 최근 학기의 예산을 쓴다
+    int? termId;
+    try {
+      termId = await ApiService().fetchCurrentTermId();
+    } on ApiUnavailable {
+      termId = null;
+    }
     if (!mounted) return;
     setState(() {
       _budgetsError = null;
       _budgets = budgets;
+      _currentTermId = termId;
       _category ??= budgets.isEmpty ? null : budgets.first.category;
       // 차단 지출이 근거면 모자란 만큼을 기본 증액분으로 채워 둔다.
       final short = _shortfall;
@@ -76,12 +98,7 @@ class _BudgetRevisionScreenState extends State<BudgetRevisionScreen> {
     });
   }
 
-  BudgetModel? get _selected {
-    for (final b in _budgets) {
-      if (b.category == _category) return b;
-    }
-    return null;
-  }
+  BudgetModel? get _selected => _category == null ? null : pickBudget(_budgets, _category!, pinnedId: widget.initialBudgetId, currentTermId: _currentTermId);
 
   /// 근거 지출이 선택한 항목의 잔량을 넘는 금액.
   int? get _shortfall {
@@ -91,13 +108,40 @@ class _BudgetRevisionScreenState extends State<BudgetRevisionScreen> {
     return basis - b.remainingAmount;
   }
 
+  late final BudgetRevisionRequester _requester = widget.requester ?? BudgetRevisionService();
+
   Future<void> _submit() async {
     if (_submitting || !_formKey.currentState!.validate()) return;
+    final budget = _selected;
+    if (budget == null) return; // 항목 검사(validator)가 먼저 막는다
+    // 현재 학기를 모르면 어느 학기 예산인지 정할 수 없다 — 근거 지출이 이미 가진 예산은 그대로 쓴다
+    if (_currentTermId == null && budget.id != widget.initialBudgetId) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('현재 학기를 확인하지 못해 예산 항목을 정할 수 없어요. 잠시 후 다시 시도해 주세요.'), behavior: SnackBarBehavior.floating));
+      return;
+    }
     setState(() => _submitting = true);
     final amount = int.parse(_amountController.text);
     // trim() 을 쓰지 않는다 — BOM 처리가 서버(Python)와 달라 사유 해시가 갈린다 (input_rules.dart 머리말).
-    // 정본화는 서명용 해시를 만들 때 Hashing.canonicalText 가 한다.
+    // 정본화는 서버가 저장할 때(canonical_text) 한다. 회장·감사는 저장된 사유의 해시에 서명한다.
     final reason = _reasonController.text;
+    final int requestId;
+    try {
+      requestId = await _requester.requestIncrease(IncreaseRequestDraft(
+        termId: budget.termId,
+        category: budget.category,
+        budgetId: budget.id,
+        amount: amount,
+        reason: reason,
+        blockedEntryId: widget.blockedEntryId,
+      ));
+    } on EntryDecisionException catch (e) {
+      if (!mounted) return;
+      setState(() => _submitting = false);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message), behavior: SnackBarBehavior.floating));
+      return;
+    }
+    if (!mounted) return;
     await showDialog<void>(
       context: context,
       builder: (ctx) => Dialog(
@@ -125,15 +169,17 @@ class _BudgetRevisionScreenState extends State<BudgetRevisionScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
+                    _kv('요청 번호', '#$requestId'),
                     _kv('예산 항목', _category ?? '-'),
                     _kv('증액분', '+${Fmt.won(amount)}'),
                     _kv('사유', reason),
-                    if (widget.basisTitle != null) _kv('근거 지출', widget.basisTitle!),
+                    if (widget.basisTitle != null)
+                      _kv('근거 지출', widget.blockedEntryId == null ? widget.basisTitle! : '#${widget.blockedEntryId} ${widget.basisTitle}'),
                   ],
                 ),
               ),
               const SizedBox(height: 12),
-              const Text('총무 요청 ✓ → 회장 요청 서명 → 감사 승인 서명',
+              const Text('총무 요청 ✓ → 회장 요청 서명 → 감사 승인 서명\n승인되면 차단된 지출을 다시 등록할 수 있어요',
                 style: TextStyle(fontSize: 12, color: AppTheme.textSub, height: 1.4),
                 textAlign: TextAlign.center,
               ),
@@ -225,17 +271,18 @@ class _BudgetRevisionScreenState extends State<BudgetRevisionScreen> {
               const Text('예산 항목', style: TextStyle(fontWeight: FontWeight.bold, color: AppTheme.textMain)),
               const SizedBox(height: 8),
               DropdownButtonFormField<String>(
-                value: _budgets.any((b) => b.category == _category) ? _category : null,
+                value: _selected == null ? null : _category,
                 isExpanded: true,
                 decoration: _decoration('증액할 항목'),
                 items: [
-                  for (final b in _budgets)
+                  for (final b in budgetsPerCategory(_budgets, pinnedId: widget.initialBudgetId, currentTermId: _currentTermId))
                     DropdownMenuItem(
                       value: b.category,
                       child: Text('${b.category} · 잔량 ${Fmt.won(b.remainingAmount)}', overflow: TextOverflow.ellipsis),
                     ),
                 ],
-                onChanged: (v) => setState(() => _category = v),
+                // 차단 지출이 근거면 그 지출의 예산만 늘릴 수 있다 (서버: 다른 예산이면 400)
+                onChanged: widget.blockedEntryId != null ? null : (v) => setState(() => _category = v),
                 validator: (v) => v == null ? '예산 항목을 골라 주세요' : null,
               ),
               if (_budgetsError != null)

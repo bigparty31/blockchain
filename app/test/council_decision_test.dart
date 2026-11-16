@@ -353,4 +353,28 @@ void main() {
     expect(confirms, isEmpty);
     expect(entryReads, greaterThan(before));
   });
+
+  Future<void> approveAndFail(WidgetTester tester) async {
+    await pump(tester);
+    await waitUntil(tester, () => shows(find.text('신입생 환영회 명찰')));
+    await tester.tap(approveButton());
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('생체인증 승인'));
+    await waitUntil(tester, () => shows(find.text('승인에 실패했어요')));
+  }
+
+  testWidgets('확정 실패 코드가 예산 사유(InsufficientBudget)면 예산 안내와 「반려로 처리」를 띄운다 (#65)', (tester) async {
+    onConfirm = () => json({'detail': '온체인 승인이 거부되었습니다 (InsufficientBudget).', 'fail_reason': 'InsufficientBudget'}, 400);
+    await approveAndFail(tester);
+    expect(find.text('예산 잔량이 부족해요'), findsOneWidget);
+    expect(find.text('반려로 처리'), findsOneWidget);
+  });
+
+  testWidgets('확정 실패 코드가 예산 사유가 아니면 반려로 넘기지 않는다 — 다시 서명할 일이다 (#65)', (tester) async {
+    onConfirm = () => json({'detail': '온체인 승인이 거부되었습니다 (SignatureExpired).', 'fail_reason': 'SignatureExpired'}, 400);
+    await approveAndFail(tester);
+    expect(find.textContaining('SignatureExpired'), findsWidgets);
+    expect(find.text('반려로 처리'), findsNothing);
+  });
 }
+

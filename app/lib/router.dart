@@ -11,6 +11,8 @@ import 'screens/council/expense_create_screen.dart';
 import 'screens/council/hardware_test_screen.dart';
 import 'screens/council/income_create_screen.dart';
 import 'screens/council/inquiry_response_screen.dart';
+import 'screens/council/sbt_mint_screen.dart';
+import 'screens/council/settlement_screen.dart';
 import 'screens/president/budget_plan_screen.dart';
 import 'screens/student/entry_detail_screen.dart';
 import 'screens/student/entry_list_screen.dart';
@@ -71,6 +73,12 @@ class AppRoutes {
   /// 예산 증액 승인 (회장: 요청 서명, 감사: 승인 서명). 인자 없음 — 단계는 로그인한 역할로 정한다
   static const councilBudgetRevisions = '/council/budget-revisions';
 
+  /// 회원권(SBT) 일괄 발행 (A3). 인자 없음. 회장·감사만
+  static const councilSbtMint = '/council/sbt-mint';
+
+  /// 학기 결산 — 요약·예산 집행·메타지표 (감사·회장). 인자 없음
+  static const councilSettlement = '/council/settlement';
+
   // ── 회장 (screens/president/) ───────────────────────────────
   /// 예산 편성 (임원). 인자: [UserRole] — 로그인한 역할과 같아야 한다.
   /// 회장이 아니면 화면이 안내만 보여준다.
@@ -128,6 +136,10 @@ class AppRouter {
         // 가드가 확인한 그 순간의 역할을 넘긴다 (빌더가 나중에 돌 때 세션을 다시 읽지 않는다)
         final role = _sessionRole;
         return _guarded(settings, _approvers, (_) => BudgetRevisionApprovalScreen(role: role!));
+      case AppRoutes.councilSbtMint:
+        return _guarded(settings, _approvers, (_) => const SbtMintScreen());
+      case AppRoutes.councilSettlement:
+        return _guarded(settings, _approvers, (_) => const SettlementScreen());
 
       // 회장
       case AppRoutes.presidentBudgetPlan:

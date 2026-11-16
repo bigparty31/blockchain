@@ -3,9 +3,11 @@ import 'package:http/http.dart' as http;
 import '../core/api_config.dart';
 import '../models/balance_model.dart';
 import '../models/budget_model.dart';
+import '../models/draft_entry.dart';
 import '../models/entry_model.dart';
 import '../core/dev_flags.dart';
 import '../core/enums.dart';
+import '../core/format.dart';
 import 'auth_service.dart';
 
 /// 서버에서 읽지 못했다 (연결 실패·200 이 아닌 응답·형식 오류). [what] 은 화면에 쓰는 대상 이름.
@@ -128,6 +130,48 @@ class ApiService {
     ];
   }
 
+  /// GET /budget-revisions?status_filter=PENDING — 회장 서명을 기다리는 예산 증액 요청 건수 (학생회 임원 전용).
+  ///
+  /// **시연용 더미가 없다.** 못 읽거나 모르면 null 이다 — 0 건으로 내리지도, 있는 것처럼 꾸미지도 않는다.
+  /// 401 이면 [_get] 이 이미 로그인 화면으로 보냈다. 한 건이 이상해도 건수 전체를 잃지 않게 목록 길이만 센다.
+  Future<int?> fetchRevisionSignWaitingCount() async {
+    try {
+      final response = await _get('${ApiConfig.baseUrl}/budget-revisions?status_filter=PENDING', '증액 요청 건수');
+      if (response.statusCode != 200) return null;
+      final data = jsonDecode(utf8.decode(response.bodyBytes));
+      return data is List ? data.length : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// GET /entries/drafts — 내가 저장해 둔 초안 (총무만, 서버 #76).
+  ///
+  /// **못 읽으면 [ApiUnavailable] 이다. 더미로 메우지 않는다** — 없는 초안을 보여 주면 이어서 제출할 수 없는 건을
+  /// 누르게 된다. 읽을 수 없는 항목(status 가 있거나 모양이 다른 것)은 그 한 건만 건너뛴다.
+  Future<List<DraftEntry>> fetchDrafts() async {
+    final response = await _get('${ApiConfig.entries}/drafts', '초안 목록').catchError((Object e) {
+      if (e is ApiUnavailable) throw e;
+      throw const ApiUnavailable('초안 목록');
+    });
+    if (response.statusCode != 200) throw const ApiUnavailable('초안 목록');
+    final Object? data;
+    try {
+      data = jsonDecode(utf8.decode(response.bodyBytes));
+    } catch (_) {
+      throw const ApiUnavailable('초안 목록');
+    }
+    if (data is! List) throw const ApiUnavailable('초안 목록');
+    final out = <DraftEntry>[];
+    for (final item in data) {
+      if (item is! Map<String, dynamic>) continue;
+      try {
+        out.add(DraftEntry.fromJson(item));
+      } catch (_) {}
+    }
+    return out;
+  }
+
   /// 3. GET /entries (수입·지출 내역 목록 조회)
   Future<List<EntryModel>> fetchEntries() async {
     try {
@@ -192,6 +236,32 @@ class ApiService {
         createdBy: 2,
       ),
     ];
+  }
+
+  /// 지금 학기의 DB id (`GET /terms`) — 시작·종료 사이인 학기, 없으면 가장 최근(id 가 큰) 학기.
+  /// 수입 등록이 쓴다 (지출은 고른 예산의 학기를 쓴다 — 다르면 체인이 `TermMismatch`).
+  Future<int> fetchCurrentTermId({DateTime? now}) async {
+    try {
+      final response = await _get('${ApiConfig.baseUrl}/terms', '학기');
+      if (response.statusCode == 200) {
+        final terms = (jsonDecode(utf8.decode(response.bodyBytes)) as List).cast<Map<String, dynamic>>();
+        if (terms.isNotEmpty) {
+          final t = now ?? DateTime.now();
+          for (final term in terms) {
+            final start = Fmt.parseServerTime(term['started_at'] as String);
+            final end = Fmt.parseServerTime(term['ended_at'] as String);
+            if (!t.isBefore(start) && !t.isAfter(end)) return term['id'] as int;
+          }
+          return terms.map((e) => e['id'] as int).reduce((a, b) => a > b ? a : b);
+        }
+      }
+    } on ApiUnavailable {
+      rethrow;
+    } catch (_) {}
+
+    // 서버 미구동 시 fallback — 시연용 예산·내역과 같은 학기 1. 개발 빌드에서만
+    _demoOrThrow('학기');
+    return 1;
   }
 
   /// 4. 승인 대기(`PENDING`) 건수. 총무·감사 홈의 배지가 쓴다.
