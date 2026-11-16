@@ -21,6 +21,7 @@ import 'signing_key_screen.dart';
 import 'my_entries_screen.dart';
 import 'inquiry_response_screen.dart';
 import 'hardware_test_screen.dart';
+import 'settlement_screen.dart';
 import '../president/budget_plan_screen.dart';
 
 /// [이승호 담당: app/lib/screens/council/]
@@ -441,10 +442,11 @@ class _CouncilHomeScreenState extends State<CouncilHomeScreen> with WidgetsBindi
             ),
           _MenuData(
             title: '결산',
-            subtitle: '요약 카드·메타지표·PDF 내보내기',
+            subtitle: '요약 카드·예산 집행·메타지표',
             icon: Icons.assessment_rounded,
-            badge: '준비 중',
+            badge: '확정 내역 기준',
             gradient: LinearGradient(colors: [Color(0xFFF59E0B), Color(0xFFFB923C)]),
+            target: SettlementScreen(),
           ),
           _MenuData(
             title: 'QR 스캐너',
