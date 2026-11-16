@@ -112,6 +112,11 @@ class _BankReconcileScreenState extends State<BankReconcileScreen> {
     } on BankActionFailed catch (e) {
       _toast(e.message);
       return;
+    } catch (_) {
+      // 선택기 자체의 실패 — 저장소 권한 거부·파일 읽기 실패면 FilePicker 가 PlatformException 을 던진다.
+      // 잡지 않으면 화면에는 아무 일도 없었던 것처럼 보인다 (#88 재리뷰)
+      _toast('고른 파일을 읽지 못했어요. 다시 골라 주세요.');
+      return;
     }
     if (bytes == null || !mounted) return;
     final file = bytes;

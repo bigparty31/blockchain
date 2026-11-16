@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -306,6 +307,16 @@ void main() {
       expect(posted!['file_hash'], Hashing.fileHash(utf8.encode('csv')));
       expect(asked.last, 'GET /bank/snapshots/3');
       expect(find.byKey(const Key('bank_clean')), findsOneWidget);
+    });
+
+    testWidgets('파일 선택기가 실패하면(권한 거부 등) 안내하고 올리지 않는다', (tester) async {
+      BankReconcileService.client = server();
+      await open(tester, picker: () async => throw PlatformException(code: 'read_external_storage_denied'));
+      await tester.tap(find.byKey(const Key('bank_upload')));
+      await tester.pumpAndSettle();
+      expect(find.text('고른 파일을 읽지 못했어요. 다시 골라 주세요.'), findsOneWidget);
+      expect(asked.where((a) => a.startsWith('POST')), isEmpty);
+      expect(find.byKey(const Key('bank_upload')), findsOneWidget, reason: '다시 고를 수 있다');
     });
 
     testWidgets('같은 파일을 다시 올리면(409) 재대조를 안내한다', (tester) async {
