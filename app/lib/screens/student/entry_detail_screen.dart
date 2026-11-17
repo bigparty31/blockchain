@@ -2,11 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../../core/api_config.dart';
 import '../../core/app_theme.dart';
+import '../../core/elapsed_days.dart';
 import '../../core/entry_merge.dart';
 import '../../core/entry_verifier.dart';
 import '../../core/enums.dart';
 import '../../core/format.dart';
-import '../../core/hashing.dart';
 import '../../models/entry_model.dart';
 import '../../models/objection_model.dart';
 import '../../services/auth_service.dart';
@@ -1647,23 +1647,10 @@ class _ObjectionTile extends StatelessWidget {
 
 /// 이의를 제기한 날로부터 **한국 날짜 기준** 며칠 지났는지 (스토리보드 5 ⑤).
 ///
-/// 24시간 단위가 아니라 **날짜가 바뀐 횟수**를 센다. 어제 23시에 제기한 건이 오늘 아침에도
-/// 「0일 경과」로 보이면 미답변 압력이 하루 늦게 걸린다 — 답하지 않은 사실이 쌓이는 것이
-/// 이 화면의 목적이다 (PRD §4.5).
-///
-/// 시간대는 KST 로 고정한다. 기기 시간대를 쓰면 UTC 인 에뮬레이터·해외 로밍에서 날짜가
-/// 하루 밀린다 ([Fmt.date] 와 같은 판단).
-int objectionElapsedDays(int raisedAt, {DateTime? now}) {
-  final raised = Hashing.kstDateOf(raisedAt);
-  final today = Hashing.kstDateOf(
-    (now ?? DateTime.now()).millisecondsSinceEpoch ~/ 1000,
-  );
-  final days = DateTime.utc(today.year, today.month, today.day)
-      .difference(DateTime.utc(raised.year, raised.month, raised.day))
-      .inDays;
-  // 기기 시계가 뒤로 가 있으면 음수가 나온다. 「-2일 경과」를 보여 주지 않는다
-  return days < 0 ? 0 : days;
-}
+/// 세는 규칙은 [kstElapsedDays] 에 있다 — 임원 화면의 「미답변 N일 경과」와 **같은 구현**이다.
+/// 두 화면이 같은 이의에 다른 일수를 보여 주면 답변 독촉이 누구 기준인지 알 수 없다.
+int objectionElapsedDays(int raisedAt, {DateTime? now}) =>
+    kstElapsedDays(raisedAt, now: now);
 
 /// 이의를 제기할 수 있는 상태인지 (스토리보드 5 「화면 전체 규칙」).
 ///

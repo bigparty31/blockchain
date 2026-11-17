@@ -117,7 +117,11 @@ async def get_or_set(key: str, produce: Callable[[], Awaitable[Any]], ttl: Optio
 
 
 async def close() -> None:
-    """프로세스를 내릴 때 연결을 닫는다 (`main_student.py` 의 lifespan)."""
+    """프로세스를 내릴 때 연결을 닫는다.
+
+    아직 부르는 곳이 없다 — 이 모듈을 라우터에 연결할 때 `main_student.py` 의 lifespan 에서
+    함께 부른다.
+    """
     global _client
     if _client is not None:
         try:

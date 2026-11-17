@@ -81,6 +81,6 @@ CACHE_ENABLED=0 .venv/bin/uvicorn app.main_student:app --port 8102 &
 - `cache.py` 를 조회 라우터에 **아직 연결하지 않았다.** `/balance` · `/entries` · `/budgets` 가
   대상이고, 이 라우터들은 공용 파일이라 소유자(김경윤)와 맞춘 뒤 붙인다. 붙이기 전까지
   `CACHE_ENABLED=1` 로 올려도 캐시는 동작하지 않는다.
-- `redis` 패키지가 `backend/requirements.txt` 에 없다. 캐시를 실제로 켜기 전에 추가해야 한다
-  (없으면 `cache.py` 가 경고만 남기고 캐시 없이 돈다).
+  `redis` 패키지는 `backend/requirements.txt` 에 넣어 두었다 — 라우터에 붙이는 날 의존성까지
+  같이 챙기지 않아도 되게 미리 넣은 것이고, 지금은 부르는 곳이 없어 아무 동작도 하지 않는다.
 - 읽기 전용 DB 계정 (`docs/SERVER_ENV.md` §5). 지금은 compose 가 `council` 계정을 그대로 쓴다.
