@@ -19,6 +19,9 @@ class DraftEntry {
   final int? correctsEntryId;
   final CorrectionReason? correctionReason;
 
+  /// 저장할 때 실은 OCR 판독 결과. 이어서 제출할 때 같은 영수증·금액이면 다시 판독하지 않는다.
+  final OcrReading? ocr;
+
   const DraftEntry({
     required this.id,
     required this.termId,
@@ -32,6 +35,7 @@ class DraftEntry {
     this.receiptPath,
     this.correctsEntryId,
     this.correctionReason,
+    this.ocr,
   });
 
   /// status 가 있으면 초안이 아니다 — [FormatException].
@@ -53,6 +57,7 @@ class DraftEntry {
       correctsEntryId: json['corrects_entry_id'] as int?,
       correctionReason:
           json['correction_reason'] == null ? null : CorrectionReason.fromCode(json['correction_reason'] as String),
+      ocr: json['ocr_status'] == null ? null : OcrReading.fromJson(json),
     );
   }
 
@@ -70,5 +75,6 @@ class DraftEntry {
         receiptPath: receiptPath,
         correctsEntryId: correctsEntryId,
         correctionReason: correctionReason,
+        ocr: ocr,
       );
 }

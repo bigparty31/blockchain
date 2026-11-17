@@ -43,6 +43,10 @@ class EntryDraft {
   /// 정정 사유 유형. 서명·해시에는 들어가지 않는다 (PRD §4.4).
   final CorrectionReason? correctionReason;
 
+  /// 영수증 OCR 판독 결과 (`POST /ocr/receipt`). 초안 등록에 그대로 싣는다.
+  /// **해시·서명에는 넣지 않는다** — 엔진이 바뀌어 판독값이 달라져도 검증 배지가 깨지지 않게 (PRD §6).
+  final OcrReading? ocr;
+
   const EntryDraft({
     required this.kind,
     required this.termId,
@@ -55,12 +59,18 @@ class EntryDraft {
     this.receiptPath,
     this.correctsEntryId,
     this.correctionReason,
+    this.ocr,
   });
 
   bool get isCorrection => correctsEntryId != null;
 
   /// 같은 초안에 서버에 올린 영수증 경로를 붙인 것 — 입력을 다시 읽지 않고 제출 시점의 값을 그대로 쓴다.
-  EntryDraft withReceiptPath(String? path) => EntryDraft(
+  EntryDraft withReceiptPath(String? path) => _copy(receiptPath: path, ocr: ocr);
+
+  /// 같은 초안에 OCR 판독 결과를 붙인 것.
+  EntryDraft withOcr(OcrReading? reading) => _copy(receiptPath: receiptPath, ocr: reading);
+
+  EntryDraft _copy({required String? receiptPath, required OcrReading? ocr}) => EntryDraft(
         kind: kind,
         termId: termId,
         amount: amount,
@@ -69,9 +79,10 @@ class EntryDraft {
         budgetId: budgetId,
         occurredAt: occurredAt,
         receiptHash: receiptHash,
-        receiptPath: path,
+        receiptPath: receiptPath,
         correctsEntryId: correctsEntryId,
         correctionReason: correctionReason,
+        ocr: ocr,
       );
 
   String get canonicalCounterparty => Hashing.canonical(counterparty);
@@ -99,6 +110,7 @@ class EntryDraft {
         if (receiptPath != null) 'receipt_path': receiptPath!,
         if (correctsEntryId != null) 'corrects_entry_id': correctsEntryId!,
         if (correctionReason != null) 'correction_reason': correctionReason!.code,
+        ...?ocr?.toCreateJson(),
       };
 
   @override
@@ -114,11 +126,83 @@ class EntryDraft {
       other.receiptHash == receiptHash &&
       other.receiptPath == receiptPath &&
       other.correctsEntryId == correctsEntryId &&
-      other.correctionReason == correctionReason;
+      other.correctionReason == correctionReason &&
+      other.ocr == ocr;
 
   @override
   int get hashCode => Object.hash(kind, termId, amount, canonicalCounterparty, canonicalPurpose, budgetId, occurredAt,
-      receiptHash, receiptPath, correctsEntryId, correctionReason);
+      receiptHash, receiptPath, correctsEntryId, correctionReason, ocr);
+}
+
+/// 영수증 OCR 판독 결과 — `POST /ocr/receipt` 응답 (PRD §6). **차단이 아니라 경고다.**
+///
+/// 판정은 서버가 한다(입력 금액과 판독 금액 비교, 같은 승인번호·결제일시·금액 중복 조회). 앱은 받은 값을
+/// 초안에 그대로 싣고, 불일치·중복이면 제출 전에 한 번 알린다.
+class OcrReading {
+  final OcrStatus status;
+
+  /// 판독한 금액. 못 읽었으면 null.
+  final int? amount;
+  final String? approvalNo;
+
+  /// 영수증에 찍힌 결제 일시 (Unix 초).
+  final int? paidAt;
+
+  /// 중복이면 이미 올라간 내역 id.
+  final int? duplicateOf;
+
+  const OcrReading({required this.status, this.amount, this.approvalNo, this.paidAt, this.duplicateOf});
+
+  /// `ocr_status` 가 없으면 판독 결과가 아니다 — [FormatException].
+  factory OcrReading.fromJson(Map<String, dynamic> json) {
+    final status = json['ocr_status'];
+    if (status is! String) throw const FormatException('ocr_status 가 없다');
+    return OcrReading(
+      status: OcrStatus.fromCode(status),
+      amount: json['ocr_amount'] as int?,
+      approvalNo: json['ocr_approval_no'] as String?,
+      paidAt: json['ocr_paid_at'] as int?,
+      duplicateOf: json['duplicate_of'] as int?,
+    );
+  }
+
+  /// 그대로 제출하면 승인할 때 사유를 적어야 하는 경고 — 제출 전에 한 번 묻는다.
+  bool get needsConfirm => status == OcrStatus.MISMATCH || status == OcrStatus.DUPLICATE;
+
+  /// `POST /entries` 에 싣는 값 (EntryCreate 의 `ocr_*`). 중복 대상 id 는 서버가 다시 찾으므로 보내지 않는다.
+  Map<String, Object> toCreateJson() => {
+        'ocr_status': status.code,
+        if (amount != null) 'ocr_amount': amount!,
+        if (approvalNo != null) 'ocr_approval_no': approvalNo!,
+        if (paidAt != null) 'ocr_paid_at': paidAt!,
+      };
+
+  @override
+  bool operator ==(Object other) =>
+      other is OcrReading &&
+      other.status == status &&
+      other.amount == amount &&
+      other.approvalNo == approvalNo &&
+      other.paidAt == paidAt &&
+      other.duplicateOf == duplicateOf;
+
+  @override
+  int get hashCode => Object.hash(status, amount, approvalNo, paidAt, duplicateOf);
+}
+
+/// OCR 서버가 받는 이미지 형식 (`jpg`·`png`). PDF·WebP 영수증은 판독하지 않는다 — null.
+String? ocrImageFormat(List<int> bytes) {
+  bool starts(List<int> sig) {
+    if (bytes.length < sig.length) return false;
+    for (var i = 0; i < sig.length; i++) {
+      if (bytes[i] != sig[i]) return false;
+    }
+    return true;
+  }
+
+  if (starts(const [0xFF, 0xD8, 0xFF])) return 'jpg';
+  if (starts(const [0x89, 0x50, 0x4E, 0x47])) return 'png';
+  return null;
 }
 
 /// 제출 결과 — 체인에 기록된 상태. 예산 문제는 revert 가 아니라 `BLOCKED` 로 **기록된다** (IAccountingLedger).
@@ -142,6 +226,10 @@ abstract class EntryRegistrar {
 
   /// 서버에 있는 영수증 원본 (`GET /receipts/{파일}`). 못 받으면 null — 해시 대조는 부르는 쪽이 한다.
   Future<List<int>?> downloadReceipt(String receiptPath);
+
+  /// 영수증 OCR 판독·판정 (`POST /ocr/receipt`, 저장하지 않음). **등록을 막지 않는다** — 판독하지 못하면
+  /// (형식이 PDF·WebP, 서버 오류, 시간 초과) null 이고 OCR 값 없이 등록한다. 로그인이 끝났을 때만 던진다.
+  Future<OcrReading?> readReceipt(List<int> bytes, {required int amount});
 
   /// 초안 저장 — 발급된 id.
   Future<int> saveDraft(EntryDraft draft);
@@ -222,6 +310,30 @@ class EntryRegistrationService implements EntryRegistrar {
       return res.statusCode == 200 ? res.bodyBytes : null;
     } catch (_) {
       return null;
+    }
+  }
+
+  /// 서버는 CLOVA 를 최대 15초 기다린다. 그보다 조금 길게 둔다.
+  static const ocrTimeout = Duration(seconds: 25);
+
+  @override
+  Future<OcrReading?> readReceipt(List<int> bytes, {required int amount}) async {
+    final format = ocrImageFormat(bytes);
+    if (format == null) return null;
+    try {
+      final body = await postSigned(
+        client,
+        '${ApiConfig.baseUrl}/ocr/receipt',
+        {'image_base64': base64Encode(bytes), 'format': format, 'amount': amount},
+        what: '영수증 판독',
+        timeout: ocrTimeout,
+      );
+      return OcrReading.fromJson(body);
+    } on EntryDecisionException catch (e) {
+      if (e.failure == EntryDecisionFailure.unauthorized) rethrow;
+      return null;
+    } catch (_) {
+      return null; // 응답 모양이 다르면(옛 서버 등) 판독 없이 등록한다
     }
   }
 
