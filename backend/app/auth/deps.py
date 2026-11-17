@@ -3,9 +3,11 @@ from typing import Awaitable, Callable, Optional
 import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy.orm import Session
 
 from app.auth.security import decode_access_token
-from app.auth.users import User, get_user_by_id
+from app.auth.users import User, get_user_by_id, resolve_wallet_address
+from app.database import get_db
 from app.schemas.auth import Role
 
 # auto_error 를 끄고 직접 401 을 낸다 (토큰 없음·형식 오류 모두 401 로 통일)
@@ -22,6 +24,7 @@ def _unauthorized(detail: str) -> HTTPException:
 
 async def get_current_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
+    db: Session = Depends(get_db),
 ) -> User:
     """Authorization: Bearer <token> 의 사용자. 토큰이 없거나 틀리면 401."""
     if credentials is None:
@@ -36,6 +39,9 @@ async def get_current_user(
     user = get_user_by_id(user_id)
     if user is None:
         raise _unauthorized("유효하지 않은 토큰입니다.")
+    wallet = resolve_wallet_address(db, user.id, user.wallet_address)
+    if wallet != user.wallet_address:
+        return user.model_copy(update={"wallet_address": wallet})
     return user
 
 

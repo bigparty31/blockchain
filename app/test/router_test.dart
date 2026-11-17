@@ -5,12 +5,16 @@ import 'package:student_council_app/core/enums.dart';
 import 'package:student_council_app/models/entry_model.dart';
 import 'package:student_council_app/router.dart';
 import 'package:student_council_app/screens/council/approval_list_screen.dart';
+import 'package:student_council_app/screens/council/budget_revision_approval_screen.dart';
 import 'package:student_council_app/screens/council/correction_screen.dart';
 import 'package:student_council_app/screens/council/council_home_screen.dart';
 import 'package:student_council_app/screens/council/expense_create_screen.dart';
 import 'package:student_council_app/screens/council/hardware_test_screen.dart';
 import 'package:student_council_app/screens/council/income_create_screen.dart';
 import 'package:student_council_app/screens/council/inquiry_response_screen.dart';
+import 'package:student_council_app/screens/council/sbt_mint_screen.dart';
+import 'package:student_council_app/screens/council/settlement_screen.dart';
+import 'package:student_council_app/screens/council/bank_reconcile_screen.dart';
 import 'package:student_council_app/screens/student/entry_detail_screen.dart';
 import 'package:student_council_app/screens/student/entry_list_screen.dart';
 import 'package:student_council_app/screens/student/my_sbt_screen.dart';
@@ -100,6 +104,10 @@ void main() {
       AppRoutes.councilApprovals: (ApprovalListScreen, {UserRole.AUDITOR, UserRole.PRESIDENT}),
       AppRoutes.councilInquiries: (InquiryResponseScreen, {UserRole.AUDITOR, UserRole.PRESIDENT}),
       AppRoutes.councilHardwareTest: (HardwareTestScreen, {UserRole.TREASURER, UserRole.AUDITOR, UserRole.PRESIDENT}),
+      AppRoutes.councilBudgetRevisions: (BudgetRevisionApprovalScreen, {UserRole.AUDITOR, UserRole.PRESIDENT}),
+      AppRoutes.councilSbtMint: (SbtMintScreen, {UserRole.AUDITOR, UserRole.PRESIDENT}),
+      AppRoutes.councilSettlement: (SettlementScreen, {UserRole.AUDITOR, UserRole.PRESIDENT}),
+      AppRoutes.councilBankReconcile: (BankReconcileScreen, {UserRole.TREASURER, UserRole.AUDITOR, UserRole.PRESIDENT}),
     };
 
     for (final e in cases.entries) {
@@ -120,6 +128,14 @@ void main() {
         }
       });
     }
+
+    testWidgets('계좌 대조 업로드 버튼은 총무로 로그인했을 때만', (tester) async {
+      for (final role in [UserRole.TREASURER, UserRole.AUDITOR, UserRole.PRESIDENT]) {
+        await signInAs(role);
+        final screen = (await buildOf(tester, AppRoutes.councilBankReconcile)) as BankReconcileScreen;
+        expect(screen.canUpload, role == UserRole.TREASURER, reason: role.code);
+      }
+    });
 
     testWidgets('홈은 로그인한 역할로 열린다 — 인자로 다른 역할을 주장할 수 없다', (tester) async {
       await signInAs(UserRole.AUDITOR);
@@ -172,6 +188,7 @@ void main() {
       AppRoutes.councilCorrections,
       AppRoutes.councilInquiries,
       AppRoutes.councilHardwareTest,
+      AppRoutes.councilSbtMint,
     ];
     expect(names.toSet().length, names.length);
   });

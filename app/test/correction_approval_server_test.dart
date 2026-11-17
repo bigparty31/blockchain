@@ -35,6 +35,7 @@ void main() {
     int? corrects,
     String? reason,
     String? ocrStatus,
+    int? revisionRequestedAt,
     String? receiptHash,
     String? receiptPath,
   }) =>
@@ -58,6 +59,7 @@ void main() {
         'created_by': createdBy,
         'corrects_entry_id': corrects,
         'correction_reason': reason,
+        'revision_requested_at': revisionRequestedAt,
       };
 
   EntryModel entry(int id,
@@ -259,6 +261,57 @@ void main() {
       expect(unknown.insufficient, isFalse);
     });
 
+    test('재분류 감액(−)은 증액(+)이 확정되기 전에는 확정할 수 없다 — 서버(#81)가 순서를 강제한다', () {
+      List<CorrectionItem> pair(String plusStatus) => correctionItemsFromEntries([
+            entry(1),
+            entry(2, amount: 35000, status: plusStatus, budgetId: 2, corrects: 1, reason: 'RECLASSIFY'),
+            entry(3, amount: -35000, status: 'PENDING', corrects: 1, reason: 'RECLASSIFY'),
+          ]);
+      CorrectionItem byId(List<CorrectionItem> l, int id) => l.firstWhere((c) => c.id == id);
+
+      final waiting = pair('PENDING');
+      expect(byId(waiting, 3).awaitsPlusFirst, isTrue);
+      expect(byId(waiting, 2).awaitsPlusFirst, isFalse, reason: '증액 쪽은 언제든 확정할 수 있다');
+
+      expect(byId(pair('CONFIRMED'), 3).awaitsPlusFirst, isFalse, reason: '증액이 확정되면 감액을 확정할 수 있다');
+      expect(byId(pair('REJECTED'), 3).awaitsPlusFirst, isTrue, reason: '증액이 반려됐으면 감액도 확정할 수 없다');
+    });
+
+    test('이미 재분류된 증액 건을 다시 재분류하면, 그 건을 대상으로 한 증액이 확정돼야 감액을 확정할 수 있다 (#98 리뷰)', () {
+      final items = correctionItemsFromEntries([
+        entry(1, amount: 100000, budgetId: 1),
+        entry(2, amount: 100000, budgetId: 2, corrects: 1, reason: 'RECLASSIFY'), // A→B 완료
+        entry(3, amount: -100000, budgetId: 1, corrects: 1, reason: 'RECLASSIFY'),
+        entry(4, amount: 100000, budgetId: 3, status: 'PENDING', corrects: 2, reason: 'RECLASSIFY'), // B→C 대기
+        entry(5, amount: -100000, budgetId: 2, status: 'PENDING', corrects: 2, reason: 'RECLASSIFY'),
+      ]);
+      expect(items.firstWhere((c) => c.id == 5).awaitsPlusFirst, isTrue,
+          reason: '과거 A→B 의 확정 증액(#2)은 B→C 의 증액이 아니다 — 서버는 #2 를 대상으로 한 확정 증액을 본다');
+    });
+
+    test('한 번 확정된 감액이 가져간 만큼은 다시 쓸 수 없다 — 대상별 가용 증액으로 판정한다 (#98 리뷰)', () {
+      List<CorrectionItem> run(int plus) => correctionItemsFromEntries([
+            entry(1, amount: 100000, budgetId: 1),
+            entry(2, amount: plus, budgetId: 2, corrects: 1, reason: 'RECLASSIFY'),
+            entry(3, amount: -60000, budgetId: 1, corrects: 1, reason: 'RECLASSIFY'), // 이미 확정된 감액
+            entry(4, amount: -40000, budgetId: 1, status: 'PENDING', corrects: 1, reason: 'RECLASSIFY'),
+          ]);
+      expect(run(60000).firstWhere((c) => c.id == 4).awaitsPlusFirst, isTrue, reason: '60,000 − 60,000 = 0 < 40,000');
+      expect(run(100000).firstWhere((c) => c.id == 4).awaitsPlusFirst, isFalse, reason: '100,000 − 60,000 = 40,000 ≥ 40,000');
+    });
+
+    test('재분류가 아닌 감액과 증액 짝을 찾지 못한 건은 미리 막지 않는다', () {
+      final items = correctionItemsFromEntries([
+        entry(1),
+        entry(2, amount: -5000, status: 'PENDING', corrects: 1, reason: 'INPUT_ERROR'),
+      ]);
+      expect(items.single.awaitsPlusFirst, isFalse);
+      final orphan = correctionItemsFromEntries([
+        entry(3, amount: -5000, status: 'PENDING', corrects: 99, reason: 'RECLASSIFY'),
+      ]);
+      expect(orphan.single.awaitsPlusFirst, isFalse, reason: '원본을 못 읽었으면 서버가 판정한다');
+    });
+
     test('잔량을 읽었고 증액분이 잔량을 넘으면 확정할 수 없다', () {
       final items = correctionItemsFromEntries(
         [entry(1), entry(2, amount: 1600000, status: 'PENDING', corrects: 1, reason: 'RECEIPT_RECHECK')],
@@ -424,6 +477,21 @@ void main() {
       expect(confirms, isEmpty);
     });
 
+    testWidgets('재분류 감액(−)은 증액(+)이 확정되기 전에 승인하면 서명을 받기 전에 막는다', (tester) async {
+      serverEntries = [
+        entryJson(1),
+        entryJson(2, amount: 35000, status: 'PENDING', budgetId: 2, corrects: 1, reason: 'RECLASSIFY', purpose: '금액 입력 오류 — 재분류 증액'),
+        entryJson(3, amount: -35000, status: 'PENDING', corrects: 1, reason: 'RECLASSIFY', purpose: '금액 입력 오류 — 재분류 감액'),
+      ];
+      await pump(tester);
+      expect(find.text('승인'), findsNWidgets(2));
+      await tester.tap(find.text('승인').last); // 대기 건은 등록 순 — 마지막이 감액(−)
+      await tester.pumpAndSettle();
+      expect(find.text('먼저 확정할 건이 있어요'), findsOneWidget);
+      expect(find.text('생체인증 승인'), findsNothing);
+      expect(confirms, isEmpty);
+    });
+
     testWidgets('체인이 예산 부족으로 거부하면 반려로 넘길 수 있다 — 항목은 대기 그대로', (tester) async {
       onConfirm = () => json({'detail': '온체인 승인이 거부되었습니다 (InsufficientBudget).', 'fail_reason': 'InsufficientBudget'}, 400);
       await pump(tester);
@@ -449,6 +517,29 @@ void main() {
       await waitUntil(tester, () => shows(find.text('승인에 실패했어요')));
       expect(find.text('반려로 처리'), findsNothing);
       expect(find.text('나중에'), findsOneWidget);
+    });
+
+    testWidgets('총무가 수정을 요청한 정정은 승인을 막고 반려만 남긴다 — 서명 단계로 가지 않는다', (tester) async {
+      serverEntries[1] = entryJson(2,
+          amount: -5000, status: 'PENDING', corrects: 1, reason: 'INPUT_ERROR', purpose: '금액 입력 오류', revisionRequestedAt: 1790700000);
+      await pump(tester);
+      expect(find.text('총무가 수정을 요청했어요 — 반려만 할 수 있어요'), findsOneWidget);
+      expect(find.byKey(const Key('correction_approve_blocked')), findsOneWidget);
+      expect(find.text('승인'), findsNothing);
+      expect(find.widgetWithText(OutlinedButton, '반려'), findsOneWidget);
+      expect(confirms, isEmpty);
+    });
+
+    testWidgets('수정 요청이 걸린 정정도 반려는 서명해 보낼 수 있다', (tester) async {
+      serverEntries[1] = entryJson(2,
+          amount: -5000, status: 'PENDING', corrects: 1, reason: 'INPUT_ERROR', purpose: '금액 입력 오류', revisionRequestedAt: 1790700000);
+      await pump(tester);
+      await tester.tap(find.widgetWithText(OutlinedButton, '반려'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextFormField), '다시 올려 주세요');
+      await tester.tap(find.text('반려하기'));
+      await waitUntil(tester, () => shows(find.textContaining('정정이 반려되었습니다.')));
+      expect(rejects, hasLength(1));
     });
 
     // 정정 승인에도 영수증 해시 대조가 있어야 한다 — 일반 승인에서만 막으면 파일이 바뀐 정정이 이쪽으로 서명·전송된다 (#74 리뷰).

@@ -14,13 +14,17 @@ import 'notification_inbox_screen.dart';
 import 'expense_create_screen.dart';
 import 'income_create_screen.dart';
 import 'approval_list_screen.dart';
+import 'bank_reconcile_screen.dart';
+import 'budget_revision_approval_screen.dart';
 import 'budget_revision_screen.dart';
 import 'correction_approval_screen.dart';
 import 'correction_screen.dart';
 import 'signing_key_screen.dart';
 import 'my_entries_screen.dart';
 import 'inquiry_response_screen.dart';
+import 'sbt_mint_screen.dart';
 import 'hardware_test_screen.dart';
+import 'settlement_screen.dart';
 import '../president/budget_plan_screen.dart';
 
 /// [이승호 담당: app/lib/screens/council/]
@@ -329,7 +333,7 @@ class _CouncilHomeScreenState extends State<CouncilHomeScreen> with WidgetsBindi
                     if (_isPresident) ...[
                       _SignRequestBanner(
                         count: _signWaiting,
-                        onTap: () => _notice(context, Icons.construction_rounded, '예산 개정 서명 화면은 준비 중입니다.'),
+                        onTap: () => _openAndReload(BudgetRevisionApprovalScreen(role: role)),
                       ),
                       const SizedBox(height: 12),
                     ],
@@ -418,8 +422,9 @@ class _CouncilHomeScreenState extends State<CouncilHomeScreen> with WidgetsBindi
               title: '예산 개정 서명',
               subtitle: '총무 증액 요청에 회장 요청 서명',
               icon: Icons.trending_up_rounded,
-              badge: '준비 중',
-              gradient: LinearGradient(colors: [Color(0xFF3B82F6), Color(0xFF6C63FF)]),
+              badge: '회장 서명',
+              gradient: const LinearGradient(colors: [Color(0xFF3B82F6), Color(0xFF6C63FF)]),
+              target: BudgetRevisionApprovalScreen(role: role),
             ),
             // 회장에게만 보인다. 감사 계정에는 회색도 아니고 아예 없다 (스토리보드 15).
             // 회장 하단 내비게이션이 정해지면(중간발표 이후) 그쪽으로 옮긴다.
@@ -436,15 +441,33 @@ class _CouncilHomeScreenState extends State<CouncilHomeScreen> with WidgetsBindi
               title: '예산 개정 승인',
               subtitle: '회장 요청 서명 후 감사 승인 서명',
               icon: Icons.trending_up_rounded,
-              badge: '준비 중',
-              gradient: LinearGradient(colors: [Color(0xFF3B82F6), Color(0xFF6C63FF)]),
+              badge: '감사 서명',
+              gradient: const LinearGradient(colors: [Color(0xFF3B82F6), Color(0xFF6C63FF)]),
+              target: BudgetRevisionApprovalScreen(role: role),
             ),
           _MenuData(
+            title: '계좌 대조',
+            subtitle: '은행 거래내역과 장부 대조 결과',
+            icon: Icons.account_balance_rounded,
+            badge: '조회',
+            gradient: const LinearGradient(colors: [Color(0xFF0EA5E9), Color(0xFF06B6D4)]),
+            target: const BankReconcileScreen(canUpload: false),
+          ),
+          _MenuData(
             title: '결산',
-            subtitle: '요약 카드·메타지표·PDF 내보내기',
+            subtitle: '요약 카드·예산 집행·메타지표',
             icon: Icons.assessment_rounded,
-            badge: '준비 중',
+            badge: '확정 내역 기준',
             gradient: LinearGradient(colors: [Color(0xFFF59E0B), Color(0xFFFB923C)]),
+            target: SettlementScreen(),
+          ),
+          _MenuData(
+            title: '회원권 발행',
+            subtitle: '납부자 명단으로 SBT 일괄 발행',
+            icon: Icons.badge_rounded,
+            badge: '기기 서명',
+            gradient: LinearGradient(colors: [Color(0xFF8B5CF6), Color(0xFF6366F1)]),
+            target: SbtMintScreen(),
           ),
           _MenuData(
             title: 'QR 스캐너',
@@ -462,7 +485,7 @@ class _CouncilHomeScreenState extends State<CouncilHomeScreen> with WidgetsBindi
             target: SigningKeyScreen(),
           ),
         ]
-      : const [
+      : [
           _MenuData(
             title: '지출 등록',
             subtitle: '영수증 촬영·첨부 및 지출 등록',
@@ -502,6 +525,14 @@ class _CouncilHomeScreenState extends State<CouncilHomeScreen> with WidgetsBindi
             badge: '증액만 가능',
             gradient: LinearGradient(colors: [Color(0xFF3B82F6), Color(0xFF6C63FF)]),
             target: BudgetRevisionScreen(),
+          ),
+          _MenuData(
+            title: '계좌 대조',
+            subtitle: '거래내역 CSV 업로드·재대조',
+            icon: Icons.account_balance_rounded,
+            badge: '총무 업로드',
+            gradient: const LinearGradient(colors: [Color(0xFF0EA5E9), Color(0xFF06B6D4)]),
+            target: const BankReconcileScreen(canUpload: true),
           ),
           _MenuData(
             title: '서명 키',

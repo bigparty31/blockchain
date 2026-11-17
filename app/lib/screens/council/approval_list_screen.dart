@@ -151,11 +151,22 @@ Map<String, dynamic> approvalItemFromEntry(EntryModel e, {Map<int, String> categ
       'status': e.status,
       'ocrStatus': e.ocrStatus,
       'categoryWarning': e.categoryWarning,
+      if (e.duplicateOf != null) 'duplicateOf': e.duplicateOf,
+      if (e.creatorName != null) 'creatorName': e.creatorName,
       'receiptInfo': e.receiptHash == null ? '영수증 없음' : '영수증 첨부 (${Fmt.shortHash(e.receiptHash!)})',
       if (e.rejectReason != null) 'rejectReason': e.rejectReason,
       if (e.warningAckReason != null) 'warningAckReason': e.warningAckReason,
+      // 총무가 수정을 요청한 건 — 서버가 확정을 막고 반려만 받는다 (API §2.3)
+      if (e.revisionRequestedAt != null) 'revisionRequested': true,
       'entry': e,
     };
+
+/// 승인 화면에 적는 등록자. 서버가 이름을 주면 이름, 안 주면 번호(`사용자 #id`). 목업 건은 `김총무`.
+String registrantLabel(Map<String, dynamic> item) {
+  final name = item['creatorName'];
+  if (name is String && name.isNotEmpty) return name;
+  return item['entry'] is EntryModel ? '사용자 #${item['createdBy']}' : '김총무';
+}
 
 /// 승인 화면에 보이는 상태 (탭 셋). `BLOCKED` 는 승인 대상이 아니다.
 const _shownStatuses = {EntryStatus.PENDING, EntryStatus.CONFIRMED, EntryStatus.REJECTED};
@@ -439,12 +450,8 @@ class _ApprovalListScreenState extends State<ApprovalListScreen>
                     _DetailRow(icon: Icons.monetization_on_rounded, label: '금액', value: '${item['amount']}원 (${item['category']})'),
                     // 서명 대상 — 승인자가 무엇에 서명하는지 보고 서명한다 (entryCommit: 종류·날짜·예산·등록자)
                     _DetailRow(icon: Icons.event_rounded, label: '사용일', value: '${item['date']}'.split(' ').first),
-                    // 서버 건은 이름이 응답에 없어 user id 로 적는다 (목업 건만 이름)
-                    _DetailRow(
-                      icon: Icons.person_rounded,
-                      label: '등록자',
-                      value: item['entry'] is EntryModel ? '사용자 #${item['createdBy']}' : '김총무',
-                    ),
+                    // 서버가 `creator_name` 을 주면 이름, 아니면 user id (목업 건만 김총무)
+                    _DetailRow(icon: Icons.person_rounded, label: '등록자', value: registrantLabel(item)),
                   ],
                 ),
               ),
@@ -1164,6 +1171,12 @@ class _ApprovalCard extends StatelessWidget {
             const Divider(color: AppTheme.divider, height: 1),
             const SizedBox(height: 12),
 
+            if (status == EntryStatus.PENDING && !own && item['revisionRequested'] == true) ...[
+              const Text('총무가 수정을 요청했어요 — 반려만 할 수 있어요',
+                style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: AppTheme.textSub),
+              ),
+              const SizedBox(height: 10),
+            ],
             if (status == EntryStatus.PENDING && own) ...[
               Text('등록자와 승인자가 같아 처리할 수 없어요',
                 style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: AppTheme.textSub),
@@ -1222,7 +1235,10 @@ class _ApprovalCard extends StatelessWidget {
                   const SizedBox(width: 8),
                   Expanded(
                     flex: 2,
-                    child: Container(
+                    // 수정 요청 중인 건은 서명하게 두지 않는다 — 서명한 뒤에야 서버가 거절하면 이유를 알 수 없다
+                    child: item['revisionRequested'] == true
+                        ? const _DisabledAction(label: '승인 서명')
+                        : Container(
                       decoration: BoxDecoration(
                         gradient: const LinearGradient(
                           colors: [Color(0xFF8B5CF6), Color(0xFF6C63FF)],

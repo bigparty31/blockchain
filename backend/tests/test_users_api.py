@@ -77,3 +77,40 @@ def test_duplicate_address_fails_instead_of_picking_one(monkeypatch):
     monkeypatch.setattr(users, "SEED_USERS", [*users.SEED_USERS, clone])
     res = TestClient(app, raise_server_exceptions=False).get("/users/wallets")
     assert res.status_code == 500
+
+
+def test_db_wallet_address_overrides_seed_for_wallets_login_and_current_user(login_db):
+    from sqlalchemy.orm import sessionmaker
+    from app.auth.deps import get_current_user
+    from app.auth.security import create_access_token
+    from app.models import User as DBUser
+    from fastapi.security import HTTPAuthorizationCredentials
+    import asyncio
+
+    new_wallet = "0xfe90dc7fbc301c17c86d6f071107e44cad7ee45c"
+    Session = sessionmaker(autocommit=False, autoflush=False, bind=login_db)
+    with Session() as db:
+        db.add(DBUser(
+            id=4,
+            student_no="20240004",
+            name="박회장",
+            role="PRESIDENT",
+            password_hash=users.SEED_USERS[3].password_hash,
+            wallet_address=new_wallet,
+        ))
+        db.commit()
+
+        # 1) GET /users/wallets 는 DB 주소를 우선 반영하고 기존 시드 주소는 제외한다
+        wallets = client.get("/users/wallets").json()
+        assert wallets.get(new_wallet) == 4
+        assert users.SEED_USERS[3].wallet_address.lower() not in wallets
+
+        # 2) POST /auth/login 응답의 wallet_address 도 DB 주소를 반환한다
+        login_res = client.post("/auth/login", json={"student_no": "20240004", "password": users.SEED_PASSWORD})
+        assert login_res.status_code == 200
+        assert login_res.json()["wallet_address"] == new_wallet
+
+        # 3) get_current_user 도 DB 주소를 반환한다
+        token = create_access_token(4)
+        resolved = asyncio.run(get_current_user(HTTPAuthorizationCredentials(scheme="Bearer", credentials=token), db=db))
+        assert resolved.wallet_address == new_wallet

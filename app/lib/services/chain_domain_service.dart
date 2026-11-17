@@ -6,6 +6,7 @@ import '../core/api_config.dart';
 import '../core/signing/eip712.dart';
 import '../core/signing/budget_types.dart';
 import '../core/signing/ledger_types.dart';
+import '../core/signing/sbt_types.dart';
 import 'auth_service.dart';
 
 /// 서명 도메인을 받지 못했거나 믿을 수 없을 때.
@@ -36,6 +37,7 @@ class ChainDomainService {
   static int expectedChainId = const int.fromEnvironment('EXPECTED_CHAIN_ID');
   static String expectedLedgerAddress = const String.fromEnvironment('EXPECTED_LEDGER_ADDRESS');
   static String expectedBudgetAddress = const String.fromEnvironment('EXPECTED_BUDGET_ADDRESS');
+  static String expectedSbtAddress = const String.fromEnvironment('EXPECTED_SBT_ADDRESS');
 
   /// 모든 도메인 (컨트랙트 이름 → 도메인).
   static Future<Map<String, Eip712Domain>> fetchAll() async {
@@ -74,6 +76,14 @@ class ChainDomainService {
     final domain = (await fetchAll())[BudgetTypes.domainName];
     if (domain == null) throw const ChainDomainException('예산 서명 도메인이 서버에 없어요.');
     checkTrusted(domain, expectedAddress: expectedBudgetAddress);
+    return domain;
+  }
+
+  /// 회원권 도메인 — 일괄 발행(`MintBatchRequest`)·회수 서명에 쓴다. 검산을 통과한 것만 돌려준다.
+  static Future<Eip712Domain> sbt() async {
+    final domain = (await fetchAll())[SbtTypes.domainName];
+    if (domain == null) throw const ChainDomainException('회원권 서명 도메인이 서버에 없어요.');
+    checkTrusted(domain, expectedAddress: expectedSbtAddress);
     return domain;
   }
 

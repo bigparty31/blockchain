@@ -35,6 +35,10 @@ class CorrectionItem {
   /// 서버 건의 원본 응답 — 승인·반려 서명이 이 값으로 만들어진다. 목업은 null.
   final EntryModel? entry;
 
+  /// 재분류 감액(−)인데 같은 원본의 증액(+)이 아직 확정되지 않았다 — 서버가 확정 순서를 강제해 400 으로 돌려보낸다
+  /// (PRD §4.4, #81). 지문을 댄 뒤에 거부되지 않도록 서명을 받기 전에 막는다.
+  final bool awaitsPlusFirst;
+
   const CorrectionItem({
     required this.id,
     required this.createdBy,
@@ -48,6 +52,7 @@ class CorrectionItem {
     this.pairNote,
     this.note,
     this.entry,
+    this.awaitsPlusFirst = false,
   });
 
   int? get finalAmount => original == null ? null : original! + delta;
@@ -68,6 +73,7 @@ class CorrectionItem {
         pairNote: pairNote,
         note: note,
         entry: entry,
+        awaitsPlusFirst: awaitsPlusFirst,
       );
 }
 
@@ -138,8 +144,23 @@ List<CorrectionItem> correctionItemsFromEntries(List<EntryModel> entries, {List<
 
     // 재분류 짝 — 같은 정정 대상을 가리키는 반대 부호·같은 금액의 재분류 건. 하나로 정해질 때만 짝으로 본다.
     String? pairNote;
+    var awaitsPlusFirst = false;
     var status = statusOf(e.status);
     if (reason == CorrectionReason.RECLASSIFY && !orphan) {
+      // 감액(−)은 같은 정정 대상에 옮겨 온 다른 예산의 증액(+)이 확정돼 있어야 확정된다. 서버(#81,
+      // `_validate_reclassify_negative_order`)는 대상별로 확정 증액의 합에서 이미 확정된 재분류 감액의 합을 뺀 만큼만 받는다.
+      if (e.amount < 0) {
+        var available = 0;
+        for (final c in entries) {
+          if (c.id == e.id || c.correctsEntryId != e.correctsEntryId || c.status != EntryStatus.CONFIRMED) continue;
+          if (c.amount > 0 && c.budgetId != null && c.budgetId != target.budgetId) {
+            available += c.amount;
+          } else if (c.amount < 0 && c.correctionReason == CorrectionReason.RECLASSIFY) {
+            available += c.amount;
+          }
+        }
+        awaitsPlusFirst = available < -e.amount;
+      }
       // 짝 후보 — 같은 정정 대상을 가리키는 반대 부호·같은 금액의 재분류 건.
       List<EntryModel> candidatesOf(EntryModel x) => entries
           .where((c) =>
@@ -178,6 +199,7 @@ List<CorrectionItem> correctionItemsFromEntries(List<EntryModel> entries, {List<
       pairNote: pairNote,
       note: e.purpose.isEmpty ? null : e.purpose,
       entry: e,
+      awaitsPlusFirst: awaitsPlusFirst,
     );
   }
 
@@ -346,6 +368,21 @@ class _CorrectionApprovalScreenState extends State<CorrectionApprovalScreen> {
   }
 
   Future<void> _approve(CorrectionItem e) async {
+    // 재분류는 증액(+)을 먼저 확정해야 감액(−)을 확정할 수 있다 — 서명을 받기 전에 알린다.
+    if (e.awaitsPlusFirst) {
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          title: const Text('먼저 확정할 건이 있어요', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+          content: const Text('재분류는 새 예산의 증액(+) 건을 먼저 확정한 뒤에 원래 예산의 감액(−) 건을 확정할 수 있어요. '
+              '증액 건을 먼저 승인해 주세요.'),
+          actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('확인'))],
+        ),
+      );
+      return;
+    }
+
     // 증액 정정이 잔량을 넘으면 확정이 되지 않는다 — 서명을 받기 전에 알린다 (대기 그대로).
     if (e.insufficient) {
       await showDialog<void>(
@@ -662,6 +699,7 @@ class _CorrectionApprovalScreenState extends State<CorrectionApprovalScreen> {
   Widget _card(CorrectionItem e) {
     final own = widget.effectiveUserId != null && e.createdBy == widget.effectiveUserId;
     final done = e.status == '확정' || e.status == '반려';
+    final revisionRequested = e.entry?.revisionRequestedAt != null;
     final statusColor = switch (e.status) {
       '확정' => AppTheme.success,
       '반려' => AppTheme.expense,
@@ -710,10 +748,20 @@ class _CorrectionApprovalScreenState extends State<CorrectionApprovalScreen> {
             const SizedBox(height: 8),
             Text('재분류 · ${e.pairNote}', style: const TextStyle(fontSize: 12, height: 1.4, color: AppTheme.info)),
           ],
+          if (e.awaitsPlusFirst && !done) ...[
+            const SizedBox(height: 8),
+            const Text('증액(+) 건을 먼저 확정해야 이 감액(−) 건을 확정할 수 있어요',
+                style: TextStyle(fontSize: 12, height: 1.4, color: AppTheme.expense)),
+          ],
           if (e.insufficient && !done) ...[
             const SizedBox(height: 8),
             Text('${e.category} 잔량(${Fmt.won(e.budgetRemaining!)}) 부족 — 승인해도 대기로 남아요',
               style: const TextStyle(fontSize: 12, height: 1.4, color: AppTheme.expense)),
+          ],
+          if (!done && !own && revisionRequested) ...[
+            const SizedBox(height: 8),
+            const Text('총무가 수정을 요청했어요 — 반려만 할 수 있어요',
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: AppTheme.textSub)),
           ],
           const SizedBox(height: 12),
           if (done)
@@ -744,11 +792,20 @@ class _CorrectionApprovalScreenState extends State<CorrectionApprovalScreen> {
                 const SizedBox(width: 12),
                 Expanded(
                   flex: 2,
-                  child: GradientButton(
-                    onPressed: () => _approve(e),
-                    label: '승인',
-                    icon: Icons.fingerprint_rounded,
-                  ),
+                  // 수정 요청 중인 건은 서명하게 두지 않는다 — 서명한 뒤에야 서버가 거절하면 이유를 알 수 없다
+                  child: revisionRequested
+                      ? Container(
+                          key: const Key('correction_approve_blocked'),
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          alignment: Alignment.center,
+                          decoration: BoxDecoration(color: const Color(0xFFE5E7EB), borderRadius: BorderRadius.circular(12)),
+                          child: const Text('승인 서명', style: TextStyle(fontSize: 13, color: Color(0xFF9CA3AF))),
+                        )
+                      : GradientButton(
+                          onPressed: () => _approve(e),
+                          label: '승인',
+                          icon: Icons.fingerprint_rounded,
+                        ),
                 ),
               ],
             ),

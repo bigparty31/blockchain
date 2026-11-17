@@ -3,9 +3,11 @@ import 'package:http/http.dart' as http;
 import '../core/api_config.dart';
 import '../models/balance_model.dart';
 import '../models/budget_model.dart';
+import '../models/draft_entry.dart';
 import '../models/entry_model.dart';
 import '../core/dev_flags.dart';
 import '../core/enums.dart';
+import '../core/format.dart';
 import 'auth_service.dart';
 
 /// 서버에서 읽지 못했다 (연결 실패·200 이 아닌 응답·형식 오류). [what] 은 화면에 쓰는 대상 이름.
@@ -143,6 +145,33 @@ class ApiService {
     }
   }
 
+  /// GET /entries/drafts — 내가 저장해 둔 초안 (총무만, 서버 #76).
+  ///
+  /// **못 읽으면 [ApiUnavailable] 이다. 더미로 메우지 않는다** — 없는 초안을 보여 주면 이어서 제출할 수 없는 건을
+  /// 누르게 된다. 읽을 수 없는 항목(status 가 있거나 모양이 다른 것)은 그 한 건만 건너뛴다.
+  Future<List<DraftEntry>> fetchDrafts() async {
+    final response = await _get('${ApiConfig.entries}/drafts', '초안 목록').catchError((Object e) {
+      if (e is ApiUnavailable) throw e;
+      throw const ApiUnavailable('초안 목록');
+    });
+    if (response.statusCode != 200) throw const ApiUnavailable('초안 목록');
+    final Object? data;
+    try {
+      data = jsonDecode(utf8.decode(response.bodyBytes));
+    } catch (_) {
+      throw const ApiUnavailable('초안 목록');
+    }
+    if (data is! List) throw const ApiUnavailable('초안 목록');
+    final out = <DraftEntry>[];
+    for (final item in data) {
+      if (item is! Map<String, dynamic>) continue;
+      try {
+        out.add(DraftEntry.fromJson(item));
+      } catch (_) {}
+    }
+    return out;
+  }
+
   /// 3. GET /entries (수입·지출 내역 목록 조회)
   Future<List<EntryModel>> fetchEntries() async {
     try {
@@ -219,8 +248,8 @@ class ApiService {
         if (terms.isNotEmpty) {
           final t = now ?? DateTime.now();
           for (final term in terms) {
-            final start = DateTime.parse(term['started_at'] as String);
-            final end = DateTime.parse(term['ended_at'] as String);
+            final start = Fmt.parseServerTime(term['started_at'] as String);
+            final end = Fmt.parseServerTime(term['ended_at'] as String);
             if (!t.isBefore(start) && !t.isAfter(end)) return term['id'] as int;
           }
           return terms.map((e) => e['id'] as int).reduce((a, b) => a > b ? a : b);

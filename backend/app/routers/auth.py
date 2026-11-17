@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.auth import login_limit
 from app.auth.deps import get_current_user
 from app.auth.security import create_access_token, verify_password
-from app.auth.users import SEED_USERS, User, get_user_by_student_no
+from app.auth.users import SEED_USERS, User, get_user_by_student_no, resolve_wallet_address
 from app.database import get_db
 from app.schemas.auth import LoginRequest, LoginResponse, MeResponse
 
@@ -86,7 +86,7 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
         token_type="bearer",
         role=user.role,
         name=user.name,
-        wallet_address=user.wallet_address,
+        wallet_address=resolve_wallet_address(db, user.id, user.wallet_address),
     )
 
 
