@@ -35,7 +35,7 @@
 
 	<!-- 카메라 및 갤러리 권한 설명 (image_picker 필수) -->
 	<key>NSCameraUsageDescription</key>
-	<string>학생회비 지출 증빙을 위한 영수증 사진 촬영에 카메라 권한이 필요합니다.</string>
+	<string>학생회비 지출 증빙 영수증 촬영과 행사 입장 QR 확인에 카메라 권한이 필요합니다.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>학생회비 영수증 이미지 첨부를 위해 갤러리 접근 권한이 필요합니다.</string>
 	<key>NSMicrophoneUsageDescription</key>

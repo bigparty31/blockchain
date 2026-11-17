@@ -11,12 +11,14 @@ import 'package:student_council_app/screens/council/correction_approval_screen.d
 import 'package:student_council_app/screens/council/bank_reconcile_screen.dart';
 import 'package:student_council_app/screens/council/budget_revision_approval_screen.dart';
 import 'package:student_council_app/screens/council/council_home_screen.dart';
+import 'package:student_council_app/screens/council/qr_scanner_screen.dart';
 import 'package:student_council_app/screens/council/settlement_screen.dart';
 import 'package:student_council_app/screens/council/inquiry_response_screen.dart';
 import 'package:student_council_app/screens/president/budget_plan_screen.dart';
 import 'package:student_council_app/services/api_service.dart';
 import 'package:student_council_app/services/bank_reconcile_service.dart';
 import 'package:student_council_app/services/budget_revision_decision_service.dart';
+import 'package:student_council_app/services/event_service.dart';
 import 'package:student_council_app/services/notification_service.dart';
 
 import 'support/session.dart';
@@ -323,14 +325,19 @@ void main() {
       });
     }
 
-    testWidgets('아직 만들지 않은 화면은 「준비 중」으로 안내한다', (tester) async {
-      await pump(tester, const CouncilHomeScreen(role: UserRole.AUDITOR));
-      await tester.ensureVisible(find.text('QR 스캐너'));
-      await tester.tap(find.text('QR 스캐너'));
-      await tester.pump();
-      expect(find.text('QR 스캐너 화면은 준비 중입니다.'), findsOneWidget);
-      await tester.pumpAndSettle(const Duration(seconds: 3));
-    });
+    for (final role in [UserRole.AUDITOR, UserRole.PRESIDENT]) {
+      testWidgets('${role.label} 홈의 QR 스캐너는 행사 선택 화면으로 이어진다 (A12)', (tester) async {
+        EventService.client = MockClient((_) async =>
+            http.Response('[]', 200, headers: {'content-type': 'application/json; charset=utf-8'}));
+        addTearDown(() => EventService.client = http.Client());
+        await pump(tester, CouncilHomeScreen(role: role));
+        await tester.ensureVisible(find.text('QR 스캐너'));
+        await tester.tap(find.text('QR 스캐너'));
+        await tester.pumpAndSettle();
+        expect(find.byType(QrScannerScreen), findsOneWidget);
+        expect(find.textContaining('준비 중입니다'), findsNothing);
+      });
+    }
 
     group('예산 개정 서명·승인 (A7) — 홈에서 화면으로 이어진다', () {
       setUp(() {
