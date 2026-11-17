@@ -24,6 +24,9 @@ class QrScannerScreen extends StatefulWidget {
   final QrScannerBuilder scanner;
   final DateTime Function()? clock;
 
+  /// 「다음 학생」 뒤 같은 QR 을 무시하는 시간. 학생이 폰을 치우는 동안 다시 찍히지 않게.
+  static const nextCooldown = Duration(seconds: 3);
+
   const QrScannerScreen({super.key, this.service, this.scanner = cameraScanner, this.clock});
 
   @override
@@ -41,7 +44,8 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
 
   // 스캔 상태
   bool _busy = false;
-  String? _lastPayload; // 지금 결과 카드의 QR — 같은 QR 은 다시 보내지 않는다
+  String? _lastPayload; // 마지막으로 읽은 QR — 같은 QR 은 다시 보내지 않는다
+  DateTime? _ignoreUntil; // 「다음 학생」 직후 — 아직 카메라에 비친 같은 QR 을 무시하는 끝 시각
   _ScanView? _view;
   int _admitted = 0;
 
@@ -113,15 +117,24 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
     final event = _event;
     final payload = raw.trim();
     if (event == null || _busy || payload.isEmpty) return;
-    // 카메라는 같은 QR 을 1초에 몇 번씩 읽는다. 결과 카드에 떠 있는 QR 은 「다시 확인」 전까지 무시한다
-    if (!force && payload == _lastPayload) return;
+    // 카메라는 같은 QR 을 1초에 몇 번씩 읽는다. 결과 카드에 떠 있는 QR 은 「다시 확인」 전까지 무시하고,
+    // 「다음 학생」 직후 잠깐은 아직 카메라에 남은 같은 QR 도 무시한다 (곧바로 「이미 입장」이 뜨지 않게)
+    if (!force && payload == _lastPayload) {
+      final until = _ignoreUntil;
+      if (_view != null || (until != null && _now().isBefore(until))) return;
+    }
     _lastPayload = payload;
+    _ignoreUntil = null;
 
     if (!isStudentQr(payload)) {
       setState(() => _view = const _ScanView.message('학생 회원권 QR 이 아니에요', '학생 앱의 「내 회원권」 QR 을 비춰 주세요.'));
       return;
     }
-    setState(() => _busy = true);
+    // 앞 학생의 카드를 바로 지운다 — 응답(최대 10초)을 기다리는 동안 앞 학생의 「입장 확인」을 이 학생 것으로 보지 않게
+    setState(() {
+      _busy = true;
+      _view = const _ScanView.checking();
+    });
     _ScanView view;
     try {
       final outcome = await _service.checkIn(eventId: event.id, payload: payload);
@@ -145,9 +158,10 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
     if (payload != null) _onCode(payload, force: true);
   }
 
+  /// 다음 학생. 방금 학생의 QR 은 [nextCooldown] 동안 카메라로 다시 읽어도 보내지 않는다.
   void _next() => setState(() {
         _view = null;
-        _lastPayload = null;
+        _ignoreUntil = _now().add(QrScannerScreen.nextCooldown);
       });
 
   void _submitManual() {
@@ -250,7 +264,8 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
         ),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: Text('이번에 입장 $_admitted명',
+          // 이 화면에서 센 값이다 (서버 집계 아님) — 화면을 나가거나 행사를 바꾸면 0 부터
+          child: Text('이 화면에서 입장 $_admitted명',
               style: const TextStyle(fontSize: 12, color: AppTheme.textSub, fontWeight: FontWeight.bold)),
         ),
         Expanded(
@@ -258,9 +273,11 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
           child: ListView(
             padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
             children: [
-              _view == null
-                  ? const _Hint()
-                  : _ResultCard(view: _view!, onRetry: _busy ? null : _retry, onNext: _busy ? null : _next),
+              switch (_view) {
+                null => const _Hint(),
+                final v when v.checking => const _CheckingCard(),
+                final v => _ResultCard(view: v, onRetry: _busy ? null : _retry, onNext: _busy ? null : _next),
+              },
               const SizedBox(height: 12),
               _ManualInput(controller: _manual, enabled: !_busy, onSubmit: _submitManual),
             ],
@@ -271,19 +288,53 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
   }
 }
 
-/// 결과 카드에 보일 것 — 서버 판정이거나, 보내지 못한 이유.
+/// 결과 카드에 보일 것 — 확인 중이거나, 서버 판정이거나, 보내지 못한 이유.
 class _ScanView {
   final CheckInOutcome? outcome;
   final String? title;
   final String? body;
   final bool retry;
+  final bool checking;
 
   const _ScanView.outcome(CheckInOutcome this.outcome)
       : title = null,
         body = null,
-        retry = false;
+        retry = false,
+        checking = false;
 
-  const _ScanView.message(String this.title, String this.body, {this.retry = false}) : outcome = null;
+  const _ScanView.message(String this.title, String this.body, {this.retry = false})
+      : outcome = null,
+        checking = false;
+
+  const _ScanView.checking()
+      : outcome = null,
+        title = null,
+        body = null,
+        retry = false,
+        checking = true;
+}
+
+/// 응답을 기다리는 동안의 카드. 이름·학번·색이 없어 어떤 판정으로도 보이지 않는다.
+class _CheckingCard extends StatelessWidget {
+  const _CheckingCard();
+
+  @override
+  Widget build(BuildContext context) => Container(
+        key: const Key('scan_checking'),
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: AppTheme.textSub.withValues(alpha: 0.3), width: 1.5),
+        ),
+        child: const Row(
+          children: [
+            SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)),
+            SizedBox(width: 12),
+            Text('확인 중…', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: AppTheme.textSub)),
+          ],
+        ),
+      );
 }
 
 class _ResultCard extends StatelessWidget {

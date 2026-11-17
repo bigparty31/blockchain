@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -38,7 +39,7 @@ void main() {
   late List<http.Request> requests;
 
   /// [checkIn] 이 입장 요청마다 돌려줄 응답을 정한다.
-  void serve({List<Map<String, Object?>> events = const [festival], required http.Response Function() checkIn}) {
+  void serve({List<Map<String, Object?>> events = const [festival], required FutureOr<http.Response> Function() checkIn}) {
     requests = [];
     EventService.client = MockClient((req) async {
       requests.add(req);
@@ -128,16 +129,24 @@ void main() {
   });
 
   group('QrScannerScreen', () {
-    /// 카메라 대신 — 누르면 [payload] 를 읽은 것처럼 넘긴다.
-    QrScannerBuilder fakeCamera(String payload) => (context, onCode) => Center(
-          child: ElevatedButton(onPressed: () => onCode(payload), child: const Text('QR 비추기')),
+    /// 카메라 대신 — 누르면 [payload] 를(「다른 학생 QR」은 U000004 를) 읽은 것처럼 넘긴다.
+    QrScannerBuilder fakeCamera(String payload) => (context, onCode) => Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            ElevatedButton(onPressed: () => onCode(payload), child: const Text('QR 비추기')),
+            ElevatedButton(onPressed: () => onCode('SCA:2026-2:U000004'), child: const Text('다른 학생 QR')),
+          ],
         );
 
+    /// 화면이 보는 지금 시각. 테스트가 앞으로 돌린다.
+    late DateTime now;
+
     Future<void> open(WidgetTester tester, {String payload = 'SCA:2026-2:U000003'}) async {
+      now = DateTime.utc(2026, 11, 20, 9);
       tester.view.physicalSize = const Size(411, 1400);
       tester.view.devicePixelRatio = 1.0;
       addTearDown(tester.view.reset);
-      await tester.pumpWidget(MaterialApp(home: QrScannerScreen(scanner: fakeCamera(payload))));
+      await tester.pumpWidget(MaterialApp(home: QrScannerScreen(scanner: fakeCamera(payload), clock: () => now)));
       await tester.pumpAndSettle();
     }
 
@@ -157,7 +166,7 @@ void main() {
       expect(find.text('2026-11-20 18:00'), findsOneWidget, reason: '09:00Z = 18:00 KST');
       await pickFestival(tester);
       expect(find.text('QR 비추기'), findsOneWidget);
-      expect(find.text('이번에 입장 0명'), findsOneWidget);
+      expect(find.text('이 화면에서 입장 0명'), findsOneWidget);
     });
 
     testWidgets('입장: 이름·학번을 크게 보이고 입장 수를 센다', (tester) async {
@@ -167,10 +176,10 @@ void main() {
       await scan(tester);
       expect(find.text('입장 확인'), findsOneWidget);
       expect(find.text('김학생 · 20240003'), findsOneWidget);
-      expect(find.text('이번에 입장 1명'), findsOneWidget);
+      expect(find.text('이 화면에서 입장 1명'), findsOneWidget);
     });
 
-    testWidgets('카메라가 같은 QR 을 계속 읽어도 한 번만 보낸다. 「다음 학생」 뒤에는 다시 보낸다', (tester) async {
+    testWidgets('카메라가 같은 QR 을 계속 읽어도 한 번만 보낸다', (tester) async {
       serve(checkIn: () => json(outcome('ADMITTED')));
       await open(tester);
       await pickFestival(tester);
@@ -178,10 +187,73 @@ void main() {
       await scan(tester);
       await scan(tester);
       expect(checkIns(), hasLength(1));
+    });
+
+    testWidgets('「다음 학생」 직후 3초는 카메라에 남은 같은 QR 을 보내지 않는다 — 곧바로 「이미 입장」이 뜨지 않게', (tester) async {
+      serve(checkIn: () => json(outcome('ADMITTED')));
+      await open(tester);
+      await pickFestival(tester);
+      await scan(tester);
       await tester.tap(find.text('다음 학생'));
       await tester.pumpAndSettle();
+
+      now = now.add(const Duration(seconds: 2));
       await scan(tester);
+      expect(checkIns(), hasLength(1), reason: '방금 학생의 폰이 아직 비친다');
+      expect(find.byKey(const Key('scan_result')), findsNothing);
+
+      // 다른 학생은 바로 보낸다
+      await tester.tap(find.text('다른 학생 QR'));
+      await tester.pumpAndSettle();
       expect(checkIns(), hasLength(2));
+      await tester.tap(find.text('다음 학생'));
+      await tester.pumpAndSettle();
+
+      // 3초가 지나면 같은 QR 도 다시 보낸다 (다시 줄을 선 경우)
+      now = now.add(QrScannerScreen.nextCooldown);
+      await scan(tester);
+      expect(checkIns(), hasLength(3));
+    });
+
+    testWidgets('직접 입력은 「다음 학생」 직후에도 바로 보낸다', (tester) async {
+      serve(checkIn: () => json(outcome('ADMITTED')));
+      await open(tester);
+      await pickFestival(tester);
+      await scan(tester);
+      await tester.tap(find.text('다음 학생'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const Key('manual_qr')), 'SCA:2026-2:U000003');
+      await tester.tap(find.widgetWithText(OutlinedButton, '확인'));
+      await tester.pumpAndSettle();
+      expect(checkIns(), hasLength(2));
+    });
+
+    testWidgets('다음 학생을 확인하는 동안 앞 학생의 「입장 확인」 카드는 보이지 않는다', (tester) async {
+      final pending = Completer<http.Response>();
+      var first = true;
+      serve(checkIn: () {
+        if (first) {
+          first = false;
+          return json(outcome('ADMITTED'));
+        }
+        return pending.future; // 두 번째 학생의 응답을 붙잡아 둔다
+      });
+      await open(tester);
+      await pickFestival(tester);
+      await scan(tester);
+      expect(find.text('입장 확인'), findsOneWidget);
+
+      // 「다음 학생」을 누르지 않고 바로 다음 학생을 찍는다
+      await tester.tap(find.text('다른 학생 QR'));
+      await tester.pump();
+      expect(find.text('입장 확인'), findsNothing, reason: '응답을 기다리는 동안 앞 학생의 판정이 남으면 안 된다');
+      expect(find.text('김학생 · 20240003'), findsNothing);
+      expect(find.text('확인 중…'), findsOneWidget);
+
+      pending.complete(json(outcome('NOT_MEMBER')));
+      await tester.pumpAndSettle();
+      expect(find.text('확인 중…'), findsNothing);
+      expect(find.text('회원권이 없어요'), findsOneWidget);
     });
 
     testWidgets('이미 입장: 처음 입장 시각(KST)을 보이고, 입장 수는 늘지 않는다', (tester) async {
@@ -191,7 +263,7 @@ void main() {
       await scan(tester);
       expect(find.text('이미 입장했어요'), findsOneWidget);
       expect(find.text('처음 입장: 2026-11-20 18:05'), findsOneWidget);
-      expect(find.text('이번에 입장 0명'), findsOneWidget);
+      expect(find.text('이 화면에서 입장 0명'), findsOneWidget);
     });
 
     testWidgets('회원권 없음·없는 학생은 거부로 보인다', (tester) async {
@@ -204,6 +276,7 @@ void main() {
       serve(checkIn: () => json(outcome('UNKNOWN_STUDENT')));
       await tester.tap(find.text('다음 학생'));
       await tester.pumpAndSettle();
+      now = now.add(QrScannerScreen.nextCooldown);
       await scan(tester);
       expect(find.text('등록되지 않은 학생이에요'), findsOneWidget);
     });
