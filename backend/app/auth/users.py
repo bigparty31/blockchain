@@ -1,6 +1,9 @@
 from typing import List, Optional
 from pydantic import BaseModel
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 
+from app.models import User as DBUser
 from app.schemas.auth import Role
 
 
@@ -68,3 +71,13 @@ def get_user_by_student_no(student_no: str) -> Optional[User]:
 
 def get_user_by_id(user_id: int) -> Optional[User]:
     return next((u for u in SEED_USERS if u.id == user_id), None)
+
+
+def resolve_wallet_address(db: Session, user_id: int, fallback: Optional[str]) -> Optional[str]:
+    """DB users 테이블의 wallet_address 를 우선 반환하고, 행이 없거나 조회 불가 시 fallback 을 쓴다."""
+    try:
+        db_wallet = db.query(DBUser.wallet_address).filter(DBUser.id == user_id).scalar()
+    except SQLAlchemyError:
+        db.rollback()
+        return fallback
+    return db_wallet if db_wallet is not None else fallback

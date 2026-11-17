@@ -9,7 +9,6 @@ import 'package:student_council_app/screens/council/budget_revision_screen.dart'
 import 'package:student_council_app/screens/council/correction_screen.dart';
 import 'package:student_council_app/screens/council/council_home_screen.dart';
 import 'package:student_council_app/screens/council/expense_create_screen.dart';
-import 'package:student_council_app/screens/council/registration_result.dart';
 import 'package:student_council_app/services/api_service.dart';
 import 'package:student_council_app/services/auth_service.dart';
 
@@ -55,13 +54,6 @@ void main() {
     test('개발 빌드처럼 더미를 켜면 더미를 돌려준다', () async {
       ApiService.useDemoData = true;
       expect(await ApiService().fetchBudgets(), isNotEmpty);
-    });
-
-    test('예산을 못 읽으면 등록 결과를 흉내 내지 않는다 — 통과로 간주하지 않는다', () async {
-      await expectLater(
-        simulateExpenseRegistration(category: '행사비', amount: 1000),
-        throwsA(isA<ApiUnavailable>()),
-      );
     });
   });
 

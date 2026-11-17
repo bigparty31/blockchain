@@ -3,13 +3,20 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:student_council_app/screens/council/my_entries_screen.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:student_council_app/core/enums.dart';
+import 'package:student_council_app/screens/council/correction_approval_screen.dart';
+import 'package:student_council_app/screens/council/bank_reconcile_screen.dart';
+import 'package:student_council_app/screens/council/budget_revision_approval_screen.dart';
 import 'package:student_council_app/screens/council/council_home_screen.dart';
+import 'package:student_council_app/screens/council/settlement_screen.dart';
 import 'package:student_council_app/screens/council/inquiry_response_screen.dart';
 import 'package:student_council_app/screens/president/budget_plan_screen.dart';
 import 'package:student_council_app/services/api_service.dart';
+import 'package:student_council_app/services/bank_reconcile_service.dart';
+import 'package:student_council_app/services/budget_revision_decision_service.dart';
 import 'package:student_council_app/services/notification_service.dart';
 
 import 'support/session.dart';
@@ -40,6 +47,25 @@ void main() {
     ApiService.client = MockClient((_) async => entriesReply(pending));
   }
 
+  /// 승인 대기 [pending] 건이 있는 `/entries` 와, 회장 서명을 기다리는 증액 요청 [revisions] 건이 있는
+  /// `/budget-revisions?status_filter=PENDING` 서버. [revisions] 가 null 이면 증액 요청 API 가 503 이다.
+  List<Uri> revisionRequests = [];
+  void serveBoth({required int pending, int? revisions}) {
+    revisionRequests = [];
+    ApiService.client = MockClient((req) async {
+      if (req.url.path == '/budget-revisions') {
+        revisionRequests.add(req.url);
+        if (revisions == null) return http.Response('{}', 503);
+        return http.Response(
+          jsonEncode([for (var i = 0; i < revisions; i++) {'id': i + 1, 'status': 'PENDING'}]),
+          200,
+          headers: {'content-type': 'application/json; charset=utf-8'},
+        );
+      }
+      return entriesReply(pending);
+    });
+  }
+
   tearDown(() => ApiService.client = http.Client());
 
   Future<void> pump(WidgetTester tester, Widget home) async {
@@ -54,7 +80,7 @@ void main() {
     testWidgets('총무 홈에는 등록·정정·개정 요청이 있고 승인·이의 답변은 없다', (tester) async {
       await pump(tester, const CouncilHomeScreen(role: UserRole.TREASURER));
 
-      for (final t in ['내 등록 현황', '정정 등록', '예산 개정 요청', '내 등록 건']) {
+      for (final t in ['내 등록 현황', '정정 등록', '예산 개정 요청', '계좌 대조', '내 등록 건']) {
         expect(find.text(t), findsOneWidget, reason: t);
       }
       expect(find.text('지출 등록'), findsNWidgets(2), reason: '빠른 실행 + 메뉴');
@@ -209,8 +235,9 @@ void main() {
 
       expect(find.text('승인 대기'), findsNWidgets(2), reason: '배너 + 메뉴');
       expect(find.text('대기 6건'), findsOneWidget);
-      expect(find.text('미답변 이의 1건'), findsOneWidget);
-      for (final t in ['이의 답변', '예산 개정 승인', '결산', 'QR 스캐너']) {
+      expect(find.text('학생 이의 답변 · 준비 중'), findsOneWidget, reason: '이의 건수를 받는 서버 API 가 없어 숫자를 적지 않는다');
+      expect(find.textContaining('미답변 이의'), findsNothing);
+      for (final t in ['이의 답변', '예산 개정 승인', '계좌 대조', '결산', 'QR 스캐너']) {
         expect(find.text(t), findsOneWidget, reason: t);
       }
       expect(find.text('예산 개정 서명'), findsNothing);
@@ -220,19 +247,42 @@ void main() {
     });
 
     testWidgets('회장 홈에는 서명할 증액 요청·이의 답변·개정 서명·예산 편성·발행이 있다 (PRD §4.5 · A4 · A8)', (tester) async {
-      serveEntries(6);
+      serveBoth(pending: 6, revisions: 2);
       await pump(tester, const CouncilHomeScreen(role: UserRole.PRESIDENT));
 
       expect(find.text('승인 대기'), findsNWidgets(2), reason: '배너 + 메뉴');
       expect(find.text('대기 6건'), findsOneWidget);
-      expect(find.text('서명할 증액 요청 1건'), findsOneWidget);
-      expect(find.text('미답변 이의 1건'), findsOneWidget);
-      for (final t in ['이의 답변', '예산 개정 서명', '예산 편성·발행', '결산', 'QR 스캐너']) {
+      expect(find.text('서명할 증액 요청 2건'), findsOneWidget, reason: '서버의 PENDING 증액 요청 수');
+      expect(revisionRequests.single.queryParameters['status_filter'], 'PENDING');
+      expect(find.text('학생 이의 답변 · 준비 중'), findsOneWidget);
+      for (final t in ['이의 답변', '예산 개정 서명', '예산 편성·발행', '계좌 대조', '결산', 'QR 스캐너']) {
         expect(find.text(t), findsOneWidget, reason: t);
       }
       expect(find.text('예산 개정 승인'), findsNothing);
       expectNoRegister(tester);
     });
+
+    testWidgets('회장 홈의 서명할 증액 요청은 서버가 0 건이라 하면 없다고 적는다', (tester) async {
+      serveBoth(pending: 0, revisions: 0);
+      await pump(tester, const CouncilHomeScreen(role: UserRole.PRESIDENT));
+      expect(find.text('서명할 증액 요청이 없습니다'), findsOneWidget);
+    });
+
+    testWidgets('회장 홈의 서명할 증액 요청은 못 읽으면 못 읽었다고 적는다 — 0 건이나 예전 고정값으로 내리지 않는다', (tester) async {
+      serveBoth(pending: 0, revisions: null);
+      await pump(tester, const CouncilHomeScreen(role: UserRole.PRESIDENT));
+      expect(find.text('서명할 증액 요청을 확인하지 못했어요'), findsOneWidget);
+      expect(find.text('서명할 증액 요청이 없습니다'), findsNothing);
+      expect(find.textContaining('서명할 증액 요청 1건'), findsNothing);
+    });
+
+    for (final role in [UserRole.AUDITOR, UserRole.TREASURER]) {
+      testWidgets('${role.label} 홈은 증액 요청 건수를 읽지 않는다 — 회장 홈에만 있는 배너', (tester) async {
+        serveBoth(pending: 1, revisions: 3);
+        await pump(tester, CouncilHomeScreen(role: role));
+        expect(revisionRequests, isEmpty);
+      });
+    }
 
     testWidgets('회장 홈의 예산 편성·발행은 예산 편성 화면으로 이어진다', (tester) async {
       await pump(tester, const CouncilHomeScreen(role: UserRole.PRESIDENT));
@@ -247,7 +297,9 @@ void main() {
       await tester.ensureVisible(find.text('내 등록 현황'));
       await tester.tap(find.text('내 등록 현황'));
       await tester.pumpAndSettle();
-      expect(find.text('처리 중 — 다시 보낼 수 없어요'), findsOneWidget);
+      // 서버 목록을 읽는 화면 — 로그인 세션이 없는 테스트에서는 내 건을 찾을 수 없다고 알린다
+      expect(find.byType(MyEntriesScreen), findsOneWidget);
+      expect(find.byKey(const Key('my_entries_failed')), findsOneWidget);
     });
 
     testWidgets('감사 홈의 정정 승인은 화면으로 이어진다', (tester) async {
@@ -255,16 +307,78 @@ void main() {
       await tester.ensureVisible(find.text('정정 승인'));
       await tester.tap(find.text('정정 승인'));
       await tester.pumpAndSettle();
-      expect(find.text('원본'), findsWidgets);
+      // 서버 목록을 읽는 화면 — 시연용 더미에는 정정 건이 없어 「정정 건이 없어요」가 보인다
+      expect(find.byType(CorrectionApprovalScreen), findsOneWidget);
+      expect(find.text('정정 건이 없어요'), findsOneWidget);
     });
+
+    for (final role in [UserRole.AUDITOR, UserRole.PRESIDENT]) {
+      testWidgets('${role.label} 홈의 결산은 결산 화면으로 이어진다', (tester) async {
+        await pump(tester, CouncilHomeScreen(role: role));
+        await tester.ensureVisible(find.text('결산'));
+        await tester.tap(find.text('결산'));
+        await tester.pumpAndSettle();
+        expect(find.byType(SettlementScreen), findsOneWidget);
+        expect(find.textContaining('결산 화면은 준비 중'), findsNothing);
+      });
+    }
 
     testWidgets('아직 만들지 않은 화면은 「준비 중」으로 안내한다', (tester) async {
       await pump(tester, const CouncilHomeScreen(role: UserRole.AUDITOR));
-      await tester.ensureVisible(find.text('예산 개정 승인'));
-      await tester.tap(find.text('예산 개정 승인'));
+      await tester.ensureVisible(find.text('QR 스캐너'));
+      await tester.tap(find.text('QR 스캐너'));
       await tester.pump();
-      expect(find.text('예산 개정 승인 화면은 준비 중입니다.'), findsOneWidget);
+      expect(find.text('QR 스캐너 화면은 준비 중입니다.'), findsOneWidget);
       await tester.pumpAndSettle(const Duration(seconds: 3));
+    });
+
+    group('예산 개정 서명·승인 (A7) — 홈에서 화면으로 이어진다', () {
+      setUp(() {
+        BudgetRevisionDecisionService.client = MockClient((_) async => http.Response('[]', 200,
+            headers: {'content-type': 'application/json; charset=utf-8'}));
+      });
+      tearDown(() => BudgetRevisionDecisionService.client = http.Client());
+
+      for (final c in [(UserRole.PRESIDENT, '예산 개정 서명'), (UserRole.AUDITOR, '예산 개정 승인')]) {
+        testWidgets('${c.$1.label} 홈의 ${c.$2} 타일은 증액 승인 화면을 그 역할로 연다', (tester) async {
+          await pump(tester, CouncilHomeScreen(role: c.$1));
+          await tester.ensureVisible(find.text(c.$2));
+          await tester.tap(find.text(c.$2));
+          await tester.pumpAndSettle();
+          final screen = tester.widget<BudgetRevisionApprovalScreen>(find.byType(BudgetRevisionApprovalScreen));
+          expect(screen.role, c.$1);
+          expect(find.textContaining('준비 중'), findsNothing, reason: '스낵바 안내가 아니라 화면이 열려야 한다');
+        });
+      }
+
+      testWidgets('회장 홈의 「서명할 증액 요청」 배너도 같은 화면을 연다', (tester) async {
+        serveBoth(pending: 0, revisions: 2);
+        await pump(tester, const CouncilHomeScreen(role: UserRole.PRESIDENT));
+        await tester.ensureVisible(find.text('서명할 증액 요청 2건'));
+        await tester.tap(find.text('서명할 증액 요청 2건'));
+        await tester.pumpAndSettle();
+        expect(find.byType(BudgetRevisionApprovalScreen), findsOneWidget);
+        expect(find.textContaining('예산 개정 서명 화면은 준비 중'), findsNothing);
+      });
+    });
+
+    group('계좌 대조 (A9) — 임원 셋 모두 홈에서 열고, 업로드는 총무만', () {
+      setUp(() {
+        BankReconcileService.client = MockClient((_) async => http.Response('[]', 200,
+            headers: {'content-type': 'application/json; charset=utf-8'}));
+      });
+      tearDown(() => BankReconcileService.client = http.Client());
+
+      for (final role in [UserRole.TREASURER, UserRole.AUDITOR, UserRole.PRESIDENT]) {
+        testWidgets('${role.label} 홈의 계좌 대조 타일은 계좌 대조 화면을 연다', (tester) async {
+          await pump(tester, CouncilHomeScreen(role: role));
+          await tester.ensureVisible(find.text('계좌 대조'));
+          await tester.tap(find.text('계좌 대조'));
+          await tester.pumpAndSettle();
+          final screen = tester.widget<BankReconcileScreen>(find.byType(BankReconcileScreen));
+          expect(screen.canUpload, role == UserRole.TREASURER, reason: '업로드·재대조는 총무만 (서버도 403)');
+        });
+      }
     });
 
     testWidgets('개발용 메뉴는 기본 빌드에 보이지 않는다', (tester) async {
