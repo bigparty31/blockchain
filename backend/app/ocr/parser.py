@@ -22,6 +22,10 @@ APPROVAL_NO_DIGITS = (6, 12)  # 카드 승인번호 자릿수 범위. 벗어나�
 
 _AMOUNT_RE = re.compile(r"^\d{1,3}(,\d{3})+원?$|^\d+원?$")
 _DATE_RE = re.compile(r"(20\d{2})[-./](\d{1,2})[-./](\d{1,2})")
+# 연도 두 자리 ("거래일시:26/11/11"). 네 자리 날짜가 없을 때만 본다. 앞뒤가 숫자면 날짜가 아니다 —
+# "11/11/2026"(월/일/년) 의 "11/11/20" 이나 전화번호 "126-1-1" 의 "26-1-1" 을 잡지 않게.
+# 구분자도 같아야 한다 — 주문번호 "#58-11/11/2026" 의 "58-11/11" 을 2058년으로 읽지 않게
+_SHORT_DATE_RE = re.compile(r"(?<!\d)(\d{2})([-./])(\d{1,2})\2(\d{1,2})(?!\d)")
 _TIME_RE = re.compile(r"(?<!\d)([01]?\d|2[0-3]):([0-5]\d)(?::([0-5]\d))?(?!\d)")
 
 
@@ -160,8 +164,9 @@ def _extract_approval_no(lines: List[List[Token]], result: ParsedReceipt) -> Non
                 if not text:
                     continue
                 lo, hi = APPROVAL_NO_DIGITS
-                # 값 전체가 숫자여야 한다. 일부만 숫자인 값은 자릿수 이상과 같이 판독 불가로 본다
-                if re.fullmatch(rf"\d{{{lo},{hi}}}", text):
+                # 숫자 lo~hi 자리. 맨 앞 영문 대문자 한 글자는 허용한다 (하나카드 "G63213610").
+                # 중간에 섞인 영문("39007O18")은 0 을 O 로 잘못 읽은 것일 수 있어 판독 불가로 둔다
+                if re.fullmatch(rf"[A-Z]?\d{{{lo},{hi}}}", text):
                     result.approval_no = text
                     if t.confidence < MIN_CONFIDENCE:
                         result.low_confidence = True
@@ -175,18 +180,23 @@ def _extract_approval_no(lines: List[List[Token]], result: ParsedReceipt) -> Non
 
 def _extract_paid_at(lines: List[List[Token]], result: ParsedReceipt) -> None:
     """날짜는 라벨 없이 찍히는 경우가 많아(CU: "2026-09-18(금)") 모양으로 찾는다. 시각은 같은 줄을 먼저 본다."""
-    date_line, date = None, None
-    for i, line in enumerate(lines):
-        m = _DATE_RE.search(" ".join(t.text for t in line))
-        if m:
-            date_line, date = i, m
+    date_line, date, century = None, None, 0
+    # 네 자리 연도를 먼저 찾고, 영수증 어디에도 없을 때만 두 자리 연도를 2000년대로 읽는다
+    for pattern, add in ((_DATE_RE, 0), (_SHORT_DATE_RE, 2000)):
+        for i, line in enumerate(lines):
+            m = pattern.search(" ".join(t.text for t in line))
+            if m:
+                date_line, date, century = i, m, add
+                break
+        if date is not None:
             break
     if date is None:
         return
 
     def find_time(line: List[Token]):
         text = " ".join(t.text for t in line)
-        text = _DATE_RE.sub("", text)  # 날짜 숫자가 시각으로 잘못 잡히지 않게
+        # 날짜 숫자가 시각으로 잘못 잡히지 않게
+        text = _SHORT_DATE_RE.sub("", _DATE_RE.sub("", text))
         return _TIME_RE.search(text)
 
     time = find_time(lines[date_line])
@@ -196,7 +206,10 @@ def _extract_paid_at(lines: List[List[Token]], result: ParsedReceipt) -> None:
             if time:
                 break
 
-    y, mo, d = (int(x) for x in date.groups())
+    if century:
+        y, mo, d = int(date.group(1)) + century, int(date.group(3)), int(date.group(4))
+    else:
+        y, mo, d = (int(x) for x in date.groups())
     h, mi, s = (int(time.group(1)), int(time.group(2)), int(time.group(3) or 0)) if time else (0, 0, 0)
     try:
         dt = datetime(y, mo, d, h, mi, s, tzinfo=KST)

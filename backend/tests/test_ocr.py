@@ -103,6 +103,19 @@ def test_approval_no_with_non_digits_is_unreadable():
     assert judge(parsed, 4600) == OCRStatus.UNREADABLE
 
 
+def test_approval_no_with_leading_letter():
+    # 하나카드 영수증: "승인" "번호" "G63213610" (실측 11/12)
+    parsed = parse_clova_response(_response(_field("승인", 200, 100), _field("번호", 250, 100), _field("G63213610", 400, 100)))
+    assert parsed.approval_no == "G63213610"
+
+
+@pytest.mark.parametrize("text", ["39007O18", "g63213610", "AB63213610", "A261107170553367642X"])
+def test_approval_no_letters_elsewhere_are_unreadable(text):
+    # 0 을 O 로 읽은 경우·소문자·영문 두 글자·현금영수증 번호(20자)는 승인번호로 믿지 않는다
+    parsed = parse_clova_response(_response(_field("승인번호", 200, 100), _field(text, 400, 100)))
+    assert parsed.approval_label_found and parsed.approval_no is None
+
+
 def test_approval_no_attached_to_label():
     parsed = parse_clova_response(_response(_field("승인번호:31008018", 200, 100), _field("7,600원", 460, 140)))
     assert parsed.approval_no == "31008018"
@@ -116,6 +129,35 @@ def test_date_and_time_in_one_token():
 def test_date_without_time_falls_back_to_midnight():
     parsed = parse_clova_response(_response(_field("2026-09-18", 200, 50)))
     assert parsed.paid_at == _kst(2026, 9, 18)
+
+
+def test_two_digit_year():
+    # 실측 11/12: 위 줄의 "11/11/2026 12:21:01"(월/일/년, 주문 시각)이 아니라 거래일시 줄을 읽어야 한다
+    parsed = parse_clova_response(_response(
+        _field("#58-11/11/2026", 200, 50), _field("12:21:01", 400, 50),
+        _field("거래일시:26/11/11", 200, 100), _field("12:24:25", 400, 100),
+    ))
+    assert parsed.paid_at == _kst(2026, 11, 11, 12, 24, 25)
+
+
+def test_four_digit_year_beats_two_digit():
+    # 같은 영수증 아래쪽에 "26/11/07(토)" 가 또 찍혀 있어도 네 자리 날짜를 쓴다
+    parsed = parse_clova_response(_response(
+        _field("26/11/08", 200, 50),
+        _field("2026/11/07(토)", 200, 100), _field("17:05:53", 400, 100),
+    ))
+    assert parsed.paid_at == _kst(2026, 11, 7, 17, 5, 53)
+
+
+@pytest.mark.parametrize("text", ["126-1-1", "1126/11/11", "26/11/111", "#58-11/11"])
+def test_digits_around_short_date_are_not_dates(text):
+    # 전화번호·더 긴 숫자에 붙은 두 자리 날짜 모양은 날짜가 아니다
+    assert parse_clova_response(_response(_field(text, 200, 50))).paid_at is None
+
+
+def test_bad_two_digit_date_is_noted():
+    parsed = parse_clova_response(_response(_field("26/13/40", 200, 50)))
+    assert parsed.paid_at is None and any("날짜 형식 이상" in n for n in parsed.notes)
 
 
 # --- 판정: 5상태와 우선순위 ------------------------------------------------
