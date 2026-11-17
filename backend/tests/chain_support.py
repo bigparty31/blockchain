@@ -11,10 +11,9 @@ from pathlib import Path
 from typing import Optional
 
 from eth_account import Account
-from eth_utils import keccak
 
 from app.chain.deployment import DEFAULT_PATH, Eip712Domain, domain_separator, load_abi, load_deployment
-from app.chain.eip712 import ISSUE_REQUEST_FIELDS, typed_data
+from app.chain.eip712 import ISSUE_REQUEST_FIELDS, category_hash_unchecked, typed_data
 from app.chain.models import ZERO_BYTES32, ChainEntry, ConfirmApproval
 from app.chain.revert import RevertDecoder
 from app.chain.web3_client import Web3ChainClient
@@ -175,7 +174,7 @@ async def issue_budget(w3, budget_id: int, amount: int, term: int = 20262, days:
     message = {
         "budgetId": budget_id,
         "term": term,
-        "category": "0x" + keccak(text=f"테스트 예산 {budget_id}").hex(),  # category 는 keccak256(utf8(이름)) (CONTRACTS.md)
+        "category": category_hash_unchecked(f"테스트 예산 {budget_id}"),  # 앱이 쓰지 않는 테스트 전용 항목명
         "amount": amount,
         "expiresAt": now + days * 86400,
         "deadline": now + 600,

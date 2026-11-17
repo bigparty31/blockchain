@@ -196,6 +196,14 @@ def category_hash(name: str) -> str:
     """
     if name not in APPROVED_CATEGORIES:
         raise ValueError("항목명이 승인된 표에 없다. docs/CONTRACTS.md category 표에 먼저 추가한다 (팀장 승인)")
+    return category_hash_unchecked(name)
+
+
+def category_hash_unchecked(name: str) -> str:
+    """category_hash 와 같은 계산(keccak256(utf8(이름)))을 승인 표 검사 없이 한다. 해시 규칙은 이 한 곳에만 둔다.
+
+    API 는 쓰지 않는다 — 예산 편성 화면의 항목과 겹치지 않아야 하는 체인 시험·관문 2 스모크의 전용 항목명에만 쓴다.
+    """
     return "0x" + keccak(text=name).hex()
 
 

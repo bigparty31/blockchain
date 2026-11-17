@@ -49,9 +49,16 @@ async def relayer_nonce(client) -> int:
     return await client._w3.eth.get_transaction_count(RELAYER, "pending")
 
 
-async def mint(client, now, recipients, key=PRESIDENT_KEY, signer=PRESIDENT, before_broadcast=None, change=None):
-    """change 는 모델 검증을 건너뛰고 바꿀 값 — 컨트랙트가 스스로 거부하는지 볼 때만 쓴다."""
-    request = MintBatchRequest(recipients=recipients, term=TERM, nonce=await nonce_of(client, signer), deadline=now + 600)
+async def mint(
+    client, now, recipients, key=PRESIDENT_KEY, signer=PRESIDENT, before_broadcast=None, change=None, unchecked_recipients=False
+):
+    """change 는 모델 검증을 건너뛰고 바꿀 값 — 컨트랙트가 스스로 거부하는지 볼 때만 쓴다.
+    unchecked_recipients 면 recipients 도 검증 없이 그대로 보낸다 (빈 배열·0 주소·101명)."""
+    nonce = await nonce_of(client, signer)
+    if unchecked_recipients:  # model_construct 는 검증하지 않는다
+        request = MintBatchRequest.model_construct(recipients=tuple(recipients), term=TERM, nonce=nonce, deadline=now + 600)
+    else:
+        request = MintBatchRequest(recipients=recipients, term=TERM, nonce=nonce, deadline=now + 600)
     request = unchecked(request, **change) if change else request
     return await client.mint_memberships(request, sign_as_app(request, DOMAIN, key), before_broadcast)
 
@@ -179,16 +186,17 @@ def test_expired_signature_is_rejected(node):
 @pytest.mark.parametrize(
     "recipients, reason",
     [
-        (("0x" + "00" * 20,), MembershipRevertReason.ZERO_ADDRESS),
-        ((), MembershipRevertReason.EMPTY_BATCH),
-        ("101", MembershipRevertReason.BATCH_TOO_LARGE),
+        (lambda: fresh(1) + ("0x" + "00" * 20,), MembershipRevertReason.ZERO_ADDRESS),  # 0 주소가 하나라도 섞이면
+        (lambda: (), MembershipRevertReason.EMPTY_BATCH),
+        (lambda: fresh(101), MembershipRevertReason.BATCH_TOO_LARGE),
     ],
+    ids=["zero_address", "empty", "101"],
 )
 def test_batches_the_contract_refuses_whole(node, recipients, reason):
-    # 모델이 먼저 막는 값이지만 컨트랙트도 스스로 거부하는지 본다 (PRD §7.2 빈 배열·100명 초과·0 주소는 전체 revert)
+    # 모델이 먼저 막는 값이지만 컨트랙트도 스스로 거부하는지 본다 (PRD §7.2 빈 배열·100명 초과·0 주소는 전체 revert).
+    # recipients 는 받는 주소를 만드는 함수다 — 모델 검증을 건너뛰고 그대로 보낸다
     async def body(client, now):
-        targets = fresh(101) if recipients == "101" else recipients
-        return await reverted(client, mint(client, now, fresh(1), change={"recipients": targets}))
+        return await reverted(client, mint(client, now, recipients(), unchecked_recipients=True))
 
     assert on_chain(body) == (reason, False)
 
