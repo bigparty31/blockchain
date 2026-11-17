@@ -32,10 +32,17 @@ def _unix(dt: datetime) -> int:
     return int(dt.timestamp())
 
 
-def _occurred_at(r: BankRowResult) -> int:
-    # 은행 거래내역의 날짜·시각은 한국 시간이다. 시각이 없는 은행 양식이면 그날 자정
-    when = datetime.strptime(f"{r.tran_date} {r.tran_time or '00:00:00'}", "%Y-%m-%d %H:%M:%S")
-    return int(when.replace(tzinfo=KST).timestamp())
+def _occurred_at(r: BankRowResult, fallback: int) -> int:
+    # 은행 거래내역의 날짜·시각은 한국 시간이다. 시각이 없는 은행 양식이면 그날 자정.
+    # 업로드 검증(#117 리뷰) 전에 저장된 값이 달력에 없으면(2026-02-31·24:00:00) 카드 전체를 500 으로
+    # 깨뜨리지 않는다 — 시각만 틀리면 그날 자정, 날짜도 틀리면 [fallback](업로드 시각)
+    for text, fmt in ((f"{r.tran_date} {r.tran_time or '00:00:00'}", "%Y-%m-%d %H:%M:%S"), (r.tran_date, "%Y-%m-%d")):
+        try:
+            return int(datetime.strptime(text, fmt).replace(tzinfo=KST).timestamp())
+        except ValueError:
+            continue
+    logger.warning("거래 일시를 읽지 못해 업로드 시각으로 대신함: %r %r", r.tran_date, r.tran_time)
+    return fallback
 
 
 @router.get("/latest", response_model=StudentSnapshot, summary="현재 학기 최신 계좌 대조 (학생 화면)")
@@ -62,14 +69,15 @@ async def latest_snapshot(
     except SQLAlchemyError as e:
         raise _db_error(e, db, "최신 계좌 대조 조회")
 
+    uploaded_at = _unix(snap.snapshot_at)
     return StudentSnapshot(
         id=snap.id,
         term_id=snap.term_id,
         bank_balance=snap.bank_balance,
-        snapshot_at=_unix(snap.snapshot_at),
+        snapshot_at=uploaded_at,
         tx_hash=snap.tx_hash,
         unrecorded=[
-            UnrecordedTransaction(amount=r.amount, counterparty=r.description, occurred_at=_occurred_at(r))
+            UnrecordedTransaction(amount=r.amount, counterparty=r.description, occurred_at=_occurred_at(r, uploaded_at))
             for r in report.transactions
             if r.status == RowStatus.UNREGISTERED and r.direction == "OUT"
         ],

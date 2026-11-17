@@ -10,6 +10,7 @@
 import csv
 import io
 import re
+from datetime import date as _date, time as _time
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
@@ -93,7 +94,10 @@ def _date_time(date_part: str, time_part: Optional[str], row_no: int):
     if not m:
         raise BankCsvError(f"{row_no}번째 거래의 날짜를 읽을 수 없습니다: {date_part!r}")
     y, mo, d = m.groups()
-    if not (1 <= int(mo) <= 12 and 1 <= int(d) <= 31):
+    try:
+        # 달력에 있는 날짜만 받는다 (2026-02-31 같은 값은 저장 뒤 조회를 깨뜨린다)
+        _date(int(y), int(mo), int(d))
+    except ValueError:
         raise BankCsvError(f"{row_no}번째 거래의 날짜가 올바르지 않습니다: {date_part!r}")
     rest = text[m.end():].strip() if time_part is None else time_part.strip()
     t = None
@@ -102,6 +106,10 @@ def _date_time(date_part: str, time_part: Optional[str], row_no: int):
         if not tm:
             raise BankCsvError(f"{row_no}번째 거래의 시각을 읽을 수 없습니다: {rest!r}")
         hh, mm, ss = tm.groups()
+        try:
+            _time(int(hh), int(mm), int(ss or 0))  # 24:00:00·12:60 같은 값은 거부
+        except ValueError:
+            raise BankCsvError(f"{row_no}번째 거래의 시각이 올바르지 않습니다: {rest!r}")
         t = f"{hh}:{mm}:{ss or '00'}"
     return f"{y}-{mo}-{d}", t
 

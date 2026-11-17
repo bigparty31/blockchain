@@ -102,6 +102,9 @@ def test_preamble_lines_and_alias_headers():
     ("2026-03-10 14:03:11,카드출금,,,1215000,", "하나만"),            # 둘 다 없음
     ("2026-03-10 14:03:11,카드출금,3.5만,,1215000,", "숫자"),
     ("2026-13-10 14:03:11,카드출금,35000,,1215000,", "날짜"),
+    ("2026-02-31 14:03:11,카드출금,35000,,1215000,", "날짜"),   # 달력에 없는 날
+    ("2026-03-10 24:00:00,카드출금,35000,,1215000,", "시각"),   # 범위 밖 시각
+    ("2026-03-10 14:60,카드출금,35000,,1215000,", "시각"),
     ("어제,카드출금,35000,,1215000,", "날짜"),
     ("2026-03-10 오후2시,카드출금,35000,,1215000,", "시각"),
 ])
@@ -431,6 +434,24 @@ def test_latest_defaults_to_current_term(db_session, auth_header):
     other = upload(auth_header, term_id=2).json()["snapshot_id"]
     # 2026-2학기(9/1~12/20)가 진행 중이거나, 끝났어도 가장 최근에 시작한 학기다
     assert latest(auth_header).json()["id"] == other
+
+
+def test_latest_survives_bad_stored_dates(db_session, auth_header):
+    # 업로드 검증 전에 저장된 값이 달력에 없어도 카드가 500 이 되지 않는다 (#117 리뷰)
+    upload(auth_header)
+    with db_session() as s:
+        rows = s.query(BankTransaction).filter(BankTransaction.direction == "OUT").order_by(BankTransaction.id).all()
+        rows[0].tran_time = "24:00:00"   # 시각만 틀림 → 그날 자정
+        rows[1].tran_date = "2026-02-31"  # 날짜가 틀림 → 업로드 시각
+        bad_time_date, bad_date_amount = rows[0].tran_date, rows[1].amount
+        s.commit()
+    res = latest(auth_header, term_id=TERM)
+    assert res.status_code == 200
+    body = res.json()
+    by_amount = {u["amount"]: u["occurred_at"] for u in body["unrecorded"]}
+    assert by_amount[bad_date_amount] == body["snapshot_at"]
+    midnight = int(datetime.strptime(bad_time_date, "%Y-%m-%d").replace(tzinfo=KST).timestamp())
+    assert midnight in by_amount.values()
 
 
 def test_latest_404_and_auth(db_session, auth_header):
