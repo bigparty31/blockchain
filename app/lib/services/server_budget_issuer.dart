@@ -86,9 +86,17 @@ class ServerBudgetIssuer implements BudgetIssuer {
         continue;
       }
       try {
-        outcomes.add(await _issueOne(items[k], termId: term, domain: domain, first: k == 0));
+        outcomes.add(await _issueOne(items[k],
+            termId: term, domain: domain, first: k == 0, expectTermCode: termId == null));
       } on _Abort catch (e) {
         abort = e.message;
+        outcomes.add(_rejected(abort));
+      } on BudgetIssueException {
+        rethrow; // 첫 줄 403 — 아무것도 안 보냈다
+      } catch (_) {
+        // 예상 못 한 오류(플랫폼 저장소 등)로 앞 줄의 결과까지 잃지 않는다. 제출 이후 단계는 모두
+        // 따로 잡으므로 여기 오는 것은 보내기 전이다 (#120 리뷰)
+        abort = '발행을 준비하다 오류가 났어요. 다시 확정해 주세요.';
         outcomes.add(_rejected(abort));
       }
     }
@@ -101,6 +109,7 @@ class ServerBudgetIssuer implements BudgetIssuer {
     required int termId,
     required Eip712Domain domain,
     required bool first,
+    required bool expectTermCode,
   }) async {
     // 컨트롤러가 다 채운 줄만 보낸다. 어기면 바로 터지게 둔다 (FakeBudgetIssuer 와 같다)
     final category = item.category!.label;
@@ -121,7 +130,11 @@ class ServerBudgetIssuer implements BudgetIssuer {
     } catch (_) {
       return _rejected('서버에 연결하지 못했어요. 다시 확정해 주세요.');
     }
-    if (prep.statusCode == 403 && first) throw const BudgetIssueException(BudgetIssueFailure.notPresident);
+    if (prep.statusCode == 403) {
+      // 같은 세션이면 남은 줄도 전부 403 이다. 첫 줄이면 아직 아무것도 안 보냈으니 「회장 아님」으로 알린다
+      if (first) throw const BudgetIssueException(BudgetIssueFailure.notPresident);
+      throw const _Abort('회장만 예산을 발행할 수 있어요.');
+    }
     if (prep.statusCode != 201 && prep.statusCode != 200) return _rejected(_refusal(prep, '예산 준비'));
 
     final Map<String, dynamic> draft;
@@ -130,7 +143,7 @@ class ServerBudgetIssuer implements BudgetIssuer {
     } catch (_) {
       return _rejected('서버 응답을 읽지 못했어요. 다시 확정해 주세요.');
     }
-    if (draft['status'] == 'ALREADY_ISSUED') return BudgetIssueOutcome.alreadyIssued;
+    if (draft['status'] == 'ALREADY_ISSUED') return _existing(draft);
 
     // ② 서명 — 서버가 준 값이 우리가 보낸 값과 같은지 먼저 본다. 다르면 엉뚱한 예산에 서명하게 된다
     final id = draft['id'];
@@ -139,8 +152,10 @@ class ServerBudgetIssuer implements BudgetIssuer {
     final expected = BudgetTypes.categoryHash(category);
     if (draft['status'] != 'DRAFT' ||
         id is! int ||
+        id <= 0 || // 컨트랙트에서 budgetId 0 은 무효
         term is! int ||
         term <= 0 ||
+        (expectTermCode && term != termCode) || // 현재 학기로 보냈는데 다른 학기 코드가 오면 서명하지 않는다
         hash is! String ||
         hash.toLowerCase() != expected.toLowerCase()) {
       return _rejected('서버가 준 발행 값이 올바르지 않아 서명하지 않았어요.');
@@ -161,6 +176,9 @@ class ServerBudgetIssuer implements BudgetIssuer {
     } on SigningException catch (e) {
       // 지문 취소 등 — 남은 줄마다 또 묻지 않는다
       throw _Abort('서명하지 않아 보내지 않았어요: ${e.message}');
+    } catch (_) {
+      // 기기 키 저장소 오류(PlatformException) 등 — 서명이 없으니 보내지 않았다
+      throw const _Abort('기기 서명 키를 읽지 못해 보내지 않았어요. 다시 확정해 주세요.');
     }
 
     // 보내기 전에 서명자를 확인한다 — 서버가 400 으로 막지만 이유를 먼저 정확히 알려 준다
@@ -213,13 +231,23 @@ class ServerBudgetIssuer implements BudgetIssuer {
       case 'ISSUED':
         return BudgetIssueOutcome.issued;
       case 'ALREADY_ISSUED':
-        return BudgetIssueOutcome.alreadyIssued;
+        return _existing(body);
       case 'REJECTED':
         final text = body['message'] ?? body['reason'];
         return _rejected(text is String ? text : '체인이 거부했어요');
       default:
         return BudgetIssueOutcome.noResponse; // NO_RESPONSE 포함
     }
+  }
+
+  /// 서버가 알려 준 체인 값(`planned_amount`·`expires_at`)과 함께 「이미 발행됨」.
+  static BudgetIssueOutcome _existing(Map<String, dynamic> body) {
+    final amount = body['planned_amount'];
+    final expiresAt = body['expires_at'];
+    return BudgetIssueOutcome.existing(
+      amount: amount is int && amount > 0 ? amount : null,
+      expiresAt: expiresAt is int && expiresAt > 0 ? expiresAt : null,
+    );
   }
 
   Future<Eip712Domain> _loadDomain() async {

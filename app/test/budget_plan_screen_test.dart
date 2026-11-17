@@ -236,6 +236,20 @@ void main() {
       expect(find.byType(SigningKeyScreen), findsOneWidget);
     });
 
+    testWidgets('이미 발행된 예산이면 잠긴 입력란도 체인의 금액으로 바뀐다', (tester) async {
+      await pumpScreen(tester, issuer: FakeBudgetIssuer(forcedOutcomes: {
+        BudgetCategory.event: const BudgetIssueOutcome.existing(amount: 1000000),
+      }));
+      await addCard(tester);
+      await fillCard(tester, 0, category: '행사비', amount: '2000000');
+      await pressConfirmAndAccept(tester);
+      await tester.pumpAndSettle();
+
+      expect(find.text('1000000'), findsOneWidget);
+      expect(find.text('2000000'), findsNothing);
+      expect(find.textContaining('체인의 값'), findsOneWidget);
+    });
+
     testWidgets('일부만 성공하면 성공한 줄은 잠기고 안내가 뜬다', (tester) async {
       final issuer = FakeBudgetIssuer(forcedOutcomes: {
         BudgetCategory.project: const BudgetIssueOutcome(BudgetIssueStatus.rejected, message: '체인이 거부했어요'),

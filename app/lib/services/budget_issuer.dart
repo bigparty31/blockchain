@@ -61,7 +61,16 @@ class BudgetIssueOutcome {
   final BudgetIssueStatus status;
   final String? message;
 
-  const BudgetIssueOutcome(this.status, {this.message});
+  /// [BudgetIssueStatus.alreadyIssued] 일 때 **체인에 실제로 있는** 편성액·만료 시각(Unix 초).
+  /// 입력값과 다를 수 있다 — 화면은 이 값으로 줄을 바꿔 보여 준다. 모르면 null.
+  final int? issuedAmount;
+  final int? issuedExpiresAt;
+
+  const BudgetIssueOutcome(this.status, {this.message, this.issuedAmount, this.issuedExpiresAt});
+
+  /// 이미 발행된 예산 — 서버가 알려 준 체인 값과 함께.
+  const BudgetIssueOutcome.existing({int? amount, int? expiresAt})
+      : this(BudgetIssueStatus.alreadyIssued, issuedAmount: amount, issuedExpiresAt: expiresAt);
 
   static const issued = BudgetIssueOutcome(BudgetIssueStatus.issued);
   static const alreadyIssued = BudgetIssueOutcome(BudgetIssueStatus.alreadyIssued);

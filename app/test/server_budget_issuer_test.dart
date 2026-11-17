@@ -153,12 +153,36 @@ void main() {
     expect((jsonDecode(sent.first.body) as Map)['term_id'], 7);
   });
 
-  test('준비 단계에서 이미 발행된 항목이면 서명·제출 없이 「이미 발행됨」', () async {
-    server(prepare: (req) => json(draftJson(11, '행사비', status: 'ALREADY_ISSUED'), 201));
-    final out = await issuer().issueAll(termId: 4, items: [item(BudgetCategory.event, 1000)]);
+  test('준비 단계에서 이미 발행된 항목이면 서명·제출 없이 「이미 발행됨」 + 체인의 실제 값', () async {
+    server(prepare: (req) => json({...draftJson(11, '행사비', status: 'ALREADY_ISSUED'), 'planned_amount': 1000000}, 201));
+    final out = await issuer().issueAll(termId: 4, items: [item(BudgetCategory.event, 2000000)]);
     expect(out.single.status, BudgetIssueStatus.alreadyIssued);
+    expect(out.single.issuedAmount, 1000000);
+    expect(out.single.issuedExpiresAt, expiresAt);
     expect(signCalls, 0);
     expect(paths(), ['/budgets']);
+  });
+
+  group('서버가 준 발행 값 검산 — 다르면 서명하지 않는다', () {
+    test('budgetId 가 0 이면', () async {
+      server(prepare: (req) => json(draftJson(0, '행사비'), 201));
+      final out = await issuer().issueAll(termId: 4, items: [item(BudgetCategory.event, 1)]);
+      expect(out.single.status, BudgetIssueStatus.rejected);
+      expect(signCalls, 0);
+    });
+
+    test('현재 학기로 보냈는데 다른 학기 코드가 오면', () async {
+      server(prepare: (req) => json({...draftJson(11, '행사비'), 'term_code': 20261}, 201));
+      final out = await issuer().issueAll(items: [item(BudgetCategory.event, 1)]);
+      expect(out.single.status, BudgetIssueStatus.rejected);
+      expect(signCalls, 0);
+    });
+
+    test('학기 id 를 직접 줬으면 그 학기 코드를 그대로 쓴다', () async {
+      server(prepare: (req) => json({...draftJson(11, '행사비'), 'term_code': 20261}, 201));
+      final out = await issuer().issueAll(termId: 3, items: [item(BudgetCategory.event, 1)]);
+      expect(out.single.status, BudgetIssueStatus.issued);
+    });
   });
 
   group('시작 전에 막힘 (아무것도 보내지 않는다)', () {
@@ -180,6 +204,20 @@ void main() {
         throwsA(isA<BudgetIssueException>().having((e) => e.failure, 'failure', BudgetIssueFailure.notPresident)),
       );
       expect(sent, isEmpty);
+    });
+
+    test('둘째 줄 준비에서 403 이면 첫 줄 결과는 남기고 나머지는 중단', () async {
+      var n = 0;
+      server(prepare: (req) {
+        n++;
+        if (n == 1) return json(draftJson(11, '행사비'), 201);
+        return json({'detail': '권한 없음'}, 403);
+      });
+      final out = await issuer().issueAll(
+          termId: 4, items: [item(BudgetCategory.event, 1), item(BudgetCategory.project, 1), item(BudgetCategory.operation, 1)]);
+      expect([for (final o in out) o.status],
+          [BudgetIssueStatus.issued, BudgetIssueStatus.rejected, BudgetIssueStatus.rejected]);
+      expect(paths().where((p) => p == '/budgets').length, 2);
     });
 
     test('첫 준비에서 403 이면 회장 아님', () async {
@@ -236,6 +274,19 @@ void main() {
       expect(paths().where((p) => p.endsWith('/submit')), isEmpty);
     });
 
+    test('둘째 줄 서명에서 저장소 오류가 나도 첫 줄 결과는 남는다', () async {
+      server();
+      final ok = signerWith(presidentKey);
+      var n = 0;
+      final out = await issuer(sign: (d, m, {required reason}) async {
+        if (++n == 2) throw Exception('PlatformException(키스토어)');
+        return ok(d, m, reason: reason);
+      }).issueAll(termId: 4, items: [item(BudgetCategory.event, 1), item(BudgetCategory.project, 1)]);
+      expect([for (final o in out) o.status], [BudgetIssueStatus.issued, BudgetIssueStatus.rejected]);
+      expect(out.last.message, contains('서명 키를 읽지 못해'));
+      expect(paths().where((p) => p.endsWith('/submit')).length, 1);
+    });
+
     test('다른 키로 서명했으면 보내지 않는다', () async {
       server();
       final out = await issuer(key: otherKey).issueAll(termId: 4, items: [item(BudgetCategory.event, 1)]);
@@ -268,11 +319,15 @@ void main() {
       expect(out.single.message, '만료일이 지났어요');
     });
 
-    test('ALREADY_ISSUED 는 이미 발행됨, NO_RESPONSE 는 응답 없음', () async {
-      final replies = ['ALREADY_ISSUED', 'NO_RESPONSE'];
-      server(submit: (req) => json({'status': replies.removeAt(0)}));
+    test('ALREADY_ISSUED 는 이미 발행됨(체인 값 포함), NO_RESPONSE 는 응답 없음', () async {
+      final replies = [
+        {'status': 'ALREADY_ISSUED', 'planned_amount': 500000, 'expires_at': 1790000000},
+        {'status': 'NO_RESPONSE'},
+      ];
+      server(submit: (req) => json(replies.removeAt(0)));
       final out = await issuer().issueAll(termId: 4, items: [item(BudgetCategory.event, 1), item(BudgetCategory.project, 1)]);
       expect([for (final o in out) o.status], [BudgetIssueStatus.alreadyIssued, BudgetIssueStatus.noResponse]);
+      expect((out.first.issuedAmount, out.first.issuedExpiresAt), (500000, 1790000000));
     });
 
     for (final code in [409, 500, 503]) {

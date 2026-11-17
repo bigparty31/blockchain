@@ -161,7 +161,20 @@ class _BudgetPlanScreenState extends State<BudgetPlanScreen> {
         ],
       ),
     );
-    if (ok == true && mounted) await _c.confirm();
+    if (ok == true && mounted) {
+      await _c.confirm();
+      _syncIssuedAmounts();
+    }
+  }
+
+  /// 이미 발행돼 있던 줄은 컨트롤러가 체인 값으로 바꾼다 — 잠긴 입력란 글자도 맞춘다.
+  void _syncIssuedAmounts() {
+    if (!mounted) return;
+    for (var i = 0; i < _c.lines.length && i < _amountCtrls.length; i++) {
+      final line = _c.lines[i];
+      final text = line.item.amount?.toString() ?? '';
+      if (line.isIssued && _amountCtrls[i].text != text) _amountCtrls[i].text = text;
+    }
   }
 
   void _connectWallet() {
