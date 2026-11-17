@@ -23,6 +23,7 @@ from app.routers.notifications import router as notifications_router
 from app.routers.membership_mint import router as membership_mint_router
 from app.routers.ocr import router as ocr_router
 from app.routers.bank import router as bank_router
+from app.routers.snapshots import router as snapshots_router
 from app.routers.receipts import router as receipts_router
 
 
@@ -94,6 +95,7 @@ app.include_router(notifications_router)
 app.include_router(membership_mint_router)
 app.include_router(ocr_router)
 app.include_router(bank_router)
+app.include_router(snapshots_router)
 app.include_router(receipts_router)
 
 

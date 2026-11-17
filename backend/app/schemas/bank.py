@@ -78,3 +78,28 @@ class SnapshotItem(BaseModel):
     snapshot_at: datetime
     uploaded_by: Optional[int]
     superseded: bool
+
+
+# ---------------------------------------------------------------- 학생 화면 S11 (GET /snapshots/latest)
+
+
+class UnrecordedTransaction(BaseModel):
+    """계좌에서 나갔는데 원장에 없는 거래 한 건. 학생에게는 금액·거래처·일시만 보인다 (거래 원문·잔액은 뺀다)."""
+
+    amount: int = Field(..., description="출금액 (원, 양수)")
+    counterparty: str = Field(..., description="은행 거래내역의 적요(거래처)")
+    occurred_at: int = Field(..., description="거래 일시 (Unix 초, KST 로 읽은 거래일·시각)")
+
+
+class StudentSnapshot(BaseModel):
+    """학생 홈 계좌 대조 카드 (docs/backend_requests.md §1-5). 앱이 파싱하는 키 그대로다 — 이름을 바꾸면 못 읽는다.
+
+    학생 화면에 필요 없는 file_hash·uploaded_by·거래 원문과 반대 방향 대조(unbacked_entries)는 싣지 않는다.
+    """
+
+    id: int = Field(..., description="스냅샷 ID")
+    term_id: int
+    bank_balance: int = Field(..., description="거래내역 마지막 거래의 거래후잔액")
+    snapshot_at: int = Field(..., description="스냅샷 일시 (Unix 초)")
+    tx_hash: Optional[str] = Field(None, description="온체인 기록 TX 해시 (아직 컨트랙트가 없어 null)")
+    unrecorded: List[UnrecordedTransaction]

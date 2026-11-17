@@ -385,3 +385,102 @@ def test_council_reads_student_cannot(db_session, auth_header):
     assert client.get(f"/bank/snapshots/{snap_id}", headers=auth_header(Role.STUDENT)).status_code == 403
     assert client.get("/bank/snapshots", params={"term_id": TERM}, headers=auth_header(Role.STUDENT)).status_code == 403
     assert client.get("/bank/snapshots/999", headers=auth_header(Role.AUDITOR)).status_code == 404
+
+
+# ================================================================ 학생 홈 카드 (GET /snapshots/latest)
+
+
+def latest(auth_header, role=Role.STUDENT, **params):
+    return client.get("/snapshots/latest", params=params, headers=auth_header(role))
+
+
+def test_student_sees_only_unregistered_withdrawals(db_session, auth_header):
+    demo_ledger(db_session)
+    report = upload(auth_header).json()
+    res = latest(auth_header, term_id=TERM)
+    assert res.status_code == 200
+    body = res.json()
+    # 앱(SnapshotModel.fromJson)이 읽는 키만. file_hash·거래 원문·반대 방향 대조는 학생에게 안 보낸다
+    assert set(body) == {"id", "term_id", "bank_balance", "snapshot_at", "tx_hash", "unrecorded"}
+    assert (body["id"], body["term_id"], body["bank_balance"], body["tx_hash"]) == (report["snapshot_id"], TERM, 1171000, None)
+    assert isinstance(body["snapshot_at"], int)
+    row = next(t for t in report["transactions"] if t["status"] == "UNREGISTERED")
+    when = datetime.strptime(f"{row['tran_date']} {row['tran_time']}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=KST)
+    assert body["unrecorded"] == [{"amount": 12000, "counterparty": row["description"], "occurred_at": int(when.timestamp())}]
+
+
+def test_unregistered_deposit_not_shown(db_session, auth_header):
+    # 원장이 비면 입금 10,000·50,000 도 미등록이지만, 학생 카드는 '장부 없이 나간 돈'만 보인다
+    upload(auth_header)
+    amounts = [u["amount"] for u in latest(auth_header, term_id=TERM).json()["unrecorded"]]
+    assert sorted(amounts) == [12000, 35000, 82000]
+
+
+def test_latest_follows_newest_upload_and_rematch(db_session, auth_header):
+    demo_ledger(db_session)
+    upload(auth_header)
+    newer = upload(auth_header, raw=KB).json()["snapshot_id"]
+    assert latest(auth_header, term_id=TERM).json()["id"] == newer
+    add_entry(db_session, 5, "EXPENSE", 12000, "2026-03-18")
+    client.post(f"/bank/snapshots/{newer}/rematch", headers=auth_header(Role.TREASURER))
+    assert latest(auth_header, term_id=TERM).json()["unrecorded"] == []
+
+
+def test_latest_defaults_to_current_term(db_session, auth_header):
+    upload(auth_header, term_id=TERM)
+    other = upload(auth_header, term_id=2).json()["snapshot_id"]
+    # 2026-2학기(9/1~12/20)가 진행 중이거나, 끝났어도 가장 최근에 시작한 학기다
+    assert latest(auth_header).json()["id"] == other
+
+
+def test_latest_404_and_auth(db_session, auth_header):
+    assert latest(auth_header, term_id=TERM).status_code == 404
+    assert client.get("/snapshots/latest", params={"term_id": TERM}).status_code == 401
+    upload(auth_header)
+    for role in (Role.STUDENT, Role.TREASURER, Role.AUDITOR, Role.PRESIDENT):
+        assert latest(auth_header, role=role, term_id=TERM).status_code == 200
+
+
+def test_student_server_serves_latest(db_session, auth_header):
+    from app.main_student import app as student_app
+    upload(auth_header)
+    student_app.dependency_overrides[get_db] = app.dependency_overrides[get_db]
+    try:
+        res = TestClient(student_app).get("/snapshots/latest", params={"term_id": TERM}, headers=auth_header(Role.STUDENT))
+    finally:
+        student_app.dependency_overrides.pop(get_db, None)
+    assert res.status_code == 200 and len(res.json()["unrecorded"]) == 3
+
+
+# ================================================================ 잔액 차이 학생 알림
+
+
+class TopicRecorder:
+    def __init__(self):
+        self.topics = []
+
+    def send_to_topic(self, topic, message):
+        self.topics.append((topic, message.body))
+
+    def send_to_tokens(self, tokens, message):
+        return []
+
+
+def test_mismatch_pushes_students(db_session, auth_header):
+    from app.services import push
+    demo_ledger(db_session)  # 장부 -57,000 vs 계좌 1,171,000
+    upload(auth_header)
+    sender = TopicRecorder()
+    push.drain(db_session, sender)
+    assert sender.topics == [("students_20261", "장부와 계좌 잔액이 다릅니다.")]
+
+
+def test_no_push_when_balanced(db_session, auth_header):
+    from app.services import push
+    demo_ledger(db_session)
+    add_entry(db_session, 5, "EXPENSE", 12000, "2026-03-18")
+    add_entry(db_session, 6, "INCOME", 1240000, "2026-02-28")  # 학기 전 이월금 — 장부 1,171,000 = 계좌
+    upload(auth_header)
+    sender = TopicRecorder()
+    push.drain(db_session, sender)
+    assert sender.topics == []

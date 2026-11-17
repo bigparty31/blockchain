@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -37,6 +38,7 @@ from app.schemas.bank import (
     SnapshotItem,
     UnbackedEntry,
 )
+from app.services.notifications import notify_students_balance_mismatch
 
 logger = logging.getLogger(__name__)
 
@@ -224,6 +226,27 @@ def _apply_matching(db: Session, snap: DBSnapshot) -> None:
         t.matched_entry_id = c.entry_id if c else None
 
 
+# ---------------------------------------------------------------- 잔액 차이 알림
+
+
+def _ledger_balance(db: Session, term_id: int) -> int:
+    """학기 장부 잔액 = Σ확정수입 − Σ확정지출 (PRD §7.4, /balance 와 같은 식). 확정 정정은 음수 금액으로 들어 있어 그대로 더한다."""
+    rows = (
+        db.query(DBEntry.kind, func.coalesce(func.sum(DBEntry.amount), 0))
+        .filter(DBEntry.term_id == term_id, DBEntry.status == "CONFIRMED")
+        .group_by(DBEntry.kind)
+        .all()
+    )
+    totals = {str(k): int(v) for k, v in rows}
+    return totals.get("INCOME", 0) - totals.get("EXPENSE", 0)
+
+
+def _notify_if_mismatch(db: Session, snap: DBSnapshot) -> None:
+    # 학생 홈 카드와 같은 비교다. 알림은 commit 과 함께 큐에 들어가 commit 뒤에 나간다
+    if _ledger_balance(db, snap.term_id) != snap.bank_balance:
+        notify_students_balance_mismatch(db, snap.term_id)
+
+
 # ---------------------------------------------------------------- API
 
 
@@ -287,6 +310,7 @@ async def upload_snapshot(body: BankUploadRequest, user: User = Depends(treasure
             ))
         db.flush()
         _apply_matching(db, snap)
+        _notify_if_mismatch(db, snap)
         db.commit()
     except IntegrityError:
         db.rollback()
@@ -315,6 +339,7 @@ async def rematch_snapshot(snapshot_id: int, user: User = Depends(treasurer_only
         if _latest_snapshot_id(db, snap.term_id) != snap.id:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="더 최근 업로드가 있습니다. 최신 스냅샷에서 재대조하세요.")
         _apply_matching(db, snap)
+        _notify_if_mismatch(db, snap)
         db.commit()
         return _report(db, snap)
     except IntegrityError:
