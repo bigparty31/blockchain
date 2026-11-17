@@ -58,6 +58,9 @@ class FakeRegistrar implements EntryRegistrar {
   /// 다음 제출을 이 예외로 실패시킨다 (한 번만).
   EntryDecisionException? failNextSubmit;
 
+  /// 제출 뒤 서버에 기록된 OCR 판정. 기본은 보낸 판독 그대로 (서버가 바꾸지 않음). null 을 돌려주면 「못 읽음」.
+  ServerOcr? Function(int id, EntryDraft draft)? serverOcr;
+
   int _nextId = 100;
 
   @override
@@ -74,9 +77,12 @@ class FakeRegistrar implements EntryRegistrar {
       failNextSubmit = null;
       throw fail;
     }
+    final ocr = serverOcr == null ? ServerOcr(draft.ocr?.status, draft.ocr?.duplicateOf) : serverOcr!(id, draft);
     final left = draft.budgetId == null ? null : remaining[draft.budgetId];
-    if (left != null && draft.amount > left) return const SubmitOutcome(EntryStatus.BLOCKED, BlockReason.BUDGET_EXCEEDED);
-    return const SubmitOutcome(EntryStatus.PENDING, null);
+    if (left != null && draft.amount > left) {
+      return SubmitOutcome(EntryStatus.BLOCKED, BlockReason.BUDGET_EXCEEDED, ocr: ocr);
+    }
+    return SubmitOutcome(EntryStatus.PENDING, null, ocr: ocr);
   }
 }
 

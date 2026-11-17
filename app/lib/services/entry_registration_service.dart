@@ -209,7 +209,21 @@ String? ocrImageFormat(List<int> bytes) {
 class SubmitOutcome {
   final EntryStatus status; // PENDING | BLOCKED
   final BlockReason? blockReason;
-  const SubmitOutcome(this.status, this.blockReason);
+
+  /// 제출 뒤 서버에 기록된 OCR 판정. **읽지 못했으면 null** — 그때 화면은 제출 전 판독을 「제출 전 기준」으로 보인다.
+  final ServerOcr? ocr;
+
+  const SubmitOutcome(this.status, this.blockReason, {this.ocr});
+}
+
+/// 서버에 기록된 OCR 판정 (`GET /entries/{id}` 의 `ocr_status`·`duplicate_of`).
+///
+/// 서버는 제출할 때 중복을 **다시** 검사해 `DUPLICATE` 로 바꿀 수 있다 — 초안 저장 뒤 같은 영수증의 다른 건이
+/// 먼저 제출된 경우. 제출 응답에는 이 값이 없어서 제출 뒤 한 번 읽는다.
+class ServerOcr {
+  final OcrStatus? status;
+  final int? duplicateOf;
+  const ServerOcr(this.status, this.duplicateOf);
 }
 
 /// 서버에 올린 영수증 — 서버가 다시 계산한 해시(앱 계산과 같음을 확인한 값)와 저장 경로.
@@ -380,12 +394,27 @@ class EntryRegistrationService implements EntryRegistrar {
       final valid = outcome.status == EntryStatus.PENDING ||
           (outcome.status == EntryStatus.BLOCKED && outcome.blockReason != null);
       if (!valid) throw const FormatException('제출 결과가 PENDING·BLOCKED(사유 포함)가 아니다');
-      return outcome;
     } catch (_) {
       throw const EntryDecisionException(
         EntryDecisionFailure.unknownOutcome,
         '등록 결과를 읽지 못했어요. 내 등록 현황에서 확인해 주세요.',
       );
+    }
+    return SubmitOutcome(EntryStatus.fromCode(status), reason is String ? BlockReason.fromCode(reason) : null,
+        ocr: await _serverOcrOf(id));
+  }
+
+  /// 제출 뒤 서버에 기록된 OCR 판정. 등록은 이미 끝났으므로 **못 읽어도 던지지 않는다** (null).
+  Future<ServerOcr?> _serverOcrOf(int id) async {
+    try {
+      final res = await client.get(Uri.parse('${ApiConfig.entries}/$id'), headers: AuthService().authHeaders).timeout(_readTimeout);
+      if (res.statusCode != 200) return null;
+      final body = jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
+      final code = body['ocr_status'];
+      final dup = body['duplicate_of'];
+      return ServerOcr(code is String ? OcrStatus.fromCode(code) : null, dup is int ? dup : null);
+    } catch (_) {
+      return null;
     }
   }
 

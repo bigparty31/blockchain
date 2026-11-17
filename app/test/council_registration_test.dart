@@ -234,17 +234,84 @@ void main() {
       expect(find.text('영수증 판독: 중복 · #7와 같은 영수증', findRichText: true), findsOneWidget);
     });
 
-    testWidgets('판독하지 못하면(서버 없음·PDF) 묻지 않고 OCR 값 없이 등록한다 — 막지 않는다', (tester) async {
+    testWidgets('판독하지 못하면(서버 없음·PDF) 묻지 않고 「판독 불가」로 등록한다 — 막지 않고, 승인 때 경고가 뜨게', (tester) async {
       final registrar = FakeRegistrar(); // 판독 결과 null
       await pump(tester, ExpenseCreateScreen(registrar: registrar, pickReceipt: fakeReceipt));
       await attachAndFill(tester);
       await tapText(tester, '제출하기');
 
+      expect(find.byKey(const Key('ocr_warning_dialog')), findsNothing, reason: '판독 불가는 묻지 않는다');
       expect(find.text('지출 제출 완료!'), findsOneWidget);
       final draft = registrar.submits.single.$2;
-      expect(draft.ocr, isNull);
-      expect(draft.toCreateJson().keys.where((k) => k.startsWith('ocr_')), isEmpty);
-      expect(find.textContaining('영수증 판독', findRichText: true), findsNothing);
+      expect(draft.ocr!.status, OcrStatus.UNREADABLE);
+      expect(draft.toCreateJson(), containsPair('ocr_status', 'UNREADABLE'),
+          reason: '서버가 OCR 을 못 돌렸을 때처럼 판독 불가로 남긴다 (SERVER_ENV.md)');
+      expect(draft.toCreateJson().containsKey('ocr_amount'), isFalse, reason: '읽지 못한 값은 지어내지 않는다');
+      expect(find.text('영수증 판독: ${OcrStatus.UNREADABLE.label}', findRichText: true), findsOneWidget);
+    });
+
+    testWidgets('판독값 없이 저장된 초안을 이어서 제출하면 다시 판독하지 않고 같은 초안 번호로 낸다 — 초안이 둘 생기지 않게', (tester) async {
+      final path = FakeRegistrar.pathOf(fakeReceiptBytes);
+      final registrar = FakeRegistrar()
+        ..ocr = ((_, __) => reading(OcrStatus.MATCH)) // 지금은 판독이 된다
+        ..stored[path] = fakeReceiptBytes;
+      final saved = DraftEntry(
+        id: 9,
+        termId: 1,
+        kind: EntryKind.EXPENSE,
+        amount: 35000,
+        counterparty: '한결문구',
+        purpose: '신입생 환영회 명찰',
+        occurredAt: 1789225200,
+        budgetId: 1,
+        receiptHash: Hashing.fileHash(fakeReceiptBytes),
+        receiptPath: path,
+      ); // 저장할 때는 판독값이 없었다
+      await pump(tester, ExpenseCreateScreen(registrar: registrar, resumeDraft: saved));
+      await tapText(tester, '제출하기');
+
+      expect(registrar.reads, isEmpty, reason: '초안을 만든 뒤에는 다시 판독하지 않는다');
+      expect(registrar.drafts, isEmpty, reason: '판독값만 달라진 새 초안을 만들지 않는다 — 앞 초안이 목록에 남지 않게');
+      expect(registrar.submits.single.$1, 9);
+    });
+
+    testWidgets('제출 응답을 잃은 뒤 판독이 되돌아와도 같은 초안 번호로 다시 낸다 — 같은 지출이 두 번 올라가지 않게', (tester) async {
+      final registrar = FakeRegistrar()
+        ..failNextSubmit = const EntryDecisionException(EntryDecisionFailure.unknownOutcome, '등록 제출 결과를 확인하지 못했어요.');
+      await pump(tester, ExpenseCreateScreen(registrar: registrar, pickReceipt: fakeReceipt));
+      await attachAndFill(tester);
+      await tapText(tester, '제출하기'); // 판독 실패 → 초안 100 → 제출 응답 유실
+      expect(find.textContaining('등록 제출 결과를 확인하지 못했어요.'), findsOneWidget);
+
+      registrar.ocr = (_, __) => reading(OcrStatus.MATCH);
+      await tapText(tester, '제출하기');
+
+      expect(registrar.drafts, hasLength(1));
+      expect(registrar.submits.map((s) => s.$1), [100, 100], reason: '서버에는 이미 올라갔을 수 있다 — 새 번호로 내지 않는다');
+    });
+
+    testWidgets('제출 때 서버가 중복으로 바꾸면 결과에 서버 판정을 보인다', (tester) async {
+      final registrar = FakeRegistrar()
+        ..ocr = ((_, __) => reading(OcrStatus.MATCH))
+        ..serverOcr = ((_, __) => const ServerOcr(OcrStatus.DUPLICATE, 7)); // 저장 뒤 같은 영수증의 다른 건이 먼저 제출됐다
+      await pump(tester, ExpenseCreateScreen(registrar: registrar, pickReceipt: fakeReceipt));
+      await attachAndFill(tester);
+      await tapText(tester, '제출하기');
+
+      expect(find.text('영수증 판독: 중복 · #7와 같은 영수증', findRichText: true), findsOneWidget);
+      expect(find.text('영수증 판독: 일치', findRichText: true), findsNothing);
+    });
+
+    testWidgets('제출 뒤 서버 판정을 못 읽으면 제출 전 판독에 「제출 전 기준」을 붙인다', (tester) async {
+      final registrar = FakeRegistrar()
+        ..ocr = ((_, __) => reading(OcrStatus.MATCH))
+        ..serverOcr = ((_, __) => null);
+      await pump(tester, ExpenseCreateScreen(registrar: registrar, pickReceipt: fakeReceipt));
+      await attachAndFill(tester);
+      await tapText(tester, '제출하기');
+
+      expect(find.text('지출 제출 완료!'), findsOneWidget, reason: '판정을 못 읽어도 등록은 끝났다');
+      expect(find.text('영수증 판독: 일치 (제출 전 기준)', findRichText: true), findsOneWidget);
     });
 
     testWidgets('초안 저장도 판독값을 싣는다 — 저장은 체인에 안 올라가서 묻지 않는다', (tester) async {
