@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../../core/app_theme.dart';
+import '../../core/elapsed_days.dart';
 import 'input_rules.dart';
 
 String _daysAgo(int days) {
@@ -33,12 +34,12 @@ List<Map<String, dynamic>> buildInquiryMockItems() => [
     ];
 
 /// 제기일부터 오늘까지 지난 날 수. 답하지 않은 사실이 남는 것이 압력이다 (PRD §4.5).
-int inquiryElapsedDays(String raisedDate, {DateTime? now}) {
-  final d = DateTime.tryParse(raisedDate);
-  if (d == null) return 0;
-  final days = (now ?? DateTime.now()).difference(d).inDays;
-  return days < 0 ? 0 : days;
-}
+///
+/// 세는 규칙은 [kstElapsedDaysFromDate] 에 있다 — 학생 화면의 「제기 후 N일 경과」와 **같은
+/// 구현**이다. 예전에는 기기 시간대로 셌는데, 그러면 UTC 인 에뮬레이터·해외 로밍에서 학생이
+/// 보는 일수와 감사가 보는 일수가 하루 어긋났다.
+int inquiryElapsedDays(String raisedDate, {DateTime? now}) =>
+    kstElapsedDaysFromDate(raisedDate, now: now);
 
 /// [이승호 담당: app/lib/screens/council/]
 /// 5. 학생 이의 제기 답변 화면 — 답변 주체는 감사·회장이다 (PRD §4.5)

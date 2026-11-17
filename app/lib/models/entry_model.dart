@@ -30,8 +30,8 @@ class EntryModel {
 
   /// 확정 트랜잭션이 담긴 블록 번호 (S10).
   ///
-  /// **백엔드에 아직 `block_number` 필드가 없어 현재는 항상 null 이다.**
-  /// 필드가 생기면 응답에 실려 오는 즉시 상세 화면에 표시된다 — 앱 쪽은 손댈 것이 없다.
+  /// 서버가 `block_number` 로 내려준다 (2026-11-12 로컬 실연동에서 확인 — `GET /entries/{id}`,
+  /// `GET /entries/{id}/onchain` 양쪽). **아직 체인에 올라가지 않은 건과 옛 서버에서는 null 이다.**
   final int? blockNumber;
 
   /// 온체인 학기 코드 `YYYYS` (예: 20262 = 2026년 2학기).
