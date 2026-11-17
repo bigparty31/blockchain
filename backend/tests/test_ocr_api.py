@@ -195,6 +195,8 @@ def test_build_request_matches_clova_v2():
     assert req["version"] == "V2"
     assert req["images"] == [{"format": "png", "name": "receipt", "data": base64.b64encode(b"abc").decode()}]
     assert req["requestId"] and isinstance(req["timestamp"], int)
+    # 표 인식을 켜면 표 인식이 꺼진 도메인에서 0028 로 거절된다. 파서는 tables 를 쓰지 않는다
+    assert req["enableTableDetection"] is False
 
 
 def test_client_without_keys_raises():

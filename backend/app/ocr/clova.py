@@ -31,13 +31,17 @@ class OcrClient(Protocol):
 
 
 def build_request(image: bytes, image_format: str) -> dict:
-    """CLOVA General V2 요청 본문. 표 영역(tables)도 같이 받는다 (docs/OCR.md)."""
+    """CLOVA General V2 요청 본문.
+
+    표 인식은 끈다. 파서는 좌표만 쓰고 tables 는 읽지 않는데, 도메인에서 표 인식을 켜지 않았으면
+    CLOVA 가 0028 (Table detection disabled) 로 요청 전체를 거절한다 (docs/OCR.md).
+    """
     return {
         "version": "V2",
         "requestId": str(uuid.uuid4()),
         "timestamp": int(time.time() * 1000),
         "lang": "ko",
-        "enableTableDetection": True,
+        "enableTableDetection": False,
         "images": [{"format": image_format, "name": "receipt", "data": base64.b64encode(image).decode("ascii")}],
     }
 
