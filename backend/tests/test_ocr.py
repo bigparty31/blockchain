@@ -155,6 +155,71 @@ def test_digits_around_short_date_are_not_dates(text):
     assert parse_clova_response(_response(_field(text, 200, 50))).paid_at is None
 
 
+def test_bracket_approval_label():
+    # 실측 11/17: 키오스크·POS 영수증의 "[승인번호] 71711187", VAN 사 이름이 끼면 "[승인번호] KIS 70152251"
+    parsed = parse_clova_response(_response(_field("[승인번호]", 100, 100), _field("71711187", 300, 100)))
+    assert parsed.approval_no == "71711187"
+    parsed = parse_clova_response(_response(
+        _field("[승인번호]", 100, 100), _field("KIS", 250, 100), _field("70152251", 350, 100)))
+    assert parsed.approval_no == "70152251"
+
+
+def test_paid_amount_beats_total_before_discount():
+    # 할인 전 합계가 아니라 실제로 결제된 금액을 읽는다
+    parsed = parse_clova_response(_response(
+        _field("총합", 100, 100), _field("계액", 150, 100), _field("3,900", 400, 100),
+        _field("결제액", 100, 150), _field("3,120", 400, 150),
+    ))
+    assert parsed.amount == 3120
+    parsed = parse_clova_response(_response(
+        _field("받을금액:", 100, 100), _field("12,000", 400, 100),
+        _field("01.", 80, 150), _field("신용카드:", 120, 150), _field("10,800", 400, 150),
+    ))
+    assert parsed.amount == 10800
+
+
+@pytest.mark.parametrize("text,amount", [("₩36,000", 36000), ("W157,600", 157600), ("31.400", 31400)])
+def test_amount_symbols_and_dot_grouping(text, amount):
+    # ₩ 기호, OCR 이 ₩ 를 W 로 읽은 것, 점으로 천 단위를 나눈 POS (실측 11/17)
+    parsed = parse_clova_response(_response(_field("합", 100, 100), _field("계", 150, 100), _field(text, 400, 100)))
+    assert parsed.amount == amount
+
+
+@pytest.mark.parametrize("text", ["6.50", "13,369.56", "Wifi1234"])
+def test_not_amounts(text):
+    assert parse_clova_response(_response(_field("합계", 100, 100), _field(text, 400, 100))).amount is None
+
+
+def test_twelve_hour_time():
+    parsed = parse_clova_response(_response(
+        _field("날짜:", 50, 50), _field("2025-09-21", 150, 50), _field("시간:", 300, 50), _field("오후", 360, 50),
+        _field("3:47", 420, 50),
+    ))
+    assert parsed.paid_at == _kst(2025, 9, 21, 15, 47)
+    parsed = parse_clova_response(_response(_field("2025-09-21", 150, 50), _field("오전", 360, 50), _field("12:05", 420, 50)))
+    assert parsed.paid_at == _kst(2025, 9, 21, 0, 5)
+
+
+def test_number_above_does_not_hide_real_date():
+    # 윗줄의 단말기·전표 번호(달력에 없는 날짜 모양)는 건너뛰고 아랫줄의 실제 결제일을 읽는다 (#118 리뷰)
+    parsed = parse_clova_response(_response(
+        _field("단말기 12-34-56", 200, 50),
+        _field("거래일시:26/11/11", 200, 100), _field("12:24:25", 400, 100),
+    ))
+    assert parsed.paid_at == _kst(2026, 11, 11, 12, 24, 25)
+    assert not any("날짜 형식 이상" in n for n in parsed.notes)
+
+
+def test_bad_four_digit_candidate_skipped_for_valid_one():
+    parsed = parse_clova_response(_response(_field("2026-13-45", 200, 50), _field("2026-11-07 17:05:53", 200, 100)))
+    assert parsed.paid_at == _kst(2026, 11, 7, 17, 5, 53)
+
+
+@pytest.mark.parametrize("text", ["2026-11/11", "12026-11-11", "2026-11-111"])
+def test_four_digit_date_needs_same_separator_and_boundaries(text):
+    assert parse_clova_response(_response(_field(text, 200, 50))).paid_at is None
+
+
 def test_bad_two_digit_date_is_noted():
     parsed = parse_clova_response(_response(_field("26/13/40", 200, 50)))
     assert parsed.paid_at is None and any("날짜 형식 이상" in n for n in parsed.notes)

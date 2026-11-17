@@ -16,12 +16,19 @@ KST = timezone(timedelta(hours=9))
 MIN_CONFIDENCE = 0.85
 
 # 우선순위 순. 앞의 라벨이 있으면 뒤의 라벨은 보지 않는다 (합계보다 실제 결제금액이 정확)
-AMOUNT_LABELS = ("결제금액", "받을금액", "승인금액", "합계금액", "총결제금액", "합계", "총구매액", "총액")
+# 앞쪽일수록 우선. 실제로 카드·간편결제에서 나간 돈(할인 뒤)을 할인 전 합계보다 먼저 본다 —
+# 버터 "총합계액 3,900 / 결제액 3,120", 공차 "받을금액 12,000 / 신용카드: 10,800(제휴할인 1,200)" (실측 11/17)
+AMOUNT_LABELS = (
+    "결제금액", "결제액", "카드청구액", "승인금액", "신용카드",
+    "받을금액", "합계금액", "총결제금액", "합계", "총구매액", "총액",
+)
 APPROVAL_LABELS = ("승인번호",)
 APPROVAL_NO_DIGITS = (6, 12)  # 카드 승인번호 자릿수 범위. 벗어나면 자릿수 미달/초과로 판독 불가
 
-_AMOUNT_RE = re.compile(r"^\d{1,3}(,\d{3})+원?$|^\d+원?$")
-_DATE_RE = re.compile(r"(20\d{2})[-./](\d{1,2})[-./](\d{1,2})")
+# 천 단위 구분은 쉼표, 일부 POS 는 점("31.400" — 원화엔 소수가 없다). 마일리지 "6.50점" 같은 두 자리 소수는 금액이 아니다
+_AMOUNT_RE = re.compile(r"^\d{1,3}(,\d{3})+원?$|^\d{1,3}(\.\d{3})+원?$|^\d+원?$")
+# 네 자리 연도. 두 자리와 같은 규칙 — 앞뒤가 숫자면 일련번호의 일부이고, 구분자가 섞이면(2026-11/11) 날짜가 아니다
+_DATE_RE = re.compile(r"(?<!\d)(20\d{2})([-./])(\d{1,2})\2(\d{1,2})(?!\d)")
 # 연도 두 자리 ("거래일시:26/11/11"). 네 자리 날짜가 없을 때만 본다. 앞뒤가 숫자면 날짜가 아니다 —
 # "11/11/2026"(월/일/년) 의 "11/11/20" 이나 전화번호 "126-1-1" 의 "26-1-1" 을 잡지 않게.
 # 구분자도 같아야 한다 — 주문번호 "#58-11/11/2026" 의 "58-11/11" 을 2058년으로 읽지 않게
@@ -99,10 +106,11 @@ def _find_label(line: List[Token], label: str) -> Optional[int]:
 
 
 def _to_amount(text: str) -> Optional[int]:
-    s = text.strip()
+    # 원화 기호: 현대백화점 "₩36,000", OCR 이 ₩ 를 W 로 읽은 COS "W157,600" (W 는 숫자 바로 앞일 때만)
+    s = re.sub(r"^(?:[₩￦\\]|W(?=\d))", "", text.strip())
     if not _AMOUNT_RE.match(s):
         return None
-    return int(s.replace(",", "").replace("원", ""))
+    return int(re.sub(r"[,.원]", "", s))
 
 
 def _after_label(text: str) -> str:
@@ -110,7 +118,8 @@ def _after_label(text: str) -> str:
     값 끝의 "원"은 금액 단위라 라벨로 보지 않는다."""
     body = text[:-1] if text.endswith("원") else text
     m = re.search(r"[가-힣][^가-힣]*$", body)
-    return (text[m.start() + 1:] if m else text).strip(" :：")
+    # 대괄호 라벨("[승인번호]")의 닫는 괄호도 라벨 일부다
+    return (text[m.start() + 1:] if m else text).strip(" :：[]【】()")
 
 
 def _is_other_label(t: Token) -> bool:
@@ -161,8 +170,8 @@ def _extract_approval_no(lines: List[List[Token]], result: ParsedReceipt) -> Non
             for i, (t, text) in enumerate(candidates):
                 if i > 0 and _is_other_label(t):
                     break
-                if not text:
-                    continue
+                if not text or not re.search(r"\d", text):
+                    continue  # 숫자 없는 글자(VAN 사 "KIS")는 건너뛴다 — "[승인번호] KIS 70152251"
                 lo, hi = APPROVAL_NO_DIGITS
                 # 숫자 lo~hi 자리. 맨 앞 영문 대문자 한 글자는 허용한다 (하나카드 "G63213610").
                 # 중간에 섞인 영문("39007O18")은 0 을 O 로 잘못 읽은 것일 수 있어 판독 불가로 둔다
@@ -181,16 +190,26 @@ def _extract_approval_no(lines: List[List[Token]], result: ParsedReceipt) -> Non
 def _extract_paid_at(lines: List[List[Token]], result: ParsedReceipt) -> None:
     """날짜는 라벨 없이 찍히는 경우가 많아(CU: "2026-09-18(금)") 모양으로 찾는다. 시각은 같은 줄을 먼저 본다."""
     date_line, date, century = None, None, 0
-    # 네 자리 연도를 먼저 찾고, 영수증 어디에도 없을 때만 두 자리 연도를 2000년대로 읽는다
+    first_bad = None  # 날짜 모양이지만 달력에 없는 첫 후보 (단말기·전표 번호 "12-34-56" 등)
+    # 네 자리 연도를 먼저 찾고, 영수증 어디에도 없을 때만 두 자리 연도를 2000년대로 읽는다.
+    # 달력에 있는 날짜만 채택한다 — 윗줄의 번호가 아랫줄의 실제 결제일을 가리지 않게 (#118 리뷰)
     for pattern, add in ((_DATE_RE, 0), (_SHORT_DATE_RE, 2000)):
         for i, line in enumerate(lines):
-            m = pattern.search(" ".join(t.text for t in line))
-            if m:
+            for m in pattern.finditer(" ".join(t.text for t in line)):
+                try:
+                    datetime(int(m.group(1)) + add, int(m.group(3)), int(m.group(4)))
+                except ValueError:
+                    first_bad = first_bad or m
+                    continue
                 date_line, date, century = i, m, add
+                break
+            if date is not None:
                 break
         if date is not None:
             break
     if date is None:
+        if first_bad is not None:
+            result.notes.append(f"날짜 형식 이상: {first_bad.group(0)}")
         return
 
     def find_time(line: List[Token]):
@@ -206,11 +225,15 @@ def _extract_paid_at(lines: List[List[Token]], result: ParsedReceipt) -> None:
             if time:
                 break
 
-    if century:
-        y, mo, d = int(date.group(1)) + century, int(date.group(3)), int(date.group(4))
-    else:
-        y, mo, d = (int(x) for x in date.groups())
+    y, mo, d = int(date.group(1)) + century, int(date.group(3)), int(date.group(4))
     h, mi, s = (int(time.group(1)), int(time.group(2)), int(time.group(3) or 0)) if time else (0, 0, 0)
+    if time is not None:
+        # 12시간제 — COS "시간: 오후 3:47"
+        before = time.string[:time.start()]
+        if re.search(r"(오후|PM)\s*$", before, re.IGNORECASE) and h < 12:
+            h += 12
+        elif re.search(r"(오전|AM)\s*$", before, re.IGNORECASE) and h == 12:
+            h = 0
     try:
         dt = datetime(y, mo, d, h, mi, s, tzinfo=KST)
     except ValueError:
