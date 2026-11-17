@@ -60,14 +60,15 @@ class BudgetLine {
 class BudgetPlanController extends ChangeNotifier {
   BudgetPlanController({
     required BudgetIssuer issuer,
-    required int termId,
+    int? termId,
     DateTime Function()? clock,
   })  : _issuer = issuer,
         _termId = termId,
         _clock = clock ?? DateTime.now;
 
   final BudgetIssuer _issuer;
-  final int _termId;
+  /// null 이면 발행기가 현재 학기를 찾는다
+  final int? _termId;
   final DateTime Function() _clock;
 
   final List<BudgetLine> _lines = [];

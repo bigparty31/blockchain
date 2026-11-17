@@ -2,18 +2,11 @@ import '../core/budget_plan.dart';
 
 /// 예산 발행(`BudgetToken.issue`)이 앱에서 나가는 **유일한 입구**.
 ///
-/// 화면은 이 인터페이스만 안다. 실제 구현(회장 기기 키로 EIP-712 `IssueRequest` 서명 →
-/// 서버 → 릴레이어 → 체인)은 아직 붙일 수 없어서 [FakeBudgetIssuer] 로 먼저 만들어 둔다.
+/// 화면은 이 인터페이스만 안다. 실제 구현은 `server_budget_issuer.dart` 의 `ServerBudgetIssuer`
+/// (회장 기기 키로 EIP-712 `IssueRequest` 서명 → 서버 → 릴레이어 → 체인)이고, [FakeBudgetIssuer] 는
+/// 체인 없이 화면을 개발·테스트할 때 쓴다.
 ///
-/// **붙이지 못하는 이유** (이 파일을 실구현으로 바꾸기 전에 풀려야 하는 것):
-///  1. 앱에 EIP-712 서명 모듈·키 보관 코드가 없다
-///  2. 백엔드에 `POST /budgets` 구현이 없고, 명세에도 서명·`deadline` 필드가 없다
-///  3. 서버 `ChainClient` 에 예산 발행 메서드가 없다
-///  4. 계획서·스토리보드는 "`msg.sender` 직접 호출"이라 했지만 컨트랙트 정본
-///     (`IBudgetToken.sol`)은 "회장 서명 + 릴레이어 제출"이다 — 팀장 확인 필요
-///
-/// 백엔드의 `ChainClient` / `FakeChainClient` 와 같은 패턴이다. 실구현이 나오면
-/// 이 인터페이스를 구현한 클래스를 하나 더 만들어 갈아 끼우고, 화면은 건드리지 않는다.
+/// 백엔드의 `ChainClient` / `FakeChainClient` 와 같은 패턴이다.
 abstract class BudgetIssuer {
   /// [items] 를 한 줄씩 발행하고, **항목마다 결과 하나**를 같은 순서로 돌려준다.
   ///
@@ -21,9 +14,11 @@ abstract class BudgetIssuer {
   /// 성공/실패 하나로 뭉뚱그리지 않고 항목별로 돌려준다.
   ///
   /// 시작도 못 하는 경우(지갑 미연결·회장 아님)는 항목을 하나도 보내기 전에
-  /// [BudgetIssueException] 을 던진다.
+  /// [BudgetIssueException] 을 던진다. **그 밖의 예외는 던지지 않는다** — 실패는 항목별 결과로 돌려준다.
+  ///
+  /// [termId] 는 서버의 학기 id. null 이면 발행기가 현재 학기를 서버에서 찾는다.
   Future<List<BudgetIssueOutcome>> issueAll({
-    required int termId,
+    int? termId,
     required List<BudgetDraftItem> items,
   });
 }
@@ -106,7 +101,7 @@ class FakeBudgetIssuer implements BudgetIssuer {
 
   @override
   Future<List<BudgetIssueOutcome>> issueAll({
-    required int termId,
+    int? termId,
     required List<BudgetDraftItem> items,
   }) async {
     callCount++;
