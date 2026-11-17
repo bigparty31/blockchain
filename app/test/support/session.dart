@@ -9,7 +9,7 @@ import 'package:student_council_app/services/auth_service.dart';
 /// (`council_guard_test.dart` 의 `loginAs` 와 같은 방식).
 ///
 /// 부른 테스트는 `tearDown` 에서 [signOutForTest] 를 불러 다음 테스트에 세션을 남기지 않는다.
-Future<void> signInAs(UserRole role, {int userId = 2}) async {
+Future<void> signInAs(UserRole role, {int userId = 2, String? walletAddress}) async {
   AuthService.store = MemoryTokenStore();
   AuthService.lockStore = MemoryLoginLockStore(); // 기본 잠금 보관소(키스토어)는 위젯 테스트에서 응답이 없다
   AuthService().resetAttempts();
@@ -20,7 +20,13 @@ Future<void> signInAs(UserRole role, {int userId = 2}) async {
       );
   AuthService.client = MockClient((req) async {
     if (req.url.path == '/auth/login') {
-      return json({'access_token': 'token-$userId', 'token_type': 'bearer', 'role': role.code, 'name': '테스트'});
+      return json({
+        'access_token': 'token-$userId',
+        'token_type': 'bearer',
+        'role': role.code,
+        'name': '테스트',
+        if (walletAddress != null) 'wallet_address': walletAddress,
+      });
     }
     if (req.url.path == '/auth/me') {
       return json({'id': userId, 'student_no': '2024000$userId', 'name': '테스트', 'role': role.code});

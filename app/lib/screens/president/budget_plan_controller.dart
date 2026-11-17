@@ -51,8 +51,22 @@ class BudgetLine {
       BudgetIssueStatus.rejected => BudgetLineState.rejected,
       BudgetIssueStatus.noResponse => BudgetLineState.noResponse,
     };
-    final note = outcome.status == BudgetIssueStatus.alreadyIssued ? '이미 발행되어 있어요' : outcome.message;
-    return BudgetLine(item, state: next, message: note);
+    if (outcome.status != BudgetIssueStatus.alreadyIssued) return BudgetLine(item, state: next, message: outcome.message);
+
+    // 이미 발행된 예산은 입력값이 아니라 체인에 있는 값을 보여 준다 — 잠긴 줄이 실제 예산과 달라 보이면 안 된다
+    final amount = outcome.issuedAmount;
+    final expiresAt = outcome.issuedExpiresAt;
+    final actual = BudgetDraftItem(
+      category: item.category,
+      amount: amount ?? item.amount,
+      expiresOn: expiresAt == null
+          ? item.expiresOn
+          : BudgetPlanRules.kstDate(DateTime.fromMillisecondsSinceEpoch(expiresAt * 1000, isUtc: true)),
+    );
+    final changed = actual.amount != item.amount ||
+        (expiresAt != null && item.expiresOn != null && BudgetPlanRules.expiresAtSeconds(item.expiresOn!) != expiresAt);
+    return BudgetLine(actual,
+        state: next, message: changed ? '이미 발행되어 있어요 · 입력값 대신 체인의 값을 보여요' : '이미 발행되어 있어요');
   }
 }
 
@@ -60,14 +74,15 @@ class BudgetLine {
 class BudgetPlanController extends ChangeNotifier {
   BudgetPlanController({
     required BudgetIssuer issuer,
-    required int termId,
+    int? termId,
     DateTime Function()? clock,
   })  : _issuer = issuer,
         _termId = termId,
         _clock = clock ?? DateTime.now;
 
   final BudgetIssuer _issuer;
-  final int _termId;
+  /// null 이면 발행기가 현재 학기를 찾는다
+  final int? _termId;
   final DateTime Function() _clock;
 
   final List<BudgetLine> _lines = [];

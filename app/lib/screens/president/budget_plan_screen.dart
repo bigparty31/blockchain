@@ -8,6 +8,8 @@ import '../../core/enums.dart';
 import '../../core/format.dart';
 import '../../core/term_info.dart';
 import '../../services/budget_issuer.dart';
+import '../../services/server_budget_issuer.dart';
+import '../council/signing_key_screen.dart';
 import 'budget_plan_controller.dart';
 
 /// [문승준 담당: app/lib/screens/president/]
@@ -22,7 +24,7 @@ class BudgetPlanScreen extends StatefulWidget {
     super.key,
     required this.role,
     this.issuer,
-    this.termId = 1,
+    this.termId,
     this.onConnectWallet,
     this.clock,
   });
@@ -32,14 +34,13 @@ class BudgetPlanScreen extends StatefulWidget {
   /// 이 검사는 접근 제어가 뚫렸을 때를 위한 마지막 방어선이다.
   final UserRole role;
 
-  /// 예산 발행기. 비우면 [FakeBudgetIssuer] 를 쓴다 — 실제 발행은 아직 연결 전이다
-  /// (`services/budget_issuer.dart` 설명 참고).
+  /// 예산 발행기. 비우면 [ServerBudgetIssuer](실제 발행)를 쓴다. 테스트는 [FakeBudgetIssuer] 를 넣는다.
   final BudgetIssuer? issuer;
 
-  /// 편성할 학기. 서버에 학기 조회 API 가 생기면 그 값을 받는다 (`core/term_info.dart`).
-  final int termId;
+  /// 편성할 학기의 서버 id. 비우면 발행기가 현재 학기(`core/term_info.dart`)를 서버에서 찾는다.
+  final int? termId;
 
-  /// 「지갑 연결하기」를 눌렀을 때. 지갑 모듈이 없어서 비우면 준비 중이라고 알려준다.
+  /// 「지갑 연결하기」를 눌렀을 때. 비우면 서명 키 화면을 연다.
   final VoidCallback? onConnectWallet;
 
   /// 현재 시각. 마감일이 지났는지 비교할 때 쓰며, 테스트에서 고정한다.
@@ -67,7 +68,7 @@ class _BudgetPlanScreenState extends State<BudgetPlanScreen> {
   @override
   void initState() {
     super.initState();
-    _issuer = widget.issuer ?? FakeBudgetIssuer(delay: const Duration(milliseconds: 900));
+    _issuer = widget.issuer ?? ServerBudgetIssuer();
     _c = BudgetPlanController(issuer: _issuer, termId: widget.termId, clock: _now);
   }
 
@@ -160,7 +161,20 @@ class _BudgetPlanScreenState extends State<BudgetPlanScreen> {
         ],
       ),
     );
-    if (ok == true && mounted) await _c.confirm();
+    if (ok == true && mounted) {
+      await _c.confirm();
+      _syncIssuedAmounts();
+    }
+  }
+
+  /// 이미 발행돼 있던 줄은 컨트롤러가 체인 값으로 바꾼다 — 잠긴 입력란 글자도 맞춘다.
+  void _syncIssuedAmounts() {
+    if (!mounted) return;
+    for (var i = 0; i < _c.lines.length && i < _amountCtrls.length; i++) {
+      final line = _c.lines[i];
+      final text = line.item.amount?.toString() ?? '';
+      if (line.isIssued && _amountCtrls[i].text != text) _amountCtrls[i].text = text;
+    }
   }
 
   void _connectWallet() {
@@ -169,9 +183,8 @@ class _BudgetPlanScreenState extends State<BudgetPlanScreen> {
       callback();
       return;
     }
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('지갑 연결 기능은 아직 준비 중이에요')),
-    );
+    // 회장 「지갑」은 이 기기의 서명 키다 — 키를 만들거나 확인하는 화면으로 보낸다
+    Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const SigningKeyScreen()));
   }
 
   @override

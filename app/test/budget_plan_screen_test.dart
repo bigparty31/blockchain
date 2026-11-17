@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:student_council_app/core/budget_plan.dart';
 import 'package:student_council_app/core/enums.dart';
+import 'package:student_council_app/core/signing/device_key.dart';
 import 'package:student_council_app/router.dart';
+import 'package:student_council_app/screens/council/signing_key_screen.dart';
 import 'package:student_council_app/screens/president/budget_plan_screen.dart';
 import 'package:student_council_app/services/budget_issuer.dart';
 
@@ -220,7 +222,8 @@ void main() {
       expect(find.text('회장 지갑이 연결되지 않았어요'), findsNothing);
     });
 
-    testWidgets('지갑 모듈이 없으면 「지갑 연결하기」는 준비 중이라고 알려준다', (tester) async {
+    testWidgets('연결 동작을 따로 주지 않으면 「지갑 연결하기」는 서명 키 화면을 연다', (tester) async {
+      DeviceKey.storage = MemoryKeyStorage();
       await pumpScreen(tester, issuer: FakeBudgetIssuer(walletConnected: false));
       await addCard(tester);
       await fillCard(tester, 0, category: '행사비', amount: '1000000');
@@ -228,9 +231,23 @@ void main() {
       await tester.pumpAndSettle();
 
       await tester.tap(find.text('지갑 연결하기'));
-      await tester.pump();
+      await tester.pumpAndSettle();
 
-      expect(find.text('지갑 연결 기능은 아직 준비 중이에요'), findsOneWidget);
+      expect(find.byType(SigningKeyScreen), findsOneWidget);
+    });
+
+    testWidgets('이미 발행된 예산이면 잠긴 입력란도 체인의 금액으로 바뀐다', (tester) async {
+      await pumpScreen(tester, issuer: FakeBudgetIssuer(forcedOutcomes: {
+        BudgetCategory.event: const BudgetIssueOutcome.existing(amount: 1000000),
+      }));
+      await addCard(tester);
+      await fillCard(tester, 0, category: '행사비', amount: '2000000');
+      await pressConfirmAndAccept(tester);
+      await tester.pumpAndSettle();
+
+      expect(find.text('1000000'), findsOneWidget);
+      expect(find.text('2000000'), findsNothing);
+      expect(find.textContaining('체인의 값'), findsOneWidget);
     });
 
     testWidgets('일부만 성공하면 성공한 줄은 잠기고 안내가 뜬다', (tester) async {
