@@ -250,7 +250,7 @@ erDiagram
     USER ||--o{ MEMBERSHIP_MINT_BATCH : "발행 준비 임원 (requested_by)"
     MEMBERSHIP_MINT_BATCH ||--o{ MEMBERSHIP_MINT_TARGET : "일괄 발행 대상 (batch_id)"
     USER ||--o{ MEMBERSHIP_MINT_TARGET : "발행 대상 학생 (user_id)"
-    MEMBERSHIP ||--o| MEMBERSHIP_MINT_TARGET : "생성된 회원권 (membership_id)"
+    MEMBERSHIP |o--o{ MEMBERSHIP_MINT_TARGET : "생성된 회원권 (membership_id)"
 
     NOTIFICATION {
         bigserial id PK "고유 ID"

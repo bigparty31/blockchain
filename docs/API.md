@@ -704,8 +704,8 @@
   - 서버 검사는 서명이 담긴 요청이 온 뒤에 돌기 때문에, 서명 전에 막으려면 **화면에서 먼저** 거릅니다. 승인 목록에서 `GET /auth/me`의 `id`와 항목의 `created_by`가 같으면 승인·반려 버튼을 비활성화합니다.
   - 서버 구현: `app/auth/approval.py`의 `ensure_not_self_approval(entry.created_by, user)`를 승인·반려 API에서 항목을 불러온 뒤 호출합니다.
 - **T4 수정 요청 / 경고 항목 / 재분류 순서**:
-  - `revision_requested_at`이 설정된 항목은 확정할 수 없습니다 (`400 Bad Request`).
-  - `ocr_status` 경고(`MISMATCH`, `DUPLICATE`, `UNREADABLE`) 또는 `category_warning = true`인 항목은 `warning_reason`이 필수입니다.
+  - `revision_requested_at`이 설정된 항목은 확정할 수 없습니다 (`409 Conflict`).
+  - `ocr_status` 경고(`MISMATCH`, `DUPLICATE`, `UNREADABLE`) 또는 `category_warning = true`인 항목은 `warning_reason`이 필수입니다. 반대로 경고가 없는 항목에 `warning_reason`을 보내면 `400 Bad Request`로 거부됩니다.
   - `RECLASSIFY` 음수 정정은 새 예산의 양수 정정이 먼저 확정(`CONFIRMED`)되어야 승인 가능합니다.
 
 **Request**
