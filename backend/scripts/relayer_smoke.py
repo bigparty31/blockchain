@@ -276,6 +276,18 @@ def _prepare(case: Case, label: str, build: Callable[[], T]) -> Optional[T]:
         return None
 
 
+DEADLINE_LABEL = "서명 유효 시한 (체인 시각 + 10분)"
+
+
+async def _deadline(case: Case, deadline_of: Deadline) -> Optional[int]:
+    """이 단계가 서명할 deadline. 체인 시각을 읽지 못하면(노드가 단계 사이에 끊김) 이 단계의 ❌ 로 남기고 None."""
+    try:
+        return await deadline_of()
+    except Exception as e:
+        case.failed(DEADLINE_LABEL, e)
+        return None
+
+
 async def _signer_with_role(case: Case, label: str, client: Web3ChainClient, payload, signature: str, has_role, role: str) -> Optional[str]:
     """API 처럼 보내기 전에 서명자를 체인의 롤과 대조한다. 맞으면 서명자, 아니면 None (보고서에 남기고 보내지 않는다).
 
@@ -415,7 +427,7 @@ async def _entry_case(
     spec: SmokeCase,
     vectors: dict,
     base_id: int,
-    deadline: int,
+    deadline_of: Deadline,
     budget_id: int = 0,
     then: str = "",
 ) -> tuple:
@@ -425,6 +437,9 @@ async def _entry_case(
     budget = "" if spec.kind is EntryKind.INCOME else f", 예산 {budget_id}"
     then = then or (", 감사 확정" if spec.confirm else "")
     case = Case(f"{label} id={base_id + spec.offset}  {spec.vector}  {values['amount']:,}원{budget}{then}")
+    deadline = await _deadline(case, deadline_of)
+    if deadline is None:
+        return case, None
     request = _prepare(
         case,
         "등록 요청 만들기",
@@ -449,13 +464,16 @@ async def _entry_case(
 
 
 async def _reject_case(
-    client: Web3ChainClient, chain: ChainView, treasurer_key: str, approver_key: str, vectors: dict, base_id: int, deadline: int
+    client: Web3ChainClient, chain: ChainView, treasurer_key: str, approver_key: str, vectors: dict, base_id: int, deadline_of: Deadline
 ) -> Case:
     """반려 (반려 API 와 같은 순서). 등록 단계가 모두 통과했을 때만 반려한다."""
     case, entry = await _entry_case(
-        client, chain, treasurer_key, approver_key, REJECT_CASE, vectors, base_id, deadline, then=", 감사 반려"
+        client, chain, treasurer_key, approver_key, REJECT_CASE, vectors, base_id, deadline_of, then=", 감사 반려"
     )
     if entry is None or not case.ok:
+        return case
+    deadline = await _deadline(case, deadline_of)
+    if deadline is None:
         return case
     label = "반려 서명 → 서명자가 체인의 감사·회장"
     reason_hash = text_hash(canonical_text(REJECT_REASON))
@@ -514,11 +532,14 @@ async def _remaining_check(client: Web3ChainClient, case: Case, budget_id: int, 
 
 
 async def _issue_case(
-    client: Web3ChainClient, chain: ChainView, president_key: str, budget_id: int, amount: int, now: int, deadline: int
+    client: Web3ChainClient, chain: ChainView, president_key: str, budget_id: int, amount: int, now: int, deadline_of: Deadline
 ) -> Case:
     """예산 발행 (예산 API 와 같은 순서). 회장 서명 1개."""
     name = f"스모크 예산 {budget_id}"
     case = Case(f"[예산 발행] budget_id={budget_id}  {name}  {amount:,}원, 회장 서명")
+    deadline = await _deadline(case, deadline_of)
+    if deadline is None:
+        return case
     label = "발행 서명 → 서명자가 체인의 회장"
 
     def build():
@@ -563,10 +584,13 @@ async def _increase_case(
     budget_id: int,
     amount: int,
     remaining_after: int,
-    deadline: int,
+    deadline_of: Deadline,
 ) -> Case:
     """증액 (PRD §4.1). 회장(요청)과 감사(승인)가 같은 값에 서명한다. 같은 서명을 다시 보내면 VersionMismatch 다 (§4.9)."""
     case = Case(f"[예산 증액] budget_id={budget_id}  +{amount:,}원, 회장 요청 + 감사 승인")
+    deadline = await _deadline(case, deadline_of)
+    if deadline is None:
+        return case
     label = "증액 요청 서명 → 서명자가 체인의 회장"
 
     def build():
@@ -640,27 +664,27 @@ async def _budget_cases(
     increase = spend - spend // 2  # 증액 뒤 잔량이 정확히 한 번 더 쓸 만큼이 된다
     budget_id = base_id
 
-    async def entry(spec: SmokeCase, deadline: int, then: str = "") -> Case:
+    async def entry(spec: SmokeCase, then: str = "") -> Case:
         case, _ = await _entry_case(
-            client, chain, treasurer_key, auditor_key, spec, vectors, base_id, deadline, budget_id=budget_id, then=then
+            client, chain, treasurer_key, auditor_key, spec, vectors, base_id, deadline_of, budget_id=budget_id, then=then
         )
         return case
 
-    steps = (  # (단계(deadline 을 받는다), 단계가 통과한 뒤 확인할 잔량)
-        (lambda d: _issue_case(client, chain, president_key, budget_id, issued, now, d), None),
-        (lambda d: entry(SPEND, d), issued - spend),
-        (lambda d: entry(OVER, d, ", 잔량 초과"), None),
+    steps = (  # (단계, 단계가 통과한 뒤 확인할 잔량). 단계마다 deadline 을 새로 정한다 (_deadline)
+        (lambda: _issue_case(client, chain, president_key, budget_id, issued, now, deadline_of), None),
+        (lambda: entry(SPEND), issued - spend),
+        (lambda: entry(OVER, ", 잔량 초과"), None),
         (
-            lambda d: _increase_case(
-                client, chain, president_key, auditor_key, budget_id, increase, issued - spend + increase, d
+            lambda: _increase_case(
+                client, chain, president_key, auditor_key, budget_id, increase, issued - spend + increase, deadline_of
             ),
             None,
         ),
-        (lambda d: entry(AGAIN, d, ", 증액 뒤 재등록 · 감사 확정"), 0),
+        (lambda: entry(AGAIN, ", 증액 뒤 재등록 · 감사 확정"), 0),
     )
     cases = []
     for make, remaining in steps:
-        case = await make(await deadline_of())
+        case = await make()
         if remaining is not None and case.ok:
             await _remaining_check(client, case, budget_id, remaining)
         cases.append(case)
@@ -683,7 +707,8 @@ async def run_smoke(
     단계의 실패(요청·서명 준비, 서명자 대조, 릴레이, 다시 읽기, 재전송, 확정)는 보고서에 남기고 다음 항목을 계속한다.
     확정·반려는 등록 단계가 모두 통과했을 때만 한다 — 등록이 어긋난 항목을 확정하면 그 여파의 실패가 원인을 가린다.
     예산 경로는 단계가 서로 잇닿아 있어 어긋난 단계에서 멈춘다.
-    실행 전체의 준비(벡터·잔액·체인 시각)의 실패만 예외로 올라가고, main 이 "관문 2 실패" 로 알린다.
+    실행 전체의 준비(벡터·잔액·시작 시각)의 실패만 예외로 올라가고, main 이 "관문 2 실패" 로 알린다.
+    단계마다 다시 읽는 체인 시각(deadline)의 실패는 그 단계의 ❌ 다 — 앞서 통과한 결과를 잃지 않는다.
     """
     vectors = load_vectors({spec.vector for spec in (*CASES, REJECT_CASE, SPEND, OVER, AGAIN)})
     balance = await chain.w3.eth.get_balance(client.relayer_address)
@@ -696,9 +721,9 @@ async def run_smoke(
         return await chain_now(chain.w3) + DEADLINE_SECONDS
 
     for spec in CASES:
-        case, _ = await _entry_case(client, chain, treasurer_key, auditor_key, spec, vectors, base_id, await deadline_of())
+        case, _ = await _entry_case(client, chain, treasurer_key, auditor_key, spec, vectors, base_id, deadline_of)
         report.cases.append(case)
-    report.cases.append(await _reject_case(client, chain, treasurer_key, auditor_key, vectors, base_id, await deadline_of()))
+    report.cases.append(await _reject_case(client, chain, treasurer_key, auditor_key, vectors, base_id, deadline_of))
     report.cases += await _budget_cases(client, chain, treasurer_key, auditor_key, president_key, vectors, base_id, now, deadline_of)
     return report
 

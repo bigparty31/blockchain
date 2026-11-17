@@ -537,6 +537,33 @@ def test_a_failure_while_preparing_a_request_is_reported_not_raised():
     assert "issue_budget" not in client.calls
 
 
+@pytest.mark.parametrize(
+    "fail_at, expected_kinds, failed_kind",
+    [
+        # 체인 시각 조회 순서: 1 시작, 2 수입, 3 지출, 4 반려 대상 등록, 5 반려 서명, 6 예산 발행, 7 예산 안 지출, ...
+        (5, STEPS, "수입"),  # 반려 서명 직전에 끊김 — 반려만 ❌, 예산 경로는 계속
+        (7, ["수입", "지출", "수입", "예산 발행", "지출"], "지출"),  # 예산 안 지출 직전에 끊김 — 예산 경로는 거기서 멈춤
+    ],
+    ids=["before_rejecting", "in_budget_path"],
+)
+def test_a_lost_chain_clock_between_steps_is_that_steps_failure(fail_at, expected_kinds, failed_kind):
+    # 단계마다 다시 읽는 체인 시각(deadline)이 실패해도 run_smoke 밖으로 나가지 않는다. 앞서 통과한 결과는 그대로 남는다
+    chain = _stub_chain()
+    calls = []
+
+    async def block(identifier):
+        calls.append(identifier)
+        if len(calls) == fail_at:
+            raise ChainUnavailable("단계 사이에 노드가 끊김")
+        return {"timestamp": 1_800_000_000}
+
+    chain.w3 = SimpleNamespace(eth=SimpleNamespace(get_balance=chain.w3.eth.get_balance, get_block=block))
+    report = run_stub(_RecordingClient(), chain)
+    assert kinds(report) == expected_kinds
+    failed = [(kinds(report)[i], c.label) for i, case in enumerate(report.cases) for c in case.checks if not c.ok]
+    assert failed == [(failed_kind, relayer_smoke.DEADLINE_LABEL)]
+
+
 def test_budget_path_stops_at_the_first_failing_step():
     # 예산 발행이 실패하면 그 예산으로 지출을 등록하지 않는다 — BUDGET_NOT_FOUND 같은 여파의 실패가 원인을 가린다
     recorded = []
