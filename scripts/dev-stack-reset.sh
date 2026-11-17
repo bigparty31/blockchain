@@ -33,10 +33,25 @@ if [ ! -f .env ]; then
   echo ".env 를 새로 만들었습니다."
 fi
 
-# .env 에 값이 있는가 (빈 값은 없는 것으로 본다)
-has_env() { grep -Eq "^$1=.+" .env; }
-# 빈 줄로 남은 항목을 지우고 새 값을 붙인다
-put_env() { sed -i "/^$1=\$/d" .env; printf '%s=%s\n' "$1" "$2" >> .env; echo ".env 에 $1 을 추가했습니다."; }
+# .env 에 값이 있는가. `export NAME=`·앞뒤 공백·따옴표를 벗긴 값으로 판단하고, 빈 값("" 포함)은 없는 것으로 본다
+has_env() {
+  local line value
+  while IFS= read -r line || [ -n "$line" ]; do
+    value=$(printf '%s' "$line" | sed -nE "s/^[[:space:]]*(export[[:space:]]+)?$1[[:space:]]*=(.*)$/\2/p" | tr -d '\r')
+    [ -n "$value" ] || continue
+    value=$(printf '%s' "$value" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/^"(.*)"$/\1/; s/^'"'"'(.*)'"'"'$/\1/; s/^#.*//')
+    [ -n "$(printf '%s' "$value" | tr -d '[:space:]')" ] && return 0
+  done < .env
+  return 1
+}
+# 빈 값으로 남은 항목을 지우고 새 값을 붙인다. has_env 가 거짓일 때만 부르므로 지우는 줄은 모두 빈 값이다
+put_env() {
+  sed -i -E "/^[[:space:]]*(export[[:space:]]+)?$1[[:space:]]*=/d" .env
+  # 마지막 줄이 줄바꿈 없이 끝나면 새 값이 앞줄에 붙으므로 줄바꿈을 먼저 넣는다
+  if [ -s .env ] && [ -n "$(tail -c1 .env)" ]; then echo >> .env; fi
+  printf '%s=%s\n' "$1" "$2" >> .env
+  echo ".env 에 $1 을 추가했습니다."
+}
 
 # 릴레이어: 개발 체인(Hardhat)의 #4 계정. 롤이 없고 잔액이 있다 (backend/scripts/local_chain.py RELAYER_INDEX).
 # 키는 Hardhat 기본 니모닉이라 공개된 값이다. 이 체인 밖(Amoy 등)에서는 쓰지 않는다
