@@ -7,6 +7,7 @@ import 'core/term_info.dart';
 import 'router.dart';
 import 'screens/login_screen.dart';
 import 'services/auth_service.dart';
+import 'services/device_token_sync.dart';
 import 'services/notification_service.dart';
 import 'services/push_service.dart';
 import 'services/student_api_service.dart';
@@ -69,7 +70,7 @@ class _StudentCouncilAppState extends State<StudentCouncilApp> {
       if (session.role == UserRole.STUDENT) {
         PushService().subscribeStudentTopic(TermInfo.currentTermCode);
       } else {
-        _registerDeviceToken();
+        _deviceTokens.onStarted(session.token);
       }
     };
 
@@ -77,8 +78,7 @@ class _StudentCouncilAppState extends State<StudentCouncilApp> {
     // 안 풀면 공용 기기에서 다음 사람이 이전 임원의 처리 알림을 계속 받는다.
     AuthService().onSessionEnding = (ending) {
       if (ending.role == UserRole.STUDENT) return;
-      final token = PushService().token;
-      if (token != null) NotificationService.revokeDeviceToken(token, ending);
+      _deviceTokens.onEnding(ending);
     };
 
     // 푸시를 누르면 **대시보드**로 간다. 학생 알림함이 없어서 보낼 곳이
@@ -104,17 +104,17 @@ class _StudentCouncilAppState extends State<StudentCouncilApp> {
     super.dispose();
   }
 
-  /// 임원 기기 토큰을 학생회 서버에 올린다 (`docs/NOTIFICATION_API.md` §4).
+  /// 임원 기기 토큰의 등록·해제 (`docs/NOTIFICATION_API.md` §4·§5).
   ///
-  /// 로그인과 앱 시작 복원 두 경로에서 불린다 — 같은 토큰을 다시 올려도 서버가 200 이다.
-  /// **기다리지 않는다.** 토큰은 알림 권한 대화상자가 닫혀야 나오는데, 그동안 화면을 막을 이유가 없다.
-  /// 푸시는 부가 기능이라 실패는 삼킨다 — 알림함 폴링이 같은 내용을 준다.
-  void _registerDeviceToken() {
-    PushService().deviceToken().then((token) {
-      if (token != null) return NotificationService.registerDeviceToken(token);
-      return false;
-    }).catchError((Object _) => false);
-  }
+  /// **기다리지 않는다** — 토큰은 알림 권한 대화상자가 닫혀야 나오는데 그동안 화면을 막을 이유가 없다.
+  /// 대신 등록과 해제를 한 줄로 세워, 로그아웃의 해제가 먼저 닿은 뒤 뒤늦은 등록이 토큰을 되살리지 못하게 한다.
+  late final DeviceTokenSync _deviceTokens = DeviceTokenSync(
+    sessionToken: () => AuthService().session?.token,
+    fcmToken: () => PushService().deviceToken(),
+    cachedToken: () => PushService().token,
+    register: NotificationService.registerDeviceToken,
+    revoke: NotificationService.revokeDeviceToken,
+  );
 
   /// 앱이 떠 있는 동안 온 푸시. 화면 위에 띄우고 대시보드로 갈 길을 준다.
   ///
