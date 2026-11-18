@@ -43,15 +43,36 @@ class FakeRegistrar implements EntryRegistrar {
     return stored[receiptPath];
   }
 
+  /// 영수증 판독 결과 — 기본은 판독 없음(null, OCR 서버가 없는 것과 같음). 판독 요청은 [reads] 에 남는다.
+  OcrReading? Function(List<int> bytes, int amount)? ocr;
+  final List<(List<int>, int)> reads = [];
+
+  @override
+  Future<OcrReading?> readReceipt(List<int> bytes, {required int amount}) async {
+    reads.add((bytes, amount));
+    return ocr?.call(bytes, amount);
+  }
+
   final List<(int, EntryDraft)> submits = [];
 
   /// 다음 제출을 이 예외로 실패시킨다 (한 번만).
   EntryDecisionException? failNextSubmit;
 
+  /// 제출 뒤 서버에 기록된 OCR 판정. 기본은 보낸 판독 그대로 (서버가 바꾸지 않음). null 을 돌려주면 「못 읽음」.
+  ServerOcr? Function(int id, EntryDraft draft)? serverOcr;
+
   int _nextId = 100;
+
+  /// 다음 초안 저장을 이 예외로 실패시킨다 (한 번만).
+  EntryDecisionException? failNextDraft;
 
   @override
   Future<int> saveDraft(EntryDraft draft) async {
+    final fail = failNextDraft;
+    if (fail != null) {
+      failNextDraft = null;
+      throw fail;
+    }
     drafts.add(draft);
     return _nextId++;
   }
@@ -64,9 +85,12 @@ class FakeRegistrar implements EntryRegistrar {
       failNextSubmit = null;
       throw fail;
     }
+    final ocr = serverOcr == null ? ServerOcr(draft.ocr?.status, draft.ocr?.duplicateOf) : serverOcr!(id, draft);
     final left = draft.budgetId == null ? null : remaining[draft.budgetId];
-    if (left != null && draft.amount > left) return const SubmitOutcome(EntryStatus.BLOCKED, BlockReason.BUDGET_EXCEEDED);
-    return const SubmitOutcome(EntryStatus.PENDING, null);
+    if (left != null && draft.amount > left) {
+      return SubmitOutcome(EntryStatus.BLOCKED, BlockReason.BUDGET_EXCEEDED, ocr: ocr);
+    }
+    return SubmitOutcome(EntryStatus.PENDING, null, ocr: ocr);
   }
 }
 

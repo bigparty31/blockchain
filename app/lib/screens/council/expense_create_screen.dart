@@ -79,6 +79,14 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
   /// 다시 등록할 때 이전 영수증을 쓰지 못한 이유.
   String? _receiptNote;
 
+  /// 영수증 OCR 판독 결과와 그때의 영수증·금액 ([_ocrKeyOf]). 같은 사진·금액이면 다시 판독하지 않는다
+  /// — 재제출할 때마다 CLOVA 를 부르지 않게 (무료 한도 월 100건).
+  OcrReading? _ocr;
+  String? _ocrKey;
+
+  /// 불일치·중복 경고를 보고 「그대로 제출」을 고른 판독. 같은 판독으로 다시 제출할 때는 또 묻지 않는다.
+  String? _ocrConfirmedKey;
+
   @override
   void initState() {
     super.initState();
@@ -122,6 +130,11 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
     _draftId = d.id;
     _savedDraft = d.toEntryDraft();
     if (d.receiptHash == null) return;
+    // 저장할 때 판독한 결과가 있으면 그대로 쓴다 — 고치지 않고 제출하면 다시 판독하지 않고 같은 초안 번호를 쓴다
+    if (d.ocr != null) {
+      _ocr = d.ocr;
+      _ocrKey = _ocrKeyOf(d.receiptHash!.toLowerCase(), d.amount);
+    }
     _restoringReceipt = true;
     restoreReceiptFile(_registrar, d.receiptHash, d.receiptPath).then((restored) {
       _restoringReceipt = false;
@@ -271,6 +284,61 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
     return _upload!.path;
   }
 
+  static String _ocrKeyOf(String receiptHash, int amount) => '$receiptHash:$amount';
+
+  /// 영수증을 판독한다 (PRD §6, T7). 판정은 입력 금액과 비교하므로 금액이 정해진 저장·제출 때 부른다.
+  /// 판독하지 못해도 등록은 계속한다 — 차단이 아니라 경고다.
+  Future<OcrReading?> _ensureOcr(EntryDraft base) async {
+    final hash = base.receiptHash;
+    if (hash == null) return null;
+    // 같은 영수증·금액으로 이미 저장한 초안이 있으면 그 판독을 그대로 쓴다. 다시 판독해 결과가 달라지면
+    // 초안이 달라져 새 번호가 생기고, 앞 초안이 제출됐는데 응답만 잃은 경우 같은 지출이 두 번 올라간다 (#119 리뷰)
+    final saved = _savedDraft;
+    if (_draftId != null &&
+        saved != null &&
+        saved.receiptHash?.toLowerCase() == hash.toLowerCase() &&
+        saved.amount == base.amount) {
+      return saved.ocr;
+    }
+    final key = _ocrKeyOf(hash, base.amount);
+    if (_ocrKey == key) return _ocr;
+    final bytes = _receiptBytes;
+    if (bytes == null) return null;
+    final reading = await _registrar.readReceipt(bytes, amount: base.amount);
+    if (reading == null) {
+      // 판독하지 못했다(서버 오류·시간 초과·PDF·WebP) — 서버가 OCR 을 못 돌렸을 때처럼 「판독 불가」로 남겨
+      // 승인 화면에 경고가 뜨게 한다 (SERVER_ENV.md, API.md). 기억하지는 않는다 — 잠깐의 연결 문제였다면
+      // 초안을 만들기 전 다음 시도에서 다시 판독한다
+      return const OcrReading(status: OcrStatus.UNREADABLE);
+    }
+    _ocr = reading;
+    _ocrKey = key;
+    return reading;
+  }
+
+  /// 불일치·중복이면 제출 전에 한 번 알린다. 막지는 않는다 — 그대로 내면 승인할 때 사유를 적어야 한다 (PRD §6).
+  Future<bool> _confirmOcrWarning(OcrReading r, int inputAmount) async {
+    final duplicate = r.status == OcrStatus.DUPLICATE;
+    final read = r.amount == null ? '알 수 없음' : Fmt.won(r.amount!);
+    final go = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        key: const Key('ocr_warning_dialog'),
+        title: Text(duplicate ? '이미 올라간 영수증 같아요' : '영수증 금액과 달라요'),
+        content: Text(duplicate
+            ? '같은 승인번호·결제일시·금액의 지출${r.duplicateOf == null ? '' : '(#${r.duplicateOf})'}이 이미 있어요.\n'
+                '그대로 제출하면 중복 경고가 붙고, 승인할 때 사유를 적어야 해요.'
+            : '영수증에서 읽은 금액은 $read, 입력한 금액은 ${Fmt.won(inputAmount)}이에요.\n'
+                '그대로 제출하면 불일치 경고가 붙고, 승인할 때 사유를 적어야 해요.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(duplicate ? '취소' : '금액 고치기')),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('그대로 제출')),
+        ],
+      ),
+    );
+    return go ?? false;
+  }
+
   /// 같은 입력으로 이미 저장한 초안이 있으면 그 번호를, 없으면 새로 저장한 번호를.
   Future<int> _ensureDraft(EntryDraft draft) async {
     if (_draftId != null && _savedDraft == draft) return _draftId!;
@@ -303,7 +371,8 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
     setState(() => _submitting = true);
     final EntryDraft draft;
     try {
-      draft = base.withReceiptPath(await _ensureUploaded());
+      final ocr = await _ensureOcr(base);
+      draft = base.withReceiptPath(await _ensureUploaded()).withOcr(ocr);
       await _ensureDraft(draft);
     } on EntryDecisionException catch (e) {
       if (!mounted) return;
@@ -338,10 +407,24 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
 
     final RegistrationResult result;
     final EntryDraft draft;
+    ServerOcr? serverOcr;
     try {
-      draft = base.withReceiptPath(await _ensureUploaded());
+      final ocr = await _ensureOcr(base);
+      // 동의 여부는 **지금 보내는** 영수증·금액으로 가린다. 마지막 판독 키([_ocrKey])와 비교하면, 저장 초안의 판독을
+      // 그대로 쓸 때(키를 갱신하지 않는다) 다른 금액에서 한 동의가 이 금액의 경고를 건너뛴다 (#119 Codex 2차)
+      final confirmKey = _ocrKeyOf(base.receiptHash?.toLowerCase() ?? '', base.amount);
+      if (ocr != null && ocr.needsConfirm && _ocrConfirmedKey != confirmKey) {
+        if (!mounted) return;
+        if (!await _confirmOcrWarning(ocr, base.amount)) {
+          if (mounted) setState(() => _submitting = false);
+          return;
+        }
+        _ocrConfirmedKey = confirmKey;
+      }
+      draft = base.withReceiptPath(await _ensureUploaded()).withOcr(ocr);
       final id = await _ensureDraft(draft);
       final outcome = await _registrar.submit(id, draft);
+      serverOcr = outcome.ocr;
       result = outcome.status == EntryStatus.BLOCKED
           ? RegistrationResult.blocked(outcome.blockReason!)
           : const RegistrationResult.pending();
@@ -362,12 +445,17 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
     }
     if (!mounted) return;
     setState(() => _submitting = false);
-    await _showResult(result, draft, category);
+    await _showResult(result, draft, category, submitted: true, serverOcr: serverOcr);
   }
 
   /// 결과 안내 — **입력칸이 아니라 보낸 초안**으로 만든다. 응답을 기다리는 사이 입력을 바꿔도(금액을 비워도)
   /// 서버에 기록된 값을 보이고, 비운 금액을 다시 읽다 예외가 나지 않는다.
-  Future<void> _showResult(RegistrationResult result, EntryDraft draft, String category) async {
+  ///
+  /// 제출했으면 영수증 판독은 **서버에 기록된 판정**([serverOcr])으로 보인다 — 서버는 제출 때 중복을 다시 검사한다.
+  /// 그 값을 읽지 못했으면 제출 전 판독에 「제출 전 기준」을 붙인다.
+  Future<void> _showResult(RegistrationResult result, EntryDraft draft, String category,
+      {bool submitted = false, ServerOcr? serverOcr}) async {
+    final ocrRow = _ocrRow(draft.ocr, submitted: submitted, server: serverOcr);
     final done = await showRegistrationResultDialog(
       context,
       kindLabel: '지출',
@@ -376,12 +464,27 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
         ('사용처', draft.counterparty),
         ('금액', '${draft.amount}원'),
         ('예산 항목', category),
+        if (ocrRow != null) ('영수증 판독', ocrRow),
       ],
       result: result,
       occurredAtNote: '전송값 occurred_at: ${draft.occurredAt} (사용일 KST 00:00)',
       onBudgetRevision: () => _openBudgetRevision(draft, category),
     );
     if (done && mounted) Navigator.pop(context);
+  }
+
+  static String? _ocrRow(OcrReading? sent, {required bool submitted, ServerOcr? server}) {
+    if (!submitted) return sent == null ? null : ocrSummary(sent);
+    if (server == null) return sent == null ? null : '${ocrSummary(sent)} (제출 전 기준)';
+    final status = server.status;
+    if (status == null) return null;
+    return ocrSummary(OcrReading(
+      status: status,
+      amount: sent?.amount,
+      approvalNo: sent?.approvalNo,
+      paidAt: sent?.paidAt,
+      duplicateOf: server.duplicateOf,
+    ));
   }
 
   /// 차단 안내 → 예산 개정 요청. 차단된 지출(보낸 초안)이 근거로 붙고 예산 항목이 골라져 넘어간다.
@@ -650,6 +753,13 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
     );
   }
 }
+
+/// 등록 결과에 보이는 판독 한 줄 (T7). 판정 이름에 근거(판독 금액·중복 대상)를 붙인다.
+String ocrSummary(OcrReading r) => switch (r.status) {
+      OcrStatus.MISMATCH => r.amount == null ? r.status.label : '${r.status.label} · 판독 ${Fmt.won(r.amount!)}',
+      OcrStatus.DUPLICATE => r.duplicateOf == null ? r.status.label : '${r.status.label} · #${r.duplicateOf}와 같은 영수증',
+      _ => r.status.label,
+    };
 
 class _SectionLabel extends StatelessWidget {
   final String label;

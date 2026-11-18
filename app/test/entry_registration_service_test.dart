@@ -53,6 +53,7 @@ void main() {
   late http.Response Function() onSubmit;
   late http.Response Function() onTerm;
   late http.Response Function(String path) onDownload;
+  late http.Response Function() onEntry; // GET /entries/11 — 제출 뒤 서버 OCR 판정
   late FakeAuthenticator auth;
   final now = DateTime.utc(2026, 11, 6, 9);
 
@@ -72,6 +73,7 @@ void main() {
     onTerm = () => json({'id': 1, 'term_code': 20262, 'name': '2026-2', 'started_at': '2026-09-01T00:00:00', 'ended_at': '2027-02-28T00:00:00'});
     uploads = [];
     onDownload = (_) => http.Response('', 404); // 옛 서버 — GET /receipts 가 없다
+    onEntry = () => http.Response('{}', 503);
     // 서버(#66 receipts.py)처럼 받은 바이트를 그대로 해시한다 — 여기서는 multipart 본문 안의 파일 바이트를 꺼내지 않고,
     // 테스트가 보낸 원본을 알고 있으므로 그 해시를 돌려준다
     onUpload = (_) => json({'receipt_hash': Hashing.fileHash(receiptBytes), 'receipt_path': '/receipts/${Hashing.fileHash(receiptBytes).substring(2)}.jpg', 'filename': 'receipt.jpg', 'size': receiptBytes.length}, 201);
@@ -88,6 +90,8 @@ void main() {
           return onUpload(req.bodyBytes);
         case 'GET /terms/1':
           return onTerm();
+        case 'GET /entries/11':
+          return onEntry();
         case 'GET /chain/domains':
           return json({'domains': {LedgerTypes.domainName: domainJson}});
       }
@@ -141,6 +145,26 @@ void main() {
     );
     expect(SigningService.recoverSigner(Eip712.digest(domain, serverSide), body['signature'] as String), treasurerAddress);
     expect(auth.calls, 1);
+  });
+
+  test('제출 뒤 서버에 기록된 OCR 판정을 읽는다 — 서버는 제출 때 중복을 다시 검사한다 (#119 리뷰)', () async {
+    onEntry = () => json({'id': 11, 'status': 'PENDING', 'ocr_status': 'DUPLICATE', 'duplicate_of': 7});
+    final outcome = await service().submit(11, expense());
+    expect(outcome.status, EntryStatus.PENDING);
+    expect(outcome.ocr!.status, OcrStatus.DUPLICATE);
+    expect(outcome.ocr!.duplicateOf, 7);
+  });
+
+  test('제출 뒤 판정을 못 읽어도 제출 결과는 그대로다 — 판정만 모른다(null)', () async {
+    onEntry = () => http.Response('{}', 503);
+    final outcome = await service().submit(11, expense());
+    expect(outcome.status, EntryStatus.PENDING);
+    expect(outcome.ocr, isNull);
+
+    onEntry = () => json({'id': 11, 'status': 'PENDING', 'ocr_status': null});
+    final none = await service().submit(11, expense());
+    expect(none.ocr, isNotNull, reason: '읽었는데 판정이 없는 것(영수증 없음)과 못 읽은 것을 가른다');
+    expect(none.ocr!.status, isNull);
   });
 
   test('정정은 원본 id 를 corrects_entry_id 로 보내고, 서명의 correctsId 도 원본 id 다 — 금액은 음수 증감분', () async {
