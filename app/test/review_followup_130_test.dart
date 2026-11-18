@@ -1,0 +1,178 @@
+import 'dart:convert';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:student_council_app/core/entry_verifier.dart';
+import 'package:student_council_app/core/enums.dart';
+import 'package:student_council_app/models/entry_model.dart';
+import 'package:student_council_app/models/onchain_entry_model.dart';
+import 'package:student_council_app/services/student_api_service.dart';
+
+/// PR #130 리뷰(codex-loop 1차) 세 건의 회귀 시험.
+///
+/// 셋 다 **화면이 멀쩡해 보이는 채로 틀린 것을 말하는** 종류라 눈으로는 안 잡힌다.
+void main() {
+  const auditor = '0x90f79bf6eb2c4f870365e785982e1f101e93b906';
+  const wallets = {auditor: 3};
+
+  group('경고 없는 확정인데 장부에 사유가 있으면 통과시키지 않는다', () {
+    /// 체인은 「경고 없이 확정」이라 사유 해시가 `bytes32(0)` 이다. 그런데 DB 에는
+    /// `warning_ack_reason` 이 달려 있다. 그 글은 체인에 해시가 없어 재계산할 대상이
+    /// 없고 `meta_hash` 에도 안 들어간다 — 통과로 두면 **검증된 적 없는 사유가 상세
+    /// 화면에 뜨고**, 나중에 끼워 넣어도 배지는 초록이다.
+    EntryModel entryWith(String? reason) => EntryModel(
+          id: 7,
+          termId: 1,
+          termCode: 20262,
+          kind: EntryKind.EXPENSE,
+          amount: 48000,
+          counterparty: '한결문구',
+          purpose: '명찰 제작',
+          budgetId: 1,
+          occurredAt: 1794841200,
+          metaHash: '0x${'a' * 64}',
+          status: EntryStatus.CONFIRMED,
+          createdBy: 2,
+          approvedBy: 3,
+          warningAckReason: reason,
+        );
+
+    OnChainEntry noWarningChain() => OnChainEntry(
+          hash: '0x${'a' * 64}',
+          amount: 48000,
+          kind: EntryKind.EXPENSE,
+          status: EntryStatus.CONFIRMED,
+          occurredAt: 1794841200,
+          term: 20262,
+          budgetId: 1,
+          correctsId: 0,
+          registrant: '0x0000000000000000000000000000000000000001',
+          approver: auditor,
+          hadWarning: false,
+          reasonHash: OnChainEntry.zeroHash,
+        );
+
+    CheckState stateOf(String? reason) => EntryVerifier.verify(
+          entryWith(reason),
+          onChain: noWarningChain(),
+          userIdByAddress: wallets,
+        ).fieldChecks.firstWhere((f) => f.label == '승인·반려 사유').state;
+
+    test('사유가 달려 있으면 불일치다', () {
+      expect(stateOf('나중에 끼워 넣은 사유'), CheckState.failed);
+    });
+
+    test('사유가 없으면 그대로 통과다', () {
+      expect(stateOf(null), CheckState.passed);
+    });
+
+    test('빈 문자열도 사유가 없는 것으로 본다', () {
+      expect(stateOf(''), CheckState.passed);
+    });
+  });
+
+  group('계좌 대조 404 — 업로드 없음만 정상으로 본다', () {
+    http.Response notFound(String detail) => http.Response(
+          jsonEncode({'detail': detail}),
+          404,
+          headers: {'content-type': 'application/json; charset=utf-8'},
+        );
+
+    Future<bool> notUploadedFor(String detail) async {
+      StudentApiService.client = MockClient((req) async {
+        if (req.url.path.endsWith('/entries')) {
+          return http.Response('[]', 200,
+              headers: {'content-type': 'application/json; charset=utf-8'});
+        }
+        return notFound(detail);
+      });
+      await StudentApiService().fetchEntries(); // 실서버 모드로 들어간다
+      return (await StudentApiService().fetchLatestSnapshot()).notUploadedYet;
+    }
+
+    tearDown(() => StudentApiService.client = http.Client());
+
+    test('업로드가 없다는 404 는 「아직 안 올라옴」이다', () async {
+      expect(await notUploadedFor('아직 업로드된 계좌 거래내역이 없습니다.'), isTrue);
+    });
+
+    /// 서버는 진행 중인 학기가 없을 때도 404 다. 그것까지 정상이라고 말하면
+    /// **설정이 잘못된 상태가 학기 초처럼 보인다.**
+    test('학기가 없다는 404 는 고장 쪽으로 둔다', () async {
+      expect(await notUploadedFor('진행 중인 학기가 없습니다.'), isFalse);
+    });
+
+    test('뜻을 모르는 404 도 고장 쪽이다', () async {
+      expect(await notUploadedFor('Not Found'), isFalse);
+    });
+  });
+
+  group('현재 학기를 서버에서 고른다', () {
+    tearDown(() => StudentApiService.client = http.Client());
+
+    String termsJson(List<Map<String, Object>> terms) => jsonEncode(terms);
+
+    void serve(String body) {
+      StudentApiService.client = MockClient((req) async => http.Response(
+            body,
+            200,
+            headers: {'content-type': 'application/json; charset=utf-8'},
+          ));
+    }
+
+    test('기간에 드는 학기의 term_code 를 고른다', () async {
+      serve(termsJson([
+        {
+          'id': 1,
+          'term_code': 20261,
+          'started_at': '2026-03-01T00:00:00Z',
+          'ended_at': '2026-08-31T23:59:59Z',
+        },
+        {
+          'id': 2,
+          'term_code': 20262,
+          'started_at': '2026-09-01T00:00:00Z',
+          'ended_at': '2027-02-28T23:59:59Z',
+        },
+      ]));
+
+      expect(
+        await StudentApiService()
+            .fetchCurrentTermCode(now: DateTime.utc(2026, 11, 19)),
+        20262,
+      );
+    });
+
+    test('기간에 드는 학기가 없으면 가장 최근 학기다', () async {
+      serve(termsJson([
+        {
+          'id': 1,
+          'term_code': 20261,
+          'started_at': '2026-03-01T00:00:00Z',
+          'ended_at': '2026-08-31T23:59:59Z',
+        },
+        {
+          'id': 2,
+          'term_code': 20262,
+          'started_at': '2026-09-01T00:00:00Z',
+          'ended_at': '2027-02-28T23:59:59Z',
+        },
+      ]));
+
+      expect(
+        await StudentApiService()
+            .fetchCurrentTermCode(now: DateTime.utc(2030, 1, 1)),
+        20262,
+      );
+    });
+
+    /// 못 읽으면 null 이고, 화면은 그때 **거르지 않는다.** 모르는 채로 거르면
+    /// 멀쩡한 항목이 합계에서 사라진다.
+    test('못 읽으면 null 이다', () async {
+      StudentApiService.client =
+          MockClient((_) async => http.Response('{}', 500));
+      expect(await StudentApiService().fetchCurrentTermCode(), isNull);
+    });
+  });
+}

@@ -52,6 +52,17 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
   /// 떠서 학생이 고장으로 읽는다.
   bool _snapshotNotUploadedYet = false;
 
+  /// 합계를 거를 **현재 학기 코드**. 서버에서 받는다
+  /// ([StudentApiService.fetchCurrentTermCode]).
+  ///
+  /// 상수(`TermInfo.currentTermCode`)를 쓰면 학기가 넘어갈 때 그 학기 금액이 통째로
+  /// 빠져서 **「아직 집행이 없다」로 읽힌다** — 화면은 멀쩡하고 숫자만 0 에 가까워진다.
+  /// 계좌 스냅샷은 서버가 고른 학기로 오므로 대조 기준도 서로 어긋난다.
+  ///
+  /// 못 읽으면 null 이고, 그때는 거르지 않는다 — 모르는 채로 거르면 멀쩡한 항목이
+  /// 합계에서 사라진다.
+  int? _termCode;
+
   /// 마지막 조회가 중간에 깨졌는지 (스토리보드 2 ⑥ 「조회 실패」).
   ///
   /// **빈 화면으로 두면 안 된다.** 조회가 깨지면 `_entries` 와 `_budgets` 가 빈
@@ -80,6 +91,7 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
     try {
       final entries = await _api.fetchEntries();
       final budgets = await _api.fetchBudgets();
+      final termCode = await _api.fetchCurrentTermCode();
       final snapshot = await _api.fetchLatestSnapshot();
       final lastSeen = await _api.lastSeenEntryId();
 
@@ -87,6 +99,7 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
       setState(() {
         _entries = entries;
         _budgets = budgets;
+        _termCode = termCode;
         _snapshot = snapshot.snapshot;
         // 실서버에서 못 읽으면 null 이다 (데모 모드에서는 예시 스냅샷이 온다).
         // 「아직 안 올라옴」은 고장이 아니므로 그쪽으로 말한다.
@@ -103,6 +116,7 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
         setState(() {
           _entries = [];
           _budgets = [];
+          _termCode = null;
           _snapshot = null;
           // 화면 전체가 「불러올 수 없습니다」로 바뀌므로 스냅샷만 따로 말하지 않는다.
           _snapshotUnavailable = false;
@@ -122,15 +136,14 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
   /// 학생이 그것을 알 방법이 없다.
   ///
   /// 정정 항목의 금액이 증감분이라 확정 항목을 그냥 다 더하면 된다.
-  /// **이번 학기만 센다.** `GET /entries` 는 학기를 가리지 않고 내려주므로, 거르지 않으면
-  /// 지난 학기 금액이 「학기 총수입·총지출」에 섞인다. 셋을 같은 기준으로 불러야
-  /// `잔액 = 수입 − 지출` 이 화면에서 성립한다.
+  /// **이번 학기만 센다** ([_termCode]). `GET /entries` 는 학기를 가리지 않고 내려주므로,
+  /// 거르지 않으면 지난 학기 금액이 「학기 총수입·총지출」에 섞인다. 셋을 같은 기준으로
+  /// 불러야 `잔액 = 수입 − 지출` 이 화면에서 성립한다.
   int get _ledgerBalance =>
-      EntryMerge.ledgerBalance(_entries, termCode: TermInfo.currentTermCode);
-  int get _totalIncome =>
-      EntryMerge.totalIncome(_entries, termCode: TermInfo.currentTermCode);
+      EntryMerge.ledgerBalance(_entries, termCode: _termCode);
+  int get _totalIncome => EntryMerge.totalIncome(_entries, termCode: _termCode);
   int get _totalExpense =>
-      EntryMerge.totalExpense(_entries, termCode: TermInfo.currentTermCode);
+      EntryMerge.totalExpense(_entries, termCode: _termCode);
 
   /// 내역 목록을 연다. **미확인 뱃지가 떠 있으면 그 건들만 추려서 연다**
   /// (스토리보드 2 ⑤).

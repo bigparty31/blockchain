@@ -262,6 +262,20 @@ class EntryVerifier {
 
     // 경고 없는 확정 — 사유가 없는 것이 정상이고, 체인도 0 이어야 한다.
     if (!expectsReason) {
+      // **장부에 사유가 있으면 「없음」이라고 말하지 않는다.** 체인은 경고 없이
+      // 확정됐다는데 DB 에는 사유가 달려 있는 상태다. 그 사유는 체인에 해시가 없어
+      // 재계산할 대상이 없고 `meta_hash` 에도 들어가지 않으므로, 통과로 두면 **검증된
+      // 적 없는 글이 상세 화면에 뜬다** — 나중에 끼워 넣어도 배지는 초록이다.
+      if (reason != null && reason.isNotEmpty) {
+        return FieldCheck(
+          label: label,
+          chain: '없음',
+          local: reason,
+          state: CheckState.failed,
+          note: '체인은 경고 없이 확정됐다는데 장부에는 사유가 있다',
+        );
+      }
+
       final isZero = c.reasonHash == OnChainEntry.zeroHash;
       return FieldCheck(
         label: label,

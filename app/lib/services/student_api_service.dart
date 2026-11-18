@@ -3,6 +3,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import '../core/api_config.dart';
 import '../core/enums.dart';
+import '../core/format.dart';
 import '../core/hashing.dart';
 import '../core/term_info.dart';
 import '../models/balance_model.dart';
@@ -238,6 +239,47 @@ class StudentApiService {
     return null;
   }
 
+  /// GET /terms — **지금 학기의 온체인 학기 코드**(`YYYYS`). 못 읽으면 null.
+  ///
+  /// 합계를 이 코드로 거른다. 예전에는 [TermInfo.currentTermCode] 상수(`20262`)를 썼는데,
+  /// **학기가 넘어가면 그 학기 금액이 통째로 빠진다** — 화면은 멀쩡하고 숫자만 0 에
+  /// 가까워져서 「아직 집행이 없다」로 읽힌다. 계좌 스냅샷은 서버가 고른 학기로 오므로
+  /// 대조 기준도 서로 어긋난다.
+  ///
+  /// 고르는 기준은 임원 쪽([ApiService.fetchCurrentTermId])과 같다 — 시작·종료 사이인
+  /// 학기, 없으면 가장 최근(id 가 큰) 학기. 두 화면이 다른 학기를 말하면 안 된다.
+  ///
+  /// **못 읽으면 null 이고, 그때는 거르지 않는다.** 모르는 채로 거르면 멀쩡한 항목이
+  /// 합계에서 사라진다 — 모르는 것을 없는 것으로 취급하지 않는다.
+  Future<int?> fetchCurrentTermCode({DateTime? now}) async {
+    final json = await _getJson('${ApiConfig.baseUrl}/terms');
+    if (json is! List || json.isEmpty) return null;
+
+    final terms = json.whereType<Map<String, dynamic>>().toList();
+    final t = now ?? DateTime.now();
+    for (final term in terms) {
+      final started = term['started_at'];
+      final ended = term['ended_at'];
+      if (started is! String || ended is! String) continue;
+      try {
+        final start = Fmt.parseServerTime(started);
+        final end = Fmt.parseServerTime(ended);
+        if (!t.isBefore(start) && !t.isAfter(end)) return term['term_code'] as int?;
+      } catch (_) {
+        // 시각을 못 읽는 학기는 건너뛴다 — 나머지로 고른다
+      }
+    }
+
+    // 기간에 드는 학기가 없으면 가장 최근 학기. id 가 없거나 코드가 없으면 null 이다.
+    Map<String, dynamic>? latest;
+    for (final term in terms) {
+      final id = term['id'];
+      if (id is! int) continue;
+      if (latest == null || id > (latest['id'] as int)) latest = term;
+    }
+    return latest?['term_code'] as int?;
+  }
+
   /// GET /users/wallets — **지갑 주소 → user id** 매핑 (검증 2단계)
   ///
   /// 체인의 `registrant`·`approver` 는 지갑 주소이고 DB 의 `created_by`·
@@ -371,15 +413,32 @@ class StudentApiService {
         }
       }
 
-      // **404 는 데모로 메우지 않는다.** 서버가 「없다」고 대답한 것이지 못 닿은 것이
-      // 아니다. 예시 스냅샷을 끼우면 실제 장부 옆에 가짜 통장 잔액이 선다.
+      // **404 가 다 「아직 안 올라옴」은 아니다.** 서버는 진행 중인 학기가 없을 때도
+      // 404 를 준다(`snapshots.py` — 「진행 중인 학기가 없습니다」). 경로가 틀렸을 때도
+      // 마찬가지다. 그것까지 정상이라고 말하면 **설정이 잘못된 상태가 학기 초처럼 보인다.**
+      //
+      // 그래서 업로드가 없다고 밝힌 응답만 그쪽으로 분류하고, 나머지 404 는 「못 읽음」
+      // 으로 둔다 — 모르는 404 를 고장 쪽에 두는 편이 안전하다.
+      //
+      // 본문 글귀에 기대는 것이 약한 고리라, 서버가 구분 가능한 코드를 주면 그쪽으로 바꾼다.
       if (res.statusCode == 404) {
-        return (snapshot: null, notUploadedYet: true);
+        return (snapshot: null, notUploadedYet: _saysNotUploaded(res));
       }
     }
 
     // 서버에 닿지 못했거나 그 밖의 실패. 데모 모드에서만 예시를 쓴다.
     return (snapshot: _usingDemoData ? _demoSnapshot() : null, notUploadedYet: false);
+  }
+
+  /// 404 본문이 **업로드가 없다**고 밝혔는지. 읽지 못하면 거짓 — 모르는 404 는 고장이다.
+  static bool _saysNotUploaded(http.Response res) {
+    try {
+      final body = jsonDecode(utf8.decode(res.bodyBytes));
+      final detail = body is Map ? body['detail'] : null;
+      return detail is String && detail.contains('거래내역');
+    } catch (_) {
+      return false;
+    }
   }
 
   /// GET /objections?entry_id= — 이의 목록 (S8)
