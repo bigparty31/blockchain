@@ -105,11 +105,14 @@ class StudentApiService {
   int get skippedEntryCount => _skippedEntryCount;
   int _skippedEntryCount = 0;
 
-  /// 서버에 `POST /objections` 가 없을 때 제기한 이의를 담아 두는 곳.
+  /// 데모 모드에서 제기한 이의를 담아 두는 곳.
   ///
-  /// 엔드포인트가 생기면 이 목록은 통째로 지운다. **항목(`entries`)에는 이런
-  /// 폴백을 두지 않는다** — `POST /entries` 는 이미 서버에 있어서, 여기에도
-  /// 사본을 두면 「어느 쪽이 진짜 데이터냐」가 갈린다.
+  /// **엔드포인트는 생겼다** (PR #128 — 조회는 양쪽 서버, 쓰기는 학생회 서버).
+  /// 실서버를 보고 있으면 이 목록을 쓰지 않고 [ObjectionFailed] 를 던진다. #128 이
+  /// develop 에 들어오면 통째로 지운다 — 그때까지는 데모 화면이 비지 않게 남겨 둔다.
+  ///
+  /// **항목(`entries`)에는 이런 폴백을 두지 않는다** — `POST /entries` 는 이미 서버에
+  /// 있어서, 여기에도 사본을 두면 「어느 쪽이 진짜 데이터냐」가 갈린다.
   final List<ObjectionModel> _pendingObjections = [];
 
   // ── 원장 ────────────────────────────────────────────────────
@@ -323,6 +326,8 @@ class StudentApiService {
   }
 
   // ── 아직 백엔드에 없는 엔드포인트 ──────────────────────────
+  //
+  // 이의(`/objections`)는 여기서 빠졌다 — PR #128 로 생겼다. 남은 것은 스냅샷뿐이다.
 
   /// GET /snapshots/latest — 통장 잔액 스냅샷과 미등록 건 (S11)
   ///
@@ -361,6 +366,11 @@ class StudentApiService {
 
   /// POST /objections — 이의 제기 (S8)
   ///
+  /// **쓰기라서 학생회 서버로 보낸다** ([ApiConfig.councilBaseUrl]). 학생 서버는 읽기 전용
+  /// DB 에 릴레이어 키가 없어(PRD §9.1) 이 경로를 아예 싣지 않는다 — 조회(`GET /objections`)는
+  /// 양쪽에 있지만 쓰기는 학생회 서버에만 있고, 거기서 `Role.STUDENT` 를 허용한다.
+  /// [ApiConfig.baseUrl] 로 보내면 학생 토큰일 때 학생 서버로 가 **404** 가 된다.
+  ///
   /// 본문의 정본화·해시는 백엔드가 한다 (HASHING.md §1.1, §3).
   /// 학생 앱은 쓰기 권한이 없어 직접 서명하지 않는다 (PRD §9.2).
   ///
@@ -379,7 +389,7 @@ class StudentApiService {
     try {
       res = await client
           .post(
-            Uri.parse('${ApiConfig.baseUrl}/objections'),
+            Uri.parse('${ApiConfig.councilBaseUrl}/objections'),
             headers: {'Content-Type': 'application/json', ...auth.headers},
             body: jsonEncode({'entry_id': entryId, 'content': content}),
           )
@@ -924,6 +934,13 @@ class StudentApiService {
       approver: e.approvedBy == null
           ? OnChainEntry.zeroAddress
           : (_demoWallets[e.approvedBy] ?? OnChainEntry.zeroAddress),
+      // 사유 해시도 **항목에서 만든다.** 따로 적어 두면 사유 문구를 고칠 때 한쪽만
+      // 바뀌어 데모가 「사유 불일치」로 뒤집힌다 — 위의 주소와 같은 이유다.
+      // 경고 없이 확정한 건은 bytes32(0) 이다 (HASHING.md §3).
+      hadWarning: e.warningAckReason != null,
+      reasonHash: e.warningAckReason != null
+          ? Hashing.textHash(e.warningAckReason!)
+          : OnChainEntry.zeroHash,
     );
   }
 

@@ -688,8 +688,9 @@ void main() {
       });
     });
 
-    test('반려 항목은 승인자를 비교하지 않는다', () {
-      // rejected_by 컬럼이 없어 그냥 비교하면 반려 건이 전부 위조가 된다.
+    test('반려 항목은 체인 approver 를 rejected_by 와 비교한다', () {
+      // 컨트랙트의 approver 는 확정자와 반려자를 겸하고 DB 는 둘을 나눠 담는다.
+      // approved_by 와 비교하면 반려 건이 전부 「한쪽만 값이 있다」로 위조가 된다.
       final rejected = _entry(
         id: 8,
         amount: 10000,
@@ -698,6 +699,7 @@ void main() {
         occurredAt: d0908,
         budgetId: 2,
         status: EntryStatus.REJECTED,
+        rejectedBy: 3,
       );
       final chain = OnChainEntry(
         hash: rejected.metaHash,
@@ -708,18 +710,49 @@ void main() {
         term: rejected.termCode,
         budgetId: 2,
         correctsId: 0,
-        registrant: '0x71C7656EC7ab88b098defB751B7401B5f6d8976F',
-        // 체인에는 반려자 주소가 있는데 DB 에는 없다.
-        approver: '0x2546BcD3c84621e976D8185a91A922aE77ECEc30',
+        registrant: registrant,
+        approver: approver, // wallets 에서 user 3 으로 풀린다
       );
 
       final r = EntryVerifier.verify(rejected,
           onChain: chain, userIdByAddress: wallets);
       expect(
-        r.fieldChecks.firstWhere((f) => f.label == '승인자').state,
-        CheckState.notApplicable,
+        r.fieldChecks.firstWhere((f) => f.label == '반려자').state,
+        CheckState.passed,
       );
       expect(r.status, isNot(VerificationStatus.tampered));
+    });
+
+    test('체인에는 반려자가 있는데 DB 에 없으면 어긋난다', () {
+      final rejected = _entry(
+        id: 9,
+        amount: 10000,
+        counterparty: '문구점',
+        purpose: '반려된 지출',
+        occurredAt: d0908,
+        budgetId: 2,
+        status: EntryStatus.REJECTED,
+        // rejected_by 가 비어 있다
+      );
+      final chain = OnChainEntry(
+        hash: rejected.metaHash,
+        amount: rejected.amount,
+        kind: rejected.kind,
+        status: rejected.status,
+        occurredAt: rejected.occurredAt,
+        term: rejected.termCode,
+        budgetId: 2,
+        correctsId: 0,
+        registrant: registrant,
+        approver: approver,
+      );
+
+      final r = EntryVerifier.verify(rejected,
+          onChain: chain, userIdByAddress: wallets);
+      expect(
+        r.fieldChecks.firstWhere((f) => f.label == '반려자').state,
+        CheckState.failed,
+      );
     });
   });
 
@@ -815,6 +848,7 @@ EntryModel _entry({
   int? correctsEntryId,
   CorrectionReason? correctionReason,
   int? approvedBy,
+  int? rejectedBy,
   String? metaHashOverride,
 }) {
   return EntryModel(
@@ -839,6 +873,7 @@ EntryModel _entry({
     status: status,
     createdBy: 2,
     approvedBy: approvedBy,
+    rejectedBy: rejectedBy,
     correctsEntryId: correctsEntryId,
     correctionReason: correctionReason,
   );
