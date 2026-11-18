@@ -14,6 +14,7 @@ class DeviceTokenSync {
     required this.cachedToken,
     required this.register,
     required this.revoke,
+    this.retryDelay = const Duration(seconds: 10),
   });
 
   /// 지금 세션의 토큰 (없으면 null)
@@ -28,6 +29,13 @@ class DeviceTokenSync {
   final Future<bool> Function(String fcmToken) register;
   final Future<bool> Function(String fcmToken, Session ending) revoke;
 
+  /// 등록이 결과를 못 낸 채 끝났을 때(시간 초과), 해제를 한 번 더 보내기까지 기다리는 시간.
+  /// 시간 초과는 요청을 취소하지 않아서, 서버가 해제 뒤에 그 등록을 처리해 토큰을 되살릴 수 있다 (#122 codex-loop 2차).
+  final Duration retryDelay;
+
+  /// 마지막 등록이 서버의 답을 받지 못했다 — 요청이 아직 날아가는 중일 수 있다
+  bool _registerInconclusive = false;
+
   Future<void> _tail = Future<void>.value();
 
   /// 줄에 선 일이 모두 끝날 때까지 (시험용)
@@ -40,7 +48,7 @@ class DeviceTokenSync {
       if (token == null) return;
       // 토큰을 기다리는 사이 로그아웃했거나 다른 사람이 로그인했다면 이 등록은 버린다
       if (sessionToken() != startedWith) return;
-      await register(token);
+      _registerInconclusive = !await register(token);
     });
   }
 
@@ -48,7 +56,14 @@ class DeviceTokenSync {
   void onEnding(Session ending) {
     _enqueue(() async {
       final token = cachedToken();
-      if (token != null) await revoke(token, ending);
+      if (token == null) return;
+      await revoke(token, ending);
+      if (_registerInconclusive) {
+        // 늦게 닿은 등록이 방금 해제를 덮었을 수 있다 — 잠시 뒤 한 번 더 해제한다
+        _registerInconclusive = false;
+        await Future<void>.delayed(retryDelay);
+        await revoke(token, ending);
+      }
     });
   }
 

@@ -97,4 +97,42 @@ void main() {
     await sync.idle;
     expect(log, ['revoke:fcm']);
   });
+
+  test('등록이 답 없이 끝났으면(시간 초과) 해제를 한 번 더 보낸다', () async {
+    final log = <String>[];
+    final sync = DeviceTokenSync(
+      sessionToken: () => 'A',
+      fcmToken: () async => 'fcm',
+      cachedToken: () => 'fcm',
+      register: (t) async => false,
+      revoke: (t, s) async {
+        log.add('revoke');
+        return true;
+      },
+      retryDelay: Duration.zero,
+    );
+    sync.onStarted('A');
+    sync.onEnding(session('A'));
+    await sync.idle;
+    expect(log, ['revoke', 'revoke']);
+  });
+
+  test('등록이 성공했으면 해제는 한 번이다', () async {
+    final log = <String>[];
+    final sync = DeviceTokenSync(
+      sessionToken: () => 'A',
+      fcmToken: () async => 'fcm',
+      cachedToken: () => 'fcm',
+      register: (t) async => true,
+      revoke: (t, s) async {
+        log.add('revoke');
+        return true;
+      },
+      retryDelay: Duration.zero,
+    );
+    sync.onStarted('A');
+    sync.onEnding(session('A'));
+    await sync.idle;
+    expect(log, ['revoke']);
+  });
 }

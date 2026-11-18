@@ -112,7 +112,8 @@ class _StudentCouncilAppState extends State<StudentCouncilApp> {
     sessionToken: () => AuthService().session?.token,
     fcmToken: () => PushService().deviceToken(),
     cachedToken: () => PushService().token,
-    register: NotificationService.registerDeviceToken,
+    // 기다리는 시간을 늘려, 느린 등록이 끝난 뒤에 해제가 나가게 한다 (시간 초과는 요청을 취소하지 않는다)
+    register: (t) => NotificationService.registerDeviceToken(t, wait: const Duration(seconds: 30)),
     revoke: NotificationService.revokeDeviceToken,
   );
 
