@@ -41,6 +41,7 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
   List<EventInfo>? _events;
   String? _loadError;
   EventInfo? _event;
+  bool _creating = false; // 행사 등록 응답을 기다리는 중 — 「행사 추가」를 잠근다
 
   // 스캔 상태
   bool _busy = false;
@@ -91,15 +92,19 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
       builder: (_) => _NewEventDialog(now: _now()),
     );
     if (draft == null || !mounted) return;
+    setState(() => _creating = true);
     try {
       final created = await _service.create(termId: termId, name: draft.$1, heldAt: draft.$2);
       if (!mounted) return;
       setState(() => _events = [created, ...?_events]);
-      _choose(created);
+      // 기다리는 사이 다른 행사를 골라 스캔 중이면 바꾸지 않는다 — 그 행사의 입장 결과가 새 행사 화면에 붙지 않게
+      if (_event == null) _choose(created);
     } on EventActionFailed catch (e) {
       _snack(e.message);
     } on ApiUnavailable catch (e) {
       _snack(e.message);
+    } finally {
+      if (mounted) setState(() => _creating = false);
     }
   }
 
@@ -136,17 +141,25 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
       _view = const _ScanView.checking();
     });
     _ScanView view;
+    CheckInOutcome? outcome;
     try {
-      final outcome = await _service.checkIn(eventId: event.id, payload: payload);
-      if (outcome.result == CheckInResult.admitted) _admitted++;
+      outcome = await _service.checkIn(eventId: event.id, payload: payload);
       view = _ScanView.outcome(outcome);
-      HapticFeedback.mediumImpact();
     } on EventActionFailed catch (e) {
       view = _ScanView.message('확인하지 못했어요', e.message, retry: true);
     } on ApiUnavailable catch (e) {
       view = _ScanView.message('확인하지 못했어요', e.message, retry: e is! ApiForbidden && e is! ApiUnauthorized);
     }
     if (!mounted) return;
+    // 기다리는 사이 화면의 행사가 바뀌었으면 이 결과는 지금 행사의 것이 아니다 — 보이지도 세지도 않는다
+    if (_event?.id != event.id) {
+      setState(() => _busy = false);
+      return;
+    }
+    if (outcome != null) {
+      if (outcome.result == CheckInResult.admitted) _admitted++;
+      HapticFeedback.mediumImpact();
+    }
     setState(() {
       _busy = false;
       _view = view;
@@ -232,7 +245,7 @@ class _QrScannerScreenState extends State<QrScannerScreen> {
           ),
         const SizedBox(height: 12),
         OutlinedButton.icon(
-          onPressed: _addEvent,
+          onPressed: _creating ? null : _addEvent,
           icon: const Icon(Icons.add_rounded),
           label: const Text('행사 추가'),
         ),

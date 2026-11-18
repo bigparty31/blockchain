@@ -39,13 +39,19 @@ void main() {
   late List<http.Request> requests;
 
   /// [checkIn] 이 입장 요청마다 돌려줄 응답을 정한다.
-  void serve({List<Map<String, Object?>> events = const [festival], required FutureOr<http.Response> Function() checkIn}) {
+  /// [created] 가 있으면 행사 등록 응답을 그때까지 붙잡아 둔다.
+  void serve({
+    List<Map<String, Object?>> events = const [festival],
+    required FutureOr<http.Response> Function() checkIn,
+    Future<void>? created,
+  }) {
     requests = [];
     EventService.client = MockClient((req) async {
       requests.add(req);
       if (req.url.path == '/terms') return json(terms);
       if (req.url.path == '/events' && req.method == 'GET') return json(events);
       if (req.url.path == '/events' && req.method == 'POST') {
+        if (created != null) await created;
         final body = jsonDecode(req.body) as Map<String, dynamic>;
         return json({'id': 12, 'term_id': body['term_id'], 'name': body['name'], 'held_at': body['held_at']}, 201);
       }
@@ -336,6 +342,46 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('총회'), findsOneWidget, reason: '앱바 제목');
       expect(find.text('QR 비추기'), findsOneWidget);
+    });
+
+    testWidgets('행사 등록을 기다리는 사이 다른 행사를 골라 스캔하면, 등록 응답이 와도 그 행사에 머문다 (#121 Codex 2차)', (tester) async {
+      final createGate = Completer<void>();
+      final checkInGate = Completer<http.Response>();
+      serve(checkIn: () => checkInGate.future, created: createGate.future);
+      await open(tester);
+
+      // 행사 B(총회) 등록 — 응답을 붙잡아 둔다
+      await tester.tap(find.text('행사 추가'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byKey(const Key('event_name')), '총회');
+      await tester.tap(find.text('추가'));
+      await tester.pumpAndSettle(); // 창이 닫힐 때까지 — 등록 응답은 붙잡혀 있다
+      expect(tester.widget<OutlinedButton>(find.widgetWithText(OutlinedButton, '행사 추가')).onPressed, isNull,
+          reason: '등록 중에는 또 등록하지 않는다');
+
+      // 그사이 행사 A(해오름제)를 골라 학생을 찍는다 — 입장 응답도 붙잡아 둔다
+      await tester.tap(find.text('해오름제'));
+      await tester.pump();
+      await tester.tap(find.text('QR 비추기'));
+      await tester.pump();
+
+      // B 등록 응답이 먼저 온다 — 화면은 A 에 머문다
+      createGate.complete();
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('해오름제'), findsOneWidget, reason: '앱바는 그대로 해오름제');
+      expect(find.text('총회'), findsNothing);
+
+      // A 의 입장 응답 — A 화면에 보이고 A 의 입장 수로 센다
+      checkInGate.complete(json(outcome('ADMITTED')));
+      await tester.pumpAndSettle();
+      expect(find.text('입장 확인'), findsOneWidget);
+      expect(find.text('이 화면에서 입장 1명'), findsOneWidget);
+
+      // 새 행사는 목록에 들어가 있다
+      await tester.tap(find.text('행사 바꾸기'));
+      await tester.pumpAndSettle();
+      expect(find.text('총회'), findsOneWidget);
     });
 
     testWidgets('학기 정보를 못 받으면 알리고 다시 불러올 수 있다', (tester) async {
