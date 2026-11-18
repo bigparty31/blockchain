@@ -2,13 +2,13 @@ from enum import Enum
 from typing import Optional
 from pydantic import BaseModel, Field, ConfigDict, StrictInt, field_validator
 
+from app.constants import MAX_AMOUNT
 from app.utils.hashing import canonical
 
 COUNTERPARTY_MAX_LENGTH = 100
 RECEIPT_PATH_MAX_LENGTH = 255
 RECEIPT_HASH_MAX_LENGTH = 66
 OCR_APPROVAL_NO_MAX_LENGTH = 50
-MAX_AMOUNT = 10**15
 INT64_MAX = (1 << 63) - 1
 
 
@@ -92,7 +92,7 @@ class EntryCreate(BaseModel):
     counterparty: str = Field(..., max_length=COUNTERPARTY_MAX_LENGTH, description="거래처 (상호명, 최대 100자)")
     purpose: str = Field(..., description="사용 목적")
     budget_id: Optional[StrictInt] = Field(None, ge=1, le=INT64_MAX, description="배정 예산 ID")
-    occurred_at: StrictInt = Field(..., le=INT64_MAX, description="거래 일시 (Unix Timestamp KST 자정)")
+    occurred_at: StrictInt = Field(..., ge=0, le=INT64_MAX, description="거래 일시 (Unix Timestamp KST 자정)")
     receipt_path: Optional[str] = Field(None, max_length=RECEIPT_PATH_MAX_LENGTH, description="영수증 이미지 경로")
     receipt_hash: Optional[str] = Field(None, max_length=RECEIPT_HASH_MAX_LENGTH, description="영수증 SHA-256 해시")
     # 아래 ocr_* 는 옛 앱과의 호환을 위해 받기만 하고 **쓰지 않는다** — 서버가 POST /ocr/receipt 에서 저장한 판독값과

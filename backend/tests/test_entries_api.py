@@ -2986,6 +2986,20 @@ def test_create_entry_accepts_max_chain_amount(auth_header):
     assert res.status_code == 201
 
 
+def test_create_entry_rejects_negative_occurred_at(auth_header):
+    """occurred_at 음수는 초안 등록 단계에서 즉시 422로 거부된다."""
+    body = {
+        "term_id": 1,
+        "kind": "INCOME",
+        "amount": 10000,
+        "counterparty": "음수시각테스트",
+        "purpose": "음수 occurred_at 차단 검증",
+        "occurred_at": -32400,
+    }
+    res = client.post("/entries", json=body, headers=auth_header(Role.TREASURER))
+    assert res.status_code == 422
+
+
 def test_get_entries_term_id_filter():
     """GET /entries?term_id= 조회 시 지정 학기 항목만 반환하고 미지정 시 전체 학기를 반환한다."""
     with _test_session_factory() as db:
