@@ -63,8 +63,16 @@ class FakeRegistrar implements EntryRegistrar {
 
   int _nextId = 100;
 
+  /// 다음 초안 저장을 이 예외로 실패시킨다 (한 번만).
+  EntryDecisionException? failNextDraft;
+
   @override
   Future<int> saveDraft(EntryDraft draft) async {
+    final fail = failNextDraft;
+    if (fail != null) {
+      failNextDraft = null;
+      throw fail;
+    }
     drafts.add(draft);
     return _nextId++;
   }

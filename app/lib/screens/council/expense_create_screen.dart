@@ -410,13 +410,16 @@ class _ExpenseCreateScreenState extends State<ExpenseCreateScreen> {
     ServerOcr? serverOcr;
     try {
       final ocr = await _ensureOcr(base);
-      if (ocr != null && ocr.needsConfirm && _ocrConfirmedKey != _ocrKey) {
+      // 동의 여부는 **지금 보내는** 영수증·금액으로 가린다. 마지막 판독 키([_ocrKey])와 비교하면, 저장 초안의 판독을
+      // 그대로 쓸 때(키를 갱신하지 않는다) 다른 금액에서 한 동의가 이 금액의 경고를 건너뛴다 (#119 Codex 2차)
+      final confirmKey = _ocrKeyOf(base.receiptHash?.toLowerCase() ?? '', base.amount);
+      if (ocr != null && ocr.needsConfirm && _ocrConfirmedKey != confirmKey) {
         if (!mounted) return;
         if (!await _confirmOcrWarning(ocr, base.amount)) {
           if (mounted) setState(() => _submitting = false);
           return;
         }
-        _ocrConfirmedKey = _ocrKey;
+        _ocrConfirmedKey = confirmKey;
       }
       draft = base.withReceiptPath(await _ensureUploaded()).withOcr(ocr);
       final id = await _ensureDraft(draft);

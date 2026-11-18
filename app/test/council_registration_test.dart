@@ -290,6 +290,43 @@ void main() {
       expect(registrar.submits.map((s) => s.$1), [100, 100], reason: '서버에는 이미 올라갔을 수 있다 — 새 번호로 내지 않는다');
     });
 
+    testWidgets('다른 금액에서 한 「그대로 제출」 동의는 원래 금액의 경고를 건너뛰지 않는다 (#119 Codex 2차)', (tester) async {
+      final mismatch = reading(OcrStatus.MISMATCH, amount: 30000);
+      final path = FakeRegistrar.pathOf(fakeReceiptBytes);
+      final registrar = FakeRegistrar()
+        ..ocr = ((_, __) => mismatch)
+        ..stored[path] = fakeReceiptBytes;
+      final saved = DraftEntry(
+        id: 9,
+        termId: 1,
+        kind: EntryKind.EXPENSE,
+        amount: 35000,
+        counterparty: '한결문구',
+        purpose: '신입생 환영회 명찰',
+        occurredAt: 1789225200,
+        budgetId: 1,
+        receiptHash: Hashing.fileHash(fakeReceiptBytes),
+        receiptPath: path,
+        ocr: mismatch,
+      );
+      await pump(tester, ExpenseCreateScreen(registrar: registrar, resumeDraft: saved));
+      final amountField = find.widgetWithText(TextFormField, '지출 금액(원) *');
+
+      // 금액을 바꿔 그 금액의 경고에 동의했는데, 새 초안 저장이 실패했다
+      await tester.enterText(amountField, '36000');
+      registrar.failNextDraft = const EntryDecisionException(EntryDecisionFailure.unknownOutcome, '초안을 저장하지 못했어요.');
+      await tapText(tester, '제출하기');
+      await tapText(tester, '그대로 제출');
+      expect(registrar.submits, isEmpty);
+
+      // 원래 금액으로 돌려 제출 — 저장 초안의 불일치는 아직 동의하지 않았다
+      await tester.enterText(amountField, '35000');
+      await tapText(tester, '제출하기');
+      expect(find.byKey(const Key('ocr_warning_dialog')), findsOneWidget);
+      await tapText(tester, '그대로 제출');
+      expect(registrar.submits.single.$1, 9);
+    });
+
     testWidgets('제출 때 서버가 중복으로 바꾸면 결과에 서버 판정을 보인다', (tester) async {
       final registrar = FakeRegistrar()
         ..ocr = ((_, __) => reading(OcrStatus.MATCH))
