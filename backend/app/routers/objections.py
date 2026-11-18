@@ -15,6 +15,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.auth import User, require_roles
+from app.auth.deps import get_student_for_objection
 from app.chain.client import ChainClient
 from app.chain.deployment import DeploymentError, load_deployment
 from app.chain.eip712 import ANSWER_REQUEST_FIELDS
@@ -52,7 +53,6 @@ logger = logging.getLogger(__name__)
 query_router = APIRouter(prefix="/objections", tags=["Objections"])
 command_router = APIRouter(prefix="/objections", tags=["Objections"])
 
-student_only = require_roles(Role.STUDENT)
 responder_only = require_roles(Role.AUDITOR, Role.PRESIDENT)
 
 
@@ -232,6 +232,32 @@ async def get_open_objection_count(db: Session = Depends(get_db)):
     return ObjectionOpenCountResponse(count=int(count))
 
 
+@query_router.get("/{objection_id}", response_model=ObjectionResponse, summary="이의 제기 단건 상세 조회")
+async def get_objection_by_id(
+    objection_id: int = Path(..., ge=1, le=INT64_MAX),
+    db: Session = Depends(get_db),
+):
+    """이의 제기 ID로 단건 상세 정보를 조회합니다 (온체인 등록 완료된 건만 반환)."""
+    try:
+        obj = (
+            db.query(DBObjection)
+            .filter(DBObjection.id == objection_id, DBObjection.tx_raise.like("0x%"))
+            .first()
+        )
+    except SQLAlchemyError as e:
+        logger.exception("이의 제기 단건 조회 중 데이터베이스 오류: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 처리 중 오류가 발생했습니다.",
+        )
+    if obj is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"이의 제기(id={objection_id})를 찾을 수 없습니다.",
+        )
+    return _to_schema(obj)
+
+
 @command_router.post(
     "",
     response_model=ObjectionResponse,
@@ -246,7 +272,7 @@ async def get_open_objection_count(db: Session = Depends(get_db)):
 )
 async def raise_objection(
     req: ObjectionCreateRequest,
-    user: User = Depends(student_only),
+    user: User = Depends(get_student_for_objection),
     db: Session = Depends(get_db),
     chain: ChainClient = Depends(get_chain_client),
 ):

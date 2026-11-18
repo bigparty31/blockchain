@@ -414,3 +414,61 @@ def test_answer_objection_recovers_after_chain_unavailable(monkeypatch):
     assert body["answer"] == "최종 복구 답변"
     assert body["answered_by"] is not None
     assert body["tx_answer"].startswith("0x")
+
+
+def test_get_objection_by_id_and_student_jwt_secret_split(monkeypatch):
+    """GET /objections/{id} 단건 조회 및 STUDENT_JWT_SECRET 분리 시 POST /objections 전용 학생 토큰 검증(PRD v0.17 §9.1)."""
+    import jwt as pyjwt
+    from datetime import timedelta
+
+    _grant_student_sbt()
+    monkeypatch.setenv("STUDENT_JWT_SECRET", "student-only-separate-secret-key")
+
+    student = next(u for u in users.SEED_USERS if u.role == Role.STUDENT)
+    auditor = next(u for u in users.SEED_USERS if u.role == Role.AUDITOR)
+    now = datetime.now(timezone.utc)
+
+    student_token = pyjwt.encode(
+        {"sub": str(student.id), "iat": now, "exp": now + timedelta(hours=1)},
+        "student-only-separate-secret-key",
+        algorithm="HS256",
+    )
+    auditor_forged_with_student_key = pyjwt.encode(
+        {"sub": str(auditor.id), "iat": now, "exp": now + timedelta(hours=1)},
+        "student-only-separate-secret-key",
+        algorithm="HS256",
+    )
+
+    # 1. STUDENT_JWT_SECRET 로 서명된 학생 토큰은 POST /objections 통과 -> 201
+    res_raise = client.post(
+        "/objections",
+        json={"entry_id": 1, "content": "분리 키 이의 제기"},
+        headers={"Authorization": f"Bearer {student_token}"},
+    )
+    assert res_raise.status_code == 201
+    oid = res_raise.json()["id"]
+
+    # 2. 단건 상세 조회 GET /objections/{id} -> 200, 미존재 -> 404
+    res_detail = client.get(f"/objections/{oid}")
+    assert res_detail.status_code == 200
+    assert res_detail.json()["content"] == "분리 키 이의 제기"
+    assert client.get("/objections/99999").status_code == 404
+
+    # 3. STUDENT_JWT_SECRET 로 임원 ID를 서명해도 POST /objections 는 403 거부
+    res_officer_student_key = client.post(
+        "/objections",
+        json={"entry_id": 1, "content": "임원 위장 시도"},
+        headers={"Authorization": f"Bearer {auditor_forged_with_student_key}"},
+    )
+    assert res_officer_student_key.status_code == 403
+
+    # 4. STUDENT_JWT_SECRET 로 서명된 토큰은 다른 경로(GET /auth/me, prepare-answer)에서 401 거부
+    assert client.get("/auth/me", headers={"Authorization": f"Bearer {student_token}"}).status_code == 401
+    assert (
+        client.post(
+            f"/objections/{oid}/prepare-answer",
+            json={"answer": "권한 우회 시도"},
+            headers={"Authorization": f"Bearer {auditor_forged_with_student_key}"},
+        ).status_code
+        == 401
+    )

@@ -63,6 +63,7 @@ def test_student_api_routes_whitelist():
         ("GET", "/snapshots/latest"),
         ("GET", "/objections"),
         ("GET", "/objections/open-count"),
+        ("GET", "/objections/{objection_id}"),
     }
 
     assert routes == expected_routes, (
