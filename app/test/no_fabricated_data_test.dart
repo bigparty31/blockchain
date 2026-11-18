@@ -60,7 +60,7 @@ void main() {
     test('스냅샷을 못 읽으면 null — 가짜 통장 잔액을 만들지 않는다', () async {
       await enterRealMode();
       expect(
-        await StudentApiService().fetchLatestSnapshot(),
+        (await StudentApiService().fetchLatestSnapshot()).snapshot,
         isNull,
         reason: '실장부 옆에 예시 통장 잔액이 섞이면 학생이 구분할 수 없다',
       );
@@ -80,7 +80,7 @@ void main() {
       await StudentApiService().fetchEntries();
 
       expect(StudentApiService().usingDemoData, isTrue);
-      expect(await StudentApiService().fetchLatestSnapshot(), isNotNull);
+      expect((await StudentApiService().fetchLatestSnapshot()).snapshot, isNotNull);
       expect(await StudentApiService().fetchBudgets(), isNotEmpty);
     });
   });

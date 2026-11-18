@@ -115,15 +115,15 @@ void main() {
     /// 멀쩡히 보이니, 계좌 대조라는 기능이 애초에 없는 화면과 구분되지 않는다 —
     /// 미등록 지출을 드러내는 장치가 꺼진 것을 아무도 모른다.
     ///
-    /// `/snapshots/latest` 는 백엔드에 아직 없어서 실모드에서는 **항상** 이 경로다.
     setUp(_mockSecureStorage);
     tearDown(_clearSecureStorageMock);
 
+    /// 조회에 **실패**했을 때. 서버가 500 처럼 뜻 모를 답을 주면 고장이다.
     testWidgets('숨기지 않고 「계좌 대조를 불러오지 못했습니다」라고 말한다', (tester) async {
       StudentApiService.client = MockClient((req) async {
         if (req.url.path.endsWith('/entries')) return http.Response('[]', 200);
         if (req.url.path.endsWith('/budgets')) return http.Response('[]', 200);
-        return http.Response('{"detail":"not found"}', 404); // /snapshots/latest
+        return http.Response('{"detail":"boom"}', 500); // /snapshots/latest
       });
 
       await _pumpHome(tester);
@@ -138,6 +138,37 @@ void main() {
         find.text('불러올 수 없습니다'),
         findsNothing,
         reason: '스냅샷 하나 때문에 장부 전체를 못 읽었다고 하면 안 된다',
+      );
+    });
+
+    /// 서버는 거래내역이 아직 없으면 404 로 답한다. 이것은 **고장이 아니라 학기 초의
+    /// 정상 상태**다. 「불러오지 못했습니다」로 뭉뚱그리면 멀쩡한 서버를 두고 학생이
+    /// 고장으로 읽는다.
+    testWidgets('아직 안 올라온 것은 고장과 다르게 말한다', (tester) async {
+      StudentApiService.client = MockClient((req) async {
+        if (req.url.path.endsWith('/entries')) return http.Response('[]', 200);
+        if (req.url.path.endsWith('/budgets')) return http.Response('[]', 200);
+        // charset 을 적는다 — 없으면 package:http 가 latin1 로 인코딩하려다 한글에서
+        // 던져서, 404 가 아니라 「서버에 닿지 못함」으로 읽힌다. 실서버는 utf-8 을 적는다.
+        return http.Response(
+          '{"detail":"아직 업로드된 계좌 거래내역이 없습니다."}',
+          404,
+          headers: {'content-type': 'application/json; charset=utf-8'},
+        );
+      });
+
+      await _pumpHome(tester);
+
+      expect(find.text('아직 계좌 내역이 올라오지 않았습니다'), findsOneWidget);
+      expect(
+        find.text('계좌 대조를 불러오지 못했습니다'),
+        findsNothing,
+        reason: '정상 상태를 고장으로 말하면 학생이 서버가 깨진 줄 안다',
+      );
+      expect(
+        find.text('장부와 계좌가 일치합니다'),
+        findsNothing,
+        reason: '대조를 안 한 것은 일치와 다르다',
       );
     });
 

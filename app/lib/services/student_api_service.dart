@@ -331,20 +331,55 @@ class StudentApiService {
 
   /// GET /snapshots/latest — 통장 잔액 스냅샷과 미등록 건 (S11)
   ///
-  /// 대조 기능 자체는 서버에 `GET /bank/snapshots` · `/bank/snapshots/{id}` 로 있지만
-  /// **학생은 그쪽을 쓸 수 없다** — 둘 다 `council_only` 라 학생 토큰은 403 이고,
-  /// `bank` 라우터가 `STUDENT_QUERY_ROUTERS` 에 없어 학생 서버에는 경로가 생기지 않는다
-  /// (2026-11-12 실연동에서 확인, `docs/backend_requests.md` §1-5). 경로를 바꾸면 안 되는 이유다.
+  /// **「아직 안 올라왔다」와 「못 읽었다」를 나눠 돌려준다.** 둘 다 보여 줄 숫자가
+  /// 없는 것은 같지만 학생에게는 다른 말이다 — 앞은 학기 초의 정상 상태이고, 뒤는
+  /// 확인해야 할 고장이다. 뭉뚱그리면 멀쩡한 서버를 두고 「불러오지 못했습니다」가
+  /// 떠서 학생이 고장으로 읽는다.
   ///
-  /// **실서버를 보고 있으면 폴백하지 않는다.** 이 엔드포인트는 백엔드에 아직
-  /// 없어서 실모드에서 404 가 확정인데, 그때 예시 스냅샷을 돌려주면 **실제
-  /// 장부와 가짜 통장 잔액·미등록 거래가 한 화면에 섞인다.** [usingDemoData] 는
+  /// 서버는 거래내역이 아직 없으면 **404** 로 답한다(`아직 업로드된 계좌 거래내역이
+  /// 없습니다`). 총무가 CSV 를 올리면 그때부터 200 이다.
+  ///
+  /// **실서버를 보고 있으면 폴백하지 않는다.** 예시 스냅샷을 돌려주면 **실제 장부와
+  /// 가짜 통장 잔액·미등록 거래가 한 화면에 섞인다.** [usingDemoData] 는
   /// `fetchEntries` 가 성공해서 false 이므로 데모 배너도 뜨지 않아, 학생은 그
   /// 혼합을 알아챌 방법이 없다 ([fetchOnChainEntry]·[fetchMyMembership] 의 같은 판단).
-  Future<SnapshotModel?> fetchLatestSnapshot() async {
-    final json = await _getJson('${ApiConfig.baseUrl}/snapshots/latest');
-    if (json is Map<String, dynamic>) return SnapshotModel.fromJson(json);
-    return _usingDemoData ? _demoSnapshot() : null;
+  Future<({SnapshotModel? snapshot, bool notUploadedYet})>
+      fetchLatestSnapshot() async {
+    final auth = _auth;
+
+    http.Response? res;
+    try {
+      res = await client
+          .get(Uri.parse('${ApiConfig.baseUrl}/snapshots/latest'),
+              headers: auth.headers)
+          .timeout(_timeout);
+    } catch (_) {
+      res = null; // 서버에 닿지 못했다
+    }
+
+    if (res != null) {
+      await _checkUnauthorized(res.statusCode, token: auth.token);
+
+      if (res.statusCode == 200) {
+        try {
+          final json = jsonDecode(utf8.decode(res.bodyBytes));
+          if (json is Map<String, dynamic>) {
+            return (snapshot: SnapshotModel.fromJson(json), notUploadedYet: false);
+          }
+        } catch (_) {
+          // 본문을 못 읽었다 — 아래 「못 읽음」으로 떨어진다
+        }
+      }
+
+      // **404 는 데모로 메우지 않는다.** 서버가 「없다」고 대답한 것이지 못 닿은 것이
+      // 아니다. 예시 스냅샷을 끼우면 실제 장부 옆에 가짜 통장 잔액이 선다.
+      if (res.statusCode == 404) {
+        return (snapshot: null, notUploadedYet: true);
+      }
+    }
+
+    // 서버에 닿지 못했거나 그 밖의 실패. 데모 모드에서만 예시를 쓴다.
+    return (snapshot: _usingDemoData ? _demoSnapshot() : null, notUploadedYet: false);
   }
 
   /// GET /objections?entry_id= — 이의 목록 (S8)

@@ -46,6 +46,12 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
   /// 「그런 기능이 없다」로 읽히는 것은 [_loadFailed] 와 같은 종류의 사고다.
   bool _snapshotUnavailable = false;
 
+  /// 계좌 내역이 **아직 안 올라왔는지.** [_snapshotUnavailable] 과 나눠 둔다 —
+  /// 둘 다 보여 줄 숫자가 없는 것은 같지만, 앞은 학기 초의 정상 상태이고 뒤는
+  /// 확인해야 할 고장이다. 뭉뚱그리면 멀쩡한 서버를 두고 「불러오지 못했습니다」가
+  /// 떠서 학생이 고장으로 읽는다.
+  bool _snapshotNotUploadedYet = false;
+
   /// 마지막 조회가 중간에 깨졌는지 (스토리보드 2 ⑥ 「조회 실패」).
   ///
   /// **빈 화면으로 두면 안 된다.** 조회가 깨지면 `_entries` 와 `_budgets` 가 빈
@@ -81,9 +87,11 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
       setState(() {
         _entries = entries;
         _budgets = budgets;
-        _snapshot = snapshot;
+        _snapshot = snapshot.snapshot;
         // 실서버에서 못 읽으면 null 이다 (데모 모드에서는 예시 스냅샷이 온다).
-        _snapshotUnavailable = snapshot == null;
+        // 「아직 안 올라옴」은 고장이 아니므로 그쪽으로 말한다.
+        _snapshotNotUploadedYet = snapshot.notUploadedYet;
+        _snapshotUnavailable = snapshot.snapshot == null && !snapshot.notUploadedYet;
         _lastSeen = lastSeen;
         _unseen = EntryMerge.unseenCount(entries, lastSeen);
         _loadFailed = false;
@@ -98,6 +106,7 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
           _snapshot = null;
           // 화면 전체가 「불러올 수 없습니다」로 바뀌므로 스냅샷만 따로 말하지 않는다.
           _snapshotUnavailable = false;
+          _snapshotNotUploadedYet = false;
           _lastSeen = 0;
           _unseen = 0;
           _loadFailed = true;
@@ -181,6 +190,11 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
                         snapshot: _snapshot!,
                         ledgerBalance: _ledgerBalance,
                       ),
+                      const SizedBox(height: 20),
+                    ]
+                    // 아직 안 올라온 것은 고장이 아니다 — 그렇다고 말한다.
+                    else if (_snapshotNotUploadedYet) ...[
+                      const _BankDiffNotUploadedYet(),
                       const SizedBox(height: 20),
                     ]
                     // 못 읽었으면 **빠뜨리지 않고 그렇다고 말한다** (스토리보드 2 ⑥).
@@ -738,6 +752,59 @@ class _EmptyBudgets extends StatelessWidget {
 ///
 /// **예시 잔액으로 메우지 않고, 숨기지도 않는다.** 숨기면 계좌 대조라는 기능이
 /// 없는 화면이 되어, 미등록 지출을 드러내는 장치가 꺼져 있는 것을 아무도 모른다.
+/// 계좌 내역이 **아직 올라오지 않은** 상태. 학기 초에는 이쪽이 정상이다.
+///
+/// [_BankDiffUnavailable] 과 나눠 둔 이유는, 멀쩡한 서버를 두고 「불러오지 못했습니다」가
+/// 뜨면 학생이 고장으로 읽기 때문이다. 여기서도 「일치한다」고는 말하지 않는다 —
+/// 대조를 안 한 것이지 맞은 것이 아니다.
+class _BankDiffNotUploadedYet extends StatelessWidget {
+  const _BankDiffNotUploadedYet();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: AppTheme.textSub.withOpacity(0.06),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: AppTheme.textSub.withOpacity(0.2)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.schedule_rounded, size: 18, color: AppTheme.textSub.withOpacity(0.8)),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  '아직 계좌 내역이 올라오지 않았습니다',
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                    color: AppTheme.textMain,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  '학생회가 계좌 내역을 올리면 장부와 맞는지 보여 드립니다.',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: AppTheme.textSub.withOpacity(0.95),
+                    height: 1.4,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 /// 「일치한다」고 말하지 않는 것이 이 카드의 요점이다 — 지금은 **대조를 못 한
 /// 상태**이고, 그것은 일치와 다르다. 그래서 카드를 숨기지 않고 「확인할 수 없다」고
 /// 적는다. 숨기면 대조가 끝난 화면과 구별되지 않는다.
