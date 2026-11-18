@@ -21,6 +21,19 @@ abstract class BudgetIssuer {
     int? termId,
     required List<BudgetDraftItem> items,
   });
+
+  /// 「응답 없음」이던 [items] 가 체인에 기록됐는지 **확인만** 한다 — 서명하지 않고 아무것도 보내지 않는다 (#120 리뷰).
+  ///
+  /// 항목마다 결과 하나를 같은 순서로 돌려준다:
+  ///  - [BudgetIssueStatus.alreadyIssued] — 체인에 있다 (체인 값과 함께)
+  ///  - [BudgetIssueStatus.rejected] — 체인에 없고 서버도 보낸 기록을 지웠다. 고쳐서 다시 확정할 수 있다
+  ///  - [BudgetIssueStatus.noResponse] — 아직 모른다 (처리 중이거나 확인 실패). 이유는 [BudgetIssueOutcome.message]
+  ///
+  /// 시작도 못 하면(회장 아님) [BudgetIssueException] 을 던진다. 그 밖의 예외는 던지지 않는다.
+  Future<List<BudgetIssueOutcome>> checkAll({
+    int? termId,
+    required List<BudgetDraftItem> items,
+  });
 }
 
 /// 발행을 시작조차 못 하는 이유. 던져지면 어떤 항목도 체인에 나가지 않았다.
@@ -87,7 +100,9 @@ class FakeBudgetIssuer implements BudgetIssuer {
     this.walletConnected = true,
     this.isPresident = true,
     Map<BudgetCategory, BudgetIssueOutcome>? forcedOutcomes,
-  }) : forcedOutcomes = forcedOutcomes ?? {};
+    Map<BudgetCategory, BudgetIssueOutcome>? checkOutcomes,
+  })  : forcedOutcomes = forcedOutcomes ?? {},
+        checkOutcomes = checkOutcomes ?? {};
 
   /// 한 번 발행하는 데 걸리는 시간. "처리 중" 화면을 눈으로 확인할 때 늘린다
   final Duration delay;
@@ -97,6 +112,12 @@ class FakeBudgetIssuer implements BudgetIssuer {
 
   /// 카테고리별로 결과를 강제한다 — 일부만 성공·무응답 같은 실패 경로를 재현할 때 쓴다
   final Map<BudgetCategory, BudgetIssueOutcome> forcedOutcomes;
+
+  /// 카테고리별 「결과 확인」 결과. 없으면 「아직 모름」 — 응답 없던 시도가 끝났는지 가짜는 알 수 없다
+  final Map<BudgetCategory, BudgetIssueOutcome> checkOutcomes;
+
+  /// [checkAll] 이 확인한 카테고리. 확인이 아무것도 보내지 않는지([sent] 그대로) 테스트에서 본다
+  final List<BudgetCategory> checked = [];
 
   /// [issueAll] 이 불린 횟수. 중복 호출이 막혔는지 테스트에서 센다
   int callCount = 0;
@@ -119,6 +140,23 @@ class FakeBudgetIssuer implements BudgetIssuer {
 
     await Future<void>.delayed(delay);
     return [for (final item in items) _issueOne(item)];
+  }
+
+  @override
+  Future<List<BudgetIssueOutcome>> checkAll({
+    int? termId,
+    required List<BudgetDraftItem> items,
+  }) async {
+    if (!isPresident) throw const BudgetIssueException(BudgetIssueFailure.notPresident);
+    await Future<void>.delayed(delay);
+    final outcomes = <BudgetIssueOutcome>[];
+    for (final item in items) {
+      final category = item.category!;
+      checked.add(category);
+      outcomes.add(checkOutcomes[category] ??
+          const BudgetIssueOutcome(BudgetIssueStatus.noResponse, message: '아직 체인에서 확인되지 않았어요'));
+    }
+    return outcomes;
   }
 
   BudgetIssueOutcome _issueOne(BudgetDraftItem item) {

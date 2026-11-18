@@ -26,7 +26,8 @@ enum BudgetLineState {
   /// 체인이 거부함. 고쳐서 다시 보낼 수 있다
   rejected,
 
-  /// 보냈는데 응답이 없음. **성공했는지 모른다** — 고치거나 다시 보내면 안 된다
+  /// 보냈는데 응답이 없음. **성공했는지 모른다** — 고치거나 다시 보내면 안 된다.
+  /// 「결과 확인」([BudgetPlanController.checkPending])으로 체인에서 확인한다
   noResponse,
 }
 
@@ -89,15 +90,22 @@ class BudgetPlanController extends ChangeNotifier {
   BudgetPlanPhase _phase = BudgetPlanPhase.editing;
   BudgetIssueFailure? _blockedBy;
   bool _disposed = false;
+  bool _checking = false;
 
   List<BudgetLine> get lines => List.unmodifiable(_lines);
   BudgetPlanPhase get phase => _phase;
+
+  /// processing 이 발행이 아니라 「결과 확인」이다 — 화면이 「기록하는 중」이라고 말하지 않게
+  bool get checking => _checking;
 
   /// 발행을 시작도 못 한 이유 (지갑 미연결 등). 없으면 null
   BudgetIssueFailure? get blockedBy => _blockedBy;
 
   /// 응답이 없는 줄이 있다 — 성공인지 모르는 상태라 확정 버튼을 잠근다 (스토리보드 15 ⑤ 실패 (3))
   bool get hasPendingResponse => _lines.any((l) => l.state == BudgetLineState.noResponse);
+
+  /// 「결과 확인」을 누를 수 있는가 — 응답 없는 줄이 있고 다른 작업 중이 아닐 때
+  bool get canCheck => _phase == BudgetPlanPhase.editing && hasPendingResponse;
 
   /// 항목은 카테고리 수(8)를 넘길 수 없다 — 한 카테고리에 예산은 하나뿐이다.
   bool get canAddLine => _phase == BudgetPlanPhase.editing && _lines.length < BudgetCategory.values.length;
@@ -185,6 +193,43 @@ class BudgetPlanController extends ChangeNotifier {
       _blockedBy = e.failure;
     } finally {
       // 예외가 어디서 나든 processing 에 영원히 갇히지 않게 항상 단계를 되돌린다.
+      _phase = _lines.every((l) => l.isIssued) ? BudgetPlanPhase.issued : BudgetPlanPhase.editing;
+      _notify();
+    }
+  }
+
+  /// 「결과 확인」 (#120 리뷰). 응답 없는 줄만 체인에 기록됐는지 확인한다 — **서명하지 않고 다시 보내지도 않는다.**
+  ///
+  /// 기록됐으면 「발행됨」(체인 값), 체인에 없고 서버도 보낸 기록을 지웠으면 「거부」(고쳐서 다시 확정),
+  /// 아직 모르면 「응답 없음」에 이유를 붙여 그대로 둔다. [confirm] 과 같이 await 전에 processing 으로 바꿔 두 번 누르기를 막는다.
+  Future<void> checkPending() async {
+    if (!canCheck) return;
+
+    _phase = BudgetPlanPhase.processing;
+    _checking = true;
+    _blockedBy = null;
+    _notify();
+
+    final targets = [
+      for (var i = 0; i < _lines.length; i++)
+        if (_lines[i].state == BudgetLineState.noResponse) i,
+    ];
+    try {
+      final outcomes = await _issuer.checkAll(
+        termId: _termId,
+        items: [for (final i in targets) _lines[i].item],
+      );
+      if (outcomes.length != targets.length) {
+        throw StateError('확인 결과 ${outcomes.length}개가 항목 ${targets.length}개와 맞지 않아요');
+      }
+      for (var k = 0; k < targets.length; k++) {
+        // 체인에 있으면 alreadyIssued(체인 값) — 잠긴 줄이 입력값이 아니라 실제 예산을 보여 준다
+        _lines[targets[k]] = _lines[targets[k]].withOutcome(outcomes[k]);
+      }
+    } on BudgetIssueException catch (e) {
+      _blockedBy = e.failure;
+    } finally {
+      _checking = false;
       _phase = _lines.every((l) => l.isIssued) ? BudgetPlanPhase.issued : BudgetPlanPhase.editing;
       _notify();
     }
