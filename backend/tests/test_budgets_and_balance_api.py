@@ -254,7 +254,7 @@ def test_post_budgets_chain_error_returns_503_and_preserves_db(auth_header, monk
     now = int(time.time())
     original_expires = now + 86400
     with _test_session_factory() as db:
-        seed_database(db)
+        seed_database(db, with_demo_entries=True)
         seed_budget = db.query(DBBudget).filter(DBBudget.id == 1).first()
         seed_budget.expires_at = datetime.fromtimestamp(original_expires, tz=timezone.utc)
         db.commit()
@@ -570,7 +570,7 @@ def test_seed_then_issue_event_budget_cleans_up_seed_v2_and_matches_chain(auth_h
     """시드 실행 후 행사비(id=1)에 2,000,000원을 실제 발행하면 시드 더미 v2(2,500,000원)가 정리되어
     GET /budgets 에서 planned=2,000,000, remaining=2,000,000, execution_rate=0.0, version=1 이 반환된다."""
     with _test_session_factory() as db:
-        seed_database(db)
+        seed_database(db, with_demo_entries=True)
 
     # 발행 전에는 온체인 예산이 없으므로 시드 더미 예산은 GET /budgets 에 노출되지 않음
     assert client.get("/budgets").json() == []

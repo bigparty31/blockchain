@@ -2955,3 +2955,95 @@ def test_income_ignores_app_ocr_values(auth_header):
     assert res.status_code == 201
     assert res.json()["ocr_status"] is None
     assert get_draft(res.json()["id"]).ocr_status is None
+
+
+@pytest.mark.parametrize("bad_amount", [1.0, 35000.5, True, False, "35000", 10**15 + 1, -(10**15 + 1), 10**100, -(10**100)])
+def test_create_entry_rejects_non_strict_int_and_out_of_range_amounts(auth_header, bad_amount):
+    """#53: 초안 등록 시 실수(1.0), 불리언(True/False), 문자열, 체인 한도(10^15) 초과 및 거대 정수를 4xx로 즉시 거부한다."""
+    body = {
+        "term_id": 1,
+        "kind": "INCOME",
+        "amount": bad_amount,
+        "counterparty": "금액검증테스트",
+        "purpose": "비정상 금액 차단 검증",
+        "occurred_at": 1788793200,
+    }
+    res = client.post("/entries", json=body, headers=auth_header(Role.TREASURER))
+    assert 400 <= res.status_code < 500
+
+
+def test_create_entry_accepts_max_chain_amount(auth_header):
+    """#53: 체인 상한 경계값(10^15원) 정수는 정상적으로 201 초안 등록이 가능해야 한다."""
+    body = {
+        "term_id": 1,
+        "kind": "INCOME",
+        "amount": 10**15,
+        "counterparty": "최대금액납부",
+        "purpose": "체인 상한 경계값 검증",
+        "occurred_at": 1788793200,
+    }
+    res = client.post("/entries", json=body, headers=auth_header(Role.TREASURER))
+    assert res.status_code == 201
+
+
+def test_create_entry_rejects_negative_occurred_at(auth_header):
+    """occurred_at 음수는 초안 등록 단계에서 즉시 422로 거부된다."""
+    body = {
+        "term_id": 1,
+        "kind": "INCOME",
+        "amount": 10000,
+        "counterparty": "음수시각테스트",
+        "purpose": "음수 occurred_at 차단 검증",
+        "occurred_at": -32400,
+    }
+    res = client.post("/entries", json=body, headers=auth_header(Role.TREASURER))
+    assert res.status_code == 422
+
+
+def test_get_entries_term_id_filter():
+    """GET /entries?term_id= 조회 시 지정 학기 항목만 반환하고 미지정 시 전체 학기를 반환한다."""
+    with _test_session_factory() as db:
+        db.add(
+            DBTerm(
+                id=2,
+                term_code=20252,
+                name="2025-2학기",
+                started_at=datetime.fromtimestamp(1756684800, tz=timezone.utc),
+                ended_at=datetime.fromtimestamp(1772236800, tz=timezone.utc),
+            )
+        )
+        db.flush()
+        db.add(
+            DBEntry(
+                id=99,
+                term_id=2,
+                kind="INCOME",
+                amount=30000,
+                counterparty="이전학기수입",
+                purpose="과거 학기 회비",
+                budget_id=None,
+                occurred_at=1772982000,
+                meta_hash="0x" + "99" * 32,
+                hash_version=1,
+                status="CONFIRMED",
+                created_by=2,
+                approved_by=3,
+                tx_pending="0x" + "98" * 32,
+                tx_confirm="0x" + "97" * 32,
+            )
+        )
+        db.commit()
+
+    res_all = client.get("/entries")
+    assert res_all.status_code == 200
+    assert {e["term_id"] for e in res_all.json()} == {1, 2}
+
+    res_t1 = client.get("/entries?term_id=1")
+    assert res_t1.status_code == 200
+    assert all(e["term_id"] == 1 for e in res_t1.json())
+    assert len(res_t1.json()) == 3
+
+    res_t2 = client.get("/entries?term_id=2")
+    assert res_t2.status_code == 200
+    assert [e["id"] for e in res_t2.json()] == [99]
+
