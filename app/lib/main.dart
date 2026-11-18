@@ -7,6 +7,7 @@ import 'core/term_info.dart';
 import 'router.dart';
 import 'screens/login_screen.dart';
 import 'services/auth_service.dart';
+import 'services/notification_service.dart';
 import 'services/push_service.dart';
 import 'services/student_api_service.dart';
 
@@ -62,13 +63,22 @@ class _StudentCouncilAppState extends State<StudentCouncilApp> {
       PushService().unsubscribe(termCode: TermInfo.currentTermCode);
     };
 
-    // 학생만 토픽을 쓴다 (PRD §4.8). 임원은 기기 토큰을 학생회 서버에 등록하며
-    // 그 경로는 임원 앱 몫이다 — 여기서 임원까지 토픽에 넣으면 임원 기기에
+    // 학생은 토픽, 임원은 기기 토큰이다 (PRD §4.8). 임원까지 토픽에 넣으면 임원 기기에
     // 학생용 공개 알림이 중복으로 뜬다.
     AuthService().onSessionStarted = (session) {
       if (session.role == UserRole.STUDENT) {
         PushService().subscribeStudentTopic(TermInfo.currentTermCode);
+      } else {
+        _registerDeviceToken();
       }
+    };
+
+    // 임원 로그아웃 — 세션이 비워진 뒤에는 인증 헤더가 없어서, 비우기 직전의 세션으로 해제한다.
+    // 안 풀면 공용 기기에서 다음 사람이 이전 임원의 처리 알림을 계속 받는다.
+    AuthService().onSessionEnding = (ending) {
+      if (ending.role == UserRole.STUDENT) return;
+      final token = PushService().token;
+      if (token != null) NotificationService.revokeDeviceToken(token, ending);
     };
 
     // 푸시를 누르면 **대시보드**로 간다. 학생 알림함이 없어서 보낼 곳이
@@ -88,9 +98,22 @@ class _StudentCouncilAppState extends State<StudentCouncilApp> {
     AuthService().onUnauthorized = null;
     AuthService().onSessionCleared = null;
     AuthService().onSessionStarted = null;
+    AuthService().onSessionEnding = null;
     PushService().onOpened = null;
     PushService().onForegroundMessage = null;
     super.dispose();
+  }
+
+  /// 임원 기기 토큰을 학생회 서버에 올린다 (`docs/NOTIFICATION_API.md` §4).
+  ///
+  /// 로그인과 앱 시작 복원 두 경로에서 불린다 — 같은 토큰을 다시 올려도 서버가 200 이다.
+  /// **기다리지 않는다.** 토큰은 알림 권한 대화상자가 닫혀야 나오는데, 그동안 화면을 막을 이유가 없다.
+  /// 푸시는 부가 기능이라 실패는 삼킨다 — 알림함 폴링이 같은 내용을 준다.
+  void _registerDeviceToken() {
+    PushService().deviceToken().then((token) {
+      if (token != null) return NotificationService.registerDeviceToken(token);
+      return false;
+    }).catchError((Object _) => false);
   }
 
   /// 앱이 떠 있는 동안 온 푸시. 화면 위에 띄우고 대시보드로 갈 길을 준다.
