@@ -564,6 +564,13 @@
   - **수입(`INCOME`)**: `receipt_hash`는 선택값입니다.
   - **해시 형식 검증**: `receipt_hash`는 `0x`로 시작하는 64자리 소문자 16진수(`^0x[0-9a-f]{64}$`)여야 합니다 (대문자, 0x 누락, 길이 불일치 시 `400 Bad Request`).
   - **파일 존재 검증**: 사전에 `POST /receipts`로 업로드되지 않았거나 서버에 존재하지 않는 파일의 해시는 `400 Bad Request`로 거부됩니다.
+- **OCR 판정은 서버가 한다 (PRD §6, #36 리뷰)**:
+  - 요청의 `ocr_status`·`ocr_amount`·`ocr_approval_no`·`ocr_paid_at`은 **무시합니다** (옛 앱 호환을 위해 받기만 함). 앱이 `MISMATCH`를 `MATCH`로 바꿔 보내 승인 때의 사유 입력을 건너뛰지 못하게 하기 위해서입니다.
+  - 서버는 `POST /ocr/receipt`가 사진 해시로 저장한 판독값(`ocr_readings`, ERD §3.17)을 `receipt_hash`로 찾아, 입력 `amount`와 비교해 다시 판정합니다. 저장되는 `ocr_*`도 서버 판독값입니다.
+  - 판독 기록이 없으면(앱이 판독을 건너뛰었거나 OCR 키가 없는 서버) `UNREADABLE` — 승인 때 사유가 필요합니다.
+  - 흐리게 읽은 판독(`low_confidence`, 승인번호 라벨은 있는데 값을 못 읽음)은 `UNREADABLE`이고, 승인번호·결제시각을 저장하지 않습니다(중복 비교에 쓰지 않음).
+  - 판정 대상은 **정정이 아닌 지출**뿐입니다. 수입과 정정은 `ocr_status = null`입니다.
+  - 응답(`201`)에 서버가 판정한 `ocr_status`가 실립니다.
 - **영수증 중복 검증 (PRD §6, §8, B4)**:
   - 기존 승인번호+결제일시+금액 또는 영수증 해시가 이미 등록되어 있는 경우, `409 Conflict`로 차단하지 않고 **정상 등록하되 `ocr_status = "DUPLICATE"` 경고 상태로 등록**합니다. (감사 승인 시 소명 사유가 강제됩니다)
   - 단, 미제출 초안(`status IS NULL`), 반려(`REJECTED`), 예산초과 차단(`BLOCKED`) 내역 및 정정 시 원본(`corrects_entry_id`)은 중복 대조 대상에서 제외됩니다.

@@ -661,3 +661,31 @@ class MembershipMintTarget(Base):
         UniqueConstraint("batch_id", "user_id", name="uq_mint_targets_batch_user"),
         Index("idx_mint_targets_user", "user_id"),
     )
+
+
+# =============================================================================
+# 15. 영수증 판독 기록 (ocr_readings) — PRD §6, #36 리뷰 (판독 결과를 서버에 묶는다)
+# =============================================================================
+class OcrReading(Base):
+    """서버가 영수증 사진을 OCR 로 읽은 값. 사진 바이트의 SHA-256(= 등록 때의 receipt_hash)으로 찾는다.
+
+    등록(POST /entries)은 앱이 보낸 ocr_* 를 믿지 않고 이 값과 입력 금액으로 **서버가 다시 판정한다** — 앱이나 직접 API
+    호출이 MISMATCH 를 MATCH 로 바꿔 보내 승인 때의 경고 사유를 건너뛰지 못하게. 판정(상태)은 입력 금액·중복에 따라
+    달라지므로 저장하지 않고 판독값만 둔다. 같은 사진을 다시 읽으면 최신 값으로 덮어쓴다.
+    """
+
+    __tablename__ = "ocr_readings"
+
+    receipt_hash = Column(String(66), primary_key=True, doc="사진 바이트 SHA-256 (0x + 소문자 hex 64자, receipt_hash 와 같은 규칙)")
+    readable = Column(Boolean, nullable=False, doc="CLOVA 가 이미지를 읽었는가 (호출 실패·이미지 실패면 false)")
+    amount = Column(BigInteger, nullable=True, doc="판독 금액 (원)")
+    approval_no = Column(String(50), nullable=True, doc="판독 카드 승인번호")
+    paid_at = Column(BigInteger, nullable=True, doc="판독 결제 시각 (Unix 초)")
+    approval_label_found = Column(Boolean, nullable=False, doc="승인번호 라벨은 있었는가 (값을 못 읽으면 UNREADABLE)")
+    low_confidence = Column(Boolean, nullable=False, doc="금액·승인번호를 흐린 글자로 읽었는가")
+    read_by = Column(BigInteger, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, doc="판독을 요청한 총무")
+    read_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), doc="마지막 판독 시각")
+
+    __table_args__ = (
+        CheckConstraint("amount IS NULL OR amount >= 0", name="ck_ocr_readings_amount"),
+    )

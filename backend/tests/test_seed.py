@@ -13,7 +13,7 @@ from app.auth import users
 from app.chain import FakeChainClient, fake_signature, get_chain_client
 from app.database import get_db
 from app.main import app
-from app.models import Budget, BudgetVersion, Entry, Term, User
+from app.models import Budget, BudgetVersion, Entry, OcrReading, Term, User
 from app.schemas.auth import Role
 from scripts.seed import SeedResult, seed_database
 
@@ -98,6 +98,12 @@ def test_seed_after_alembic_upgrade_is_idempotent_and_enables_entry_flow(tmp_pat
         treasurer_wallet = next(u.wallet_address for u in users.SEED_USERS if u.role == Role.TREASURER)
         auditor_wallet = next(u.wallet_address for u in users.SEED_USERS if u.role == Role.AUDITOR)
 
+        # 앱이 등록 전에 이 사진을 POST /ocr/receipt 로 읽은 것처럼 서버 판독 기록을 남긴다 (등록은 이 기록으로 다시 판정)
+        with SessionLocal() as s:
+            treasurer_id = next(u.id for u in users.SEED_USERS if u.role == Role.TREASURER)
+            s.add(OcrReading(receipt_hash="0x" + "aa" * 32, readable=True, amount=25000, approval_no=None, paid_at=None,
+                             approval_label_found=False, low_confidence=False, read_by=treasurer_id))
+            s.commit()
         res_draft = test_client.post(
             "/entries",
             json={

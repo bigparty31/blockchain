@@ -296,7 +296,7 @@ erDiagram
 
 ---
 
-## 3. 엔티티 상세 명세서 (17개 테이블)
+## 3. 엔티티 상세 명세서 (18개 테이블)
 
 ### 3.1 `users` (사용자 관리)
 - **요구사항 매핑**: FR-AUTH-01(로그인), FR-AUTH-02(역할 분기), FR-AUTH-04(학생 지갑 파생), FR-AUTH-05/06(임원 키스토어)
@@ -783,6 +783,31 @@ erDiagram
 
 ---
 
+### 3.17 `ocr_readings` (영수증 판독 기록)
+- **요구사항 매핑**: PRD v0.15 §6 (OCR 판정은 경고, 경고는 승인 때 사유 필수), #36 리뷰 (앱이 보낸 판정을 믿지 않는다)
+- **설명**: `POST /ocr/receipt`가 읽은 값을 **사진의 SHA-256(= `entries.receipt_hash`)** 으로 저장한다. `POST /entries`는 앱이 보낸 `ocr_*`를 쓰지 않고 이 기록과 입력 금액으로 `ocr_status`를 다시 판정한다. 기록이 없으면 `UNREADABLE`.
+- **판정은 저장하지 않고 판독값만 저장한다.** 판정은 입력 금액에 따라 달라지기 때문이다(금액을 고친 뒤 등록하면 그 금액으로 다시 판정).
+- 같은 사진을 다시 읽으면 최신 판독으로 덮어쓴다. 영수증 원본과 OCR 원문은 여기에 남기지 않는다(개인정보).
+- `low_confidence`이거나 「승인번호 라벨은 있는데 값을 못 읽음」이면 승인번호·결제시각을 `entries`에 옮기지 않는다 — 흐리게 읽은 번호로 다른 건을 중복으로 지목하지 않게.
+
+| 컬럼명 | 데이터 타입 | Null | 기본값 | 제약조건 / 설명 |
+| :--- | :--- | :---: | :---: | :--- |
+| `receipt_hash` | `VARCHAR(66)` | N | - | **PK**. `0x` + 64 hex 소문자 (`POST /receipts`와 같은 규칙) |
+| `readable` | `BOOLEAN` | N | - | 영수증으로 읽혔는가 |
+| `amount` | `BIGINT` | Y | - | 읽은 결제 금액 (원). `amount >= 0` |
+| `approval_no` | `VARCHAR(50)` | Y | - | 읽은 카드 승인번호 |
+| `paid_at` | `BIGINT` | Y | - | 읽은 결제 시각 (epoch 초) |
+| `approval_label_found` | `BOOLEAN` | N | - | 승인번호 라벨이 있었는가 (`NO_NUMBER`와 `UNREADABLE` 구분) |
+| `low_confidence` | `BOOLEAN` | N | - | 금액 글자 신뢰도가 기준(0.85)보다 낮았는가 |
+| `read_by` | `BIGINT` | N | - | **FK** → `users(id)` `ON DELETE RESTRICT`. 판독을 요청한 총무 |
+| `read_at` | `TIMESTAMPTZ` | N | `CURRENT_TIMESTAMP` | 마지막 판독 시각 |
+
+- **테이블 제약조건**:
+  - `CONSTRAINT ck_ocr_readings_amount CHECK (amount IS NULL OR amount >= 0)`
+- **DB 계정**: 학생 서버에는 `/ocr`·`/entries` 쓰기가 없으므로 권한이 필요 없다.
+
+---
+
 ## 4. 요구사항명세서(Excel) 기능별 데이터 모델 매핑 추적표
 
 | 기능 코드 | 기능명 (Excel 명세서) | 관련 테이블 및 컬럼 | 데이터 모델 반영 내용 |
@@ -1193,6 +1218,20 @@ CREATE TABLE login_attempts (
     last_attempt_at BIGINT NOT NULL,
     locked_until BIGINT,
     CONSTRAINT ck_login_attempts_failed_count CHECK (failed_count >= 0)
+);
+
+-- 17. 영수증 판독 기록 (ocr_readings) — PRD v0.15 §6, #36 리뷰. 등록 때 서버가 이 값으로 ocr_status 를 다시 판정한다
+CREATE TABLE ocr_readings (
+    receipt_hash VARCHAR(66) PRIMARY KEY,
+    readable BOOLEAN NOT NULL,
+    amount BIGINT,
+    approval_no VARCHAR(50),
+    paid_at BIGINT,
+    approval_label_found BOOLEAN NOT NULL,
+    low_confidence BOOLEAN NOT NULL,
+    read_by BIGINT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    read_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT ck_ocr_readings_amount CHECK (amount IS NULL OR amount >= 0)
 );
 
 -- 15·16. 회원권 일괄 발행 (membership_mint_batches, membership_mint_targets)
