@@ -39,14 +39,13 @@ DEFAULT_TERM_ENDED_AT = datetime(2027, 2, 28, 23, 59, 59, tzinfo=KST)
 # docs/API.md 및 app/routers/budgets.py 의 기본 예산 만료 시각 (2026-12-14 23:59:59 KST)
 DEFAULT_BUDGET_EXPIRES_AT = datetime.fromtimestamp(1797260399, tz=timezone.utc)
 
-# (budget_id, category, [(version, planned_amount, revision_reason, approved_by), ...])
+# (budget_id, category, [(version, planned_amount, revision_reason, approved_by, revision_request_id), ...])
 DEFAULT_BUDGETS = (
     (
         1,
         "행사비",
         (
             (1, 2_000_000, None, 4, None),
-            (2, 2_500_000, "참가인원 증가", 3, 1),
         ),
     ),
     (
@@ -64,6 +63,8 @@ DEFAULT_BUDGETS = (
         ),
     ),
 )
+
+DEMO_EVENT_BUDGET_V2 = (2, 2_500_000, "참가인원 증가", 3, 1)
 
 REQUIRED_TABLES = ("users", "terms", "budgets", "budget_versions", "entries", "budget_revision_requests")
 
@@ -273,31 +274,6 @@ def seed_database(db: Session, *, with_demo_entries: bool = False) -> SeedResult
                     )
             budget_ids_by_category[category] = budget.id
 
-            # 행사비 v2에 연결할 근거 증액 요청 행 (PRD v0.13 §8: version > 1 은 revision_request_id 필수)
-            if category == "행사비":
-                seed_rev = db.query(DBBudgetRevisionRequest).filter(DBBudgetRevisionRequest.id == 1).first()
-                if not seed_rev:
-                    seed_rev = DBBudgetRevisionRequest(
-                        id=1,
-                        term_id=term.id,
-                        category="행사비",
-                        budget_id=budget.id,
-                        requested_amount=500_000,
-                        reason="참가인원 증가",
-                        requested_by=1,
-                        status="APPROVED",
-                        president_signed_by=2,
-                        president_signature="0x" + "11" * 65,
-                        president_signed_at=datetime(2026, 9, 5, 10, 0, 0, tzinfo=KST),
-                        signature_deadline=1793548800,
-                        signed_version=1,
-                        resolved_by=3,
-                        resolved_at=datetime(2026, 9, 5, 14, 0, 0, tzinfo=KST),
-                        tx_increase="0x" + "22" * 32,
-                    )
-                    db.add(seed_rev)
-                    db.flush()
-
             for ver_no, planned_amount, revision_reason, approver_id, rev_req_id in versions:
                 ver_exists = (
                     db.query(DBBudgetVersion)
@@ -324,7 +300,58 @@ def seed_database(db: Session, *, with_demo_entries: bool = False) -> SeedResult
                 budget_versions_created += 1
         db.flush()
 
-        # 4. 선택적 오프라인 데모 내역 (CHAIN_FAKE=1 화면 확인용)
+        # 4. 선택적 오프라인 데모 데이터 (CHAIN_FAKE=1 화면 확인용 — 가짜 서명·승인 증액 이력 및 예시 내역)
+        if with_demo_entries:
+            event_budget_id = budget_ids_by_category.get("행사비")
+            if event_budget_id is not None:
+                seed_rev = db.query(DBBudgetRevisionRequest).filter(DBBudgetRevisionRequest.id == 1).first()
+                if not seed_rev:
+                    seed_rev = DBBudgetRevisionRequest(
+                        id=1,
+                        term_id=term.id,
+                        category="행사비",
+                        budget_id=event_budget_id,
+                        requested_amount=500_000,
+                        reason="참가인원 증가",
+                        requested_by=1,
+                        status="APPROVED",
+                        president_signed_by=2,
+                        president_signature="0x" + "11" * 65,
+                        president_signed_at=datetime(2026, 9, 5, 10, 0, 0, tzinfo=KST),
+                        signature_deadline=1793548800,
+                        signed_version=1,
+                        resolved_by=3,
+                        resolved_at=datetime(2026, 9, 5, 14, 0, 0, tzinfo=KST),
+                        tx_increase="0x" + "22" * 32,
+                    )
+                    db.add(seed_rev)
+                    db.flush()
+
+                ver_no, planned_amount, revision_reason, approver_id, rev_req_id = DEMO_EVENT_BUDGET_V2
+                ver_exists = (
+                    db.query(DBBudgetVersion)
+                    .filter(
+                        DBBudgetVersion.budget_id == event_budget_id,
+                        DBBudgetVersion.version == ver_no,
+                    )
+                    .first()
+                )
+                if ver_exists is None:
+                    approver_exists = db.query(DBUser.id).filter(DBUser.id == approver_id).first()
+                    db.add(
+                        DBBudgetVersion(
+                            budget_id=event_budget_id,
+                            version=ver_no,
+                            planned_amount=planned_amount,
+                            revision_reason=revision_reason,
+                            approved_by=approver_id if approver_exists else None,
+                            revision_request_id=rev_req_id,
+                            tx_hash=None,
+                        )
+                    )
+                    budget_versions_created += 1
+                    db.flush()
+
         if with_demo_entries and db.query(DBEntry).count() == 0:
             treasurer = db.query(DBUser).filter(DBUser.role == "TREASURER").order_by(DBUser.id).first()
             auditor = (

@@ -13,7 +13,7 @@ from app.auth import users
 from app.chain import FakeChainClient, fake_signature, get_chain_client
 from app.database import get_db
 from app.main import app
-from app.models import Budget, BudgetVersion, Entry, OcrReading, Term, User
+from app.models import Budget, BudgetRevisionRequest, BudgetVersion, Entry, OcrReading, Term, User
 from app.schemas.auth import Role
 from scripts.seed import SeedResult, seed_database
 
@@ -43,7 +43,7 @@ def _run_migrations(db_file):
 
 def test_seed_after_alembic_upgrade_is_idempotent_and_enables_entry_flow(tmp_path, auth_header):
     """빈 마이그레이션 DB에 시드 후:
-    1) users(5)·terms(1)·budgets(3)·budget_versions(4) 생성 확인, entries 는 기본 0건
+    1) users(5)·terms(1)·budgets(3)·budget_versions(3) 생성 확인, 가짜 증액 승인 이력(0)·entries(0) 확인
     2) 재실행 시 중복 생성 없이 0건 반환(멱등성)
     3) 외래키 강제 상태에서 총무 등록 -> 서명 제출 -> 감사 확정까지 정상 동작 확인
     """
@@ -58,7 +58,7 @@ def test_seed_after_alembic_upgrade_is_idempotent_and_enables_entry_flow(tmp_pat
             users_created=len(users.SEED_USERS),
             terms_created=1,
             budgets_created=3,
-            budget_versions_created=4,
+            budget_versions_created=3,
             entries_created=0,
         )
 
@@ -73,7 +73,8 @@ def test_seed_after_alembic_upgrade_is_idempotent_and_enables_entry_flow(tmp_pat
 
         assert db.query(Term).count() == 1
         assert db.query(Budget).count() == 3
-        assert db.query(BudgetVersion).count() == 4
+        assert db.query(BudgetVersion).count() == 3
+        assert db.query(BudgetRevisionRequest).count() == 0
         assert db.query(Entry).count() == 0
 
         # 2회차 실행 시 아무것도 새로 만들지 않아야 함 (멱등성)
@@ -143,7 +144,7 @@ def test_seed_after_alembic_upgrade_is_idempotent_and_enables_entry_flow(tmp_pat
 
 
 def test_seed_with_demo_entries_is_optional_and_idempotent(tmp_path):
-    """--with-demo-entries 옵션 사용 시 예시 내역 3건이 추가되고 재실행 시 중복되지 않음"""
+    """--with-demo-entries 옵션 사용 시 데모 증액 v2·예시 내역 3건이 추가되고 재실행 시 중복되지 않음"""
     db_file = tmp_path / "demo_seeded.db"
     _run_migrations(db_file)
     engine = _make_engine(db_file)
@@ -152,11 +153,17 @@ def test_seed_with_demo_entries_is_optional_and_idempotent(tmp_path):
         with SessionLocal() as db:
             first = seed_database(db, with_demo_entries=True)
             assert first.entries_created == 3
+            assert first.budget_versions_created == 4
             assert db.query(Entry).count() == 3
+            assert db.query(BudgetVersion).count() == 4
+            assert db.query(BudgetRevisionRequest).count() == 1
 
             second = seed_database(db, with_demo_entries=True)
             assert second.entries_created == 0
+            assert second.budget_versions_created == 0
             assert db.query(Entry).count() == 3
+            assert db.query(BudgetVersion).count() == 4
+            assert db.query(BudgetRevisionRequest).count() == 1
     finally:
         engine.dispose()
 
@@ -304,7 +311,7 @@ def test_seed_coexists_with_non_conflicting_extra_users(tmp_path):
             assert result.users_created == len(users.SEED_USERS)
             assert result.terms_created == 1
             assert result.budgets_created == 3
-            assert result.budget_versions_created == 4
+            assert result.budget_versions_created == 3
             assert [u.id for u in db.query(User).order_by(User.id).all()] == [1, 2, 3, 4, 5, 20]
     finally:
         engine.dispose()
