@@ -104,16 +104,26 @@ class EntryMerge {
       ..sort((a, b) => b.occurredAt.compareTo(a.occurredAt));
 
     return heads.map((head) {
+      // **갈라진 이력도 전부 모은다.** 한 원본에 정정이 둘 달리고(#2·#3) 그중 앞 건에
+      // 후속 정정(#4)이 붙는 일이 실제로 생긴다. 마지막 형제만 따라가면 #4 가 체인에서
+      // 빠지는데, 그러면 [EntryChain.finalAmount] 가 그 증감분을 반영하지 못해 **금액이
+      // 틀리고**, isCorrection 에는 들어 있어 heads 에서도 빠지므로 **화면에서 통째로
+      // 사라진다** — 검증조차 되지 않는다.
       final chain = <EntryModel>[];
-      var cursor = head;
+      final queue = <int>[head.id];
 
-      while (true) {
-        final next = correctionsOf[cursor.id];
-        if (next == null || next.isEmpty) break;
-        next.sort((a, b) => a.id.compareTo(b.id));
-        chain.addAll(next);
-        cursor = next.last;
+      while (queue.isNotEmpty) {
+        final next = correctionsOf[queue.removeLast()];
+        if (next == null) continue;
+        for (final c in next) {
+          chain.add(c);
+          queue.add(c.id);
+        }
       }
+
+      // 등록 순서(id 오름차순). 갈래가 여럿이면 가지별이 아니라 **등록된 차례**로 읽는 것이
+      // 맞다 — 학생이 보는 것은 「이 건이 언제 어떻게 고쳐졌는가」의 시간순이다.
+      chain.sort((a, b) => a.id.compareTo(b.id));
 
       return EntryChain(original: head, corrections: chain);
     }).toList();
@@ -123,29 +133,41 @@ class EntryMerge {
   ///
   /// 정정이 증감분이므로 **확정 항목을 전부 더하면 된다.**
   /// 원본을 골라내거나 빼는 처리가 필요 없다.
-  static int totalIncome(List<EntryModel> entries) =>
-      _sumOf(entries, EntryKind.INCOME);
+  static int totalIncome(List<EntryModel> entries, {int? termCode}) =>
+      _sumOf(entries, EntryKind.INCOME, termCode);
 
   /// 확정 지출 합계.
-  static int totalExpense(List<EntryModel> entries) =>
-      _sumOf(entries, EntryKind.EXPENSE);
+  static int totalExpense(List<EntryModel> entries, {int? termCode}) =>
+      _sumOf(entries, EntryKind.EXPENSE, termCode);
 
   /// 장부 잔액 = Σ확정수입 − Σ확정지출 (PRD §7.4)
   ///
   /// 서버가 내려준 합계를 그대로 쓰지 않고 항목에서 직접 계산한다.
   /// 서버 값을 믿으면, 서버가 숫자를 바꿨을 때 학생이 알 방법이 없다.
-  static int ledgerBalance(List<EntryModel> entries) =>
-      totalIncome(entries) - totalExpense(entries);
+  ///
+  /// [termCode] 를 주면 그 학기만 더한다. 셋을 **같은 기준으로** 불러야 한다 —
+  /// 잔액만 전체 학기이고 수입·지출이 한 학기면 화면에서 `잔액 ≠ 수입 − 지출` 이 된다.
+  static int ledgerBalance(List<EntryModel> entries, {int? termCode}) =>
+      totalIncome(entries, termCode: termCode) -
+      totalExpense(entries, termCode: termCode);
 
   /// 확정(CONFIRMED)된 항목만 더한다.
   ///
   /// 대기 건을 미리 반영하면 승인되지 않은 수치가 학생 화면 합계에 섞인다.
-  static int _sumOf(List<EntryModel> entries, EntryKind kind) {
+  ///
+  /// [termCode] 가 있으면 그 학기 항목만 더한다. `GET /entries` 는 학기를 가리지 않고
+  /// 내려주므로, 거르지 않으면 **지난 학기 금액이 「이번 학기 총수입·총지출」에 섞인다.**
+  ///
+  /// **학기를 모르는 항목(`termCode == null`)은 빼지 않는다.** 옛 서버와 시연용 더미는
+  /// `term_code` 를 싣지 않는데, 이때 거르면 합계가 통째로 0 이 되어 「서버가 숫자를
+  /// 바꿨는지 학생이 직접 센다」는 이 화면의 목적이 사라진다. 모르는 것을 없는 것으로
+  /// 취급하지 않는다.
+  static int _sumOf(List<EntryModel> entries, EntryKind kind, int? termCode) {
     var sum = 0;
     for (final e in entries) {
-      if (e.status == EntryStatus.CONFIRMED && e.kind == kind) {
-        sum += e.amount;
-      }
+      if (e.status != EntryStatus.CONFIRMED || e.kind != kind) continue;
+      if (termCode != null && e.termCode != null && e.termCode != termCode) continue;
+      sum += e.amount;
     }
     return sum;
   }

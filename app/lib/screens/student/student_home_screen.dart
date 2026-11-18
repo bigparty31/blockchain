@@ -113,9 +113,15 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
   /// 학생이 그것을 알 방법이 없다.
   ///
   /// 정정 항목의 금액이 증감분이라 확정 항목을 그냥 다 더하면 된다.
-  int get _ledgerBalance => EntryMerge.ledgerBalance(_entries);
-  int get _totalIncome => EntryMerge.totalIncome(_entries);
-  int get _totalExpense => EntryMerge.totalExpense(_entries);
+  /// **이번 학기만 센다.** `GET /entries` 는 학기를 가리지 않고 내려주므로, 거르지 않으면
+  /// 지난 학기 금액이 「학기 총수입·총지출」에 섞인다. 셋을 같은 기준으로 불러야
+  /// `잔액 = 수입 − 지출` 이 화면에서 성립한다.
+  int get _ledgerBalance =>
+      EntryMerge.ledgerBalance(_entries, termCode: TermInfo.currentTermCode);
+  int get _totalIncome =>
+      EntryMerge.totalIncome(_entries, termCode: TermInfo.currentTermCode);
+  int get _totalExpense =>
+      EntryMerge.totalExpense(_entries, termCode: TermInfo.currentTermCode);
 
   /// 내역 목록을 연다. **미확인 뱃지가 떠 있으면 그 건들만 추려서 연다**
   /// (스토리보드 2 ⑤).
@@ -733,7 +739,8 @@ class _EmptyBudgets extends StatelessWidget {
 /// **예시 잔액으로 메우지 않고, 숨기지도 않는다.** 숨기면 계좌 대조라는 기능이
 /// 없는 화면이 되어, 미등록 지출을 드러내는 장치가 꺼져 있는 것을 아무도 모른다.
 /// 「일치한다」고 말하지 않는 것이 이 카드의 요점이다 — 지금은 **대조를 못 한
-/// 상태**이고, 그것은 일치와 다르다.
+/// 상태**이고, 그것은 일치와 다르다. 그래서 카드를 숨기지 않고 「확인할 수 없다」고
+/// 적는다. 숨기면 대조가 끝난 화면과 구별되지 않는다.
 class _BankDiffUnavailable extends StatelessWidget {
   const _BankDiffUnavailable();
 
@@ -766,8 +773,7 @@ class _BankDiffUnavailable extends StatelessWidget {
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  '장부와 계좌가 맞는지 지금은 확인할 수 없습니다. '
-                  '일치한다는 뜻이 아닙니다.',
+                  '장부와 계좌가 맞는지 지금은 확인할 수 없습니다.',
                   style: TextStyle(
                     fontSize: 12,
                     color: AppTheme.textSub.withOpacity(0.95),
