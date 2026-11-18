@@ -27,6 +27,7 @@ from app.models import (
     BudgetRevisionRequest as DBBudgetRevisionRequest,
     BudgetVersion as DBBudgetVersion,
     Entry as DBEntry,
+    OcrReading,
     Term as DBTerm,
     User as DBUser,
 )
@@ -625,6 +626,12 @@ def test_get_budgets_reflects_chain_remaining(auth_header):
     _test_chain._budgets[1] = _test_chain._budgets[1].model_copy(update={"spent": 30_000})
 
     # 사업비(id=2): 실제 지출 등록 -> 제출 -> 확정(confirm) 흐름으로 FakeChainClient가 spent 35,000원을 반영하는지 검증
+    # 앱이 등록 전에 이 사진을 읽은 것처럼 서버 판독 기록을 남긴다 (없으면 UNREADABLE 이라 승인 때 사유가 필요)
+    with _test_session_factory() as db:
+        treasurer_id = next(u.id for u in users.SEED_USERS if u.role == Role.TREASURER)
+        db.merge(OcrReading(receipt_hash="0x" + "a" * 64, readable=True, amount=35_000, approval_no=None, paid_at=None,
+                            approval_label_found=False, low_confidence=False, read_by=treasurer_id))
+        db.commit()
     res_entry_draft = client.post(
         "/entries",
         json={

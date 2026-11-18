@@ -12,7 +12,7 @@ class OcrRequest(BaseModel):
 
 
 class OcrResult(BaseModel):
-    """PRD §6 응답 형태 + 등록(POST /entries)에 그대로 넘길 판독값."""
+    """PRD §6 응답 형태 + 판독값. 등록(POST /entries)은 이 값을 받지 않고 receipt_hash 로 저장된 판독값을 다시 판정한다."""
 
     ocr_status: OCRStatus = Field(..., description="판정 결과")
     ocr_amount: Optional[int] = Field(None, description="OCR 판독 금액")
@@ -20,3 +20,4 @@ class OcrResult(BaseModel):
     duplicate_of: Optional[int] = Field(None, description="같은 승인번호·결제일시·금액으로 이미 올라간 내역 ID")
     ocr_approval_no: Optional[str] = Field(None, description="OCR 판독 카드 승인번호")
     ocr_paid_at: Optional[int] = Field(None, description="OCR 판독 결제 일시 (Unix 초)")
+    receipt_hash: str = Field(..., description="판독한 사진의 SHA-256 (0x + 소문자 hex). 같은 사진으로 등록하면 이 판독값으로 판정한다")

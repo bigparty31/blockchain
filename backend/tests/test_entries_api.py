@@ -18,6 +18,7 @@ from app.routers import entries as entries_router
 from app.models import (
     Budget as DBBudget,
     Entry as DBEntry,
+    OcrReading,
     Term as DBTerm,
     User as DBUser,
 )
@@ -214,6 +215,20 @@ def test_get_entries():
         assert entry["tx_pending"] is not None
 
 
+
+def _read_as(receipt_hash, amount, approval_no=None, paid_at=None):
+    """앱이 등록 전에 POST /ocr/receipt 로 이 사진을 읽은 것처럼 서버 판독 기록을 남긴다.
+
+    등록은 앱이 보낸 ocr_* 를 쓰지 않고 이 기록과 입력 금액으로 다시 판정한다 (#36 리뷰). 기록이 없으면 UNREADABLE.
+    승인번호가 없으면 NO_NUMBER(정상), 있으면 MATCH — 둘 다 경고가 아니다.
+    """
+    treasurer = next(u for u in users.SEED_USERS if u.role == Role.TREASURER)
+    with _test_session_factory() as db:
+        db.merge(OcrReading(receipt_hash=receipt_hash, readable=True, amount=amount, approval_no=approval_no,
+                            paid_at=paid_at, approval_label_found=approval_no is not None, low_confidence=False,
+                            read_by=treasurer.id))
+        db.commit()
+
 def test_create_entry_draft_and_submit(auth_header):
     """1단계 초안 생성(id만 발급, 목록 미노출) 및 2단계 submit(signer_of 통과, PENDING 전환, 목록 노출) 검증"""
     now = int(time.time())
@@ -373,6 +388,8 @@ def test_submit_blocked_budget_exceeded(auth_header):
 
 def test_ocr_duplication_warning_returns_201_duplicate(auth_header):
     """동일한 승인번호/결제일시/금액 중복 등록 시 409 차단 대신 201 Created 및 ocr_status=DUPLICATE 경고 전환 검증 (PRD v0.15 §6, §8, B4)"""
+    # 시드 e1(35,000원, 승인번호 12345678)과 같은 결제를 다른 사진으로 다시 올린다
+    _read_as("0x" + "bb" * 32, 35000, "12345678", 1788825820)
     dup_body = {
         "term_id": 1,
         "kind": "EXPENSE",
@@ -543,6 +560,7 @@ def test_other_treasurer_cannot_submit_someone_elses_draft(second_treasurer, dra
 
 def test_confirm_entry_success(auth_header):
     """감사가 PENDING 항목을 정상 승인(CONFIRMED)하는 흐름 검증"""
+    _read_as(TEST_RECEIPT_HASH, 50000)
     now = int(time.time())
     # 1. 초안 생성 및 온체인 PENDING 등록
     draft_body = {
@@ -624,6 +642,7 @@ def test_confirm_self_approval_is_blocked(auth_header):
 
 def test_confirm_signer_mismatch_fails(auth_header):
     """승인 시 서명자가 요청자와 다르면 400 Bad Request 반환 검증"""
+    _read_as(TEST_RECEIPT_HASH, 20000)
     now = int(time.time())
     draft_body = {
         "term_id": 1,
@@ -700,6 +719,7 @@ def test_reject_entry_success(auth_header):
 
 def test_confirm_ocr_mismatch_requires_warning_reason(auth_header):
     """OCR 불일치(AMOUNT_MISMATCH) 항목 승인 시 warning_reason 누락 시 400 Bad Request 차단 검증"""
+    _read_as("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef", 48000, "11223344", 1788829999)  # 입력 50,000원
     now = int(time.time())
     draft_body = {
         "term_id": 1,
@@ -750,6 +770,7 @@ def test_confirm_ocr_mismatch_requires_warning_reason(auth_header):
 
 def test_confirm_without_warning_rejects_warning_reason(auth_header):
     """경고가 없는 정상 항목에 warning_reason 제출 시 400 Bad Request 차단 검증"""
+    _read_as(TEST_RECEIPT_HASH, 20000)
     now = int(time.time())
     draft_body = {
         "term_id": 1,
@@ -783,6 +804,7 @@ def test_confirm_without_warning_rejects_warning_reason(auth_header):
 
 def test_confirm_ocr_no_number_is_normal(auth_header):
     """PRD 기준 OCRStatus NO_NUMBER(계좌이체 등)는 정상 항목이므로 warning_reason 없이 승인 가능하고 사유 제출 시 400 차단 검증"""
+    _read_as(TEST_RECEIPT_HASH, 30000)
     now = int(time.time())
     draft_body = {
         "term_id": 1,
@@ -958,6 +980,7 @@ def test_reject_blocked_when_confirm_in_flight(auth_header):
 
 
 def _pending_entry(auth_header) -> int:
+    _read_as(TEST_RECEIPT_HASH, 25000)
     now = int(time.time())
     draft_body = {
         "term_id": 1,
@@ -1416,6 +1439,7 @@ def test_get_onchain_entry_endpoint(auth_header):
 
 def test_confirm_entry_fail_reason_on_chain_revert(auth_header):
     """POST /entries/{id}/confirm 실패(ChainRevert) 시 400과 fail_reason 코드 반환 검증"""
+    _read_as(TEST_RECEIPT_HASH, 30000)
     now = int(time.time())
     body = {
         "term_id": 1,
@@ -1625,6 +1649,7 @@ def test_duplicate_receipt_hash_sets_ocr_status_duplicate(auth_header):
 
 def test_duplicate_receipt_ignores_rejected_and_blocked(auth_header):
     """반려(REJECTED)되거나 예산초과 차단(BLOCKED)된 항목의 영수증으로 재등록 시 DUPLICATE 경고가 붙지 않음"""
+    _read_as("0xabc1234567890abcdef1234567890abcdef1234567890abcdef1234567890abc", 20000, "99998888", 1788825820)
     # 1. 시드 DB의 e1을 REJECTED 상태로 변경
     with _test_session_factory() as db:
         e1 = db.query(DBEntry).filter(DBEntry.id == 1).first()
@@ -1980,6 +2005,7 @@ def test_server_resolves_and_overwrites_receipt_path(auth_header):
 
 def test_duplicate_check_ignores_draft_entries(auth_header):
     """제출되지 않은 미제출 초안(status NULL)끼리는 영수증이 같아도 DUPLICATE가 되지 않음 (리뷰어 피드백 2)"""
+    _read_as(TEST_RECEIPT_HASH, 25000, "55556666", 1788825820)
     # 1. 초안 1 생성 (status NULL)
     body1 = {
         "term_id": 1,
@@ -2039,6 +2065,7 @@ def test_duplicate_check_ignores_draft_entries(auth_header):
 
 def test_duplicate_check_concurrent_submit(auth_header):
     """같은 영수증의 초안 A·B를 동시에 제출(asyncio.gather)해도 나중 건이 DUPLICATE로 갱신되어 두 건 모두 MATCH로 남지 않음 검증 (#66 Codex 2차)"""
+    _read_as(TEST_RECEIPT_HASH, 27000, "55557777", 1788825820)
     import asyncio
     from app.schemas.entry import EntrySubmitRequest
 
@@ -2112,7 +2139,7 @@ def test_duplicate_check_ignores_correction_original_entry(auth_header):
 
     with _test_session_factory() as db:
         pos_row = db.query(DBEntry).filter(DBEntry.id == pos_id).first()
-        assert pos_row.ocr_status == "MATCH"
+        assert pos_row.ocr_status is None  # 정정은 금액이 증감분이라 OCR 판정 대상이 아니다 (앱이 보낸 MATCH 는 무시)
         pos_row.status = "PENDING"
         db.commit()
 
@@ -2137,8 +2164,8 @@ def test_duplicate_check_ignores_correction_original_entry(auth_header):
 
     with _test_session_factory() as db:
         neg_row = db.query(DBEntry).filter(DBEntry.id == neg_id).first()
-        # 원본 건(e1)과 같은 원본의 정정 건(pos_id) 모두 제외되었으므로 DUPLICATE가 되지 않고 MATCH 유지
-        assert neg_row.ocr_status == "MATCH"
+        # 원본 건(e1)과 같은 원본의 정정 건(pos_id) 모두 제외되었으므로 DUPLICATE가 되지 않는다 (정정은 OCR 판정 없음)
+        assert neg_row.ocr_status is None
 
 
 def test_duplicate_sets_duplicate_of_in_response_and_query(auth_header):
@@ -2665,6 +2692,7 @@ def test_reclassify_order_positive_first_enforced(auth_header):
 
 def test_reclassify_negative_concurrent_and_inflight_reservation(auth_header):
     """원본 35,000원에 양수 재분류 +10,000원이 확정된 상태에서 음수 -10,000원 두 건이 처리 중이거나 동시에 확정될 때 한 건만 통과하고 나머지는 400으로 차단됨 검증"""
+    _read_as(TEST_RECEIPT_HASH, 35000)
     import asyncio
     from fastapi import HTTPException
     from app.schemas.entry import EntryConfirmRequest
@@ -2830,3 +2858,100 @@ def test_correction_reason_other_saves_detail_in_purpose(auth_header):
 
 
 
+
+
+# ---------------------------------------------------------------- OCR 서버 재판정 (PRD §6, #36 리뷰)
+# 등록은 앱이 보낸 ocr_* 를 쓰지 않는다. POST /ocr/receipt 가 사진 해시로 저장한 판독값과 입력 금액으로 서버가 판정한다.
+
+FORGED_OCR = {"ocr_amount": 35000, "ocr_approval_no": "10101010", "ocr_paid_at": 1788825820, "ocr_status": "MATCH"}
+
+
+def _expense(amount=35000, receipt_hash=TEST_RECEIPT_HASH, **extra):
+    return {
+        "term_id": 1,
+        "kind": "EXPENSE",
+        "amount": amount,
+        "counterparty": "재판정문구",
+        "purpose": "OCR 재판정 검사",
+        "budget_id": 2,
+        "occurred_at": 1788793200,
+        "receipt_hash": receipt_hash,
+        **extra,
+    }
+
+
+def test_forged_match_is_judged_again_from_server_reading(auth_header):
+    """서버 판독은 30,000원인데 앱이 MATCH 로 꾸며 보내도 MISMATCH 로 저장된다 — 판독값도 서버 것"""
+    _read_as(TEST_RECEIPT_HASH, 30000, "20202020", 1788820000)
+    res = client.post("/entries", json=_expense(35000, **FORGED_OCR), headers=auth_header(Role.TREASURER))
+    assert res.status_code == 201
+    assert res.json()["ocr_status"] == "MISMATCH", "응답에도 서버 판정을 돌려준다"
+    row = get_draft(res.json()["id"])
+    assert row.ocr_status == "MISMATCH"
+    assert (row.ocr_amount, row.ocr_approval_no, row.ocr_paid_at) == (30000, "20202020", 1788820000)
+
+
+def test_forged_match_still_needs_warning_reason_at_confirm(auth_header):
+    """위조한 MATCH 로 승인 때의 경고 사유를 건너뛸 수 없다 (#36 리뷰 High)"""
+    _read_as(TEST_RECEIPT_HASH, 30000, "20202020", 1788820000)
+    entry_id = client.post("/entries", json=_expense(35000, **FORGED_OCR), headers=auth_header(Role.TREASURER)).json()["id"]
+    now = int(time.time())
+    assert client.post(
+        f"/entries/{entry_id}/submit",
+        json={"deadline": now + 600, "signature": fake_signature(TREASURER_WALLET)},
+        headers=auth_header(Role.TREASURER),
+    ).status_code == 200
+    res = client.post(
+        f"/entries/{entry_id}/confirm",
+        json={"deadline": now + 600, "signature": fake_signature(AUDITOR_WALLET), "warning_reason": None},
+        headers=auth_header(Role.AUDITOR),
+    )
+    assert res.status_code == 400
+    assert "warning_reason" in res.json()["detail"]
+
+
+def test_matching_server_reading_is_match(auth_header):
+    _read_as(TEST_RECEIPT_HASH, 35000, "20202020", 1788820000)
+    res = client.post("/entries", json=_expense(35000), headers=auth_header(Role.TREASURER))
+    assert res.json()["ocr_status"] == "MATCH"
+
+
+def test_without_server_reading_is_unreadable_and_ignores_app_values(auth_header):
+    """서버가 이 사진을 읽은 적이 없으면 UNREADABLE (OCR 키가 없을 때와 같은 규칙) — 앱이 보낸 판독값은 저장하지 않는다"""
+    res = client.post("/entries", json=_expense(35000, **FORGED_OCR), headers=auth_header(Role.TREASURER))
+    assert res.json()["ocr_status"] == "UNREADABLE"
+    row = get_draft(res.json()["id"])
+    assert (row.ocr_amount, row.ocr_approval_no, row.ocr_paid_at) == (None, None, None)
+
+
+def test_blurry_reading_is_unreadable_and_not_used_for_duplicates(auth_header):
+    """흐리게 읽은 승인번호·결제시각은 저장하지 않는다 — 다른 건과 중복 비교에 쓰이지 않게"""
+    treasurer = next(u for u in users.SEED_USERS if u.role == Role.TREASURER)
+    with _test_session_factory() as db:
+        db.add(OcrReading(receipt_hash=TEST_RECEIPT_HASH, readable=True, amount=35000, approval_no="12345678",
+                          paid_at=1788825820, approval_label_found=True, low_confidence=True, read_by=treasurer.id))
+        db.commit()
+    res = client.post("/entries", json=_expense(35000), headers=auth_header(Role.TREASURER))
+    assert res.json()["ocr_status"] == "UNREADABLE", "시드 e1 과 같은 승인번호지만 흐리게 읽어 중복으로 지목하지 않는다"
+    assert res.json()["duplicate_of"] is None
+    row = get_draft(res.json()["id"])
+    assert (row.ocr_approval_no, row.ocr_paid_at) == (None, None)
+
+
+def test_server_reading_finds_duplicate_payment(auth_header):
+    """다른 사진이어도 서버 판독의 승인번호·결제시각·금액이 확정 건(시드 e1)과 같으면 DUPLICATE"""
+    other_photo = "0x" + "bb" * 32  # conftest 가 파일을 준비해 둔 해시
+    _read_as(other_photo, 35000, "12345678", 1788825820)
+    res = client.post("/entries", json=_expense(35000, receipt_hash=other_photo), headers=auth_header(Role.TREASURER))
+    assert res.json()["ocr_status"] == "DUPLICATE"
+    assert res.json()["duplicate_of"] == 1
+
+
+def test_income_ignores_app_ocr_values(auth_header):
+    """수입은 OCR 대상이 아니다 — 앱이 보낸 MATCH 를 저장하지 않는다"""
+    body = {"term_id": 1, "kind": "INCOME", "amount": 50000, "counterparty": "납부자", "purpose": "학생회비",
+            "occurred_at": 1788793200, **FORGED_OCR}
+    res = client.post("/entries", json=body, headers=auth_header(Role.TREASURER))
+    assert res.status_code == 201
+    assert res.json()["ocr_status"] is None
+    assert get_draft(res.json()["id"]).ocr_status is None
