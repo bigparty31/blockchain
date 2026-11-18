@@ -33,25 +33,33 @@ if [ ! -f .env ]; then
   echo ".env 를 새로 만들었습니다."
 fi
 
-# .env 에 값이 있는가. `export NAME=`·앞뒤 공백·따옴표를 벗긴 값으로 판단하고, 빈 값("" 포함)은 없는 것으로 본다
+# 값이 있는가는 .env 를 직접 읽지 않고 compose 가 api 컨테이너에 넘기는 값으로 판단한다.
+# api 는 docker-compose.yml 의 ${NAME:-} 로 값을 받으므로, compose 의 .env 해석(따옴표·`export`·주석·중복 키는
+# 마지막 값)이 그대로 백엔드가 보는 값이다. 같은 규칙을 셸로 다시 짜면 어긋난다 (#101 Codex 1·2차)
+# 컨테이너를 못 띄운 것을 "값 없음"으로 읽으면 멀쩡한 값을 덮어쓰므로, 읽기 실패는 멈춘다
+# (${NAME:-} 라 변수는 늘 설정돼 있어 printenv 의 실패는 곧 실행 실패다)
 has_env() {
-  local line value
-  while IFS= read -r line || [ -n "$line" ]; do
-    value=$(printf '%s' "$line" | sed -nE "s/^[[:space:]]*(export[[:space:]]+)?$1[[:space:]]*=(.*)$/\2/p" | tr -d '\r')
-    [ -n "$value" ] || continue
-    value=$(printf '%s' "$value" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/^"(.*)"$/\1/; s/^'"'"'(.*)'"'"'$/\1/; s/^#.*//')
-    [ -n "$(printf '%s' "$value" | tr -d '[:space:]')" ] && return 0
-  done < .env
-  return 1
+  local value
+  value=$(docker compose run --rm --no-deps -T api printenv "$1") || {
+    echo "api 컨테이너에서 $1 값을 읽지 못했습니다. .env 와 docker 상태를 확인하세요." >&2
+    exit 1
+  }
+  [ -n "$(printf '%s' "$value" | tr -d '[:space:]')" ]
 }
-# 빈 값으로 남은 항목을 지우고 새 값을 붙인다. has_env 가 거짓일 때만 부르므로 지우는 줄은 모두 빈 값이다
+# 그 이름의 기존 줄은 지우지 않고 주석으로 돌린 뒤 새 값을 붙인다. 비어 보였는데 실은 값이 있던 줄이 있어도 잃지 않는다
 put_env() {
-  sed -i -E "/^[[:space:]]*(export[[:space:]]+)?$1[[:space:]]*=/d" .env
+  if grep -qE "^[[:space:]]*(export[[:space:]]+)?$1[[:space:]]*=" .env; then
+    sed -i -E "s/^([[:space:]]*(export[[:space:]]+)?$1[[:space:]]*=.*)$/# dev-stack-reset 가 비활성화 (compose 기준 최종 값이 비어 있었음): \1/" .env
+    echo ".env 의 기존 $1 줄은 지우지 않고 주석으로 돌렸습니다."
+  fi
   # 마지막 줄이 줄바꿈 없이 끝나면 새 값이 앞줄에 붙으므로 줄바꿈을 먼저 넣는다
   if [ -s .env ] && [ -n "$(tail -c1 .env)" ]; then echo >> .env; fi
   printf '%s=%s\n' "$1" "$2" >> .env
   echo ".env 에 $1 을 추가했습니다."
 }
+
+# 값 판단에 api 이미지가 필요하므로 먼저 빌드한다
+docker compose build api
 
 # 릴레이어: 개발 체인(Hardhat)의 #4 계정. 롤이 없고 잔액이 있다 (backend/scripts/local_chain.py RELAYER_INDEX).
 # 키는 Hardhat 기본 니모닉이라 공개된 값이다. 이 체인 밖(Amoy 등)에서는 쓰지 않는다
@@ -59,11 +67,17 @@ if ! has_env RELAYER_PRIVATE_KEY; then
   put_env RELAYER_PRIVATE_KEY 0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a
 fi
 
-docker compose build api
-
 # 학생 지갑 니모닉: 새로 만든다. Hardhat 기본 니모닉은 학생 주소가 임원 주소와 겹쳐 쓰지 않는다 (docs/SERVER_ENV.md 6절).
 # 한번 만들면 바꾸지 않는다 — 바꾸면 학생 주소가 모두 바뀐다. 초기화해도 .env 의 값은 그대로 둔다
-if ! has_env STUDENT_WALLET_MNEMONIC; then
+# 값이 있는데 니모닉이 아니면(주석이 값으로 읽힌 경우 등) 새로 만들지 않고 멈춘다. 학생 주소가 걸린 값이라 사람이 고친다
+if has_env STUDENT_WALLET_MNEMONIC; then
+  docker compose run --rm --no-deps -T api python -c \
+    "import os; from eth_account import Account; Account.enable_unaudited_hdwallet_features(); Account.from_mnemonic(os.environ['STUDENT_WALLET_MNEMONIC'])" \
+    >/dev/null 2>&1 || {
+    echo ".env 의 STUDENT_WALLET_MNEMONIC 이 올바른 BIP-39 니모닉이 아닙니다. 직접 고치세요 (바꾸면 학생 주소가 모두 바뀝니다)." >&2
+    exit 1
+  }
+else
   mnemonic=$(docker compose run --rm --no-deps -T api python -c \
     "from eth_account import Account; Account.enable_unaudited_hdwallet_features(); print(Account.create_with_mnemonic()[1])")
   [ "$(echo "$mnemonic" | wc -w)" -eq 12 ] || { echo "학생 지갑 니모닉을 만들지 못했습니다." >&2; exit 1; }
