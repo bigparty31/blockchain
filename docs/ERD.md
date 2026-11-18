@@ -41,7 +41,7 @@
 2. **영수증 중복 탐지 (PRD §6)**:
    - `(ocr_approval_no, ocr_paid_at, amount)` 일반 인덱스를 구축하고 서버 등록 시 중복 여부를 사전 조회하여, 중복 시 `ocr_status = 'DUPLICATE'` 경고를 부여하고 승인 시 사유 입력을 강제합니다.
 3. **정정 분개 원칙 (FR-COR-01 ~ 04)**:
-   - 마감 및 확정된 지출은 UPDATE/DELETE가 불가하며, `corrects_entry_id` 자기참조 외래키와 4종 사유(`INPUT_ERROR`, `RECEIPT_RECHECK`, `REFUND`, `RECLASSIFY`)를 가진 새 Entry를 등록하여 정정합니다.
+   - 마감 및 확정된 지출은 UPDATE/DELETE가 불가하며, `corrects_entry_id` 자기참조 외래키와 5종 사유(`INPUT_ERROR`, `RECEIPT_RECHECK`, `REFUND`, `RECLASSIFY`, `OTHER`)를 가진 새 Entry를 등록하여 정정합니다.
 
 ---
 
@@ -49,7 +49,6 @@
 
 ```mermaid
 erDiagram
-    TERM ||--o{ USER : "소속 및 임기"
     TERM ||--o{ BUDGET : "학기별 예산 편성"
     TERM ||--o{ BUDGET_REVISION_REQUEST : "학기별 예산 개정 요청"
     TERM ||--o{ ENTRY : "학기 회계 기록"
@@ -124,14 +123,22 @@ erDiagram
         bigint term_id FK "학기 ID"
         varchar category "예산 항목"
         bigint budget_id FK "대상 예산 ID"
-        bigint requested_amount "증액 요청 편성액 (원 단위 정수)"
+        bigint blocked_entry_id FK "근거 차단 지출 ID"
+        bigint requested_amount "증액분 요청액 (원 단위 양의 정수)"
         text reason "개정 사유"
         bigint requested_by FK "요청 총무 ID"
         timestamptz requested_at "요청 일시"
-        varchar status "PENDING, APPROVED, REJECTED"
-        bigint resolved_by FK "처리 감사/회장 ID"
+        varchar status "PENDING, PRESIDENT_SIGNED, APPROVED, REJECTED"
+        bigint president_signed_by FK "요청 서명 회장 ID"
+        varchar president_signature "회장 EIP-712 서명값"
+        timestamptz president_signed_at "회장 서명 일시"
+        bigint signature_deadline "회장 서명 시한 (Unix 초)"
+        integer signed_version "서명 대상 온체인 버전"
+        varchar tx_increase "온체인 증액 릴레이 TX 해시"
+        bigint resolved_by FK "최종 처리 감사/회장 ID"
         timestamptz resolved_at "처리 일시"
         text reject_reason "반려 사유 (서버 전용 기록)"
+        timestamptz created_at "등록 일시"
     }
 
     ENTRY {
@@ -160,9 +167,10 @@ erDiagram
         bigint rejected_by FK "반려자 (감사, 회장)"
         text reject_reason "반려 사유"
         varchar tx_pending "대기 기록 TX 해시"
-        varchar tx_confirm "최종 확정 TX 해시"
+        varchar tx_confirm "최종 확정/반려 공용 TX 해시"
         bigint corrects_entry_id FK "정정 대상 원본 ID"
-        varchar correction_reason "정정 사유 4종"
+        varchar correction_reason "정정 사유 5종"
+        timestamptz revision_requested_at "T4 수정 요청 일시"
     }
 
     SNAPSHOT {
@@ -235,11 +243,60 @@ erDiagram
         bigint last_attempt_at "마지막 시도 (epoch 초)"
         bigint locked_until "잠금 해제 시각 (epoch 초)"
     }
+
+    USER ||--o{ NOTIFICATION : "임원 알림 수신 (user_id)"
+    USER ||--o{ DEVICE_TOKEN : "FCM 기기 토큰 (user_id)"
+    TERM ||--o{ MEMBERSHIP_MINT_BATCH : "회원권 일괄 발행 (term_id)"
+    USER ||--o{ MEMBERSHIP_MINT_BATCH : "발행 준비 임원 (requested_by)"
+    MEMBERSHIP_MINT_BATCH ||--o{ MEMBERSHIP_MINT_TARGET : "일괄 발행 대상 (batch_id)"
+    USER ||--o{ MEMBERSHIP_MINT_TARGET : "발행 대상 학생 (user_id)"
+    MEMBERSHIP |o--o{ MEMBERSHIP_MINT_TARGET : "생성된 회원권 (membership_id)"
+
+    NOTIFICATION {
+        bigserial id PK "고유 ID"
+        bigint user_id FK "받는 임원 ID"
+        varchar kind "알림 종류 14종"
+        bigint entry_id FK "대상 항목 ID"
+        bigint budget_revision_request_id FK "대상 증액 요청 ID"
+        bigint objection_id FK "대상 이의 ID"
+        text body "알림 문구"
+        timestamptz read_at "읽은 일시"
+        timestamptz resolved_at "처리 닫힘 일시"
+        integer remind_count "재알림 횟수"
+    }
+
+    DEVICE_TOKEN {
+        bigserial id PK "고유 ID"
+        bigint user_id FK "임원 ID"
+        varchar platform "android"
+        varchar token UK "FCM 등록 토큰"
+        timestamptz revoked_at "해제 일시"
+    }
+
+    MEMBERSHIP_MINT_BATCH {
+        bigserial id PK "고유 ID"
+        bigint term_id FK "발행 학기 ID"
+        bigint requested_by FK "준비 임원 ID"
+        varchar signer_address "서명 지갑 주소 (소문자)"
+        bigint nonce "MembershipSBT nonce"
+        varchar status "PREPARED, SUBMITTING, MINTED, REJECTED, NO_RESPONSE"
+        varchar tx_hash UK "온체인 발행 TX 해시"
+    }
+
+    MEMBERSHIP_MINT_TARGET {
+        bigserial id PK "고유 ID"
+        bigint batch_id FK "묶음 ID"
+        integer position "recipients 순서"
+        bigint user_id FK "학생 ID"
+        varchar status "PENDING, MINTED, SKIPPED"
+        bigint token_id "발행된 tokenId"
+        bigint membership_id FK "회원권 ID"
+    }
 ```
 
 ---
 
-## 3. 엔티티 상세 명세서 (7종)
+## 3. 엔티티 상세 명세서 (18개 테이블)
 
 ### 3.1 `users` (사용자 관리)
 - **요구사항 매핑**: FR-AUTH-01(로그인), FR-AUTH-02(역할 분기), FR-AUTH-04(학생 지갑 파생), FR-AUTH-05/06(임원 키스토어)
@@ -260,6 +317,7 @@ erDiagram
   - `CONSTRAINT ck_users_role CHECK (role IN ('STUDENT', 'TREASURER', 'AUDITOR', 'PRESIDENT'))`
   - `CONSTRAINT ck_users_student_wallet CHECK (role != 'STUDENT' OR wallet_index IS NOT NULL)` (학생은 지갑 인덱스 필수)
   - `CONSTRAINT ck_users_council_wallet CHECK (role = 'STUDENT' OR wallet_address IS NOT NULL)` (임원은 서명용 지갑 주소 필수)
+  - `CONSTRAINT ck_users_wallet_address_lower CHECK (wallet_address IS NULL OR wallet_address = lower(wallet_address))` (지갑 주소 소문자 정규화)
 - **인덱스**:
   - `idx_users_role ON users (role)`
   - `idx_users_student_no ON users (student_no)`
@@ -375,7 +433,8 @@ erDiagram
 | `tx_pending` | `VARCHAR(66)` | Y | NULL | 온체인 Pending/Blocked 기록 TX 해시 (`0x...`) |
 | `tx_confirm` | `VARCHAR(66)` | Y | NULL | 온체인 Confirmed 확정 및 반려(`rejectEntry`) 공용 기록 TX 해시 (`0x...`) |
 | `corrects_entry_id`| `BIGINT` | Y | NULL | **FK** -> `entries(id)` ON DELETE RESTRICT (정정 대상 원본 Entry ID) |
-| `correction_reason`| `VARCHAR(30)`| Y | NULL | Enum: `INPUT_ERROR`, `RECEIPT_RECHECK`, `REFUND`, `RECLASSIFY` |
+| `correction_reason`| `VARCHAR(30)`| Y | NULL | Enum: `INPUT_ERROR`, `RECEIPT_RECHECK`, `REFUND`, `RECLASSIFY`, `OTHER` |
+| `revision_requested_at`| `TIMESTAMPTZ`| Y | NULL | T4 수정 요청 일시 (값이 있으면 승인 릴레이 차단) |
 | `created_at` | `TIMESTAMPTZ` | N | `now()` | 시스템 등록 일시 |
 
 - **테이블 제약조건**:
@@ -386,7 +445,7 @@ erDiagram
   - `CONSTRAINT ck_entries_status CHECK (status IS NULL OR status IN ('PENDING', 'CONFIRMED', 'REJECTED', 'BLOCKED'))`
   - `CONSTRAINT ck_entries_block_reason CHECK (block_reason IS NULL OR block_reason IN ('BUDGET_EXCEEDED', 'BUDGET_EXPIRED', 'BUDGET_NOT_FOUND'))`
   - `CONSTRAINT ck_entries_ocr_status CHECK (ocr_status IS NULL OR ocr_status IN ('MATCH', 'MISMATCH', 'DUPLICATE', 'NO_NUMBER', 'UNREADABLE'))`
-  - `CONSTRAINT ck_entries_correction_reason CHECK (correction_reason IS NULL OR correction_reason IN ('INPUT_ERROR', 'RECEIPT_RECHECK', 'REFUND', 'RECLASSIFY'))`
+  - `CONSTRAINT ck_entries_correction_reason CHECK (correction_reason IS NULL OR correction_reason IN ('INPUT_ERROR', 'RECEIPT_RECHECK', 'REFUND', 'RECLASSIFY', 'OTHER'))`
   - `CONSTRAINT ck_entries_maker_checker CHECK (approved_by IS NULL OR created_by != approved_by)` (**등록자 ≠ 승인자 분리 강제**)
   - `CONSTRAINT ck_entries_rejected_maker CHECK (rejected_by IS NULL OR created_by != rejected_by)` (**등록자 ≠ 반려자 분리**)
   - `CONSTRAINT ck_entries_no_self_correct CHECK (corrects_entry_id IS NULL OR corrects_entry_id != id)` (자기 자신 정정 금지)
@@ -516,7 +575,7 @@ erDiagram
 
 ### 3.9 `budget_revision_requests` (예산 개정 요청 관리)
 - **요구사항 매핑**: FR-BUD-06(예산 개정 신청), FR-BUD-07(개정 사유 및 승인/반려), 스토리보드 16번(예산 개정 승인 화면)
-- **설명**: 총무가 제출한 예산 증액/개정 신청의 대기(`PENDING`), 승인(`APPROVED`), 반려(`REJECTED`) 라이프사이클을 관리합니다. 감사가 반려할 경우 블록체인 트랜잭션 없이 서버(DB)에만 반려 사유를 남겨 이력을 추적하며, 승인할 경우 `budgets` 테이블에 새 버전(`version = 이전+1`) row가 생성되고 온체인 `tx_increase`가 기록됩니다.
+- **설명**: 총무가 제출한 예산 증액 신청의 대기(`PENDING`) → 회장 서명(`PRESIDENT_SIGNED`) → 감사 최종 승인(`APPROVED`) / 반려(`REJECTED`) 라이프사이클을 관리합니다. 감사가 최종 승인할 경우 온체인 `BudgetToken.increase` 릴레이(`tx_increase`) 후 `budget_versions` 테이블에 새 버전(`version = 이전+1`) row가 생성됩니다.
 
 | 컬럼명 | 데이터 타입 | Null | 기본값 | 제약조건 / 설명 |
 | :--- | :--- | :---: | :---: | :--- |
@@ -524,26 +583,39 @@ erDiagram
 | `term_id` | `BIGINT` | N | - | **FK** -> `terms(id)` ON DELETE RESTRICT |
 | `category` | `VARCHAR(50)` | N | - | 예산 항목명 |
 | `budget_id` | `BIGINT` | Y | NULL | **FK** -> `budgets(id)` ON DELETE SET NULL (기존 편성된 예산 ID) |
-| `requested_amount`| `BIGINT` | N | - | **원 단위 정수 (int256 대응)**, 변경/증액 요청 금액 |
+| `blocked_entry_id` | `BIGINT` | Y | NULL | **FK** -> `entries(id)` ON DELETE SET NULL (근거 차단 지출 ID) |
+| `requested_amount`| `BIGINT` | N | - | **원 단위 정수 (`> 0`, int256 대응)**, 증액분 요청 금액 |
 | `reason` | `TEXT` | N | - | 개정 요청 사유 |
 | `requested_by` | `BIGINT` | N | - | **FK** -> `users(id)` ON DELETE RESTRICT (신청 총무) |
 | `requested_at` | `TIMESTAMPTZ` | N | `now()` | 개정 신청 일시 |
-| `status` | `VARCHAR(20)` | N | 'PENDING'| Enum: `PENDING`, `APPROVED`, `REJECTED` |
-| `resolved_by` | `BIGINT` | Y | NULL | **FK** -> `users(id)` ON DELETE RESTRICT (승인/반려한 감사 또는 회장) |
+| `status` | `VARCHAR(20)` | N | `'PENDING'` | Enum: `PENDING`, `PRESIDENT_SIGNED`, `APPROVED`, `REJECTED` |
+| `president_signed_by` | `BIGINT` | Y | NULL | **FK** -> `users(id)` ON DELETE RESTRICT (서명 회장 ID) |
+| `president_signature` | `VARCHAR(132)` | Y | NULL | 회장의 EIP-712 `IncreaseRequest` 서명값 |
+| `president_signed_at` | `TIMESTAMPTZ` | Y | NULL | 회장 서명 일시 |
+| `signature_deadline` | `BIGINT` | Y | NULL | 회장 서명 시한 (Unix 초) |
+| `signed_version` | `INTEGER` | Y | NULL | 서명 대상 온체인 버전 |
+| `tx_increase` | `VARCHAR(66)` | Y | NULL | 온체인 증액 릴레이 트랜잭션 해시 (선점용) |
+| `resolved_by` | `BIGINT` | Y | NULL | **FK** -> `users(id)` ON DELETE RESTRICT (최종 처리 감사 또는 반려 회장/감사) |
 | `resolved_at` | `TIMESTAMPTZ` | Y | NULL | 처리 일시 |
 | `reject_reason`| `TEXT` | Y | NULL | 반려 사유 (반려 시 필수, 서버 전용 기록) |
 | `created_at` | `TIMESTAMPTZ` | N | `now()` | 레코드 등록 일시 |
 
 - **테이블 제약조건**:
-  - `CONSTRAINT ck_budget_rev_status CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED'))`
-  - `CONSTRAINT ck_budget_rev_amount CHECK (requested_amount >= 0)`
-  - `CONSTRAINT ck_budget_rev_resolved CHECK (status = 'PENDING' OR (resolved_by IS NOT NULL AND resolved_at IS NOT NULL))`
+  - `CONSTRAINT ck_budget_rev_status CHECK (status IN ('PENDING', 'PRESIDENT_SIGNED', 'APPROVED', 'REJECTED'))`
+  - `CONSTRAINT ck_budget_rev_amount CHECK (requested_amount > 0)`
+  - `CONSTRAINT ck_budget_rev_pres_signed_fields CHECK (status != 'PRESIDENT_SIGNED' OR (president_signed_by IS NOT NULL AND president_signature IS NOT NULL AND president_signed_at IS NOT NULL AND signature_deadline IS NOT NULL AND signed_version IS NOT NULL))`
+  - `CONSTRAINT ck_budget_rev_resolved CHECK (status NOT IN ('APPROVED', 'REJECTED') OR (resolved_by IS NOT NULL AND resolved_at IS NOT NULL))`
   - `CONSTRAINT ck_budget_rev_reject_reason CHECK (status != 'REJECTED' OR reject_reason IS NOT NULL)` (반려 시 사유 필수)
   - `CONSTRAINT ck_budget_rev_maker_checker CHECK (resolved_by IS NULL OR requested_by != resolved_by)` (신청자 ≠ 처리자 분리)
+  - `CONSTRAINT ck_budget_rev_req_pres_diff CHECK (president_signed_by IS NULL OR requested_by != president_signed_by)`
+  - `CONSTRAINT ck_budget_rev_pres_aud_diff CHECK (status != 'APPROVED' OR president_signed_by IS NULL OR resolved_by != president_signed_by)`
+  - `CONSTRAINT ck_budget_rev_approved_tx CHECK (status != 'APPROVED' OR tx_increase IS NOT NULL)`
 - **인덱스**:
-  - `idx_budget_rev_pending ON budget_revision_requests (term_id, status) WHERE status = 'PENDING'` (감사 대기 목록 고속 조회)
+  - `idx_budget_rev_pending ON budget_revision_requests (term_id, status)`
   - `idx_budget_rev_budget ON budget_revision_requests (budget_id)`
   - `idx_budget_rev_requested_by ON budget_revision_requests (requested_by)`
+  - `idx_budget_rev_blocked_entry ON budget_revision_requests (blocked_entry_id)`
+  - `idx_budget_rev_president_signed_by ON budget_revision_requests (president_signed_by)`
 
 ---
 
@@ -711,6 +783,31 @@ erDiagram
 
 ---
 
+### 3.17 `ocr_readings` (영수증 판독 기록)
+- **요구사항 매핑**: PRD v0.15 §6 (OCR 판정은 경고, 경고는 승인 때 사유 필수), #36 리뷰 (앱이 보낸 판정을 믿지 않는다)
+- **설명**: `POST /ocr/receipt`가 읽은 값을 **사진의 SHA-256(= `entries.receipt_hash`)** 으로 저장한다. `POST /entries`는 앱이 보낸 `ocr_*`를 쓰지 않고 이 기록과 입력 금액으로 `ocr_status`를 다시 판정한다. 기록이 없으면 `UNREADABLE`.
+- **판정은 저장하지 않고 판독값만 저장한다.** 판정은 입력 금액에 따라 달라지기 때문이다(금액을 고친 뒤 등록하면 그 금액으로 다시 판정).
+- 같은 사진을 다시 읽으면 최신 판독으로 덮어쓴다. 영수증 원본과 OCR 원문은 여기에 남기지 않는다(개인정보).
+- `low_confidence`이거나 「승인번호 라벨은 있는데 값을 못 읽음」이면 승인번호·결제시각을 `entries`에 옮기지 않는다 — 흐리게 읽은 번호로 다른 건을 중복으로 지목하지 않게.
+
+| 컬럼명 | 데이터 타입 | Null | 기본값 | 제약조건 / 설명 |
+| :--- | :--- | :---: | :---: | :--- |
+| `receipt_hash` | `VARCHAR(66)` | N | - | **PK**. `0x` + 64 hex 소문자 (`POST /receipts`와 같은 규칙) |
+| `readable` | `BOOLEAN` | N | - | 영수증으로 읽혔는가 |
+| `amount` | `BIGINT` | Y | - | 읽은 결제 금액 (원). `amount >= 0` |
+| `approval_no` | `VARCHAR(50)` | Y | - | 읽은 카드 승인번호 |
+| `paid_at` | `BIGINT` | Y | - | 읽은 결제 시각 (epoch 초) |
+| `approval_label_found` | `BOOLEAN` | N | - | 승인번호 라벨이 있었는가 (`NO_NUMBER`와 `UNREADABLE` 구분) |
+| `low_confidence` | `BOOLEAN` | N | - | 금액 글자 신뢰도가 기준(0.85)보다 낮았는가 |
+| `read_by` | `BIGINT` | N | - | **FK** → `users(id)` `ON DELETE RESTRICT`. 판독을 요청한 총무 |
+| `read_at` | `TIMESTAMPTZ` | N | `CURRENT_TIMESTAMP` | 마지막 판독 시각 |
+
+- **테이블 제약조건**:
+  - `CONSTRAINT ck_ocr_readings_amount CHECK (amount IS NULL OR amount >= 0)`
+- **DB 계정**: 학생 서버에는 `/ocr`·`/entries` 쓰기가 없으므로 권한이 필요 없다.
+
+---
+
 ## 4. 요구사항명세서(Excel) 기능별 데이터 모델 매핑 추적표
 
 | 기능 코드 | 기능명 (Excel 명세서) | 관련 테이블 및 컬럼 | 데이터 모델 반영 내용 |
@@ -718,20 +815,20 @@ erDiagram
 | `FR-AUTH-04` | 학생 지갑 파생 | `users.wallet_index` | HD 월렛 인덱스 저장 (`m/44'/60'/0'/0/{index}`) |
 | `FR-AUTH-05` | 임원 키 서버 미보관 | `users.wallet_address` | 서버는 주소만 저장, 개인키는 기기 키스토어 보관 |
 | `FR-BUD-01` | 예산 편성 | `budgets` (v1) | 카테고리, 금액, 만료일 저장 |
-| `FR-BUD-06` | **예산 개정** | `budgets` (v2+) | **Row 추가 + version 증가, 이전 버전 보존** |
-| `FR-BUD-07` | 개정 사유·승인 | `budgets.revision_reason`, `approved_by` | 개정 시 사유 입력 필수 제약 |
+| `FR-BUD-06` | **예산 개정** | `budget_versions` (v2+) | **Row 추가 + version 증가, 이전 버전 보존** |
+| `FR-BUD-07` | 개정 사유·승인 | `budget_versions.revision_reason`, `approved_by` | 개정 시 사유 입력 필수 제약 |
 | `FR-EXP-04` | **BLOCKED 기록** | `entries.status = 'BLOCKED'`, `block_reason` | 예산 초과 거부 시도 및 사유 DB 보존 |
 | `FR-EXP-06` | Pending 온체인 기록 | `entries.meta_hash`, `tx_pending` | 오프체인 메타데이터 SHA256 해시화 (KST 자정 기준) |
 | `FR-EXP-12` | **등록자·승인자·반려자 분리**| `entries(created_by, approved_by, rejected_by)` | 등록자 ≠ 승인자 및 등록자 ≠ 반려자 DB 강제 |
 | `FR-COR-01` | 정정 등록 | `entries.corrects_entry_id` | 원본 불변, 새 Entry로 연결 분개 |
-| `FR-COR-04` | 정정 사유 유형 | `entries.correction_reason` | 4종 규격화된 Enum 선택 강제 |
-| `FR-OCR-03` | **중복 제출 탐지** | `entries(ocr_approval_no, ocr_paid_at, amount)` | 조건부 복합 유니크 인덱스로 이중 제출 차단 |
+| `FR-COR-04` | 정정 사유 유형 | `entries.correction_reason` | 5종 규격화된 Enum 선택 강제 |
+| `FR-OCR-03` | **중복 제출 탐지** | `entries(ocr_approval_no, ocr_paid_at, amount)` | 일반 인덱스(`idx_entries_ocr_dup`)로 중복 탐지 및 DUPLICATE 경고 |
 | `FR-OCR-06` | 경고 승인 사유 | `entries.warning_ack_reason` | OCR/용도 경고 무시 승인 시 사유 강제 |
 | `FR-OBJ-04` | 미답변 표시 | `objections.status = 'OPEN'` | 대시보드 미답변 카운트 인덱스 |
 | `FR-BNK-01` | **통장 CSV 업로드·파싱** | `snapshots.file_hash`, `bank_transactions` | 원본 파일 해시 보존 및 정규화 내역 저장 |
 | `FR-BNK-02` | **미등록 거래 탐지** | `bank_transactions.matched_entry_id` | 통장 내역과 원장 간 1:1 소모식 대조 매칭 |
 | `FR-BNK-06` | 수동/스냅샷 잔액 | `snapshots.bank_balance` | 원 단위 정수 잔액 보관 |
-| `FR-RPT-05` | **예산 개정 패턴** | `budgets.version`, `entries.status` | 개정 횟수 및 초과 집행 후 개정 비율 집계 |
+| `FR-RPT-05` | **예산 개정 패턴** | `budget_versions.version`, `entries.status` | 개정 횟수 및 초과 집행 후 개정 비율 집계 |
 
 ---
 
@@ -763,7 +860,8 @@ CREATE TABLE users (
     CONSTRAINT uq_users_wallet_address UNIQUE (wallet_address),
     CONSTRAINT ck_users_role CHECK (role IN ('STUDENT', 'TREASURER', 'AUDITOR', 'PRESIDENT')),
     CONSTRAINT ck_users_student_wallet CHECK (role != 'STUDENT' OR wallet_index IS NOT NULL),
-    CONSTRAINT ck_users_council_wallet CHECK (role = 'STUDENT' OR wallet_address IS NOT NULL)
+    CONSTRAINT ck_users_council_wallet CHECK (role = 'STUDENT' OR wallet_address IS NOT NULL),
+    CONSTRAINT ck_users_wallet_address_lower CHECK (wallet_address IS NULL OR wallet_address = lower(wallet_address))
 );
 
 CREATE INDEX idx_users_role ON users (role);
@@ -860,6 +958,7 @@ CREATE TABLE entries (
     tx_confirm VARCHAR(66) NULL,
     corrects_entry_id BIGINT NULL,
     correction_reason VARCHAR(30) NULL,
+    revision_requested_at TIMESTAMPTZ NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT fk_entries_term FOREIGN KEY (term_id) REFERENCES terms(id) ON DELETE RESTRICT,
     CONSTRAINT fk_entries_budget FOREIGN KEY (budget_id) REFERENCES budgets(id) ON DELETE RESTRICT,
@@ -874,7 +973,7 @@ CREATE TABLE entries (
     CONSTRAINT ck_entries_status CHECK (status IS NULL OR status IN ('PENDING', 'CONFIRMED', 'REJECTED', 'BLOCKED')),
     CONSTRAINT ck_entries_block_reason CHECK (block_reason IS NULL OR block_reason IN ('BUDGET_EXCEEDED', 'BUDGET_EXPIRED', 'BUDGET_NOT_FOUND')),
     CONSTRAINT ck_entries_ocr_status CHECK (ocr_status IS NULL OR ocr_status IN ('MATCH', 'MISMATCH', 'DUPLICATE', 'NO_NUMBER', 'UNREADABLE')),
-    CONSTRAINT ck_entries_correction_reason CHECK (correction_reason IS NULL OR correction_reason IN ('INPUT_ERROR', 'RECEIPT_RECHECK', 'REFUND', 'RECLASSIFY')),
+    CONSTRAINT ck_entries_correction_reason CHECK (correction_reason IS NULL OR correction_reason IN ('INPUT_ERROR', 'RECEIPT_RECHECK', 'REFUND', 'RECLASSIFY', 'OTHER')),
     CONSTRAINT ck_entries_maker_checker CHECK (approved_by IS NULL OR created_by != approved_by),
     CONSTRAINT ck_entries_rejected_maker CHECK (rejected_by IS NULL OR created_by != rejected_by),
     CONSTRAINT ck_entries_no_self_correct CHECK (corrects_entry_id IS NULL OR corrects_entry_id != id),
@@ -997,29 +1096,44 @@ CREATE TABLE budget_revision_requests (
     term_id BIGINT NOT NULL,
     category VARCHAR(50) NOT NULL,
     budget_id BIGINT NULL,
+    blocked_entry_id BIGINT NULL,
     requested_amount BIGINT NOT NULL,
     reason TEXT NOT NULL,
     requested_by BIGINT NOT NULL,
     requested_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     status VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+    president_signed_by BIGINT NULL,
+    president_signature VARCHAR(132) NULL,
+    president_signed_at TIMESTAMPTZ NULL,
+    signature_deadline BIGINT NULL,
+    signed_version INTEGER NULL,
+    tx_increase VARCHAR(66) NULL,
     resolved_by BIGINT NULL,
     resolved_at TIMESTAMPTZ NULL,
     reject_reason TEXT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT fk_budget_rev_term FOREIGN KEY (term_id) REFERENCES terms(id) ON DELETE RESTRICT,
     CONSTRAINT fk_budget_rev_budget FOREIGN KEY (budget_id) REFERENCES budgets(id) ON DELETE SET NULL,
+    CONSTRAINT fk_budget_rev_blocked_entry FOREIGN KEY (blocked_entry_id) REFERENCES entries(id) ON DELETE SET NULL,
     CONSTRAINT fk_budget_rev_requester FOREIGN KEY (requested_by) REFERENCES users(id) ON DELETE RESTRICT,
+    CONSTRAINT fk_budget_rev_pres_signer FOREIGN KEY (president_signed_by) REFERENCES users(id) ON DELETE RESTRICT,
     CONSTRAINT fk_budget_rev_resolver FOREIGN KEY (resolved_by) REFERENCES users(id) ON DELETE RESTRICT,
-    CONSTRAINT ck_budget_rev_status CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED')),
-    CONSTRAINT ck_budget_rev_amount CHECK (requested_amount >= 0),
-    CONSTRAINT ck_budget_rev_resolved CHECK (status = 'PENDING' OR (resolved_by IS NOT NULL AND resolved_at IS NOT NULL)),
+    CONSTRAINT ck_budget_rev_status CHECK (status IN ('PENDING', 'PRESIDENT_SIGNED', 'APPROVED', 'REJECTED')),
+    CONSTRAINT ck_budget_rev_amount CHECK (requested_amount > 0),
+    CONSTRAINT ck_budget_rev_pres_signed_fields CHECK (status != 'PRESIDENT_SIGNED' OR (president_signed_by IS NOT NULL AND president_signature IS NOT NULL AND president_signed_at IS NOT NULL AND signature_deadline IS NOT NULL AND signed_version IS NOT NULL)),
+    CONSTRAINT ck_budget_rev_resolved CHECK (status NOT IN ('APPROVED', 'REJECTED') OR (resolved_by IS NOT NULL AND resolved_at IS NOT NULL)),
     CONSTRAINT ck_budget_rev_reject_reason CHECK (status != 'REJECTED' OR reject_reason IS NOT NULL),
-    CONSTRAINT ck_budget_rev_maker_checker CHECK (resolved_by IS NULL OR requested_by != resolved_by)
+    CONSTRAINT ck_budget_rev_maker_checker CHECK (resolved_by IS NULL OR requested_by != resolved_by),
+    CONSTRAINT ck_budget_rev_req_pres_diff CHECK (president_signed_by IS NULL OR requested_by != president_signed_by),
+    CONSTRAINT ck_budget_rev_pres_aud_diff CHECK (status != 'APPROVED' OR president_signed_by IS NULL OR resolved_by != president_signed_by),
+    CONSTRAINT ck_budget_rev_approved_tx CHECK (status != 'APPROVED' OR tx_increase IS NOT NULL)
 );
 
-CREATE INDEX idx_budget_rev_pending ON budget_revision_requests (term_id, status) WHERE status = 'PENDING';
+CREATE INDEX idx_budget_rev_pending ON budget_revision_requests (term_id, status);
 CREATE INDEX idx_budget_rev_budget ON budget_revision_requests (budget_id);
 CREATE INDEX idx_budget_rev_requested_by ON budget_revision_requests (requested_by);
+CREATE INDEX idx_budget_rev_blocked_entry ON budget_revision_requests (blocked_entry_id);
+CREATE INDEX idx_budget_rev_president_signed_by ON budget_revision_requests (president_signed_by);
 
 -- 행사 (events) — PRD v0.15 §4.2
 CREATE TABLE events (
@@ -1106,6 +1220,20 @@ CREATE TABLE login_attempts (
     CONSTRAINT ck_login_attempts_failed_count CHECK (failed_count >= 0)
 );
 
+-- 17. 영수증 판독 기록 (ocr_readings) — PRD v0.15 §6, #36 리뷰. 등록 때 서버가 이 값으로 ocr_status 를 다시 판정한다
+CREATE TABLE ocr_readings (
+    receipt_hash VARCHAR(66) PRIMARY KEY,
+    readable BOOLEAN NOT NULL,
+    amount BIGINT,
+    approval_no VARCHAR(50),
+    paid_at BIGINT,
+    approval_label_found BOOLEAN NOT NULL,
+    low_confidence BOOLEAN NOT NULL,
+    read_by BIGINT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    read_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT ck_ocr_readings_amount CHECK (amount IS NULL OR amount >= 0)
+);
+
 -- 15·16. 회원권 일괄 발행 (membership_mint_batches, membership_mint_targets)
 CREATE TABLE membership_mint_batches (
     id BIGSERIAL PRIMARY KEY,
@@ -1165,7 +1293,7 @@ COMMIT;
 | :--- | :--- | :--- | :---: |
 | **엔티티 9종 전수 매핑** | PRD §8, BANK_CSV.md | `User`, `Term`, `Budget`, `BudgetRevisionRequest`, `Entry`, `Snapshot`, `Membership`, `Objection`, `BankTransaction` 100% 매핑 | **PASS** |
 | **필드명 일치 (snake_case)** | PRD §8, docs/HASHING.md | 컬럼명 철자 1글자도 변경 없이 원본 유지 및 HASHING.md 보완 컬럼(`rejected_by`, `block_reason`, `file_hash`) 반영 | **PASS** |
-| **Enum 규격 일치** | `docs/enums.md`, PRD §8 | `role(4)`, `kind(2)`, `status(4)`, `block_reason(3)`, `correction_reason(4)`, `ocr_status(5)`, `objection status(2)` 100% 일치 | **PASS** |
+| **Enum 규격 일치** | `docs/enums.md`, PRD §8 | `role(4)`, `kind(2)`, `status(4)`, `block_reason(3)`, `correction_reason(5)`, `ocr_status(5)`, `objection status(2)` 100% 일치 | **PASS** |
 | **주의점 1: 예산 개정 이력** | `2주차 할일.md`, FR-BUD-06 | Row 추가 + `version` 증가, `UNIQUE(term_id, category, version)`, `CHECK(version=1 OR revision_reason IS NOT NULL)` | **PASS** |
 | **주의점 2: 금액 정수형** | `2주차 할일.md`, PRD §8 | 컨트랙트 `int256` 대응 원 단위 `BIGINT` 통일 (부동소수점 배제) | **PASS** |
 | **등록자 ≠ 승인자/반려자 분리** | PRD §3, FR-EXP-12 | `CHECK (created_by != approved_by)`, `CHECK (created_by != rejected_by)` DB 강제 | **PASS** |

@@ -37,6 +37,8 @@ from app.routers.ocr import command_router as ocr_command_router
 from app.routers.settlement import router as settlement_command_router
 from app.routers.events import router as events_command_router
 from app.routers.bank import router as bank_command_router
+# 학생 홈 계좌 대조 카드 (S11). 조회 전용이라 학생 서버에도 붙는다
+from app.routers.snapshots import query_router as snapshots_query_router
 # 알림은 임원 전용이고 기기 토큰 등록·읽음 처리로 DB 에 쓴다. 학생 서버에는 붙이지 않는다 (PRD §9.1)
 from app.routers.notifications import router as notifications_command_router
 
@@ -55,6 +57,7 @@ STUDENT_QUERY_ROUTERS: List[APIRouter] = [
     chain_query_router,
     receipts_query_router,
     users_query_router,
+    snapshots_query_router,
 ]
 
 # 학생회용 쓰기/명령 전용 라우터 목록
@@ -92,5 +95,6 @@ COUNCIL_ALL_ROUTERS: List[APIRouter] = [
     settlement_command_router,
     events_command_router,
     bank_command_router,
+    snapshots_query_router,
     notifications_command_router,
 ]

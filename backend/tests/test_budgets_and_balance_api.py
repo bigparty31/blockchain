@@ -27,6 +27,7 @@ from app.models import (
     BudgetRevisionRequest as DBBudgetRevisionRequest,
     BudgetVersion as DBBudgetVersion,
     Entry as DBEntry,
+    OcrReading,
     Term as DBTerm,
     User as DBUser,
 )
@@ -253,7 +254,7 @@ def test_post_budgets_chain_error_returns_503_and_preserves_db(auth_header, monk
     now = int(time.time())
     original_expires = now + 86400
     with _test_session_factory() as db:
-        seed_database(db)
+        seed_database(db, with_demo_entries=True)
         seed_budget = db.query(DBBudget).filter(DBBudget.id == 1).first()
         seed_budget.expires_at = datetime.fromtimestamp(original_expires, tz=timezone.utc)
         db.commit()
@@ -569,7 +570,7 @@ def test_seed_then_issue_event_budget_cleans_up_seed_v2_and_matches_chain(auth_h
     """시드 실행 후 행사비(id=1)에 2,000,000원을 실제 발행하면 시드 더미 v2(2,500,000원)가 정리되어
     GET /budgets 에서 planned=2,000,000, remaining=2,000,000, execution_rate=0.0, version=1 이 반환된다."""
     with _test_session_factory() as db:
-        seed_database(db)
+        seed_database(db, with_demo_entries=True)
 
     # 발행 전에는 온체인 예산이 없으므로 시드 더미 예산은 GET /budgets 에 노출되지 않음
     assert client.get("/budgets").json() == []
@@ -625,6 +626,12 @@ def test_get_budgets_reflects_chain_remaining(auth_header):
     _test_chain._budgets[1] = _test_chain._budgets[1].model_copy(update={"spent": 30_000})
 
     # 사업비(id=2): 실제 지출 등록 -> 제출 -> 확정(confirm) 흐름으로 FakeChainClient가 spent 35,000원을 반영하는지 검증
+    # 앱이 등록 전에 이 사진을 읽은 것처럼 서버 판독 기록을 남긴다 (없으면 UNREADABLE 이라 승인 때 사유가 필요)
+    with _test_session_factory() as db:
+        treasurer_id = next(u.id for u in users.SEED_USERS if u.role == Role.TREASURER)
+        db.merge(OcrReading(receipt_hash="0x" + "a" * 64, readable=True, amount=35_000, approval_no=None, paid_at=None,
+                            approval_label_found=False, low_confidence=False, read_by=treasurer_id))
+        db.commit()
     res_entry_draft = client.post(
         "/entries",
         json={

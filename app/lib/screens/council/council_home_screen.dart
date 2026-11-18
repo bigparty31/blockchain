@@ -24,6 +24,7 @@ import 'my_entries_screen.dart';
 import 'inquiry_response_screen.dart';
 import 'sbt_mint_screen.dart';
 import 'hardware_test_screen.dart';
+import 'qr_scanner_screen.dart';
 import 'settlement_screen.dart';
 import '../president/budget_plan_screen.dart';
 
@@ -473,8 +474,9 @@ class _CouncilHomeScreenState extends State<CouncilHomeScreen> with WidgetsBindi
             title: 'QR 스캐너',
             subtitle: '행사 입장 시 SBT 보유 확인',
             icon: Icons.qr_code_scanner_rounded,
-            badge: '준비 중',
+            badge: '서버 판정',
             gradient: LinearGradient(colors: [Color(0xFF6366F1), Color(0xFF8B5CF6)]),
+            target: QrScannerScreen(),
           ),
           _MenuData(
             title: '서명 키',

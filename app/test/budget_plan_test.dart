@@ -250,6 +250,34 @@ void main() {
       expect(c.phase, BudgetPlanPhase.issued);
     });
 
+    test('이미 발행된 예산이 입력값과 다르면 체인의 금액·마감일로 바꿔 보인다', () async {
+      final chainExpiry = BudgetPlanRules.expiresAtSeconds(DateTime(2027, 2, 28));
+      final c = build(FakeBudgetIssuer(forcedOutcomes: {
+        BudgetCategory.event: BudgetIssueOutcome.existing(amount: 1000000, expiresAt: chainExpiry),
+      }));
+      addFilled(c, BudgetCategory.event, amount: 2000000);
+
+      await c.confirm();
+
+      final line = c.lines.single;
+      expect(line.state, BudgetLineState.issued);
+      expect(line.item.amount, 1000000);
+      expect(BudgetPlanRules.expiresAtSeconds(line.item.expiresOn!), chainExpiry);
+      expect(line.message, contains('체인의 값'));
+    });
+
+    test('체인 값이 입력과 같으면 안내는 그대로', () async {
+      final c = build(FakeBudgetIssuer(forcedOutcomes: {
+        BudgetCategory.event: BudgetIssueOutcome.existing(
+            amount: 1000000, expiresAt: BudgetPlanRules.expiresAtSeconds(DateTime(2026, 12, 14))),
+      }));
+      addFilled(c, BudgetCategory.event);
+
+      await c.confirm();
+
+      expect(c.lines.single.message, '이미 발행되어 있어요');
+    });
+
     test('발행 중에 화면을 닫아도(dispose) 응답이 돌아올 때 터지지 않는다', () async {
       final c = build(FakeBudgetIssuer(delay: const Duration(milliseconds: 20)));
       addFilled(c, BudgetCategory.event);

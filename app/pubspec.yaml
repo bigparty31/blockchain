@@ -19,6 +19,8 @@ dependencies:
   google_fonts: ^6.2.1
   crypto: ^3.0.3
   qr_flutter: ^4.1.0
+  # QR 스캐너(A12) — 행사 입장 때 학생 회원권 QR 을 카메라로 읽는다 (11/17 결정)
+  mobile_scanner: ^7.5.0
   # Dart 표준 라이브러리에 유니코드 정규화가 없다 (HASHING.md §6).
   # String.trim() 은 BOM 처리가 Python 과 달라 쓰지 않는다.
   unorm_dart: ^0.3.0

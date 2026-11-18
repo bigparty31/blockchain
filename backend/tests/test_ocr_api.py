@@ -15,7 +15,9 @@ from sqlalchemy.orm import sessionmaker
 from app.auth import users
 from app.database import Base, get_db
 from app.main import app
-from app.models import Entry as DBEntry, Term as DBTerm, User as DBUser
+import hashlib
+
+from app.models import Entry as DBEntry, OcrReading, Term as DBTerm, User as DBUser
 from app.ocr import ClovaOcrClient, OcrUnavailable, get_ocr_client
 from app.ocr.clova import build_request
 from app.schemas.auth import Role
@@ -26,6 +28,7 @@ CU = json.loads((Path(__file__).resolve().parents[2] / "docs" / "samples" / "clo
 CU_APPROVAL_NO = "39007018"
 CU_PAID_AT = int(datetime(2026, 9, 18, 4, 22, tzinfo=timezone.utc).timestamp())  # 13:22 KST
 IMAGE = base64.b64encode(b"fake-jpeg-bytes").decode()
+IMAGE_HASH = "0x" + hashlib.sha256(b"fake-jpeg-bytes").hexdigest()  # POST /receipts 와 같은 규칙
 
 
 class FakeOcr:
@@ -96,7 +99,7 @@ def test_match_returns_prd_shape(auth_header):
     assert res.status_code == 200
     assert res.json() == {
         "ocr_status": "MATCH", "ocr_amount": 4600, "input_amount": 4600, "duplicate_of": None,
-        "ocr_approval_no": CU_APPROVAL_NO, "ocr_paid_at": CU_PAID_AT,
+        "ocr_approval_no": CU_APPROVAL_NO, "ocr_paid_at": CU_PAID_AT, "receipt_hash": IMAGE_HASH,
     }
     assert fake.calls == [(b"fake-jpeg-bytes", "jpg")]  # base64 를 풀어 원본 바이트를 넘긴다
 
@@ -148,6 +151,58 @@ def test_same_approval_no_other_amount_is_not_duplicate(auth_header):
     assert _post(auth_header).json()["ocr_status"] == "MATCH"
 
 
+# --- 판독값 저장 (#36 리뷰 — 등록 때 서버가 다시 판정한다) ----------------------------
+
+
+def _reading(receipt_hash=IMAGE_HASH):
+    with _session() as db:
+        return db.get(OcrReading, receipt_hash)
+
+
+def test_reading_is_saved_by_image_hash(auth_header):
+    treasurer = next(u for u in users.SEED_USERS if u.role == Role.TREASURER)
+    _post(auth_header)
+    row = _reading()
+    assert row is not None, "사진 SHA-256(= 등록의 receipt_hash)으로 저장한다"
+    assert (row.amount, row.approval_no, row.paid_at) == (4600, CU_APPROVAL_NO, CU_PAID_AT)
+    assert row.readable is True and row.low_confidence is False
+    assert row.read_by == treasurer.id
+
+
+def test_reading_saves_values_not_verdict(auth_header):
+    # 판정은 입력 금액에 따라 달라지므로 저장하지 않는다 — 다른 금액으로 읽어도 같은 판독값
+    _post(auth_header, amount=5000)
+    _post(auth_header, amount=4600)
+    with _session() as db:
+        assert db.query(OcrReading).count() == 1, "같은 사진은 한 줄을 덮어쓴다"
+    assert _reading().amount == 4600
+
+
+def test_rereading_overwrites_with_latest(auth_header):
+    _use_ocr(FakeOcr(error=OcrUnavailable("CLOVA 응답 500")))
+    _post(auth_header)
+    assert _reading().readable is False, "못 읽은 것도 남긴다 — 등록하면 UNREADABLE"
+    _use_ocr(FakeOcr(CU))
+    _post(auth_header)
+    assert _reading().readable is True and _reading().amount == 4600
+
+
+def test_reading_save_failure_does_not_block(auth_header, monkeypatch):
+    # 저장을 못 해도 판독 응답은 준다 — 등록 때 기록이 없어 UNREADABLE 로 남는다
+    from sqlalchemy.exc import OperationalError
+
+    import app.routers.ocr as ocr_router
+
+    def broken(*_a, **_k):
+        raise OperationalError("insert", {}, Exception("db down"))
+
+    monkeypatch.setattr(ocr_router, "save_reading", broken)
+    res = _post(auth_header)
+    assert res.status_code == 200
+    assert res.json()["ocr_status"] == "MATCH"
+    assert _reading() is None
+
+
 def test_ocr_unavailable_is_unreadable_not_error(auth_header):
     # OCR 을 못 돌려도 등록을 막지 않는다 — 200 + UNREADABLE (PRD §6)
     _use_ocr(FakeOcr(error=OcrUnavailable("CLOVA 응답 500")))
@@ -195,6 +250,8 @@ def test_build_request_matches_clova_v2():
     assert req["version"] == "V2"
     assert req["images"] == [{"format": "png", "name": "receipt", "data": base64.b64encode(b"abc").decode()}]
     assert req["requestId"] and isinstance(req["timestamp"], int)
+    # 표 인식을 켜면 표 인식이 꺼진 도메인에서 0028 로 거절된다. 파서는 tables 를 쓰지 않는다
+    assert req["enableTableDetection"] is False
 
 
 def test_client_without_keys_raises():

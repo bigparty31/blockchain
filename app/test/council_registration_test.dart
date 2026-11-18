@@ -8,6 +8,7 @@ import 'package:http/testing.dart';
 import 'package:student_council_app/core/enums.dart';
 import 'package:student_council_app/core/format.dart';
 import 'package:student_council_app/core/hashing.dart';
+import 'package:student_council_app/models/draft_entry.dart';
 import 'package:student_council_app/models/entry_model.dart';
 import 'package:student_council_app/screens/council/budget_revision_screen.dart';
 import 'package:student_council_app/screens/council/expense_create_screen.dart';
@@ -142,6 +143,260 @@ void main() {
       await tapText(tester, '제출하기');
       expect(find.textContaining('예산 목록을 불러오지 못해'), findsOneWidget);
       expect(registrar.drafts, isEmpty);
+    });
+  });
+
+  group('영수증 OCR 판독 (T7 · PRD §6 · 데모 5)', () {
+    OcrReading reading(OcrStatus status, {int? amount = 35000, int? duplicateOf}) => OcrReading(
+          status: status,
+          amount: amount,
+          approvalNo: '39007018',
+          paidAt: 1789052400,
+          duplicateOf: duplicateOf,
+        );
+
+    Future<void> attachAndFill(WidgetTester tester, {String amount = '35000'}) async {
+      await tapText(tester, '영수증 촬영 또는 사진 첨부');
+      await fillExpense(tester, amount: amount);
+    }
+
+    testWidgets('입력 금액으로 판독해 결과를 초안에 싣고, 등록 결과에 보인다 — 해시에는 넣지 않는다', (tester) async {
+      final match = reading(OcrStatus.MATCH);
+      final registrar = FakeRegistrar()..ocr = (_, __) => match;
+      await pump(tester, ExpenseCreateScreen(registrar: registrar, pickReceipt: fakeReceipt));
+      await attachAndFill(tester);
+      await tapText(tester, '제출하기');
+
+      expect(find.byKey(const Key('ocr_warning_dialog')), findsNothing, reason: '일치는 묻지 않는다');
+      expect(registrar.reads.single.$1, fakeReceiptBytes);
+      expect(registrar.reads.single.$2, 35000, reason: '총무가 입력한 금액과 비교한다');
+      final draft = registrar.submits.single.$2;
+      expect(draft.ocr, match);
+      expect(draft.toCreateJson(), containsPair('ocr_status', 'MATCH'));
+      expect(draft.toCreateJson(), containsPair('ocr_approval_no', '39007018'));
+      expect(draft.metaHash, draft.withOcr(null).metaHash, reason: 'OCR 값은 해시에 넣지 않는다 (PRD §6)');
+      expect(find.text('영수증 판독: 일치', findRichText: true), findsOneWidget);
+    });
+
+    testWidgets('불일치면 제출 전에 묻고, 「금액 고치기」면 아무것도 올리지 않는다 — 고친 금액으로 다시 판독한다', (tester) async {
+      final registrar = FakeRegistrar()
+        ..ocr = (_, amount) => reading(amount == 30000 ? OcrStatus.MATCH : OcrStatus.MISMATCH, amount: 30000);
+      await pump(tester, ExpenseCreateScreen(registrar: registrar, pickReceipt: fakeReceipt));
+      await attachAndFill(tester);
+      await tapText(tester, '제출하기');
+
+      expect(find.text('영수증 금액과 달라요'), findsOneWidget);
+      expect(find.textContaining('30,000'), findsOneWidget, reason: '판독 금액을 보여 준다');
+      await tapText(tester, '금액 고치기');
+      expect(registrar.uploads, isEmpty);
+      expect(registrar.drafts, isEmpty);
+      expect(find.text('제출하기'), findsOneWidget, reason: '「제출 중」에 갇히지 않는다');
+
+      await tester.enterText(find.widgetWithText(TextFormField, '지출 금액(원) *'), '30000');
+      await tapText(tester, '제출하기');
+      expect(registrar.reads.map((r) => r.$2), [35000, 30000]);
+      expect(registrar.submits.single.$2.ocr!.status, OcrStatus.MATCH);
+      expect(find.text('지출 제출 완료!'), findsOneWidget);
+    });
+
+    testWidgets('불일치를 「그대로 제출」하면 경고를 싣고, 제출이 실패해 다시 낼 때는 다시 묻거나 판독하지 않는다', (tester) async {
+      final registrar = FakeRegistrar()
+        ..ocr = ((_, __) => reading(OcrStatus.MISMATCH, amount: 30000))
+        ..failNextSubmit = const EntryDecisionException(EntryDecisionFailure.unknownOutcome, '등록 제출 결과를 확인하지 못했어요.');
+      await pump(tester, ExpenseCreateScreen(registrar: registrar, pickReceipt: fakeReceipt));
+      await attachAndFill(tester);
+      await tapText(tester, '제출하기');
+      await tapText(tester, '그대로 제출');
+      expect(find.textContaining('등록 제출 결과를 확인하지 못했어요.'), findsOneWidget);
+
+      await tapText(tester, '제출하기');
+      expect(find.byKey(const Key('ocr_warning_dialog')), findsNothing);
+      expect(registrar.reads, hasLength(1), reason: '같은 사진·금액은 다시 판독하지 않는다 (CLOVA 무료 한도)');
+      expect(registrar.drafts, hasLength(1), reason: '같은 초안 번호로 다시 낸다');
+      expect(registrar.submits.last.$2.toCreateJson(), containsPair('ocr_status', 'MISMATCH'));
+      expect(find.text('영수증 판독: 불일치 · 판독 ₩ 30,000', findRichText: true), findsOneWidget);
+    });
+
+    testWidgets('중복이면 이미 올라간 내역 번호와 함께 알린다 — 「취소」면 올리지 않는다', (tester) async {
+      final registrar = FakeRegistrar()..ocr = (_, __) => reading(OcrStatus.DUPLICATE, duplicateOf: 7);
+      await pump(tester, ExpenseCreateScreen(registrar: registrar, pickReceipt: fakeReceipt));
+      await attachAndFill(tester);
+      await tapText(tester, '제출하기');
+
+      expect(find.text('이미 올라간 영수증 같아요'), findsOneWidget);
+      expect(find.textContaining('(#7)'), findsOneWidget);
+      await tapText(tester, '취소');
+      expect(registrar.drafts, isEmpty);
+
+      await tapText(tester, '제출하기');
+      await tapText(tester, '그대로 제출');
+      expect(registrar.submits.single.$2.ocr!.status, OcrStatus.DUPLICATE);
+      expect(find.text('영수증 판독: 중복 · #7와 같은 영수증', findRichText: true), findsOneWidget);
+    });
+
+    testWidgets('판독하지 못하면(서버 없음·PDF) 묻지 않고 「판독 불가」로 등록한다 — 막지 않고, 승인 때 경고가 뜨게', (tester) async {
+      final registrar = FakeRegistrar(); // 판독 결과 null
+      await pump(tester, ExpenseCreateScreen(registrar: registrar, pickReceipt: fakeReceipt));
+      await attachAndFill(tester);
+      await tapText(tester, '제출하기');
+
+      expect(find.byKey(const Key('ocr_warning_dialog')), findsNothing, reason: '판독 불가는 묻지 않는다');
+      expect(find.text('지출 제출 완료!'), findsOneWidget);
+      final draft = registrar.submits.single.$2;
+      expect(draft.ocr!.status, OcrStatus.UNREADABLE);
+      expect(draft.toCreateJson(), containsPair('ocr_status', 'UNREADABLE'),
+          reason: '서버가 OCR 을 못 돌렸을 때처럼 판독 불가로 남긴다 (SERVER_ENV.md)');
+      expect(draft.toCreateJson().containsKey('ocr_amount'), isFalse, reason: '읽지 못한 값은 지어내지 않는다');
+      expect(find.text('영수증 판독: ${OcrStatus.UNREADABLE.label}', findRichText: true), findsOneWidget);
+    });
+
+    testWidgets('판독값 없이 저장된 초안을 이어서 제출하면 다시 판독하지 않고 같은 초안 번호로 낸다 — 초안이 둘 생기지 않게', (tester) async {
+      final path = FakeRegistrar.pathOf(fakeReceiptBytes);
+      final registrar = FakeRegistrar()
+        ..ocr = ((_, __) => reading(OcrStatus.MATCH)) // 지금은 판독이 된다
+        ..stored[path] = fakeReceiptBytes;
+      final saved = DraftEntry(
+        id: 9,
+        termId: 1,
+        kind: EntryKind.EXPENSE,
+        amount: 35000,
+        counterparty: '한결문구',
+        purpose: '신입생 환영회 명찰',
+        occurredAt: 1789225200,
+        budgetId: 1,
+        receiptHash: Hashing.fileHash(fakeReceiptBytes),
+        receiptPath: path,
+      ); // 저장할 때는 판독값이 없었다
+      await pump(tester, ExpenseCreateScreen(registrar: registrar, resumeDraft: saved));
+      await tapText(tester, '제출하기');
+
+      expect(registrar.reads, isEmpty, reason: '초안을 만든 뒤에는 다시 판독하지 않는다');
+      expect(registrar.drafts, isEmpty, reason: '판독값만 달라진 새 초안을 만들지 않는다 — 앞 초안이 목록에 남지 않게');
+      expect(registrar.submits.single.$1, 9);
+    });
+
+    testWidgets('제출 응답을 잃은 뒤 판독이 되돌아와도 같은 초안 번호로 다시 낸다 — 같은 지출이 두 번 올라가지 않게', (tester) async {
+      final registrar = FakeRegistrar()
+        ..failNextSubmit = const EntryDecisionException(EntryDecisionFailure.unknownOutcome, '등록 제출 결과를 확인하지 못했어요.');
+      await pump(tester, ExpenseCreateScreen(registrar: registrar, pickReceipt: fakeReceipt));
+      await attachAndFill(tester);
+      await tapText(tester, '제출하기'); // 판독 실패 → 초안 100 → 제출 응답 유실
+      expect(find.textContaining('등록 제출 결과를 확인하지 못했어요.'), findsOneWidget);
+
+      registrar.ocr = (_, __) => reading(OcrStatus.MATCH);
+      await tapText(tester, '제출하기');
+
+      expect(registrar.drafts, hasLength(1));
+      expect(registrar.submits.map((s) => s.$1), [100, 100], reason: '서버에는 이미 올라갔을 수 있다 — 새 번호로 내지 않는다');
+    });
+
+    testWidgets('다른 금액에서 한 「그대로 제출」 동의는 원래 금액의 경고를 건너뛰지 않는다 (#119 Codex 2차)', (tester) async {
+      final mismatch = reading(OcrStatus.MISMATCH, amount: 30000);
+      final path = FakeRegistrar.pathOf(fakeReceiptBytes);
+      final registrar = FakeRegistrar()
+        ..ocr = ((_, __) => mismatch)
+        ..stored[path] = fakeReceiptBytes;
+      final saved = DraftEntry(
+        id: 9,
+        termId: 1,
+        kind: EntryKind.EXPENSE,
+        amount: 35000,
+        counterparty: '한결문구',
+        purpose: '신입생 환영회 명찰',
+        occurredAt: 1789225200,
+        budgetId: 1,
+        receiptHash: Hashing.fileHash(fakeReceiptBytes),
+        receiptPath: path,
+        ocr: mismatch,
+      );
+      await pump(tester, ExpenseCreateScreen(registrar: registrar, resumeDraft: saved));
+      final amountField = find.widgetWithText(TextFormField, '지출 금액(원) *');
+
+      // 금액을 바꿔 그 금액의 경고에 동의했는데, 새 초안 저장이 실패했다
+      await tester.enterText(amountField, '36000');
+      registrar.failNextDraft = const EntryDecisionException(EntryDecisionFailure.unknownOutcome, '초안을 저장하지 못했어요.');
+      await tapText(tester, '제출하기');
+      await tapText(tester, '그대로 제출');
+      expect(registrar.submits, isEmpty);
+
+      // 원래 금액으로 돌려 제출 — 저장 초안의 불일치는 아직 동의하지 않았다
+      await tester.enterText(amountField, '35000');
+      await tapText(tester, '제출하기');
+      expect(find.byKey(const Key('ocr_warning_dialog')), findsOneWidget);
+      await tapText(tester, '그대로 제출');
+      expect(registrar.submits.single.$1, 9);
+    });
+
+    testWidgets('제출 때 서버가 중복으로 바꾸면 결과에 서버 판정을 보인다', (tester) async {
+      final registrar = FakeRegistrar()
+        ..ocr = ((_, __) => reading(OcrStatus.MATCH))
+        ..serverOcr = ((_, __) => const ServerOcr(OcrStatus.DUPLICATE, 7)); // 저장 뒤 같은 영수증의 다른 건이 먼저 제출됐다
+      await pump(tester, ExpenseCreateScreen(registrar: registrar, pickReceipt: fakeReceipt));
+      await attachAndFill(tester);
+      await tapText(tester, '제출하기');
+
+      expect(find.text('영수증 판독: 중복 · #7와 같은 영수증', findRichText: true), findsOneWidget);
+      expect(find.text('영수증 판독: 일치', findRichText: true), findsNothing);
+    });
+
+    testWidgets('제출 뒤 서버 판정을 못 읽으면 제출 전 판독에 「제출 전 기준」을 붙인다', (tester) async {
+      final registrar = FakeRegistrar()
+        ..ocr = ((_, __) => reading(OcrStatus.MATCH))
+        ..serverOcr = ((_, __) => null);
+      await pump(tester, ExpenseCreateScreen(registrar: registrar, pickReceipt: fakeReceipt));
+      await attachAndFill(tester);
+      await tapText(tester, '제출하기');
+
+      expect(find.text('지출 제출 완료!'), findsOneWidget, reason: '판정을 못 읽어도 등록은 끝났다');
+      expect(find.text('영수증 판독: 일치 (제출 전 기준)', findRichText: true), findsOneWidget);
+    });
+
+    testWidgets('초안 저장도 판독값을 싣는다 — 저장은 체인에 안 올라가서 묻지 않는다', (tester) async {
+      final registrar = FakeRegistrar()..ocr = (_, __) => reading(OcrStatus.MISMATCH, amount: 30000);
+      await pump(tester, ExpenseCreateScreen(registrar: registrar, pickReceipt: fakeReceipt));
+      await attachAndFill(tester);
+      await tapText(tester, '초안으로 저장');
+
+      expect(find.byKey(const Key('ocr_warning_dialog')), findsNothing);
+      expect(registrar.drafts.single.ocr!.status, OcrStatus.MISMATCH);
+      expect(find.text('지출 초안 저장 완료'), findsOneWidget);
+    });
+
+    testWidgets('영수증 없이 저장하는 초안은 판독하지 않는다', (tester) async {
+      final registrar = FakeRegistrar()..ocr = (_, __) => reading(OcrStatus.MATCH);
+      await pump(tester, ExpenseCreateScreen(registrar: registrar, pickReceipt: fakeReceipt));
+      await fillExpense(tester);
+      await tapText(tester, '초안으로 저장');
+      expect(registrar.reads, isEmpty);
+      expect(registrar.drafts.single.ocr, isNull);
+    });
+
+    testWidgets('판독값이 있는 초안을 그대로 이어서 제출하면 다시 판독하지 않고 같은 초안 번호로 낸다', (tester) async {
+      final match = reading(OcrStatus.MATCH);
+      final path = FakeRegistrar.pathOf(fakeReceiptBytes);
+      final registrar = FakeRegistrar()
+        ..ocr = ((_, __) => match)
+        ..stored[path] = fakeReceiptBytes;
+      final saved = DraftEntry(
+        id: 9,
+        termId: 1,
+        kind: EntryKind.EXPENSE,
+        amount: 35000,
+        counterparty: '한결문구',
+        purpose: '신입생 환영회 명찰',
+        occurredAt: 1789225200,
+        budgetId: 1,
+        receiptHash: Hashing.fileHash(fakeReceiptBytes),
+        receiptPath: path,
+        ocr: match,
+      );
+      await pump(tester, ExpenseCreateScreen(registrar: registrar, resumeDraft: saved));
+      await tapText(tester, '제출하기');
+
+      expect(registrar.reads, isEmpty);
+      expect(registrar.drafts, isEmpty, reason: '고치지 않았으니 새 초안을 만들지 않는다');
+      expect(registrar.submits.single.$1, 9);
+      expect(registrar.submits.single.$2.ocr, match);
     });
   });
 

@@ -60,6 +60,7 @@ def test_student_api_routes_whitelist():
         ("GET", "/chain/domains"),
         ("GET", "/receipts/{filename}"),
         ("GET", "/users/wallets"),
+        ("GET", "/snapshots/latest"),
     }
 
     assert routes == expected_routes, (

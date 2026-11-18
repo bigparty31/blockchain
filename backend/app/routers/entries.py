@@ -4,7 +4,7 @@ import inspect
 import logging
 import re
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
@@ -35,6 +35,8 @@ from app.services.chain_tx import (
 from app.services.notifications import NotificationKind, create_notification
 from app.database import get_db
 from app.models import Budget as DBBudget, Entry as DBEntry, Term as DBTerm, User as DBUser
+from app.ocr import ParsedReceipt, judge
+from app.ocr.readings import is_confident, load_reading
 from app.routers.receipts import receipt_file_exists, resolve_receipt_path
 from app.schemas.auth import Role
 from app.schemas.entry import (
@@ -51,6 +53,8 @@ from app.schemas.entry import (
     EntryStatus,
     EntrySubmitRequest,
     EntrySubmitResponse,
+    INT64_MAX,
+    MAX_AMOUNT,
     OCRStatus,
     OnChainEntryResponse,
 )
@@ -214,11 +218,16 @@ def _validate_reclassify_negative_order(
 
 def _validate_correction_rules(db: Session, entry: EntryCreate) -> None:
     """정정 규칙 서버 검사 (PRD v0.15 §4.4, docs/CONTRACTS.md '정정', B7)."""
-    # 1. 차액 0 금지 (ZeroAmount)
+    # 1. 차액 0 금지 (ZeroAmount) 및 체인 금액 상한 검사 (AmountOutOfRange)
     if entry.amount == 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="금액(amount)은 0일 수 없습니다. (ZeroAmount)",
+        )
+    if abs(entry.amount) > MAX_AMOUNT:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"금액(|amount|)은 체인 상한({MAX_AMOUNT:,}원)을 초과할 수 없습니다. (AmountOutOfRange)",
         )
 
     # 2. 일반 항목 vs 정정 항목 기본 검증
@@ -523,13 +532,17 @@ async def _get_chain_client_safe(request: Request) -> Optional[ChainClient]:
 @query_router.get("/", response_model=List[EntryResponse], include_in_schema=False)
 async def get_entries(
     request: Request,
+    term_id: Optional[int] = Query(None, ge=1, le=INT64_MAX, description="조회할 학기 ID (미지정 시 전체 학기)"),
     db: Session = Depends(get_db),
 ):
     """모바일 앱 '내역 목록' 및 '대시보드'에서 호출하는 수입·지출 내역 목록 API입니다.
     체인에 기록된 건(status IS NOT NULL)만 반환하며, 기기 서명 미제출 초안은 제외됩니다.
     """
     try:
-        db_entries = db.query(DBEntry).filter(DBEntry.status.isnot(None)).all()
+        query = db.query(DBEntry).filter(DBEntry.status.isnot(None))
+        if term_id is not None:
+            query = query.filter(DBEntry.term_id == term_id)
+        db_entries = query.all()
     except SQLAlchemyError as e:
         logger.exception("수입·지출 내역 목록 조회 중 데이터베이스 오류: %s", e)
         raise HTTPException(
@@ -783,16 +796,32 @@ async def create_entry(
             detail="수입 내역에는 예산을 연결할 수 없습니다.",
         )
 
-    # 5. 영수증 중복 검사 (PRD §6, §8, B4: 409 차단 대신 DUPLICATE 경고로 등록 허용)
-    # 중복 비교 대상: PENDING·CONFIRMED만 대조 (초안 status NULL, REJECTED, BLOCKED 제외)
-    # 정정 건(corrects_entry_id)인 경우 원본 건은 대조에서 제외 (리뷰어 피드백)
-    effective_ocr_status = entry.ocr_status
+    # 5. OCR 판정 — 앱이 보낸 ocr_* 는 쓰지 않고 서버가 다시 판정한다 (PRD §6, #36 리뷰)
+    # 앱 값을 믿으면 MISMATCH 를 MATCH 로 바꿔 보내 승인 때의 경고 사유(warning_reason)를 건너뛸 수 있다.
+    # 판독값은 POST /ocr/receipt 가 사진 해시(= receipt_hash)로 저장해 둔 것만 쓴다.
+    # - 영수증이 있는 일반 지출: 저장된 판독값과 입력 금액으로 판정. 서버가 이 사진을 읽은 기록이 없으면 UNREADABLE
+    #   (OCR 키가 없을 때와 같은 규칙, docs/SERVER_ENV.md) — 판독은 등록을 막지 않고 승인 때 경고로 남는다
+    # - 정정(금액이 증감분이라 영수증 금액과 비교할 수 없음)·수입·영수증 없음: OCR 판정 없음
+    ocr_amount = ocr_approval_no = ocr_paid_at = None
+    effective_ocr_status: Optional[OCRStatus] = None
+    reading: Optional[ParsedReceipt] = None
+    ocr_target = entry.kind == EntryKind.EXPENSE and entry.corrects_entry_id is None and bool(entry.receipt_hash)
     try:
+        if ocr_target:
+            reading = load_reading(db, entry.receipt_hash) or ParsedReceipt(readable=False)
+            ocr_amount = reading.amount
+            # 흐리게 읽은 승인번호·결제시각은 저장하지 않는다 — 다른 건과의 중복 비교에 쓰이지 않게
+            if is_confident(reading):
+                ocr_approval_no, ocr_paid_at = reading.approval_no, reading.paid_at
+
+        # 5.1 영수증 중복 검사 (PRD §6, §8, B4: 409 차단 대신 DUPLICATE 경고로 등록 허용)
+        # 중복 비교 대상: PENDING·CONFIRMED만 대조 (초안 status NULL, REJECTED, BLOCKED 제외)
+        # 정정 건(corrects_entry_id)인 경우 원본 건은 대조에서 제외 (리뷰어 피드백)
         duplicate_of_id = _detect_duplicate_entry_id(
             db,
             receipt_hash=entry.receipt_hash,
-            ocr_approval_no=entry.ocr_approval_no,
-            ocr_paid_at=entry.ocr_paid_at,
+            ocr_approval_no=ocr_approval_no,
+            ocr_paid_at=ocr_paid_at,
             amount=entry.amount,
             corrects_entry_id=entry.corrects_entry_id,
         )
@@ -803,6 +832,9 @@ async def create_entry(
             detail="데이터베이스 처리 중 오류가 발생했습니다.",
         )
 
+    if reading is not None:
+        effective_ocr_status = judge(reading, entry.amount)
+    # 같은 영수증 파일이나 같은 결제(승인번호·결제시각·금액)가 이미 올라가 있으면 판독과 상관없이 중복이다
     if duplicate_of_id is not None:
         effective_ocr_status = OCRStatus.DUPLICATE
 
@@ -829,9 +861,9 @@ async def create_entry(
             receipt_hash=entry.receipt_hash,
             meta_hash=computed_meta_hash,
             hash_version=1,
-            ocr_amount=entry.ocr_amount,
-            ocr_approval_no=entry.ocr_approval_no,
-            ocr_paid_at=entry.ocr_paid_at,
+            ocr_amount=ocr_amount,
+            ocr_approval_no=ocr_approval_no,
+            ocr_paid_at=ocr_paid_at,
             ocr_status=effective_ocr_status.value if effective_ocr_status else None,
             category_warning=False,
             warning_ack_reason=None,
@@ -859,6 +891,7 @@ async def create_entry(
     return EntryCreateResponse(
         id=db_entry.id,
         duplicate_of=duplicate_of_id,
+        ocr_status=effective_ocr_status,
         message="지출/수입 초안이 등록되었으며, 기기 서명 제출 대기 상태입니다.",
     )
 
