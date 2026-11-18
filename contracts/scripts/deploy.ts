@@ -4,7 +4,8 @@
  *   터미널 1:  npx hardhat node
  *   터미널 2:  npx hardhat run scripts/deploy.ts --network localhost
  *
- * 순서: RoleManager(회장, 총무, 감사1, 감사2) → BudgetToken → AccountingLedger → setLedger → MembershipSBT.
+ * 순서: RoleManager(회장, 총무, 감사1, 감사2) → BudgetToken → AccountingLedger → setLedger → MembershipSBT
+ *       → ObjectionRegistry(…, relayer).
  * 네 임원은 생성자 인자다. 별도 롤 부여 단계가 없고, 끝난 뒤 배포자는 어떤 권한도 갖지 않는다.
  *
  * 계정 배치 (Hardhat 기본 니모닉의 순서. 개인키는 Hardhat 이 공개한 테스트 키라 파일에 두지 않는다):
@@ -12,7 +13,7 @@
  *   [1] president  회장
  *   [2] treasurer  총무
  *   [3] auditor    감사 1
- *   [4] relayer    서버 릴레이어. 롤 없음 (이전 배치와 같은 번호를 유지한다)
+ *   [4] relayer    서버 릴레이어. 롤 없음 (이전 배치와 같은 번호를 유지한다). ObjectionRegistry.raise 를 부를 유일한 주소
  *   [5] auditor2   감사 2 (감사 최소 2명 — 회장 키 분실 복구용)
  *
  * 결과는 deployments/<network>.json 과 deployments/abi/*.json 에 쓴다. 백엔드(손종인)가 읽는 파일이다.
@@ -27,7 +28,7 @@ import { network } from "hardhat";
 import { deployAll } from "./lib/deployAll.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const CONTRACTS = ["RoleManager", "BudgetToken", "AccountingLedger", "MembershipSBT"] as const;
+const CONTRACTS = ["RoleManager", "BudgetToken", "AccountingLedger", "MembershipSBT", "ObjectionRegistry"] as const;
 const ALLOWED_NETWORKS = ["localhost"];
 
 const conn = await network.getOrCreate();
@@ -57,6 +58,7 @@ const d = await deployAll(
     auditor1: auditor.address,
     auditor2: auditor2.address,
   },
+  relayer.address,
   deployer,
 );
 
@@ -88,11 +90,21 @@ assert((await d.budgetToken.roleManager()) === d.addresses.RoleManager, "BudgetT
 assert((await d.ledger.roleManager()) === d.addresses.RoleManager, "AccountingLedger.roleManager 불일치");
 assert((await d.ledger.budgetToken()) === d.addresses.BudgetToken, "AccountingLedger.budgetToken 불일치");
 assert((await d.membershipSBT.roleManager()) === d.addresses.RoleManager, "MembershipSBT.roleManager 불일치");
+assert((await d.objectionRegistry.roleManager()) === d.addresses.RoleManager, "ObjectionRegistry.roleManager 불일치");
+assert((await d.objectionRegistry.ledger()) === d.addresses.AccountingLedger, "ObjectionRegistry.ledger 불일치");
+assert((await d.objectionRegistry.membershipSBT()) === d.addresses.MembershipSBT, "ObjectionRegistry.membershipSBT 불일치");
+assert((await d.objectionRegistry.relayer()) === relayer.address, "ObjectionRegistry.relayer 불일치");
 
-// EIP-712 도메인: 서명을 받는 네 컨트랙트 모두
+// EIP-712 도메인: 서명을 받는 다섯 컨트랙트 모두
 const eip712: Record<string, object> = {};
 for (const name of CONTRACTS) {
-  const contract = { RoleManager: d.roleManager, BudgetToken: d.budgetToken, AccountingLedger: d.ledger, MembershipSBT: d.membershipSBT }[name];
+  const contract = {
+    RoleManager: d.roleManager,
+    BudgetToken: d.budgetToken,
+    AccountingLedger: d.ledger,
+    MembershipSBT: d.membershipSBT,
+    ObjectionRegistry: d.objectionRegistry,
+  }[name];
   const onchain: string = await contract.DOMAIN_SEPARATOR();
   const expected = ethers.TypedDataEncoder.hashDomain({
     name,

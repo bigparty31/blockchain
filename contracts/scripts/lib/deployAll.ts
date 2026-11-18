@@ -6,9 +6,13 @@
  *   → AccountingLedger(roleManager, budgetToken)
  *   → BudgetToken.setLedger(ledger)   // 배포자가 1회 호출, 이후 잠김
  *   → MembershipSBT(roleManager)
+ *   → ObjectionRegistry(roleManager, ledger, membershipSBT, relayer)
  *
- * MembershipSBT 를 맨 뒤에 두는 이유: 배포 주소는 배포자 nonce 로 정해진다. 앞의 세 컨트랙트와 setLedger 의
+ * MembershipSBT·ObjectionRegistry 를 뒤에 두는 이유: 배포 주소는 배포자 nonce 로 정해진다. 앞의 컨트랙트와 setLedger 의
  * 순서를 그대로 두어야 그 주소와 EIP-712 도메인(앱·서버 벡터에 박힌 값)이 바뀌지 않는다.
+ * ObjectionRegistry 는 v0.16 에 추가됐다. 맨 뒤라 앞의 네 주소는 이전 배포와 같다.
+ *
+ * relayer 는 ObjectionRegistry.raise 를 부를 수 있는 유일한 주소다 (롤은 없다).
  *
  * 네 임원(회장·총무·감사 2명)은 생성자 인자로 들어가므로 별도 롤 부여 단계가 없다.
  * 배포자는 setLedger 를 부른 뒤 어떤 권한도 남지 않는다 (docs/CONTRACTS.md "생성자·배포 순서").
@@ -32,13 +36,21 @@ export interface Deployment {
   budgetToken: any;
   ledger: any;
   membershipSBT: any;
-  addresses: { RoleManager: string; BudgetToken: string; AccountingLedger: string; MembershipSBT: string };
+  objectionRegistry: any;
+  addresses: {
+    RoleManager: string;
+    BudgetToken: string;
+    AccountingLedger: string;
+    MembershipSBT: string;
+    ObjectionRegistry: string;
+  };
   blocks: {
     RoleManager: number;
     BudgetToken: number;
     AccountingLedger: number;
     setLedger: number;
     MembershipSBT: number;
+    ObjectionRegistry: number;
   };
 }
 
@@ -51,6 +63,7 @@ async function deployedBlock(contract: any): Promise<number> {
 export async function deployAll(
   ethers: any,
   officers: Officers,
+  relayer: string,
   deployer?: any,
   opts: DeployOptions = {},
 ): Promise<Deployment> {
@@ -80,16 +93,25 @@ export async function deployAll(
   const membershipSBT = await ethers.deployContract("MembershipSBT", [await roleManager.getAddress()], signer);
   await membershipSBT.waitForDeployment();
 
+  const objectionRegistry = await ethers.deployContract(
+    "ObjectionRegistry",
+    [await roleManager.getAddress(), await ledger.getAddress(), await membershipSBT.getAddress(), relayer],
+    signer,
+  );
+  await objectionRegistry.waitForDeployment();
+
   return {
     roleManager,
     budgetToken,
     ledger,
     membershipSBT,
+    objectionRegistry,
     addresses: {
       RoleManager: await roleManager.getAddress(),
       BudgetToken: await budgetToken.getAddress(),
       AccountingLedger: await ledger.getAddress(),
       MembershipSBT: await membershipSBT.getAddress(),
+      ObjectionRegistry: await objectionRegistry.getAddress(),
     },
     blocks: {
       RoleManager: await deployedBlock(roleManager),
@@ -97,6 +119,7 @@ export async function deployAll(
       AccountingLedger: await deployedBlock(ledger),
       setLedger: setReceipt.blockNumber,
       MembershipSBT: await deployedBlock(membershipSBT),
+      ObjectionRegistry: await deployedBlock(objectionRegistry),
     },
   };
 }
