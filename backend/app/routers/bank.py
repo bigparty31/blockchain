@@ -99,6 +99,15 @@ class _Ledger:
         self.entries = {i: by_id[i] for i, amt in net.items() if amt > 0}
         self.net = {i: net[i] for i in self.entries}
 
+    def still_matches(self, entry_id: int, t: DBBankTx) -> bool:
+        """짝을 정할 때의 조건(방향·순금액·날짜, matcher.match)이 지금 원장에서도 맞는가."""
+        e = self.entries[entry_id]
+        return (
+            _KIND_TO_DIRECTION.get(e.kind) == t.direction
+            and self.net[entry_id] == t.amount
+            and _kst_date(e.occurred_at) == t.tran_date
+        )
+
     def candidates(self) -> List[Candidate]:
         return [
             Candidate(
@@ -147,7 +156,10 @@ def _report(db: Session, snap: DBSnapshot) -> ReconciliationReport:
     used = set()
     for t in txs:
         entry = ledger.entries.get(t.matched_entry_id) if t.matched_entry_id else None
-        # 업로드 뒤에 짝 항목이 반려됐다면 지금은 짝이 아니다
+        # 업로드 뒤에 짝 항목이 반려됐거나, 정정으로 순금액이 달라졌다면 지금은 짝이 아니다 (#100).
+        # 저장된 짝은 재대조 때 다시 정한다 — 그 전에도 보고서는 재대조한 것과 같은 판정을 보여 준다
+        if entry is not None and not ledger.still_matches(entry.id, t):
+            entry = None
         if entry is None:
             rows.append(_row(t, RowStatus.UNREGISTERED, None))
             continue
@@ -201,10 +213,38 @@ def _row(t: DBBankTx, st: Optional[RowStatus], entry_id: Optional[int]) -> BankR
 # ---------------------------------------------------------------- 매칭 저장
 
 
+def _when(r: BankRow):
+    return (r.tran_date, r.tran_time or "")
+
+
+def _balance_continues(rows: List[BankRow]) -> bool:
+    """이 순서가 시간순이라면 각 줄의 거래후잔액 = 앞 줄 잔액 + 입금 − 출금 이어야 한다."""
+    return all(
+        cur.balance_after == prev.balance_after + (cur.amount if cur.direction == "IN" else -cur.amount)
+        for prev, cur in zip(rows, rows[1:])
+    )
+
+
 def _chronological(rows: List[BankRow]) -> List[BankRow]:
-    # 은행 파일은 최신 거래가 위에 오는 경우가 많다. 첫 줄이 마지막 줄보다 늦으면 뒤집어서 시간순으로 맞춘다
-    ordered = list(reversed(rows)) if (rows[0].tran_date, rows[0].tran_time or "") > (rows[-1].tran_date, rows[-1].tran_time or "") else list(rows)
-    return sorted(ordered, key=lambda r: (r.tran_date, r.tran_time or ""))  # 같은 시각이면 파일 순서 유지
+    """파일을 시간순(오래된 것 → 최신)으로 맞춘다. 마지막 줄의 잔액이 계좌 잔액이 된다.
+
+    은행 파일은 최신순·시간순이 섞여 있고, 하루치이거나 시각이 없으면 날짜로는 방향을 알 수 없다 (#107).
+    그래서 **잔액이 이어지는 방향**을 고른다. 두 방향 다 이어지면(+100 뒤 −100 처럼) 그때만 날짜·시각으로 정하고,
+    그래도 모르면 잘못된 잔액을 저장하는 대신 파일을 다시 받아 달라고 한다.
+    """
+    forward, backward = list(rows), list(reversed(rows))
+    fits = [o for o in (forward, backward) if _balance_continues(o)]
+    if not fits:
+        raise BankCsvError("거래후잔액이 거래 순서대로 이어지지 않습니다. 한 계좌의 거래내역을 은행에서 받은 그대로 올려 주세요.")
+    if len(fits) == 2 and len(rows) > 1:
+        first, last = _when(rows[0]), _when(rows[-1])
+        if first == last:
+            raise BankCsvError("거래 순서를 정할 수 없습니다 (같은 시각, 잔액으로도 구분되지 않음). 거래 시각이 들어간 거래내역을 받아 주세요.")
+        fits = [forward if first < last else backward]
+    ordered = fits[0]
+    if any(_when(b) < _when(a) for a, b in zip(ordered, ordered[1:])):
+        raise BankCsvError("거래 날짜·시각이 잔액 순서와 맞지 않습니다. 은행에서 받은 원본을 고치지 말고 올려 주세요.")
+    return ordered
 
 
 def _apply_matching(db: Session, snap: DBSnapshot) -> None:
@@ -271,7 +311,7 @@ async def upload_snapshot(body: BankUploadRequest, user: User = Depends(treasure
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="file_hash 가 업로드한 파일의 해시와 다릅니다.")
 
     try:
-        rows = parse_bank_csv(raw)
+        ordered = _chronological(parse_bank_csv(raw))
     except BankCsvError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
@@ -289,7 +329,6 @@ async def upload_snapshot(body: BankUploadRequest, user: User = Depends(treasure
                 detail=f"같은 파일이 이미 업로드되어 있습니다 (스냅샷 {dup[0]}). 원장을 고친 뒤 다시 맞추려면 재대조를 쓰세요.",
             )
 
-        ordered = _chronological(rows)
         snap = DBSnapshot(
             term_id=body.term_id,
             bank_balance=ordered[-1].balance_after,
