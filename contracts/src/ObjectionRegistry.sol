@@ -13,7 +13,7 @@ import {ROLE_AUDITOR, ROLE_PRESIDENT, Signatures} from "./Common.sol";
 /// @notice 학생 이의 제기·감사 답변의 해시 기록. 규칙은 IObjectionRegistry 주석과 docs/CONTRACTS.md "이의" 절이 정본.
 /// @dev
 /// - 이의는 원장 항목의 상태를 바꾸지 않는다. 원장·SBT 는 읽기만 한다.
-/// - raise 는 릴레이어만 부른다 (학생 서명 없음, 릴레이어 신뢰 — PRD v0.16 §4.5·§13).
+/// - raise 는 릴레이어만 부른다 (학생 서명 없음, 릴레이어 신뢰 — PRD v0.17 §4.5·§13).
 /// - answer 는 AUDITOR 또는 PRESIDENT 의 EIP-712 서명 1개. 호출자(릴레이어)는 권한 판단에 쓰지 않는다.
 /// - 검사 순서 (제기): Unauthorized → ReservedId → ObjectionAlreadyExists → EntryNotFound → NotMember.
 /// - 검사 순서 (답변): SignatureExpired → InvalidSignature → NotResponder → ObjectionNotFound

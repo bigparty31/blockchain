@@ -10,7 +10,7 @@
  *
  * MembershipSBT·ObjectionRegistry 를 뒤에 두는 이유: 배포 주소는 배포자 nonce 로 정해진다. 앞의 컨트랙트와 setLedger 의
  * 순서를 그대로 두어야 그 주소와 EIP-712 도메인(앱·서버 벡터에 박힌 값)이 바뀌지 않는다.
- * ObjectionRegistry 는 v0.16 에 추가됐다. 맨 뒤라 앞의 네 주소는 이전 배포와 같다.
+ * ObjectionRegistry 는 PRD v0.17 에 추가됐다. 맨 뒤라 앞의 네 주소는 이전 배포와 같다.
  *
  * relayer 는 ObjectionRegistry.raise 를 부를 수 있는 유일한 주소다 (롤은 없다).
  *

@@ -10,7 +10,7 @@
 | `BudgetToken` | 학기+항목 1줄 단위 예산 한도·소모액. 발행·회수는 회장 서명, 증액은 회장+감사 서명. `spend/refund`는 `AccountingLedger`만 호출 |
 | `AccountingLedger` | 수입·지출 원장. 확정 항목 수정 불가, 정정은 `correctsId`로 원본을 가리키는 새 항목 |
 | `MembershipSBT` | 학기 단위 학생 회원 증명. PRESIDENT 또는 AUDITOR 서명으로 발행·소각. 전송 불가. 온체인에는 지갑 주소만 있고 학번 등 식별정보는 없음 |
-| `ObjectionRegistry` | 학생 이의 제기·감사 답변. 해시만 온체인. entry 상태에 영향 없음. PRD v0.16에서 범위에 다시 넣었다 |
+| `ObjectionRegistry` | 학생 이의 제기·감사 답변. 해시만 온체인. entry 상태에 영향 없음. PRD v0.17에서 범위에 다시 넣었다 |
 
 거래내역 CSV 파일 해시를 남기는 `recordBankSnapshot`은 원장에 넣지 않는다. 별도 컨트랙트로 추후 설계한다 (문승준과 필드·서명 주체 확정 후).
 
@@ -301,7 +301,7 @@ meta_hash = SHA256( amount ␟ counterparty ␟ purpose ␟ occurred_at ␟ rece
 
 ## EIP-712
 
-서명을 받는 컨트랙트마다 도메인이 따로 있다: `name = 컨트랙트명`, `version = "1"`, `chainId`, `verifyingContract`. 서명 도메인은 AccountingLedger·BudgetToken·RoleManager·MembershipSBT·ObjectionRegistry의 5개이며 모두 `DOMAIN_SEPARATOR()`를 노출한다 (ObjectionRegistry는 PRD v0.16에서 추가). 앱은 서명 대상에 맞는 도메인을 골라야 한다.
+서명을 받는 컨트랙트마다 도메인이 따로 있다: `name = 컨트랙트명`, `version = "1"`, `chainId`, `verifyingContract`. 서명 도메인은 AccountingLedger·BudgetToken·RoleManager·MembershipSBT·ObjectionRegistry의 5개이며 모두 `DOMAIN_SEPARATOR()`를 노출한다 (ObjectionRegistry는 PRD v0.17에서 추가). 앱은 서명 대상에 맞는 도메인을 골라야 한다.
 
 | 컨트랙트 | struct | typehash 문자열 |
 | --- | --- | --- |

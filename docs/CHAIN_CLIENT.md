@@ -6,7 +6,7 @@
 
 | 지금 | 다음 |
 | --- | --- |
-| `AccountingLedger` 등록·확정·반려, `getEntry` 조회. 실제 릴레이어(`Web3ChainClient`)는 등록(`record_pending`)·확정(`confirm_entry`)·반려(`reject_entry`)·조회(`get_entry`·`tx_result`)까지, 배포 기록 읽기, 중복 전송 방지(`before_broadcast`), deadline 결정(§7). `tx_pending` 3상태 전이(`app/services/chain_tx.py`, §3) | 재시도, 오래 남은 처리 중(②) 정리. 예산(`BudgetToken`)·롤(`RoleManager`) 릴레이 — 둘 다 서명 + 릴레이어 방식이 됐다. SBT 발행·소각 릴레이는 연결됐다. 이의(`ObjectionRegistry`)는 컨트랙트가 생겼고(PRD v0.16) 릴레이는 #128에서 연결한다 |
+| `AccountingLedger` 등록·확정·반려, `getEntry` 조회. 실제 릴레이어(`Web3ChainClient`)는 등록(`record_pending`)·확정(`confirm_entry`)·반려(`reject_entry`)·조회(`get_entry`·`tx_result`)까지, 배포 기록 읽기, 중복 전송 방지(`before_broadcast`), deadline 결정(§7). `tx_pending` 3상태 전이(`app/services/chain_tx.py`, §3) | 재시도, 오래 남은 처리 중(②) 정리. 예산(`BudgetToken`)·롤(`RoleManager`) 릴레이 — 둘 다 서명 + 릴레이어 방식이 됐다. SBT 발행·소각 릴레이는 연결됐다. 이의(`ObjectionRegistry`)는 컨트랙트가 생겼고(PRD v0.17) 릴레이는 #128에서 연결한다 |
 
 서명은 ChainClient가 만들지 않는다. 임원 기기가 서명한 값을 받아 릴레이만 한다 (PRD §9.2).
 
