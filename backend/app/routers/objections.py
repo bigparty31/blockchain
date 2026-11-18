@@ -114,6 +114,34 @@ def _objection_domain_dict() -> dict:
     }
 
 
+async def _reconcile_pending_raise(
+    db: Session, chain: ChainClient, obj: DBObjection
+) -> bool:
+    """'?...' 인플라이트 표기가 남은 이의 제기의 온체인 등록 여부를 확인해 복구한다."""
+    if not obj.tx_raise or not obj.tx_raise.startswith("?"):
+        return bool(obj.tx_raise and obj.tx_raise.startswith("0x"))
+
+    inflight_hash = "0x" + obj.tx_raise[1:]
+    try:
+        onchain = await chain.get_objection(obj.id)
+    except (ChainUnavailable, ChainSetupError) as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"이전 이의 제기 트랜잭션 결과를 확인할 수 없습니다: {e}",
+        )
+
+    if onchain is not None:
+        obj.tx_raise = inflight_hash
+        db.commit()
+        db.refresh(obj)
+        return True
+
+    obj.tx_raise = None
+    db.commit()
+    db.refresh(obj)
+    return False
+
+
 async def _reconcile_pending_answer(
     db: Session, chain: ChainClient, obj: DBObjection
 ) -> tuple[DBObjection, bool]:
@@ -139,6 +167,7 @@ async def _reconcile_pending_answer(
         and obj.answer is not None
         and obj.answered_by is not None
         and obj.answered_at is not None
+        and onchain.answer_hash.lower() == text_hash(obj.answer)
     ):
         obj.status = ObjectionStatus.ANSWERED.value
         db.commit()
@@ -261,36 +290,40 @@ async def raise_objection(
                 detail="해당 학기 학생회비 납부 확인(MembershipSBT 보유)이 필요합니다.",
             )
 
-        # 이전 요청에서 ChainUnavailable 등으로 남은 동일 질문 미확정 행(tx_raise IS NULL 또는 '?...' 선점)을 먼저 확인·복구한다.
+        # 이전 요청에서 ChainUnavailable 등으로 남은 미확정 행(tx_raise IS NULL 또는 '?...' 선점)을 먼저 확인·복구한다.
         # SQLite 에서 롤백으로 ID가 재사용되어 체인의 ObjectionAlreadyExists 와 충돌하는 것도 막는다.
-        candidates = (
+        inflight_rows = (
             db.query(DBObjection)
             .filter(
-                DBObjection.entry_id == entry.id,
                 DBObjection.user_id == user.id,
-                DBObjection.content == normalized,
                 DBObjection.status == ObjectionStatus.OPEN.value,
+                DBObjection.tx_raise.like("?%"),
             )
             .order_by(DBObjection.id.desc())
             .all()
         )
+        for cand in inflight_rows:
+            landed = await _reconcile_pending_raise(db, chain, cand)
+            if landed and cand.entry_id == entry.id and cand.content == normalized:
+                return _to_schema(cand)
+
         obj: Optional[DBObjection] = None
-        for cand in candidates:
-            if cand.tx_raise is None:
-                onchain = await chain.get_objection(cand.id)
-                if onchain is None:
-                    obj = cand
-                    break
-            elif cand.tx_raise.startswith("?"):
-                inflight_hash = "0x" + cand.tx_raise[1:]
-                onchain = await chain.get_objection(cand.id)
-                if onchain is not None:
-                    cand.tx_raise = inflight_hash
-                    db.commit()
-                    db.refresh(cand)
-                    return _to_schema(cand)
-                # 이전 시도에서 before_broadcast 후 체인에 안착하지 못한 행 -> 재사용
-                cand.tx_raise = None
+        unrecorded_rows = (
+            db.query(DBObjection)
+            .filter(
+                DBObjection.user_id == user.id,
+                DBObjection.status == ObjectionStatus.OPEN.value,
+                DBObjection.tx_raise.is_(None),
+            )
+            .order_by(DBObjection.id.desc())
+            .all()
+        )
+        for cand in unrecorded_rows:
+            onchain = await chain.get_objection(cand.id)
+            if onchain is None:
+                cand.entry_id = entry.id
+                cand.content = normalized
+                cand.raised_at = datetime.now(timezone.utc)
                 db.commit()
                 db.refresh(cand)
                 obj = cand
@@ -439,14 +472,23 @@ async def prepare_answer_objection(
             detail="데이터베이스 처리 중 오류가 발생했습니다.",
         )
 
-    if obj is None or not obj.tx_raise or not obj.tx_raise.startswith("0x"):
+    if obj is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"이의 제기(id={objection_id})를 찾을 수 없습니다.",
         )
 
     try:
+        if obj.tx_raise and obj.tx_raise.startswith("?"):
+            await _reconcile_pending_raise(db, chain, obj)
+        if not obj.tx_raise or not obj.tx_raise.startswith("0x"):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"이의 제기(id={objection_id})를 찾을 수 없습니다.",
+            )
         obj, _ = await _reconcile_pending_answer(db, chain, obj)
+    except HTTPException:
+        raise
     except SQLAlchemyError as e:
         db.rollback()
         logger.exception("이의 답변 선점 복구 중 데이터베이스 오류: %s", e)
@@ -507,14 +549,23 @@ async def answer_objection(
             detail="데이터베이스 처리 중 오류가 발생했습니다.",
         )
 
-    if obj is None or not obj.tx_raise or not obj.tx_raise.startswith("0x"):
+    if obj is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"이의 제기(id={objection_id})를 찾을 수 없습니다.",
         )
 
     try:
+        if obj.tx_raise and obj.tx_raise.startswith("?"):
+            await _reconcile_pending_raise(db, chain, obj)
+        if not obj.tx_raise or not obj.tx_raise.startswith("0x"):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"이의 제기(id={objection_id})를 찾을 수 없습니다.",
+            )
         obj, recovered_now = await _reconcile_pending_answer(db, chain, obj)
+    except HTTPException:
+        raise
     except SQLAlchemyError as e:
         db.rollback()
         logger.exception("이의 답변 선점 복구 중 데이터베이스 오류: %s", e)
