@@ -36,6 +36,7 @@ from app.chain.models import (
     STATUS_ORDER,
     ZERO_ADDRESS,
     BURN_REASON_ORDER,
+    AnswerRequest,
     BudgetTxResult,
     BurnRequest,
     BurnResult,
@@ -52,6 +53,8 @@ from app.chain.models import (
     MintBatchRequest,
     MintBatchResult,
     MintedMembership,
+    ObjectionTxResult,
+    OnChainObjection,
     RecordRequest,
     RejectDecision,
     RevertReason,
@@ -462,10 +465,22 @@ class Web3ChainClient:
     def signer_of(
         self,
         payload: Union[
-            RecordRequest, ConfirmApproval, RejectDecision, IssueRequest, IncreaseRequest, MintBatchRequest, BurnRequest
+            RecordRequest,
+            ConfirmApproval,
+            RejectDecision,
+            IssueRequest,
+            IncreaseRequest,
+            MintBatchRequest,
+            BurnRequest,
+            AnswerRequest,
         ],
         signature: str,
     ) -> str:
+        if isinstance(payload, AnswerRequest):
+            domain = self._deployment.eip712.get("ObjectionRegistry")
+            if domain is None:
+                raise ChainSetupError("배포 기록에 ObjectionRegistry 서명 도메인이 없다.")
+            return eip712.recover_signer(eip712.typed_data_for(payload, domain), signature)
         if isinstance(payload, eip712.MEMBERSHIP_PAYLOADS):
             return eip712.recover_signer(eip712.typed_data_for(payload, self._sbt_domain()), signature)
         contract = BUDGET_TOKEN if isinstance(payload, eip712.BUDGET_PAYLOADS) else LEDGER
@@ -914,3 +929,24 @@ class Web3ChainClient:
         if entry is not None and entry.status in expected:
             return TxResult(tx_hash=tx_hash, status=entry.status)
         raise ChainUnavailable(f"결과 이벤트를 찾지 못했다 (tx={tx_hash})")
+
+    async def raise_objection(
+        self,
+        objection_id: int,
+        entry_id: int,
+        content_hash: str,
+        raiser: str,
+        before_broadcast: Optional[BeforeBroadcast] = None,
+    ) -> ObjectionTxResult:
+        raise ChainSetupError("ObjectionRegistry 릴레이가 아직 연결되지 않았습니다.")
+
+    async def answer_objection(
+        self,
+        request: AnswerRequest,
+        signature: str,
+        before_broadcast: Optional[BeforeBroadcast] = None,
+    ) -> ObjectionTxResult:
+        raise ChainSetupError("ObjectionRegistry 릴레이가 아직 연결되지 않았습니다.")
+
+    async def get_objection(self, objection_id: int) -> Optional[OnChainObjection]:
+        return None

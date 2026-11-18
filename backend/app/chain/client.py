@@ -11,6 +11,7 @@
 from typing import Awaitable, Callable, Optional, Protocol, Union
 
 from app.chain.models import (
+    AnswerRequest,
     BudgetTxResult,
     BurnRequest,
     BurnResult,
@@ -22,6 +23,8 @@ from app.chain.models import (
     ConfirmApproval,
     IncreaseRequest,
     IssueRequest,
+    ObjectionTxResult,
+    OnChainObjection,
     RecordRequest,
     RejectDecision,
     TxResult,
@@ -42,7 +45,14 @@ class ChainClient(Protocol):
     def signer_of(
         self,
         payload: Union[
-            RecordRequest, ConfirmApproval, RejectDecision, IssueRequest, IncreaseRequest, MintBatchRequest, BurnRequest
+            RecordRequest,
+            ConfirmApproval,
+            RejectDecision,
+            IssueRequest,
+            IncreaseRequest,
+            MintBatchRequest,
+            BurnRequest,
+            AnswerRequest,
         ],
         signature: str,
     ) -> str:
@@ -245,4 +255,28 @@ class ChainClient(Protocol):
         """MembershipSBT.burnRelayed 를 릴레이한다. 서명자는 회장 또는 감사. 예외는 mint_memberships 와 같고,
         대상 회원권이 없으면 NO_MEMBERSHIP 이다. 소각하면 같은 학기 재발행이 된다 (새 tokenId).
         """
+        ...
+
+    async def raise_objection(
+        self,
+        objection_id: int,
+        entry_id: int,
+        content_hash: str,
+        raiser: str,
+        before_broadcast: Optional[BeforeBroadcast] = None,
+    ) -> ObjectionTxResult:
+        """IObjectionRegistry.raise 를 릴레이한다."""
+        ...
+
+    async def answer_objection(
+        self,
+        request: AnswerRequest,
+        signature: str,
+        before_broadcast: Optional[BeforeBroadcast] = None,
+    ) -> ObjectionTxResult:
+        """IObjectionRegistry.answer 를 릴레이한다."""
+        ...
+
+    async def get_objection(self, objection_id: int) -> Optional[OnChainObjection]:
+        """IObjectionRegistry.getObjection 결과를 조회한다. 없으면 None."""
         ...

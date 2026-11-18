@@ -33,6 +33,7 @@ from app.chain.models import (
     ZERO_BYTES32,
     BURN_REASON_ORDER,
     MAX_MINT_BATCH,
+    AnswerRequest,
     BlockReason,
     BudgetRevertReason,
     BudgetTxResult,
@@ -42,6 +43,9 @@ from app.chain.models import (
     MintBatchRequest,
     MintBatchResult,
     MintedMembership,
+    ObjectionRevertReason,
+    ObjectionTxResult,
+    OnChainObjection,
     ChainBudget,
     ChainEntry,
     EntryTxDetail,
@@ -67,15 +71,18 @@ WRITE_METHODS = (
     "increase_budget",
     "mint_memberships",
     "burn_membership_relayed",
+    "raise_objection",
+    "answer_objection",
 )
 
 _BUDGET_METHODS = ("issue_budget", "increase_budget")
 _MEMBERSHIP_METHODS = ("mint_memberships", "burn_membership_relayed")
+_OBJECTION_METHODS = ("raise_objection", "answer_objection")
 _ZERO_TERM = 0
 UINT32_MAX = 2**32 - 1  # Budget.term 의 저장 폭
 
 # 검사를 통과한 쓰기의 (항목 id, 결과, 상태 변경). 상태는 before_broadcast 가 끝난 뒤에 바꾼다. 회원권은 id 자리가 0 이다
-Result = Union[TxResult, BudgetTxResult, MintBatchResult, BurnResult]
+Result = Union[TxResult, BudgetTxResult, MintBatchResult, BurnResult, ObjectionTxResult]
 Prepared = Tuple[int, Result, Callable[[], None]]
 
 
@@ -103,6 +110,7 @@ class FakeChainClient:
         self._memberships: dict[tuple[str, int], int] = {}  # (주소 소문자, 학기 코드) → 유효한 tokenId
         self._membership_count = 0
         self._sbt_nonces: dict[str, int] = {}  # 서명자 주소 소문자 → nonces(signer). 발행·소각이 공유한다
+        self._objections: dict[int, OnChainObjection] = {}
         self._tx_count = 0
         # tx hash 에 섞는 인스턴스별 값. 서버를 다시 켜 새 가짜가 생겨도 DB 에 남은 옛 hash 와 겹치지 않는다 (tx_result)
         self._tx_salt = secrets.token_hex(8)
@@ -149,7 +157,14 @@ class FakeChainClient:
     def signer_of(
         self,
         payload: Union[
-            RecordRequest, ConfirmApproval, RejectDecision, IssueRequest, IncreaseRequest, MintBatchRequest, BurnRequest
+            RecordRequest,
+            ConfirmApproval,
+            RejectDecision,
+            IssueRequest,
+            IncreaseRequest,
+            MintBatchRequest,
+            BurnRequest,
+            AnswerRequest,
         ],
         signature: str,
     ) -> str:
@@ -284,6 +299,81 @@ class FakeChainClient:
     ) -> BurnResult:
         signature = check_signature(signature)
         return await self._send("burn_membership_relayed", lambda tx: self._burn(request, signature, tx), before_broadcast)
+
+    async def raise_objection(
+        self,
+        objection_id: int,
+        entry_id: int,
+        content_hash: str,
+        raiser: str,
+        before_broadcast: Optional[BeforeBroadcast] = None,
+    ) -> ObjectionTxResult:
+        return await self._send(
+            "raise_objection",
+            lambda tx: self._raise_objection(objection_id, entry_id, content_hash, raiser, tx),
+            before_broadcast,
+        )
+
+    async def answer_objection(
+        self,
+        request: AnswerRequest,
+        signature: str,
+        before_broadcast: Optional[BeforeBroadcast] = None,
+    ) -> ObjectionTxResult:
+        signature = check_signature(signature)
+        return await self._send(
+            "answer_objection",
+            lambda tx: self._answer_objection(request, signature, tx),
+            before_broadcast,
+        )
+
+    async def get_objection(self, objection_id: int) -> Optional[OnChainObjection]:
+        return self._objections.get(objection_id)
+
+    def _raise_objection(
+        self, objection_id: int, entry_id: int, content_hash: str, raiser: str, tx_hash: str
+    ) -> Prepared:
+        self._precheck("raise_objection", int(self._clock()) + 3600)
+        if objection_id in self._objections:
+            raise ChainRevert(ObjectionRevertReason.OBJECTION_ALREADY_EXISTS, f"id={objection_id}")
+        raiser_addr = check_address(raiser)
+        obj = OnChainObjection(
+            entry_id=entry_id,
+            content_hash=content_hash,
+            answer_hash=ZERO_BYTES32,
+            status="OPEN",
+            raiser=raiser_addr,
+            responder=ZERO_ADDRESS,
+        )
+        res = ObjectionTxResult(tx_hash=tx_hash)
+
+        def apply() -> None:
+            self._objections[objection_id] = obj
+
+        return objection_id, res, apply
+
+    def _answer_objection(self, request: AnswerRequest, signature: str, tx_hash: str) -> Prepared:
+        self._precheck("answer_objection", request.deadline)
+        obj = self._objections.get(request.objection_id)
+        if obj is None:
+            raise ChainRevert(ObjectionRevertReason.OBJECTION_NOT_FOUND, f"id={request.objection_id}")
+        if obj.status != "OPEN":
+            raise ChainRevert(ObjectionRevertReason.OBJECTION_ALREADY_ANSWERED, f"id={request.objection_id}")
+        responder = _signer(signature)
+        updated = OnChainObjection(
+            entry_id=obj.entry_id,
+            content_hash=obj.content_hash,
+            answer_hash=request.answer_hash,
+            status="ANSWERED",
+            raiser=obj.raiser,
+            responder=responder,
+        )
+        res = ObjectionTxResult(tx_hash=tx_hash)
+
+        def apply() -> None:
+            self._objections[request.objection_id] = updated
+
+        return request.objection_id, res, apply
 
     # ------------------------------------------------------------ 컨트랙트 흉내
 
@@ -604,7 +694,11 @@ class FakeChainClient:
             expired = (
                 BudgetRevertReason
                 if method in _BUDGET_METHODS
-                else MembershipRevertReason if method in _MEMBERSHIP_METHODS else RevertReason
+                else (
+                    MembershipRevertReason
+                    if method in _MEMBERSHIP_METHODS
+                    else ObjectionRevertReason if method in _OBJECTION_METHODS else RevertReason
+                )
             )
             raise ChainRevert(expired.SIGNATURE_EXPIRED, f"deadline={deadline}")
 
