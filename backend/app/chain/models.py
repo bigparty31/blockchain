@@ -11,6 +11,7 @@ from typing import Optional, Tuple, Union
 from eth_utils import to_checksum_address
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.constants import MAX_AMOUNT
 from app.schemas.entry import EntryKind, EntryStatus
 
 # docs/enums.md 표 순서 = 온체인 uint8 값. 튜플의 인덱스가 곧 그 값이다.
@@ -26,8 +27,7 @@ _SIGNATURE = re.compile(r"0x[0-9a-fA-F]{130}")
 _ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}")
 _KST_MIDNIGHT_REMAINDER = 54000  # KST 00:00 = UTC 15:00 → Unix 초 % 86400
 
-# 원장의 저장 필드 폭과 금액 상한 (IAccountingLedger "저장 필드 폭", MAX_AMOUNT). 넘으면 체인이 revert 한다
-MAX_AMOUNT = 10**15
+# 원장의 저장 필드 폭 (IAccountingLedger "저장 필드 폭"). MAX_AMOUNT 는 app.chain.constants 에서 가져온다.
 UINT64_MAX = 2**64 - 1
 UINT256_MAX = 2**256 - 1  # deadline 처럼 uint256 인 필드. 넘으면 서명 인코딩부터 안 된다
 # 학기 코드 YYYYS 의 학기 자리: 1·2 정규, 3 여름, 4 겨울 (docs/CONTRACTS.md "공통 규칙")

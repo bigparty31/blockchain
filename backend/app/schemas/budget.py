@@ -1,9 +1,10 @@
 from typing import Optional
 from pydantic import BaseModel, Field, ConfigDict
 
+from app.constants import MAX_AMOUNT
+
 UINT64_MAX = (1 << 64) - 1
 UINT256_MAX = (1 << 256) - 1
-MAX_AMOUNT = 10**15
 # Python datetime.fromtimestamp 상한 (9999-12-31 23:59:59 UTC)
 MAX_UNIX_SECONDS = 253_402_300_799
 
