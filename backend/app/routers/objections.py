@@ -65,18 +65,19 @@ def _to_unix(dt: Optional[datetime]) -> Optional[int]:
 
 
 def _to_schema(obj: DBObjection) -> ObjectionResponse:
+    answered = obj.status == ObjectionStatus.ANSWERED.value
     return ObjectionResponse(
         id=obj.id,
         entry_id=obj.entry_id,
         user_id=obj.user_id,
         content=obj.content,
-        answer=obj.answer,
-        answered_by=obj.answered_by,
+        answer=obj.answer if answered else None,
+        answered_by=obj.answered_by if answered else None,
         status=ObjectionStatus(obj.status),
         raised_at=_to_unix(obj.raised_at) or 0,
-        answered_at=_to_unix(obj.answered_at),
+        answered_at=_to_unix(obj.answered_at) if answered else None,
         tx_raise=obj.tx_raise,
-        tx_answer=obj.tx_answer,
+        tx_answer=obj.tx_answer if answered else None,
     )
 
 
@@ -113,6 +114,49 @@ def _objection_domain_dict() -> dict:
     }
 
 
+async def _reconcile_pending_answer(
+    db: Session, chain: ChainClient, obj: DBObjection
+) -> tuple[DBObjection, bool]:
+    """OPEN 상태에서 tx_answer 선점이 남아 있는 항목의 온체인 안착 여부를 확인해 DB를 복구한다.
+
+    Returns:
+        (갱신된 obj, 방금 복구되어 ANSWERED로 전환되었는지 여부)
+    """
+    if obj.status != ObjectionStatus.OPEN.value or obj.tx_answer is None:
+        return obj, False
+
+    try:
+        onchain = await chain.get_objection(obj.id)
+    except (ChainUnavailable, ChainSetupError) as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"이전 답변 트랜잭션 결과를 확인할 수 없습니다: {e}",
+        )
+
+    if (
+        onchain is not None
+        and onchain.status == ObjectionStatus.ANSWERED.value
+        and obj.answer is not None
+        and obj.answered_by is not None
+        and obj.answered_at is not None
+    ):
+        obj.status = ObjectionStatus.ANSWERED.value
+        db.commit()
+        db.refresh(obj)
+        return obj, True
+
+    if onchain is None or onchain.status == ObjectionStatus.OPEN.value:
+        obj.tx_answer = None
+        obj.answer = None
+        obj.answered_by = None
+        obj.answered_at = None
+        db.commit()
+        db.refresh(obj)
+        return obj, False
+
+    return obj, False
+
+
 @query_router.get("", response_model=List[ObjectionResponse], summary="이의 제기 목록 조회")
 @query_router.get("/", response_model=List[ObjectionResponse], include_in_schema=False)
 async def list_objections(
@@ -120,9 +164,9 @@ async def list_objections(
     status_filter: Optional[ObjectionStatus] = Query(None, alias="status", description="상태 필터 (OPEN | ANSWERED)"),
     db: Session = Depends(get_db),
 ):
-    """특정 회계 항목 또는 전체 이의 제기 목록을 조회합니다."""
+    """특정 회계 항목 또는 전체 이의 제기 목록을 조회합니다 (온체인 등록 완료된 건만 반환)."""
     try:
-        q = db.query(DBObjection)
+        q = db.query(DBObjection).filter(DBObjection.tx_raise.like("0x%"))
         if entry_id is not None:
             q = q.filter(DBObjection.entry_id == entry_id)
         if status_filter is not None:
@@ -143,7 +187,10 @@ async def get_open_objection_count(db: Session = Depends(get_db)):
     try:
         count = (
             db.query(func.count(DBObjection.id))
-            .filter(DBObjection.status == ObjectionStatus.OPEN.value)
+            .filter(
+                DBObjection.tx_raise.like("0x%"),
+                DBObjection.status == ObjectionStatus.OPEN.value,
+            )
             .scalar()
             or 0
         )
@@ -213,11 +260,59 @@ async def raise_objection(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="해당 학기 학생회비 납부 확인(MembershipSBT 보유)이 필요합니다.",
             )
+
+        # 이전 요청에서 ChainUnavailable 등으로 남은 동일 질문 미확정 행(tx_raise IS NULL 또는 '?...' 선점)을 먼저 확인·복구한다.
+        # SQLite 에서 롤백으로 ID가 재사용되어 체인의 ObjectionAlreadyExists 와 충돌하는 것도 막는다.
+        candidates = (
+            db.query(DBObjection)
+            .filter(
+                DBObjection.entry_id == entry.id,
+                DBObjection.user_id == user.id,
+                DBObjection.content == normalized,
+                DBObjection.status == ObjectionStatus.OPEN.value,
+            )
+            .order_by(DBObjection.id.desc())
+            .all()
+        )
+        obj: Optional[DBObjection] = None
+        for cand in candidates:
+            if cand.tx_raise is None:
+                onchain = await chain.get_objection(cand.id)
+                if onchain is None:
+                    obj = cand
+                    break
+            elif cand.tx_raise.startswith("?"):
+                inflight_hash = "0x" + cand.tx_raise[1:]
+                onchain = await chain.get_objection(cand.id)
+                if onchain is not None:
+                    cand.tx_raise = inflight_hash
+                    db.commit()
+                    db.refresh(cand)
+                    return _to_schema(cand)
+                # 이전 시도에서 before_broadcast 후 체인에 안착하지 못한 행 -> 재사용
+                cand.tx_raise = None
+                db.commit()
+                db.refresh(cand)
+                obj = cand
+                break
+
+        if obj is None:
+            obj = DBObjection(
+                entry_id=entry.id,
+                user_id=user.id,
+                content=normalized,
+                status=ObjectionStatus.OPEN.value,
+                raised_at=datetime.now(timezone.utc),
+                tx_raise=None,
+            )
+            db.add(obj)
+            db.commit()
+            db.refresh(obj)
     except (ChainUnavailable, ChainSetupError) as e:
-        logger.warning("이의 제기 SBT 확인 불가: user=%s %s", user.id, e)
+        logger.warning("이의 제기 사전 체인 확인 불가: user=%s %s", user.id, e)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="회원권 보유 여부를 확인할 수 없어 이의를 제기할 수 없습니다. 잠시 후 다시 시도해 주세요.",
+            detail="블록체인 상태를 확인할 수 없어 이의를 제기할 수 없습니다. 잠시 후 다시 시도해 주세요.",
         )
     except WalletDerivationError as e:
         logger.warning("학생 지갑 파생 실패: user=%s %s", user.id, e)
@@ -226,35 +321,86 @@ async def raise_objection(
             detail="학생 지갑 주소를 확인할 수 없습니다.",
         )
     except SQLAlchemyError as e:
-        logger.exception("이의 제기 사전 조회 중 데이터베이스 오류: %s", e)
+        db.rollback()
+        logger.exception("이의 제기 사전 조회/채번 중 데이터베이스 오류: %s", e)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="데이터베이스 처리 중 오류가 발생했습니다.",
         )
 
-    now = datetime.now(timezone.utc)
-    obj = DBObjection(
-        entry_id=entry.id,
-        user_id=user.id,
-        content=normalized,
-        status=ObjectionStatus.OPEN.value,
-        raised_at=now,
-    )
+    claimed_tx: Optional[str] = None
+
+    async def _claim_tx_raise(tx_hash: str) -> None:
+        nonlocal claimed_tx
+        inflight_marker = "?" + tx_hash[2:]
+        rows = (
+            db.query(DBObjection)
+            .filter(DBObjection.id == obj.id, DBObjection.tx_raise.is_(None))
+            .update({DBObjection.tx_raise: inflight_marker}, synchronize_session=False)
+        )
+        if rows == 0:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="이미 처리 중인 이의 제기 요청입니다.",
+            )
+        db.commit()
+        claimed_tx = tx_hash
+
+    def _clear_tx_raise() -> None:
+        if claimed_tx is None:
+            return
+        try:
+            db.query(DBObjection).filter(DBObjection.id == obj.id).update(
+                {DBObjection.tx_raise: None}, synchronize_session=False
+            )
+            db.commit()
+        except SQLAlchemyError:
+            db.rollback()
+
     try:
-        db.add(obj)
-        db.flush()
-        tx_result = await chain.raise_objection(obj.id, entry.id, content_hash, raiser_wallet)
+        tx_result = await chain.raise_objection(
+            obj.id, entry.id, content_hash, raiser_wallet, before_broadcast=_claim_tx_raise
+        )
         obj.tx_raise = tx_result.tx_hash
         db.commit()
         db.refresh(obj)
+    except HTTPException:
+        raise
     except ChainRevert as e:
-        db.rollback()
+        _clear_tx_raise()
+        if e.reason == ObjectionRevertReason.OBJECTION_ALREADY_EXISTS:
+            # 이전 전송에서 응답만 유실되고 실제 체인에는 이미 기록된 경우 복구한다.
+            try:
+                onchain = await chain.get_objection(obj.id)
+                if onchain is not None and onchain.content_hash.lower() == content_hash.lower():
+                    obj.tx_raise = claimed_tx or ("0x" + "0" * 64)
+                    db.commit()
+                    db.refresh(obj)
+                    return _to_schema(obj)
+            except (ChainUnavailable, ChainSetupError, SQLAlchemyError):
+                db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"온체인 이의 제기 기록이 거절되었습니다: {e}",
         )
-    except (ChainUnavailable, ChainSetupError) as e:
-        db.rollback()
+    except ChainSetupError as e:
+        _clear_tx_raise()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"블록체인 네트워크와 통신할 수 없습니다: {e}",
+        )
+    except ChainUnavailable as e:
+        if claimed_tx is not None:
+            try:
+                onchain = await chain.get_objection(obj.id)
+                if onchain is not None:
+                    obj.tx_raise = claimed_tx
+                    db.commit()
+                    db.refresh(obj)
+                    return _to_schema(obj)
+            except (ChainUnavailable, ChainSetupError, SQLAlchemyError):
+                db.rollback()
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"블록체인 네트워크와 통신할 수 없습니다: {e}",
@@ -280,6 +426,7 @@ async def prepare_answer_objection(
     objection_id: int = Path(..., ge=1, le=INT64_MAX),
     user: User = Depends(responder_only),
     db: Session = Depends(get_db),
+    chain: ChainClient = Depends(get_chain_client),
 ):
     """답변 본문을 정본화·해시하고, 임원 기기가 서명할 EIP-712 AnswerRequest 값을 내려줍니다."""
     normalized = _normalize_multiline(req.answer, "answer", "답변 본문은 비어 있거나 공백만 있을 수 없습니다.")
@@ -292,11 +439,22 @@ async def prepare_answer_objection(
             detail="데이터베이스 처리 중 오류가 발생했습니다.",
         )
 
-    if obj is None:
+    if obj is None or not obj.tx_raise or not obj.tx_raise.startswith("0x"):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"이의 제기(id={objection_id})를 찾을 수 없습니다.",
         )
+
+    try:
+        obj, _ = await _reconcile_pending_answer(db, chain, obj)
+    except SQLAlchemyError as e:
+        db.rollback()
+        logger.exception("이의 답변 선점 복구 중 데이터베이스 오류: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 처리 중 오류가 발생했습니다.",
+        )
+
     if obj.status != ObjectionStatus.OPEN.value or obj.tx_answer is not None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -349,11 +507,25 @@ async def answer_objection(
             detail="데이터베이스 처리 중 오류가 발생했습니다.",
         )
 
-    if obj is None:
+    if obj is None or not obj.tx_raise or not obj.tx_raise.startswith("0x"):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"이의 제기(id={objection_id})를 찾을 수 없습니다.",
         )
+
+    try:
+        obj, recovered_now = await _reconcile_pending_answer(db, chain, obj)
+    except SQLAlchemyError as e:
+        db.rollback()
+        logger.exception("이의 답변 선점 복구 중 데이터베이스 오류: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="데이터베이스 처리 중 오류가 발생했습니다.",
+        )
+
+    if recovered_now and obj.answer == normalized:
+        return _to_schema(obj)
+
     if obj.status != ObjectionStatus.OPEN.value or obj.tx_answer is not None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -381,6 +553,11 @@ async def answer_objection(
             detail="서명자 지갑 주소가 로그인한 임원의 지갑 주소와 일치하지 않습니다.",
         )
 
+    now = datetime.now(timezone.utc)
+    raised_utc = obj.raised_at if obj.raised_at.tzinfo else obj.raised_at.replace(tzinfo=timezone.utc)
+    if now < raised_utc:
+        now = raised_utc
+
     claimed = False
 
     async def _claim_tx_answer(tx_hash: str) -> None:
@@ -392,7 +569,15 @@ async def answer_objection(
                 DBObjection.status == ObjectionStatus.OPEN.value,
                 DBObjection.tx_answer.is_(None),
             )
-            .update({DBObjection.tx_answer: tx_hash}, synchronize_session=False)
+            .update(
+                {
+                    DBObjection.tx_answer: tx_hash,
+                    DBObjection.answer: normalized,
+                    DBObjection.answered_by: user.id,
+                    DBObjection.answered_at: now,
+                },
+                synchronize_session=False,
+            )
         )
         if rows == 0:
             db.rollback()
@@ -410,7 +595,15 @@ async def answer_objection(
             db.query(DBObjection).filter(
                 DBObjection.id == obj.id,
                 DBObjection.status == ObjectionStatus.OPEN.value,
-            ).update({DBObjection.tx_answer: None}, synchronize_session=False)
+            ).update(
+                {
+                    DBObjection.tx_answer: None,
+                    DBObjection.answer: None,
+                    DBObjection.answered_by: None,
+                    DBObjection.answered_at: None,
+                },
+                synchronize_session=False,
+            )
             db.commit()
         except SQLAlchemyError:
             db.rollback()
@@ -434,15 +627,23 @@ async def answer_objection(
             detail=f"블록체인 네트워크와 통신할 수 없습니다: {e}",
         )
     except ChainUnavailable as e:
+        if claimed:
+            try:
+                onchain = await chain.get_objection(obj.id)
+                if onchain is not None and onchain.status == ObjectionStatus.ANSWERED.value:
+                    db.query(DBObjection).filter(DBObjection.id == obj.id).update(
+                        {DBObjection.status: ObjectionStatus.ANSWERED.value},
+                        synchronize_session=False,
+                    )
+                    db.commit()
+                    db.refresh(obj)
+                    return _to_schema(obj)
+            except (ChainUnavailable, ChainSetupError, SQLAlchemyError):
+                pass
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"블록체인 네트워크와 통신할 수 없습니다: {e}",
         )
-
-    now = datetime.now(timezone.utc)
-    raised_utc = obj.raised_at if obj.raised_at.tzinfo else obj.raised_at.replace(tzinfo=timezone.utc)
-    if now < raised_utc:
-        now = raised_utc
 
     try:
         updated = (

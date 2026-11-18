@@ -275,3 +275,142 @@ def test_raise_and_answer_validation_and_role_guards():
         headers=_auth(Role.TREASURER),
     )
     assert res_treasurer_ans.status_code == 403
+
+
+def test_raise_objection_recovers_after_chain_unavailable(monkeypatch):
+    """전송 후 ChainUnavailable 발생 시(landed=True/False) 질문 본문과 ID를 보존하고 재요청 시 복구한다."""
+    _grant_student_sbt()
+
+    # 1. landed=True + 첫 get_objection 도 실패하여 503이 난 뒤 재시도 시 동일 ID/본문으로 복구
+    _test_chain.unavailable_next("raise_objection", landed=True, sent=True)
+    orig_get = _test_chain.get_objection
+    calls = {"n": 0}
+
+    async def flaky_get(oid: int):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ChainUnavailable("조회 일시 실패")
+        return await orig_get(oid)
+
+    monkeypatch.setattr(_test_chain, "get_objection", flaky_get)
+
+    res1 = client.post(
+        "/objections",
+        json={"entry_id": 1, "content": "응답 유실 복구 질문"},
+        headers=_auth(Role.STUDENT),
+    )
+    assert res1.status_code == 503
+    assert client.get("/objections").json() == []
+
+    # 재요청 시 체인에 이미 들어간 기존 ID(1)를 복구하여 201 반환
+    res2 = client.post(
+        "/objections",
+        json={"entry_id": 1, "content": "응답 유실 복구 질문"},
+        headers=_auth(Role.STUDENT),
+    )
+    assert res2.status_code == 201
+    data2 = res2.json()
+    assert data2["id"] == 1
+    assert data2["content"] == "응답 유실 복구 질문"
+    assert data2["tx_raise"].startswith("0x")
+    assert len(client.get("/objections").json()) == 1
+
+    # 2. landed=False 시 503 반환 후 재시도하면 같은 행을 재전송하여 성공
+    _test_chain.unavailable_next("raise_objection", landed=False, sent=True)
+    res3 = client.post(
+        "/objections",
+        json={"entry_id": 1, "content": "미안착 재전송 질문"},
+        headers=_auth(Role.STUDENT),
+    )
+    assert res3.status_code == 503
+    assert len(client.get("/objections").json()) == 1
+
+    res4 = client.post(
+        "/objections",
+        json={"entry_id": 1, "content": "미안착 재전송 질문"},
+        headers=_auth(Role.STUDENT),
+    )
+    assert res4.status_code == 201
+    assert res4.json()["id"] == 2
+    assert len(client.get("/objections").json()) == 2
+
+
+def test_answer_objection_recovers_after_chain_unavailable(monkeypatch):
+    """답변 전송 후 ChainUnavailable 발생 시(landed=True/False) 본문·답변자를 보존하고 재요청 시 복구한다."""
+    _grant_student_sbt()
+    created = client.post(
+        "/objections",
+        json={"entry_id": 1, "content": "답변 복구 테스트 질문"},
+        headers=_auth(Role.STUDENT),
+    ).json()
+    oid = created["id"]
+
+    prep = client.post(
+        f"/objections/{oid}/prepare-answer",
+        json={"answer": "첫 번째 답변"},
+        headers=_auth(Role.AUDITOR),
+    ).json()
+
+    # 1. landed=False -> 503 후 prepare-answer 와 answer 재요청이 409로 막히지 않고 통과해야 함
+    _test_chain.unavailable_next("answer_objection", landed=False, sent=True)
+    res_unlanded = client.post(
+        f"/objections/{oid}/answer",
+        json={
+            "answer": "첫 번째 답변",
+            "answer_hash": prep["answer_hash"],
+            "deadline": prep["deadline"],
+            "signature": fake_signature(AUDITOR_WALLET),
+        },
+        headers=_auth(Role.AUDITOR),
+    )
+    assert res_unlanded.status_code == 503
+
+    prep_retry = client.post(
+        f"/objections/{oid}/prepare-answer",
+        json={"answer": "최종 복구 답변"},
+        headers=_auth(Role.AUDITOR),
+    )
+    assert prep_retry.status_code == 200
+    prep2 = prep_retry.json()
+
+    # 2. landed=True + 첫 get_objection 도 실패 -> 503 후 재요청 시 본문·답변자·tx_answer 복구
+    _test_chain.unavailable_next("answer_objection", landed=True, sent=True)
+    orig_get = _test_chain.get_objection
+    calls = {"n": 0}
+
+    async def flaky_get(target_id: int):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ChainUnavailable("조회 일시 실패")
+        return await orig_get(target_id)
+
+    monkeypatch.setattr(_test_chain, "get_objection", flaky_get)
+
+    res_landed_503 = client.post(
+        f"/objections/{oid}/answer",
+        json={
+            "answer": "최종 복구 답변",
+            "answer_hash": prep2["answer_hash"],
+            "deadline": prep2["deadline"],
+            "signature": fake_signature(AUDITOR_WALLET),
+        },
+        headers=_auth(Role.AUDITOR),
+    )
+    assert res_landed_503.status_code == 503
+
+    res_recovered = client.post(
+        f"/objections/{oid}/answer",
+        json={
+            "answer": "최종 복구 답변",
+            "answer_hash": prep2["answer_hash"],
+            "deadline": prep2["deadline"],
+            "signature": fake_signature(AUDITOR_WALLET),
+        },
+        headers=_auth(Role.AUDITOR),
+    )
+    assert res_recovered.status_code == 200
+    body = res_recovered.json()
+    assert body["status"] == "ANSWERED"
+    assert body["answer"] == "최종 복구 답변"
+    assert body["answered_by"] is not None
+    assert body["tx_answer"].startswith("0x")
