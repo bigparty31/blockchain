@@ -148,7 +148,7 @@ class PushSender(Protocol):
 
 ## `kind` 값
 
-이벤트와 받는 사람은 §4.8이다. 값은 `docs/enums.md`의 notification kind와 같다 (PR #31). 증액 쪽은 `REVISION_*`, T4 수정 요청은 `ENTRY_EDIT_REQUESTED`다 — 「개정」은 예산 용어다. 이의 제기는 v0.13 범위 밖이라 없다.
+이벤트와 받는 사람은 §4.8이다. 값은 `docs/enums.md`의 notification kind와 같다 (PR #31). 증액 쪽은 `REVISION_*`, T4 수정 요청은 `ENTRY_EDIT_REQUESTED`다 — 「개정」은 예산 용어다. 이의 알림은 PRD v0.16 §4.8에서 다시 들어갔다 — 이의 제기는 감사 전원·회장에게, 답변 등록은 제기한 학생에게 간다(학생 한 명에게 보내는 경로는 [미정]). kind 값은 아직 정하지 않았다. `docs/enums.md`에 먼저 추가한 뒤 이 표에 적는다.
 
 | `kind` | 이벤트 | 받는 사람 | 연결 | 재알림 |
 |---|---|---|---|---|
