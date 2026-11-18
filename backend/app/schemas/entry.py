@@ -1,6 +1,6 @@
 from enum import Enum
 from typing import Optional
-from pydantic import BaseModel, Field, ConfigDict, field_validator
+from pydantic import BaseModel, Field, ConfigDict, StrictInt, field_validator
 
 from app.utils.hashing import canonical
 
@@ -8,6 +8,8 @@ COUNTERPARTY_MAX_LENGTH = 100
 RECEIPT_PATH_MAX_LENGTH = 255
 RECEIPT_HASH_MAX_LENGTH = 66
 OCR_APPROVAL_NO_MAX_LENGTH = 50
+MAX_AMOUNT = 10**15
+INT64_MAX = (1 << 63) - 1
 
 
 class EntryKind(str, Enum):
@@ -84,13 +86,13 @@ class EntryResponse(BaseModel):
 
 
 class EntryCreate(BaseModel):
-    term_id: int = Field(1, description="학기 ID")
+    term_id: StrictInt = Field(1, ge=1, le=INT64_MAX, description="학기 ID")
     kind: EntryKind = Field(EntryKind.EXPENSE, description="수입/지출 구분")
-    amount: int = Field(..., description="금액 (원 단위, 정수)")
+    amount: StrictInt = Field(..., ge=-MAX_AMOUNT, le=MAX_AMOUNT, description="금액 (원 단위, 정수, |amount| <= 10^15)")
     counterparty: str = Field(..., max_length=COUNTERPARTY_MAX_LENGTH, description="거래처 (상호명, 최대 100자)")
     purpose: str = Field(..., description="사용 목적")
-    budget_id: Optional[int] = Field(None, description="배정 예산 ID")
-    occurred_at: int = Field(..., description="거래 일시 (Unix Timestamp KST 자정)")
+    budget_id: Optional[StrictInt] = Field(None, ge=1, le=INT64_MAX, description="배정 예산 ID")
+    occurred_at: StrictInt = Field(..., le=INT64_MAX, description="거래 일시 (Unix Timestamp KST 자정)")
     receipt_path: Optional[str] = Field(None, max_length=RECEIPT_PATH_MAX_LENGTH, description="영수증 이미지 경로")
     receipt_hash: Optional[str] = Field(None, max_length=RECEIPT_HASH_MAX_LENGTH, description="영수증 SHA-256 해시")
     # 아래 ocr_* 는 옛 앱과의 호환을 위해 받기만 하고 **쓰지 않는다** — 서버가 POST /ocr/receipt 에서 저장한 판독값과
@@ -99,7 +101,7 @@ class EntryCreate(BaseModel):
     ocr_approval_no: Optional[str] = Field(None, max_length=OCR_APPROVAL_NO_MAX_LENGTH, description="(무시됨) 영수증 카드 승인번호")
     ocr_paid_at: Optional[int] = Field(None, description="(무시됨) OCR 인식 결제 일시")
     ocr_status: Optional[OCRStatus] = Field(None, description="(무시됨) OCR 판독 상태 — 서버가 다시 판정한다")
-    corrects_entry_id: Optional[int] = Field(None, description="정정 등록 시 대상 Entry ID")
+    corrects_entry_id: Optional[StrictInt] = Field(None, ge=1, le=INT64_MAX, description="정정 등록 시 대상 Entry ID")
     correction_reason: Optional[CorrectionReason] = Field(None, description="정정 사유")
 
     @field_validator("counterparty", mode="before")

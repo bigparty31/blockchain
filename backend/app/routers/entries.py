@@ -4,7 +4,7 @@ import inspect
 import logging
 import re
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
@@ -53,6 +53,8 @@ from app.schemas.entry import (
     EntryStatus,
     EntrySubmitRequest,
     EntrySubmitResponse,
+    INT64_MAX,
+    MAX_AMOUNT,
     OCRStatus,
     OnChainEntryResponse,
 )
@@ -216,11 +218,16 @@ def _validate_reclassify_negative_order(
 
 def _validate_correction_rules(db: Session, entry: EntryCreate) -> None:
     """정정 규칙 서버 검사 (PRD v0.15 §4.4, docs/CONTRACTS.md '정정', B7)."""
-    # 1. 차액 0 금지 (ZeroAmount)
+    # 1. 차액 0 금지 (ZeroAmount) 및 체인 금액 상한 검사 (AmountOutOfRange)
     if entry.amount == 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="금액(amount)은 0일 수 없습니다. (ZeroAmount)",
+        )
+    if abs(entry.amount) > MAX_AMOUNT:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"금액(|amount|)은 체인 상한({MAX_AMOUNT:,}원)을 초과할 수 없습니다. (AmountOutOfRange)",
         )
 
     # 2. 일반 항목 vs 정정 항목 기본 검증
@@ -525,13 +532,17 @@ async def _get_chain_client_safe(request: Request) -> Optional[ChainClient]:
 @query_router.get("/", response_model=List[EntryResponse], include_in_schema=False)
 async def get_entries(
     request: Request,
+    term_id: Optional[int] = Query(None, ge=1, le=INT64_MAX, description="조회할 학기 ID (미지정 시 전체 학기)"),
     db: Session = Depends(get_db),
 ):
     """모바일 앱 '내역 목록' 및 '대시보드'에서 호출하는 수입·지출 내역 목록 API입니다.
     체인에 기록된 건(status IS NOT NULL)만 반환하며, 기기 서명 미제출 초안은 제외됩니다.
     """
     try:
-        db_entries = db.query(DBEntry).filter(DBEntry.status.isnot(None)).all()
+        query = db.query(DBEntry).filter(DBEntry.status.isnot(None))
+        if term_id is not None:
+            query = query.filter(DBEntry.term_id == term_id)
+        db_entries = query.all()
     except SQLAlchemyError as e:
         logger.exception("수입·지출 내역 목록 조회 중 데이터베이스 오류: %s", e)
         raise HTTPException(
