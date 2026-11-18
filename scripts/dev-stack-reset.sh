@@ -16,6 +16,15 @@ for arg in "$@"; do
   esac
 done
 
+# compose 는 셸 환경변수를 .env 보다 먼저 쓴다. 셸에 이 이름이 있으면(빈 값이라도) .env 의 값을 가려
+# 아래 값 판단이 .env 를 잘못 고치므로, 아무것도 건드리기 전에 멈춘다 (#101 Codex 3차)
+for name in RELAYER_PRIVATE_KEY STUDENT_WALLET_MNEMONIC; do
+  if [ -n "${!name+x}" ]; then
+    echo "셸에 $name 이(가) 설정돼 있어 .env 값을 가립니다. unset $name 후 다시 실행하세요." >&2
+    exit 1
+  fi
+done
+
 if [ "$assume_yes" -ne 1 ]; then
   read -r -p "체인과 DB 를 모두 지웁니다. 계속할까요? [y/N] " answer
   [ "$answer" = "y" ] || { echo "취소했습니다."; exit 1; }
