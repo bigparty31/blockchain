@@ -105,6 +105,26 @@ def setup_objection_db(tmp_path, monkeypatch):
                 tx_pending="0x" + "cc" * 32,
             )
         )
+        db.add(
+            DBEntry(
+                id=3,
+                term_id=1,
+                kind="EXPENSE",
+                amount=15000,
+                counterparty="반려상점",
+                purpose="반려 항목",
+                budget_id=None,
+                occurred_at=1788793200,
+                meta_hash="0x" + "33" * 32,
+                hash_version=1,
+                status="REJECTED",
+                created_by=2,
+                rejected_by=3,
+                reject_reason="영수증 누락",
+                tx_pending="0x" + "dd" * 32,
+                tx_confirm="0x" + "ee" * 32,
+            )
+        )
         db.commit()
 
     def override_get_db():
@@ -228,16 +248,23 @@ def test_raise_objection_requires_sbt_and_fails_closed(monkeypatch):
 
 
 def test_raise_and_answer_validation_and_role_guards():
-    """미확정 항목·제어문자·빈 답변·잘못된 권한을 차단한다."""
+    """PRD v0.17 §4.5: 확정(CONFIRMED)·대기 중(PENDING) 항목은 허용하고, 반려(REJECTED)·제어문자·빈 답변·잘못된 권한을 차단한다."""
     _grant_student_sbt()
 
-    # 1. 미확정(PENDING) 항목에 이의 제기 -> 400
+    # 1. 대기 중(PENDING) 항목에 이의 제기 -> 201 허용, 반려(REJECTED) 항목 -> 400 차단
     res_pending = client.post(
         "/objections",
         json={"entry_id": 2, "content": "대기 항목 문의"},
         headers=_auth(Role.STUDENT),
     )
-    assert res_pending.status_code == 400
+    assert res_pending.status_code == 201
+
+    res_rejected = client.post(
+        "/objections",
+        json={"entry_id": 3, "content": "반려 항목 문의"},
+        headers=_auth(Role.STUDENT),
+    )
+    assert res_rejected.status_code == 400
 
     # 2. 제어문자 포함 본문 -> 400
     res_ctrl = client.post(
@@ -472,3 +499,142 @@ def test_get_objection_by_id_and_student_jwt_secret_split(monkeypatch):
         ).status_code
         == 401
     )
+
+
+def test_unmined_then_retry_then_late_mined_preserves_question_and_answer():
+    """Codex 2차 회귀: 미확정(채굴 대기) 상태에서 다른 요청/재요청이 들어온 뒤 원래 전송이 뒤늦게 채굴되어도 질문·답변 본문이 보존된다."""
+    from app.chain.models import OnChainObjection, ZERO_ADDRESS, ZERO_BYTES32
+
+    _grant_student_sbt()
+    student = next(u for u in users.SEED_USERS if u.role == Role.STUDENT)
+    raiser_addr = student_address(student.wallet_index)
+
+    # 1) 질문 A 전송 중 타임아웃(채굴 대기: landed=False) -> id=1 채번 및 '?...' 보존
+    _test_chain.unavailable_next("raise_objection", landed=False, sent=True)
+    res_q1 = client.post(
+        "/objections",
+        json={"entry_id": 1, "content": "원래 채굴 대기 질문 A"},
+        headers=_auth(Role.STUDENT),
+    )
+    assert res_q1.status_code == 503
+
+    # 2) 아직 질문 A가 미채굴인 상태에서 질문 B를 새로 요청 -> id=1을 덮어쓰지 않고 id=2로 등록
+    res_q2 = client.post(
+        "/objections",
+        json={"entry_id": 1, "content": "다른 새 질문 B"},
+        headers=_auth(Role.STUDENT),
+    )
+    assert res_q2.status_code == 201
+    assert res_q2.json()["id"] == 2
+    assert res_q2.json()["content"] == "다른 새 질문 B"
+
+    # 3) 뒤늦게 원래 질문 A(id=1)가 체인에서 채굴됨 -> 재요청/조회 시 질문 A 본문과 해시가 일치하며 복구됨
+    _test_chain._objections[1] = OnChainObjection(
+        entry_id=1,
+        content_hash=text_hash("원래 채굴 대기 질문 A"),
+        answer_hash=ZERO_BYTES32,
+        status="OPEN",
+        raiser=raiser_addr,
+        responder=ZERO_ADDRESS,
+    )
+    res_q1_recover = client.post(
+        "/objections",
+        json={"entry_id": 1, "content": "원래 채굴 대기 질문 A"},
+        headers=_auth(Role.STUDENT),
+    )
+    assert res_q1_recover.status_code == 201
+    assert res_q1_recover.json()["id"] == 1
+    assert res_q1_recover.json()["content"] == "원래 채굴 대기 질문 A"
+
+    # 4) 답변 A 전송 중 타임아웃(채굴 대기: landed=False) -> prepare-answer 재요청이 와도 보존된 답변 A가 삭제되지 않음
+    prep_a = client.post(
+        "/objections/1/prepare-answer",
+        json={"answer": "원래 채굴 대기 답변 A"},
+        headers=_auth(Role.AUDITOR),
+    ).json()
+    _test_chain.unavailable_next("answer_objection", landed=False, sent=True)
+    assert (
+        client.post(
+            "/objections/1/answer",
+            json={
+                "answer": "원래 채굴 대기 답변 A",
+                "answer_hash": prep_a["answer_hash"],
+                "deadline": prep_a["deadline"],
+                "signature": fake_signature(AUDITOR_WALLET),
+            },
+            headers=_auth(Role.AUDITOR),
+        ).status_code
+        == 503
+    )
+
+    # 아직 미채굴인 동안 다른 답변 B로 prepare-answer를 호출해도 DB에 보존된 답변 A가 지워지지 않아야 함
+    prep_b = client.post(
+        "/objections/1/prepare-answer",
+        json={"answer": "새 답변 B"},
+        headers=_auth(Role.AUDITOR),
+    )
+    assert prep_b.status_code == 200
+
+    # 5) 뒤늦게 원래 답변 A가 체인에서 채굴됨 -> 이후 답변 A(또는 B) 제출 시 보존된 답변 A로 복구됨
+    _test_chain._objections[1] = OnChainObjection(
+        entry_id=1,
+        content_hash=text_hash("원래 채굴 대기 질문 A"),
+        answer_hash=text_hash("원래 채굴 대기 답변 A"),
+        status="ANSWERED",
+        raiser=raiser_addr,
+        responder=AUDITOR_WALLET,
+    )
+    res_ans_recover = client.post(
+        "/objections/1/answer",
+        json={
+            "answer": "원래 채굴 대기 답변 A",
+            "answer_hash": prep_a["answer_hash"],
+            "deadline": prep_a["deadline"],
+            "signature": fake_signature(AUDITOR_WALLET),
+        },
+        headers=_auth(Role.AUDITOR),
+    )
+    assert res_ans_recover.status_code == 200
+    assert res_ans_recover.json()["status"] == "ANSWERED"
+    assert res_ans_recover.json()["answer"] == "원래 채굴 대기 답변 A"
+
+
+def test_objection_eip712_vectors():
+    """PR #129 objectionVectors(감사·회장 AnswerRequest 서명 벡터 2건)와 백엔드 EIP-712 인코딩·복구가 일치하는지 검증."""
+    from app.chain.deployment import Eip712Domain
+    from app.chain.eip712 import digest, recover_signer, typed_data_for
+    from app.chain.models import AnswerRequest
+
+    domain = Eip712Domain(
+        name="ObjectionRegistry",
+        version="1",
+        chain_id=31337,
+        verifying_contract="0x5FC8d32690cc91D4c39d9d3abcBD16989F875707",
+        domain_separator="0x416805697be1ff041a4ce947f9cbc23108bba4e7fde1ccf4ab4145ae330f9dfc",
+    )
+    vectors = [
+        (
+            AnswerRequest(
+                objection_id=1,
+                answer_hash="0x441076584b2fc8da010f82ea6727c17b7a05df0aef7087bbf1ccc072a865efde",
+                deadline=1790700000,
+            ),
+            "0x9dd2e581a12e0fdf2696b0b32f36bd1c30d972be8539d36392a041359d8307aa",
+            "0x4d13b117b5ae8b3df899901e3b8d583ca503d9b04456bfed7b7b414f759efb651ad453a8eca0f666161bd7a3ca86f04ad20d85dbe11bff0134f1553bd600bfb31b",
+            "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+        ),
+        (
+            AnswerRequest(
+                objection_id=2,
+                answer_hash="0x441076584b2fc8da010f82ea6727c17b7a05df0aef7087bbf1ccc072a865efde",
+                deadline=1790700000,
+            ),
+            "0x4e48f1c4c6d0d68e7bcce39b011b7ab3d804e9af77ed3818357a45361822728b",
+            "0x824448c59930316a32410761b725b011e11c8dafe01220fa99f8168a4c3b5b583f98cdba7286c4a9e3e61009478d104076cde3d68c8427928271d472a74442cf1c",
+            "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+        ),
+    ]
+    for req, expected_digest, sig, expected_signer in vectors:
+        td = typed_data_for(req, domain)
+        assert digest(td) == expected_digest
+        assert recover_signer(td, sig) == expected_signer

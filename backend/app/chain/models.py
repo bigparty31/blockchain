@@ -517,6 +517,8 @@ class ObjectionRevertReason(str, Enum):
 
     UNKNOWN = "Unknown"
     UNAUTHORIZED = "Unauthorized"
+    RESERVED_ID = "ReservedId"
+    ZERO_ADDRESS = "ZeroAddress"
     OBJECTION_ALREADY_EXISTS = "ObjectionAlreadyExists"
     OBJECTION_NOT_FOUND = "ObjectionNotFound"
     OBJECTION_ALREADY_ANSWERED = "ObjectionAlreadyAnswered"

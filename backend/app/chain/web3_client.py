@@ -62,15 +62,23 @@ from app.chain.models import (
     check_tx_hash,
 )
 from app.schemas.entry import EntryStatus
-from app.chain.revert import RevertDecoder, budget_revert_decoder, membership_revert_decoder, rpc_error_of
+from app.chain.revert import (
+    RevertDecoder,
+    budget_revert_decoder,
+    membership_revert_decoder,
+    objection_revert_decoder,
+    rpc_error_of,
+)
 
 LEDGER = "AccountingLedger"
 ROLE_MANAGER = "RoleManager"
 BUDGET_TOKEN = "BudgetToken"
 CONTRACTS = (LEDGER, ROLE_MANAGER, BUDGET_TOKEN)
-# 배포 기록에 있을 때만 쓰는 컨트랙트. 없어도 연결은 되고, 회원권 조회만 ChainSetupError 다 (아직 배포 전일 수 있다)
+# 배포 기록에 있을 때만 쓰는 컨트랙트. 없어도 연결은 되고, 해당 기능 호출만 ChainSetupError 다 (아직 배포 전일 수 있다)
 MEMBERSHIP_SBT = "MembershipSBT"
-OPTIONAL_CONTRACTS = (MEMBERSHIP_SBT,)
+OBJECTION_REGISTRY = "ObjectionRegistry"
+OPTIONAL_CONTRACTS = (MEMBERSHIP_SBT, OBJECTION_REGISTRY)
+OBJECTION_STATUS_ORDER = ("OPEN", "ANSWERED")
 
 RPC_TIMEOUT_SECONDS = 10
 RECEIPT_TIMEOUT_SECONDS = 30  # 쓰기 메서드가 receipt 를 기다리는 한도. 넘으면 ChainUnavailable
@@ -269,11 +277,15 @@ class Web3ChainClient:
         self._role_manager = contracts.get(ROLE_MANAGER)
         self._budget_token = contracts.get(BUDGET_TOKEN)
         self._membership_sbt = contracts.get(MEMBERSHIP_SBT)
+        self._objection_registry = contracts.get(OBJECTION_REGISTRY)
         # 확정 안에서 원장이 부르는 BudgetToken 의 에러도 원장 호출의 revert 로 올라온다 (app/chain/revert.py)
         self._reverts = RevertDecoder(self._ledger.abi, self._budget_token.abi if self._budget_token is not None else None)
         self._budget_reverts = budget_revert_decoder(self._budget_token.abi) if self._budget_token is not None else None
         self._membership_reverts = (
             membership_revert_decoder(self._membership_sbt.abi) if self._membership_sbt is not None else None
+        )
+        self._objection_reverts = (
+            objection_revert_decoder(self._objection_registry.abi) if self._objection_registry is not None else None
         )
         self._entry_fields = _entry_fields(self._ledger.abi)
         self._budget_fields = _budget_fields(self._budget_token.abi) if self._budget_token is not None else None
@@ -930,6 +942,18 @@ class Web3ChainClient:
             return TxResult(tx_hash=tx_hash, status=entry.status)
         raise ChainUnavailable(f"결과 이벤트를 찾지 못했다 (tx={tx_hash})")
 
+    def _objection_contract(self):
+        self._ensure_open()
+        if self._objection_registry is None:
+            raise ChainSetupError("배포 기록에 ObjectionRegistry 가 없다. 이의 제기를 처리할 수 없다")
+        return self._objection_registry
+
+    def _objection_domain(self):
+        domain = self._deployment.eip712.get(OBJECTION_REGISTRY)
+        if domain is None:
+            raise ChainSetupError("배포 기록에 ObjectionRegistry 서명 도메인이 없다.")
+        return domain
+
     async def raise_objection(
         self,
         objection_id: int,
@@ -938,7 +962,15 @@ class Web3ChainClient:
         raiser: str,
         before_broadcast: Optional[BeforeBroadcast] = None,
     ) -> ObjectionTxResult:
-        raise ChainSetupError("ObjectionRegistry 릴레이가 아직 연결되지 않았습니다.")
+        reg = self._objection_contract()
+        call = getattr(reg.functions, "raise")(
+            objection_id,
+            entry_id,
+            bytes.fromhex(content_hash[2:]),
+            AsyncWeb3.to_checksum_address(raiser),
+        )
+        tx_hash, _receipt = await self._relay(call, before_broadcast, self._objection_reverts)
+        return ObjectionTxResult(tx_hash=tx_hash)
 
     async def answer_objection(
         self,
@@ -946,7 +978,37 @@ class Web3ChainClient:
         signature: str,
         before_broadcast: Optional[BeforeBroadcast] = None,
     ) -> ObjectionTxResult:
-        raise ChainSetupError("ObjectionRegistry 릴레이가 아직 연결되지 않았습니다.")
+        reg = self._objection_contract()
+        msg = {
+            "objectionId": request.objection_id,
+            "answerHash": bytes.fromhex(request.answer_hash[2:]),
+            "deadline": request.deadline,
+        }
+        call = reg.functions.answer(msg, _signature_bytes(signature))
+        tx_hash, _receipt = await self._relay(call, before_broadcast, self._objection_reverts)
+        return ObjectionTxResult(tx_hash=tx_hash)
 
     async def get_objection(self, objection_id: int) -> Optional[OnChainObjection]:
-        return None
+        reg = self._objection_contract()
+        if not 0 <= objection_id < 2**256:
+            return None
+        try:
+            raw = await reg.functions.getObjection(objection_id).call()
+        except Exception as e:
+            self._raise_call_failure(e)
+        entry_id, content_hash, answer_hash, status_num, raiser, responder = raw
+        if str(raiser).lower() == ZERO_ADDRESS:
+            return None
+        status_str = (
+            OBJECTION_STATUS_ORDER[status_num]
+            if 0 <= int(status_num) < len(OBJECTION_STATUS_ORDER)
+            else "OPEN"
+        )
+        return OnChainObjection(
+            entry_id=int(entry_id),
+            content_hash="0x" + bytes(content_hash).hex(),
+            answer_hash="0x" + bytes(answer_hash).hex(),
+            status=status_str,
+            raiser=AsyncWeb3.to_checksum_address(raiser),
+            responder=AsyncWeb3.to_checksum_address(responder),
+        )
