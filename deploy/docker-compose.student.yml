@@ -32,8 +32,9 @@ services:
       redis:
         condition: service_healthy
     environment:
-      # 읽기 전용 계정을 따로 만들면 여기를 그 계정으로 바꾼다 (docs/SERVER_ENV.md §5)
-      DATABASE_URL: postgresql+psycopg://council:${POSTGRES_PASSWORD}@db:5432/council
+      # 읽기 전용 계정이다 (PRD §9.1, docs/SERVER_ENV.md §5). 계정은 deploy/student-ro.sql 로 만든다 —
+      # 마이그레이션 뒤에 돌려야 테이블에 GRANT 가 걸린다. login_attempts 만 쓰기가 열려 있다 (#89).
+      DATABASE_URL: postgresql+psycopg://student_ro:${STUDENT_DB_PASSWORD:?.env 에 STUDENT_DB_PASSWORD 가 필요합니다 (학생 서버 읽기 전용 계정 — deploy/student-ro.sql)}@db:5432/council
       JWT_SECRET: ${JWT_SECRET:?.env 에 JWT_SECRET 이 필요합니다}
       CHAIN_RPC_URL: http://chain:8545
       # RELAYER_PRIVATE_KEY 를 **주지 않는다** — 학생 서버는 체인을 조회만 한다
@@ -57,7 +58,7 @@ services:
   student-api-2:
     <<: *student-api
     environment:
-      DATABASE_URL: postgresql+psycopg://council:${POSTGRES_PASSWORD}@db:5432/council
+      DATABASE_URL: postgresql+psycopg://student_ro:${STUDENT_DB_PASSWORD:?.env 에 STUDENT_DB_PASSWORD 가 필요합니다 (학생 서버 읽기 전용 계정 — deploy/student-ro.sql)}@db:5432/council
       JWT_SECRET: ${JWT_SECRET:?.env 에 JWT_SECRET 이 필요합니다}
       CHAIN_RPC_URL: http://chain:8545
       DEPLOYMENTS_FILE: /deployments/localhost.json

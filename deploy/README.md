@@ -18,12 +18,26 @@
 
 ## 띄우기
 
-루트 `.env` 에 `POSTGRES_PASSWORD`, `JWT_SECRET`, `STUDENT_WALLET_MNEMONIC` 이 있어야 한다
-(`docs/SERVER_ENV.md`). 저장소 루트에서:
+루트 `.env` 에 `POSTGRES_PASSWORD`, `JWT_SECRET`, `STUDENT_WALLET_MNEMONIC`,
+`STUDENT_DB_PASSWORD` 가 있어야 한다 (`docs/SERVER_ENV.md`). 저장소 루트에서:
 
 ```bash
 docker compose -f docker-compose.yml -f deploy/docker-compose.student.yml up -d
+
+# 학생 서버는 읽기 전용 계정으로 붙는다 (PRD §9.1). 마이그레이션 뒤에 한 번 돌린다 —
+# 테이블이 있어야 GRANT 가 걸린다. 여러 번 돌려도 안전하다.
+docker compose exec -T api alembic upgrade head
+
+# **.env 는 compose 만 읽는다. 셸로 따로 가져와야 한다** — 안 그러면 빈 문자열로 치환되어
+# 비밀번호가 빈 계정이 만들어지고, 앱만 password authentication failed 로 실패한다.
+export $(grep -E '^STUDENT_DB_PASSWORD=' .env | xargs)
+
+docker compose exec -T db psql -U council -d council \
+  -v student_ro_password="$STUDENT_DB_PASSWORD" -f /dev/stdin < deploy/student-ro.sql
 ```
+
+계정을 만들기 전에는 학생 API 로그에 `password authentication failed for user "student_ro"` 가
+뜨고 조회가 전부 실패한다. 그때는 위 스크립트를 먼저 돌린다.
 
 - 학생 API: `http://127.0.0.1:8001` (nginx 를 거친다)
 - 임원 API: `http://127.0.0.1:8000` (기존 그대로)
@@ -83,4 +97,3 @@ CACHE_ENABLED=0 .venv/bin/uvicorn app.main_student:app --port 8102 &
   `CACHE_ENABLED=1` 로 올려도 캐시는 동작하지 않는다.
   `redis` 패키지는 `backend/requirements.txt` 에 넣어 두었다 — 라우터에 붙이는 날 의존성까지
   같이 챙기지 않아도 되게 미리 넣은 것이고, 지금은 부르는 곳이 없어 아무 동작도 하지 않는다.
-- 읽기 전용 DB 계정 (`docs/SERVER_ENV.md` §5). 지금은 compose 가 `council` 계정을 그대로 쓴다.

@@ -90,7 +90,7 @@ O는 넣는다, **비움**은 넣지 않거나 빈 값으로 둔다는 뜻이다
 
 ## 5. 학생 서버의 읽기 전용 DB 계정
 
-계정 연결은 장정아 님 작업이다 (PRD §9.1). 아래는 PostgreSQL에서 만드는 예시다. 테이블은 마이그레이션이 나중에 만들기 때문에, 그 뒤에 생기는 테이블에도 조회 권한이 가도록 `ALTER DEFAULT PRIVILEGES`를 같이 둔다.
+계정은 **`deploy/student-ro.sql`** 로 만든다 (PRD §9.1). 여러 번 돌려도 안전하다. 아래는 그 스크립트가 하는 일이다. 테이블은 마이그레이션이 나중에 만들기 때문에, 그 뒤에 생기는 테이블에도 조회 권한이 가도록 `ALTER DEFAULT PRIVILEGES`를 같이 둔다.
 
 ```sql
 CREATE ROLE student_ro LOGIN PASSWORD '...';
