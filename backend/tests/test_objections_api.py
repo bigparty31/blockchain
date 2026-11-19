@@ -767,3 +767,64 @@ def test_answer_timeout_then_reverted_receipt_allows_prepare_and_retry():
     assert ans_body["status"] == "ANSWERED"
     assert ans_body["answer"] == "재시도 답변"
     assert ans_body["tx_answer"] != timed_out_hash
+
+
+def test_concurrent_reconcile_does_not_clear_newly_claimed_raise_or_answer():
+    """Codex 5차 회귀: 이전 실패 receipt 확인 중 다른 요청이 새 전송을 선점하면 늦은 복구가 새 선점을 지우지 않아야 한다."""
+    import asyncio
+    from datetime import datetime, timezone
+    from app.chain.models import ChainRevert, ObjectionRevertReason
+    from app.routers.objections import _reconcile_pending_answer, _reconcile_pending_raise
+
+    _grant_student_sbt()
+    _test_chain.unavailable_next("raise_objection", sent=True, landed=False)
+    assert (
+        client.post(
+            "/objections",
+            json={"entry_id": 1, "content": "동시 복구 경쟁 테스트"},
+            headers=_auth(Role.STUDENT),
+        ).status_code
+        == 503
+    )
+
+    new_raise_hash = "?" + "a" * 64
+    new_answer_hash = "0x" + "b" * 64
+
+    class RacingChain:
+        async def get_objection(self, objection_id: int):
+            return None
+
+        async def objection_tx_result(self, tx_hash: str):
+            # receipt 확인 도중 다른 요청이 이미 이전 선점을 해제하고 새 전송을 선점한 상황 재현
+            with _test_session_factory() as other_db:
+                row = other_db.query(DBObjection).filter(DBObjection.id == 1).first()
+                if row.tx_raise and row.tx_raise.startswith("?"):
+                    row.tx_raise = new_raise_hash
+                else:
+                    row.tx_answer = new_answer_hash
+                    row.answer = "새로 선점된 답변"
+                    row.answered_by = 3
+                    row.answered_at = datetime.now(timezone.utc)
+                other_db.commit()
+            raise ChainRevert(ObjectionRevertReason.UNKNOWN, "old tx reverted")
+
+    with _test_session_factory() as db:
+        obj = db.query(DBObjection).filter(DBObjection.id == 1).first()
+        landed = asyncio.run(_reconcile_pending_raise(db, RacingChain(), obj))
+        assert landed is False
+        assert obj.tx_raise == new_raise_hash
+
+        # 답변 선점 경쟁 케이스도 동일하게 검증
+        obj.tx_raise = "0x" + "1" * 64
+        obj.tx_answer = "0x" + "2" * 64
+        obj.answer = "이전 실패 답변"
+        obj.answered_by = 3
+        obj.answered_at = datetime.now(timezone.utc)
+        db.commit()
+
+        updated_obj, recovered = asyncio.run(_reconcile_pending_answer(db, RacingChain(), obj))
+        assert recovered is False
+        assert updated_obj.tx_answer == new_answer_hash
+        assert updated_obj.answer == "새로 선점된 답변"
+        assert updated_obj.answered_by == 3
+        assert updated_obj.answered_at is not None

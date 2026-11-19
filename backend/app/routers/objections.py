@@ -125,7 +125,8 @@ async def _reconcile_pending_raise(
     if not obj.tx_raise or not obj.tx_raise.startswith("?"):
         return bool(obj.tx_raise and obj.tx_raise.startswith("0x"))
 
-    inflight_hash = "0x" + obj.tx_raise[1:]
+    expected_tx_raise = obj.tx_raise
+    inflight_hash = "0x" + expected_tx_raise[1:]
     try:
         onchain = await chain.get_objection(obj.id)
     except (ChainUnavailable, ChainSetupError) as e:
@@ -143,9 +144,19 @@ async def _reconcile_pending_raise(
     try:
         await chain.objection_tx_result(inflight_hash)
     except ChainRevert:
-        obj.tx_raise = None
+        rows = (
+            db.query(DBObjection)
+            .filter(
+                DBObjection.id == obj.id,
+                DBObjection.status == ObjectionStatus.OPEN.value,
+                DBObjection.tx_raise == expected_tx_raise,
+            )
+            .update({DBObjection.tx_raise: None}, synchronize_session=False)
+        )
         db.commit()
         db.refresh(obj)
+        if rows == 0:
+            return bool(obj.tx_raise and obj.tx_raise.startswith("0x"))
         return False
     except (ChainUnavailable, ChainSetupError) as e:
         raise HTTPException(
@@ -162,7 +173,7 @@ async def _reconcile_pending_answer(
     """OPEN 상태에서 tx_answer 선점이 남아 있는 항목의 온체인 안착 여부를 확인해 DB를 복구한다.
 
     체인 상태가 아직 OPEN 이고 receipt 도 없으면 채굴 대기 중일 수 있으므로 보존된 답변 본문·해시를 유지한다.
-    receipt 가 실패(ChainRevert)로 확정되면 선점과 임시 답변 정보를 해제한다.
+    receipt 가 실패(ChainRevert)로 확정되면 조회 시점의 해시·상태와 일치할 때만 선점을 해제한다.
 
     Returns:
         (갱신된 obj, 방금 복구되어 ANSWERED로 전환되었는지 여부)
@@ -170,6 +181,7 @@ async def _reconcile_pending_answer(
     if obj.status != ObjectionStatus.OPEN.value or obj.tx_answer is None:
         return obj, False
 
+    expected_tx_answer = obj.tx_answer
     try:
         onchain = await chain.get_objection(obj.id)
     except (ChainUnavailable, ChainSetupError) as e:
@@ -192,14 +204,29 @@ async def _reconcile_pending_answer(
         return obj, True
 
     try:
-        await chain.objection_tx_result(obj.tx_answer)
+        await chain.objection_tx_result(expected_tx_answer)
     except ChainRevert:
-        obj.tx_answer = None
-        obj.answer = None
-        obj.answered_by = None
-        obj.answered_at = None
+        rows = (
+            db.query(DBObjection)
+            .filter(
+                DBObjection.id == obj.id,
+                DBObjection.status == ObjectionStatus.OPEN.value,
+                DBObjection.tx_answer == expected_tx_answer,
+            )
+            .update(
+                {
+                    DBObjection.tx_answer: None,
+                    DBObjection.answer: None,
+                    DBObjection.answered_by: None,
+                    DBObjection.answered_at: None,
+                },
+                synchronize_session=False,
+            )
+        )
         db.commit()
         db.refresh(obj)
+        if rows == 0 and obj.status == ObjectionStatus.ANSWERED.value:
+            return obj, True
         return obj, False
     except (ChainUnavailable, ChainSetupError) as e:
         raise HTTPException(
