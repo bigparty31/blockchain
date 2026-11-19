@@ -278,6 +278,114 @@ void main() {
       expect(c.lines.single.message, '이미 발행되어 있어요');
     });
 
+    group('결과 확인 (#120 리뷰)', () {
+      /// 행사비·사업비를 확정했는데 행사비만 응답이 없던 상태를 만든다
+      Future<(BudgetPlanController, FakeBudgetIssuer)> pendingEvent({
+        Map<BudgetCategory, BudgetIssueOutcome>? checks,
+      }) async {
+        final issuer = FakeBudgetIssuer(
+          forcedOutcomes: {BudgetCategory.event: BudgetIssueOutcome.noResponse},
+          checkOutcomes: checks,
+        );
+        final c = build(issuer);
+        addFilled(c, BudgetCategory.event);
+        addFilled(c, BudgetCategory.project, amount: 500000);
+        await c.confirm();
+        expect(c.lines.map((l) => l.state), [BudgetLineState.noResponse, BudgetLineState.issued]);
+        return (c, issuer);
+      }
+
+      test('응답 없는 줄이 있을 때만 누를 수 있다', () async {
+        final c = build(FakeBudgetIssuer());
+        addFilled(c, BudgetCategory.event);
+        expect(c.canCheck, isFalse);
+        final (pending, _) = await pendingEvent();
+        expect(pending.canCheck, isTrue);
+      });
+
+      test('체인에 있으면 발행됨 — 체인 값으로 잠기고 전부 발행이면 읽기 전용', () async {
+        final expires = BudgetPlanRules.expiresAtSeconds(DateTime(2026, 12, 20));
+        final (c, issuer) = await pendingEvent(checks: {
+          BudgetCategory.event: BudgetIssueOutcome.existing(amount: 1200000, expiresAt: expires),
+        });
+
+        await c.checkPending();
+
+        expect(c.lines[0].state, BudgetLineState.issued);
+        expect(c.lines[0].item.amount, 1200000, reason: '입력값이 아니라 체인 값');
+        expect(c.lines[0].item.expiresOn, DateTime.utc(2026, 12, 20));
+        expect(c.phase, BudgetPlanPhase.issued);
+        // 확인만 했다 — 다시 보내지 않았다
+        expect(issuer.sent, [BudgetCategory.event, BudgetCategory.project]);
+        expect(issuer.checked, [BudgetCategory.event], reason: '발행된 줄은 확인하지 않는다');
+      });
+
+      test('체인에 없고 보낸 기록도 없으면 거부 — 고쳐서 다시 확정할 수 있다', () async {
+        final (c, issuer) = await pendingEvent(checks: {
+          BudgetCategory.event: const BudgetIssueOutcome(BudgetIssueStatus.rejected, message: '체인 기록이 확인되지 않았어요'),
+        });
+
+        await c.checkPending();
+
+        expect(c.lines[0].state, BudgetLineState.rejected);
+        expect(c.isEditable(0), isTrue);
+        expect(c.canConfirm, isTrue);
+
+        issuer.forcedOutcomes.clear();
+        await c.confirm();
+        expect(c.phase, BudgetPlanPhase.issued);
+        expect(issuer.sent, [BudgetCategory.event, BudgetCategory.project, BudgetCategory.event]);
+      });
+
+      test('아직 모르면 잠금을 유지하고 이유를 붙인다', () async {
+        final (c, _) = await pendingEvent();
+
+        await c.checkPending();
+
+        expect(c.lines[0].state, BudgetLineState.noResponse);
+        expect(c.lines[0].message, '아직 체인에서 확인되지 않았어요');
+        expect(c.canConfirm, isFalse);
+        expect(c.isEditable(0), isFalse);
+        expect(c.canCheck, isTrue, reason: '나중에 다시 확인할 수 있다');
+      });
+
+      test('확인 중에는 다시 누르기·확정이 막히고 checking 이 켜진다', () async {
+        final (c, issuer) = await pendingEvent();
+        final first = c.checkPending();
+        expect(c.phase, BudgetPlanPhase.processing);
+        expect(c.checking, isTrue);
+        expect(c.canCheck, isFalse);
+        await c.checkPending(); // 무시된다
+        await first;
+        expect(issuer.checked, [BudgetCategory.event], reason: '한 번만 확인');
+        expect(c.checking, isFalse);
+      });
+
+      test('예상 못 한 오류(결과 수 불일치)도 던지지 않고 응답 없음을 유지한다 (#125 리뷰)', () async {
+        final issuer = _ShortCheckIssuer(forcedOutcomes: {BudgetCategory.event: BudgetIssueOutcome.noResponse});
+        final c = build(issuer);
+        addFilled(c, BudgetCategory.event);
+        await c.confirm();
+
+        await c.checkPending(); // 던지면 여기서 테스트가 실패한다
+
+        expect(c.lines.single.state, BudgetLineState.noResponse);
+        expect(c.lines.single.message, contains('확인하지 못했어요'));
+        expect(c.phase, BudgetPlanPhase.editing);
+        expect(c.checking, isFalse);
+        expect(c.canCheck, isTrue);
+      });
+
+      test('회장이 아니면 줄은 그대로 두고 이유만 보인다', () async {
+        final (c, issuer) = await pendingEvent();
+        issuer.isPresident = false;
+        await c.checkPending();
+        expect(c.blockedBy, BudgetIssueFailure.notPresident);
+        expect(c.lines[0].state, BudgetLineState.noResponse);
+        expect(c.phase, BudgetPlanPhase.editing);
+      });
+    });
+
     test('발행 중에 화면을 닫아도(dispose) 응답이 돌아올 때 터지지 않는다', () async {
       final c = build(FakeBudgetIssuer(delay: const Duration(milliseconds: 20)));
       addFilled(c, BudgetCategory.event);
@@ -288,4 +396,12 @@ void main() {
       await expectLater(pending, completes);
     });
   });
+}
+
+/// 확인 결과를 항목 수보다 적게 돌려주는 고장 난 발행기 — 컨트롤러가 던지지 않는지 본다
+class _ShortCheckIssuer extends FakeBudgetIssuer {
+  _ShortCheckIssuer({super.forcedOutcomes});
+
+  @override
+  Future<List<BudgetIssueOutcome>> checkAll({int? termId, required List<BudgetDraftItem> items}) async => [];
 }
