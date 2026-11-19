@@ -1,9 +1,10 @@
 import asyncio
 from datetime import datetime, timezone
+import inspect
 import logging
 from typing import Callable, List, Optional, TypeVar
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import or_, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
@@ -545,12 +546,25 @@ async def _execute_budget_issue(
         )
 
 
+async def _resolve_chain_client(request: Request) -> ChainClient:
+    """캐시 미스 시에만 체인 클라이언트를 지연 획득한다.
+
+    Depends(get_chain_client)를 라우트 시그니처에 두면 캐시 적중 경로에서도
+    체인 provider 초기화·RPC 점검이 실행되므로 _produce() 내부에서 호출한다.
+    """
+    getter = request.app.dependency_overrides.get(get_chain_client, get_chain_client)
+    res = getter()
+    if inspect.isawaitable(res):
+        res = await res
+    return res
+
+
 @query_router.get("", response_model=List[BudgetResponse], summary="항목별 예산 편성액 및 잔량 조회")
 @query_router.get("/", response_model=List[BudgetResponse], include_in_schema=False)
 async def get_budgets(
+    request: Request,
     term_id: Optional[int] = Query(None, ge=1, description="조회할 학기 ID (미지정 시 전체 학기)"),
     db: Session = Depends(get_db),
-    chain: ChainClient = Depends(get_chain_client),
 ):
     """모바일 앱 '예산 현황' 및 집행률 그래프 화면에서 호출하는 카테고리별 예산 현황 API입니다.
     스마트 컨트랙트 BudgetToken에 발행 완료된 예산의 온체인 한도(issued)·실시간 잔량(remaining)과
@@ -571,6 +585,10 @@ async def get_budgets(
                 detail="데이터베이스 처리 중 오류가 발생했습니다.",
             )
 
+        if not db_budgets:
+            return []
+
+        chain = await _resolve_chain_client(request)
         result: List[dict] = []
 
         for b in db_budgets:

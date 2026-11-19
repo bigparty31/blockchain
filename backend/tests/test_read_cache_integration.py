@@ -338,3 +338,46 @@ def test_student_lifespan_closes_cache_on_shutdown(monkeypatch):
 
     assert fake_redis.closed is True
     assert cache._client is None
+
+
+def test_budgets_cache_hit_skips_chain_provider_even_if_provider_fails(test_env, monkeypatch):
+    """Codex 1차 회귀: 유효 캐시가 있으면 체인 provider 를 호출하지 않고, provider 실패 상태에서도 200 을 반환한다."""
+    import json
+    from app.chain import ChainSetupError
+
+    monkeypatch.setenv("CACHE_ENABLED", "1")
+    cached_payload = [
+        {
+            "id": 1,
+            "term_id": 1,
+            "category": "행사비",
+            "planned_amount": 1_000_000,
+            "remaining_amount": 750_000,
+            "execution_rate": 0.25,
+            "version": 1,
+            "expires_at": 1_900_000_000,
+            "revision_reason": None,
+        }
+    ]
+    test_env.redis.store["budgets:all"] = json.dumps(cached_payload)
+
+    provider_calls = 0
+
+    async def _failing_provider():
+        nonlocal provider_calls
+        provider_calls += 1
+        raise ChainSetupError("simulated chain provider init failure")
+
+    student_app.dependency_overrides[get_chain_client] = _failing_provider
+
+    # 1) 캐시 적중 경로: provider 를 아예 호출하지 않고 200 반환
+    r_hit = test_env.client.get("/budgets")
+    assert r_hit.status_code == 200
+    assert r_hit.json() == cached_payload
+    assert provider_calls == 0
+
+    # 2) 캐시 미스 경로: provider 호출 후 503 반환, 오류는 캐시에 저장하지 않음
+    r_miss = test_env.client.get("/budgets?term_id=1")
+    assert r_miss.status_code == 503
+    assert provider_calls == 1
+    assert "budgets:1" not in test_env.redis.store
