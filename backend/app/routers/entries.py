@@ -12,6 +12,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 logger = logging.getLogger(__name__)
 
+from app import cache
 from app.auth import User, require_roles
 from app.auth.approval import ensure_not_self_approval
 from app.chain import (
@@ -538,44 +539,48 @@ async def get_entries(
     """모바일 앱 '내역 목록' 및 '대시보드'에서 호출하는 수입·지출 내역 목록 API입니다.
     체인에 기록된 건(status IS NOT NULL)만 반환하며, 기기 서명 미제출 초안은 제외됩니다.
     """
-    try:
-        query = db.query(DBEntry).filter(DBEntry.status.isnot(None))
-        if term_id is not None:
-            query = query.filter(DBEntry.term_id == term_id)
-        db_entries = query.all()
-    except SQLAlchemyError as e:
-        logger.exception("수입·지출 내역 목록 조회 중 데이터베이스 오류: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="데이터베이스 처리 중 오류가 발생했습니다.",
-        )
+    cache_key = f"entries:{term_id if term_id is not None else 'all'}"
 
-    # RPC 호출 부하 및 앱 타임아웃(3초) 방지:
-    # 목록 조회에서는 최대 1.5초 이내로 온체인 등록자 조회를 시도하고,
-    # 노드 응답 지연/오류 시 DB 값으로 위장하지 않고 registrant=null(None)로 반환하여 앱이 미검증 상태를 식별할 수 있게 합니다.
-    chain_registrants: dict[int, str] = {}
-
-    if db_entries:
+    async def _produce():
         try:
-            async def _fetch_all():
-                chain = await _get_chain_client_safe(request)
-                if chain is None:
-                    return
-                tasks = [chain.get_entry(e.id) for e in db_entries]
-                fetched = await asyncio.gather(*tasks, return_exceptions=True)
-                for e, res in zip(db_entries, fetched):
-                    if not isinstance(res, Exception) and res and res.registrant:
-                        chain_registrants[e.id] = res.registrant
+            query = db.query(DBEntry).filter(DBEntry.status.isnot(None))
+            if term_id is not None:
+                query = query.filter(DBEntry.term_id == term_id)
+            db_entries = query.all()
+        except SQLAlchemyError as e:
+            logger.exception("수입·지출 내역 목록 조회 중 데이터베이스 오류: %s", e)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="데이터베이스 처리 중 오류가 발생했습니다.",
+            )
 
-            await asyncio.wait_for(_fetch_all(), timeout=1.5)
-        except Exception:
-            pass
+        # RPC 호출 부하 및 앱 타임아웃(3초) 방지:
+        # 목록 조회에서는 최대 1.5초 이내로 온체인 등록자 조회를 시도하고,
+        # 노드 응답 지연/오류 시 DB 값으로 위장하지 않고 registrant=null(None)로 반환하여 앱이 미검증 상태를 식별할 수 있게 합니다.
+        chain_registrants: dict[int, str] = {}
 
-    results = [
-        _to_schema(e, chain_registrant=chain_registrants.get(e.id), db=db)
-        for e in db_entries
-    ]
-    return results
+        if db_entries:
+            try:
+                async def _fetch_all():
+                    chain = await _get_chain_client_safe(request)
+                    if chain is None:
+                        return
+                    tasks = [chain.get_entry(e.id) for e in db_entries]
+                    fetched = await asyncio.gather(*tasks, return_exceptions=True)
+                    for e, res in zip(db_entries, fetched):
+                        if not isinstance(res, Exception) and res and res.registrant:
+                            chain_registrants[e.id] = res.registrant
+
+                await asyncio.wait_for(_fetch_all(), timeout=1.5)
+            except Exception:
+                pass
+
+        return [
+            _to_schema(e, chain_registrant=chain_registrants.get(e.id), db=db).model_dump(mode="json")
+            for e in db_entries
+        ]
+
+    return await cache.get_or_set(cache_key, _produce)
 
 
 @command_router.get("/drafts", response_model=List[EntryResponse], summary="본인 작성 미제출 초안 목록 조회 (T5)")

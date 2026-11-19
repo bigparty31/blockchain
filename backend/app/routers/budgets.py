@@ -8,6 +8,7 @@ from sqlalchemy import or_, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
+from app import cache
 from app.auth.deps import require_roles
 from app.auth.users import User
 from app.chain import (
@@ -555,68 +556,73 @@ async def get_budgets(
     스마트 컨트랙트 BudgetToken에 발행 완료된 예산의 온체인 한도(issued)·실시간 잔량(remaining)과
     DB의 해당 버전 개정 사유(revision_reason)를 결합해 반환합니다.
     """
-    try:
-        query = db.query(DBBudget).options(selectinload(DBBudget.versions))
-        if term_id is not None:
-            query = query.filter(DBBudget.term_id == term_id)
-        db_budgets = query.order_by(DBBudget.id.asc()).all()
-    except SQLAlchemyError as e:
-        logger.exception("예산 목록 조회 중 데이터베이스 오류: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="데이터베이스 처리 중 오류가 발생했습니다.",
-        )
+    cache_key = f"budgets:{term_id if term_id is not None else 'all'}"
 
-    result: List[BudgetResponse] = []
-
-    for b in db_budgets:
+    async def _produce():
         try:
-            chain_budget = await chain.get_budget(b.id)
-        except ChainError as e:
-            logger.error("체인 예산(id=%s) 조회 실패: %s", b.id, e)
+            query = db.query(DBBudget).options(selectinload(DBBudget.versions))
+            if term_id is not None:
+                query = query.filter(DBBudget.term_id == term_id)
+            db_budgets = query.order_by(DBBudget.id.asc()).all()
+        except SQLAlchemyError as e:
+            logger.exception("예산 목록 조회 중 데이터베이스 오류: %s", e)
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="블록체인 네트워크와 통신할 수 없습니다.",
+                detail="데이터베이스 처리 중 오류가 발생했습니다.",
             )
 
-        # 온체인에 발행되지 않은 행(초안, 시드 전용 더미, NO_RESPONSE 대기 건)은 목록에서 제외
-        if chain_budget is None:
-            continue
+        result: List[dict] = []
 
-        planned_amount = int(chain_budget.issued)
-        remaining_amount = max(0, int(chain_budget.remaining))
-        version = int(chain_budget.version)
+        for b in db_budgets:
+            try:
+                chain_budget = await chain.get_budget(b.id)
+            except ChainError as e:
+                logger.error("체인 예산(id=%s) 조회 실패: %s", b.id, e)
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="블록체인 네트워크와 통신할 수 없습니다.",
+                )
 
-        matched_ver = next((v for v in b.versions if v.version == version), None)
-        if matched_ver is None and b.versions:
-            valid_versions = [v for v in b.versions if v.version <= version]
-            if valid_versions:
-                matched_ver = max(valid_versions, key=lambda v: v.version)
-        revision_reason = matched_ver.revision_reason if matched_ver is not None else None
+            # 온체인에 발행되지 않은 행(초안, 시드 전용 더미, NO_RESPONSE 대기 건)은 목록에서 제외
+            if chain_budget is None:
+                continue
 
-        spent_amount = max(0, planned_amount - remaining_amount)
-        execution_rate = round(spent_amount / planned_amount, 4) if planned_amount > 0 else 0.0
-        expires_at = (
-            int(chain_budget.expires_at)
-            if chain_budget.expires_at
-            else _to_unix_seconds(b.expires_at)
-        )
+            planned_amount = int(chain_budget.issued)
+            remaining_amount = max(0, int(chain_budget.remaining))
+            version = int(chain_budget.version)
 
-        result.append(
-            BudgetResponse(
-                id=b.id,
-                term_id=b.term_id,
-                category=b.category,
-                planned_amount=planned_amount,
-                remaining_amount=remaining_amount,
-                execution_rate=execution_rate,
-                version=version,
-                expires_at=expires_at,
-                revision_reason=revision_reason,
+            matched_ver = next((v for v in b.versions if v.version == version), None)
+            if matched_ver is None and b.versions:
+                valid_versions = [v for v in b.versions if v.version <= version]
+                if valid_versions:
+                    matched_ver = max(valid_versions, key=lambda v: v.version)
+            revision_reason = matched_ver.revision_reason if matched_ver is not None else None
+
+            spent_amount = max(0, planned_amount - remaining_amount)
+            execution_rate = round(spent_amount / planned_amount, 4) if planned_amount > 0 else 0.0
+            expires_at = (
+                int(chain_budget.expires_at)
+                if chain_budget.expires_at
+                else _to_unix_seconds(b.expires_at)
             )
-        )
 
-    return result
+            result.append(
+                BudgetResponse(
+                    id=b.id,
+                    term_id=b.term_id,
+                    category=b.category,
+                    planned_amount=planned_amount,
+                    remaining_amount=remaining_amount,
+                    execution_rate=execution_rate,
+                    version=version,
+                    expires_at=expires_at,
+                    revision_reason=revision_reason,
+                ).model_dump(mode="json")
+            )
+
+        return result
+
+    return await cache.get_or_set(cache_key, _produce)
 
 
 @command_router.post(
