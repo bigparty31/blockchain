@@ -25,6 +25,12 @@ bash scripts/dev-stack-reset.sh
 bash scripts/dev-stack-reset.sh --no-budgets
 ```
 
+시연용으로 임원 롤을 실제 기기 주소로 배포할 때는 주소 넷을 환경변수로 준다. Hardhat 키로 대신 서명할 수 없어 예산은 회장 기기가 편성 화면에서 발행하므로 `--no-budgets` 가 필요하다 (빠뜨리면 스크립트가 멈춘다). DB `users.wallet_address` 는 시드 뒤 같은 주소로 따로 맞춘다.
+
+```bash
+OFFICER_PRESIDENT=0x... OFFICER_TREASURER=0x... OFFICER_AUDITOR1=0x... OFFICER_AUDITOR2=0x... bash scripts/dev-stack-reset.sh --no-budgets
+```
+
 **VM 을 재시작했거나 `chain` 컨테이너가 다시 시작되면 이 스크립트를 실행해야 한다.** 체인은 메모리에만 저장되어 지워지지만 DB 는 남아 서로 어긋난다.
 
 ## 코드만 반영하기

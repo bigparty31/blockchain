@@ -68,6 +68,8 @@ npx hardhat run scripts/deploy.ts --network localhost
 | 4 | 릴레이어 (롤 없음) | `0x15d3…6A65` |
 | 5 | 감사 2 | `0x9965…A4dc` |
 
+시연용으로 임원을 실제 기기 주소로 배포할 때는 `OFFICER_PRESIDENT`·`OFFICER_TREASURER`·`OFFICER_AUDITOR1`·`OFFICER_AUDITOR2` 를 넷 다 환경변수로 준다. 위 표의 1·2·3·5번 대신 이 주소가 초기 롤이 된다. 하나라도 비면 Hardhat 계정을 쓰고, 일부만 주면 배포하지 않고 멈춘다. 배포자(0)와 릴레이어(4)는 그대로라 컨트랙트 주소도 같다. 저장소의 `deployments/localhost.json` 은 Hardhat 임원 기준이므로 이 배포 결과로 덮어써 커밋하지 않는다.
+
 노드를 새로 띄우면 nonce 가 0 부터라 컨트랙트 주소가 `deployments/localhost.json` 과 같게 나온다. 노드를 띄운 채로 다시 배포하면 주소가 달라지니 파일을 갱신하거나 노드를 재시작한다.
 
 Amoy 등 외부 네트워크 배포는 아직 없다.
