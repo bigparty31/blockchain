@@ -142,6 +142,38 @@ class BankReconcileService {
     }
   }
 
+  /// 서버 한도 (API.md: 원문 20000자). 넘으면 보내기 전에 막는다.
+  static const maxSmsChars = 20000;
+
+  /// 붙여넣은 카드 승인 문자를 원장과 맞춰 본다 (PRD §4.6). **서버는 아무것도 저장하지 않는다** —
+  /// 그래서 결과를 못 받았어도 다시 누르면 된다 (reload 없음).
+  Future<CardSmsCheckResult> checkCardSms({required int termId, required String text}) async {
+    if (text.trim().isEmpty) throw const BankActionFailed('카드사 승인 문자를 붙여 넣어 주세요.');
+    if (text.length > maxSmsChars) throw const BankActionFailed('문자가 너무 길어요. 나눠서 붙여 넣어 주세요.');
+    final http.Response res;
+    try {
+      res = await _post('$_base/bank/card-sms/check', {'term_id': termId, 'text': text}, '카드 문자 대조');
+    } on BankActionFailed {
+      throw const BankActionFailed('카드 문자 대조 결과를 받지 못했어요. 잠시 후 다시 눌러 주세요.');
+    }
+    switch (res.statusCode) {
+      case 200:
+        try {
+          return CardSmsCheckResult.fromJson(jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>);
+        } on Object {
+          throw const BankActionFailed('카드 문자 대조 결과를 읽지 못했어요. 잠시 후 다시 눌러 주세요.');
+        }
+      case 400:
+        throw BankActionFailed(_detail(res) ?? '문자를 읽지 못했어요.');
+      case 404:
+        throw const BankActionFailed('현재 학기를 서버에서 찾지 못했어요.');
+      case 422:
+        throw const BankActionFailed('문자가 너무 길어요. 나눠서 붙여 넣어 주세요.');
+      default:
+        throw const BankActionFailed('카드 문자를 대조하지 못했어요. 잠시 후 다시 시도해 주세요.');
+    }
+  }
+
   // ───────────────────────────── HTTP
 
   /// 쓰기는 성공했는데 결과를 못 읽은 경우 — 다시 올리면 409 가 나니 목록을 다시 읽게 한다.

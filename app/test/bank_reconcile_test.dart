@@ -247,11 +247,12 @@ void main() {
       expect(find.text('₩ 12,000'), findsOneWidget, reason: '장부에 없이 나간 돈');
       expect(find.text('₩ 5,000'), findsOneWidget, reason: '장부에 없이 들어온 돈');
       expect(find.byKey(const Key('bank_clean')), findsNothing);
+      expect(find.byKey(const Key('bank_rematch')), findsOneWidget);
+      await tester.scrollUntilVisible(find.byKey(const Key('bank_tran_3')), 200);
       expect(find.byKey(const Key('bank_unregistered')), findsOneWidget);
       expect(find.byKey(const Key('bank_tran_3')), findsOneWidget);
       await tester.scrollUntilVisible(find.byKey(const Key('bank_unbacked_9')), 200);
       expect(find.byKey(const Key('bank_unbacked_9')), findsOneWidget);
-      expect(find.byKey(const Key('bank_rematch')), findsOneWidget);
     });
 
     testWidgets('어긋난 곳이 없으면 「장부와 계좌가 맞아요」', (tester) async {
@@ -339,6 +340,160 @@ void main() {
       await tester.tap(find.text('다시 시도'));
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('bank_summary')), findsOneWidget);
+    });
+  });
+
+  group('카드 문자 (PRD §4.6)', () {
+    Map<String, dynamic> sms(int no, String status,
+        {String kind = 'APPROVAL', int? amount = 12000, String? merchant = '가게', int? entry, String? reason}) {
+      final unreadable = status == 'UNREADABLE';
+      return {
+        'msg_no': no,
+        'status': status,
+        'company': unreadable ? null : 'KB',
+        'kind': unreadable ? null : kind,
+        'tran_date': unreadable ? null : '2026-09-1$no',
+        'tran_time': unreadable ? null : '12:3$no:00',
+        'merchant': unreadable ? null : merchant,
+        'amount': unreadable ? null : amount,
+        'approval_no': null,
+        'entry_id': entry,
+        'reason': reason,
+      };
+    }
+
+    Map<String, dynamic> result({bool clean = false}) => {
+          'term_id': 7,
+          'text_hash': '0x${'c' * 64}',
+          'summary': {
+            'total': clean ? 1 : 4,
+            'matched': 1,
+            'matched_pending': clean ? 0 : 1,
+            'unregistered': clean ? 0 : 1,
+            'unregistered_amount': clean ? 0 : 12000,
+            'unreadable': clean ? 0 : 1,
+          },
+          'items': [
+            sms(1, 'MATCHED', entry: 2),
+            if (!clean) sms(2, 'MATCHED_PENDING', entry: 3),
+            if (!clean) sms(3, 'UNREGISTERED', merchant: '미등록상회'),
+            if (!clean) sms(4, 'UNREADABLE', reason: '날짜를 찾지 못했어요'),
+          ],
+        };
+
+    test('모델 — 상태·요약을 그대로 읽고, 모르는 상태는 지어내지 않는다', () {
+      final r = CardSmsCheckResult.fromJson(result());
+      expect(r.summary.unregisteredAmount, 12000);
+      expect(r.items.map((e) => e.status), [
+        CardSmsStatus.matched,
+        CardSmsStatus.matchedPending,
+        CardSmsStatus.unregistered,
+        CardSmsStatus.unreadable,
+      ]);
+      expect(r.items.last.amount, isNull);
+      final bad = result()..['items'] = [sms(1, 'WHATEVER')];
+      expect(() => CardSmsCheckResult.fromJson(bad), throwsFormatException);
+      final noSummary = result()..remove('summary');
+      expect(() => CardSmsCheckResult.fromJson(noSummary), throwsFormatException);
+    });
+
+    test('서비스 — 학기 id 와 원문을 그대로 보낸다', () async {
+      BankReconcileService.client = server(onPost: (_) => json(result()));
+      final r = await BankReconcileService().checkCardSms(termId: 7, text: '[Web발신]\n문자');
+      expect(asked, ['POST /bank/card-sms/check']);
+      expect(posted, {'term_id': 7, 'text': '[Web발신]\n문자'});
+      expect(r.summary.unregistered, 1);
+    });
+
+    test('서비스 — 빈 문자·너무 긴 문자는 보내지 않는다', () async {
+      BankReconcileService.client = server(onPost: (_) => json(result()));
+      final s = BankReconcileService();
+      await expectLater(s.checkCardSms(termId: 7, text: '  \n '), throwsA(isA<BankActionFailed>()));
+      await expectLater(s.checkCardSms(termId: 7, text: 'a' * 20001), throwsA(isA<BankActionFailed>()));
+      expect(asked, isEmpty);
+    });
+
+    test('서비스 — 400 은 서버 문구, 403 은 권한 없음, 응답을 못 읽으면 다시 누르라고 한다', () async {
+      final s = BankReconcileService();
+      BankReconcileService.client = server(onPost: (_) => json({'detail': '한 번에 500건까지 붙여넣을 수 있습니다.'}, 400));
+      await expectLater(
+          s.checkCardSms(termId: 7, text: 'x'),
+          throwsA(isA<BankActionFailed>()
+              .having((e) => e.message, 'message', '한 번에 500건까지 붙여넣을 수 있습니다.')
+              .having((e) => e.reload, 'reload', isFalse)));
+      BankReconcileService.client = server(onPost: (_) => json({}, 403));
+      await expectLater(s.checkCardSms(termId: 7, text: 'x'), throwsA(isA<ApiForbidden>()));
+      BankReconcileService.client = server(onPost: (_) => http.Response('not json', 200));
+      await expectLater(s.checkCardSms(termId: 7, text: 'x'),
+          throwsA(isA<BankActionFailed>().having((e) => e.reload, 'reload', isFalse)));
+    });
+
+    Future<void> openSms(WidgetTester tester) async {
+      await tester.pumpWidget(const MaterialApp(home: BankReconcileScreen(canUpload: true)));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('bank_card_sms')));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('감사·회장에게는 카드 문자 버튼이 없다', (tester) async {
+      BankReconcileService.client = server();
+      await tester.pumpWidget(const MaterialApp(home: BankReconcileScreen(canUpload: false)));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('bank_card_sms')), findsNothing);
+    });
+
+    testWidgets('붙여 넣고 대조하면 장부에 없는 카드 사용을 맨 위에 보인다', (tester) async {
+      // 결과 네 건이 한 화면에 다 그려지도록 화면을 길게 — 순서를 위치로 비교한다
+      tester.view.physicalSize = const Size(800, 2400);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      BankReconcileService.client = server(onPost: (_) => json(result()));
+      await openSms(tester);
+      await tester.enterText(find.byKey(const Key('card_sms_text')), '[Web발신]\nKB국민카드 승인');
+      await tester.tap(find.byKey(const Key('card_sms_check')));
+      await tester.pumpAndSettle();
+      expect(posted!['term_id'], 7);
+      expect(find.text('장부에 없는 카드 사용 1건'), findsOneWidget);
+      expect(find.textContaining('12,000'), findsWidgets);
+      final top = tester.getTopLeft(find.byKey(const Key('card_sms_item_3'))).dy;
+      expect(top, lessThan(tester.getTopLeft(find.byKey(const Key('card_sms_item_1'))).dy),
+          reason: '미등록(3번)이 맞음(1번)보다 먼저');
+      expect(find.text('날짜를 찾지 못했어요'), findsOneWidget, reason: '못 읽은 이유를 보인다');
+    });
+
+    testWidgets('모두 맞으면 「모든 카드 사용이 장부와 맞아요」', (tester) async {
+      BankReconcileService.client = server(onPost: (_) => json(result(clean: true)));
+      await openSms(tester);
+      await tester.enterText(find.byKey(const Key('card_sms_text')), 'x');
+      await tester.tap(find.byKey(const Key('card_sms_check')));
+      await tester.pumpAndSettle();
+      expect(find.text('모든 카드 사용이 장부와 맞아요'), findsOneWidget);
+    });
+
+    testWidgets('대조 중에는 버튼이 잠겨 두 번 보내지 않는다', (tester) async {
+      var posts = 0;
+      BankReconcileService.client = server(onPost: (_) {
+        posts++;
+        return json(result());
+      });
+      await openSms(tester);
+      await tester.enterText(find.byKey(const Key('card_sms_text')), 'x');
+      await tester.tap(find.byKey(const Key('card_sms_check')));
+      await tester.tap(find.byKey(const Key('card_sms_check')), warnIfMissed: false);
+      await tester.pumpAndSettle();
+      expect(posts, 1);
+    });
+
+    testWidgets('서버가 거절하면 문구를 띄우고 다시 누를 수 있다', (tester) async {
+      BankReconcileService.client = server(onPost: (_) => json({'detail': '문자 내용이 없습니다.'}, 400));
+      await openSms(tester);
+      await tester.enterText(find.byKey(const Key('card_sms_text')), 'x');
+      await tester.tap(find.byKey(const Key('card_sms_check')));
+      await tester.pumpAndSettle();
+      expect(find.text('문자 내용이 없습니다.'), findsOneWidget);
+      expect(find.byKey(const Key('card_sms_summary')), findsNothing);
+      final button = tester.widget<ButtonStyleButton>(find.byKey(const Key('card_sms_check')));
+      expect(button.onPressed, isNotNull);
     });
   });
 }

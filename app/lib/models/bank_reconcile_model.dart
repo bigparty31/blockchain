@@ -270,6 +270,137 @@ class UnbackedEntry {
   }
 }
 
+// ───────────────────────────── 카드 승인 문자 대조 (`POST /bank/card-sms/check`, 저장하지 않음)
+
+/// 붙여넣은 문자 한 건의 대조 결과.
+enum CardSmsStatus {
+  matched('MATCHED', '장부와 맞음'),
+  matchedPending('MATCHED_PENDING', '승인 대기 항목과 맞음'),
+
+  /// 카드로 결제됐는데 장부에 없음 — 미등록 의심.
+  unregistered('UNREGISTERED', '장부에 없음'),
+
+  /// 같은 붙여넣기 안의 승인·취소가 서로 상쇄 — 대조에서 뺐다.
+  cancelledPair('CANCELLED_PAIR', '승인 뒤 취소됨'),
+  outOfTerm('OUT_OF_TERM', '학기 기간 밖'),
+  unreadable('UNREADABLE', '읽지 못함');
+
+  final String code;
+  final String label;
+  const CardSmsStatus(this.code, this.label);
+
+  static CardSmsStatus parse(String code) {
+    for (final s in values) {
+      if (s.code == code) return s;
+    }
+    throw FormatException('알 수 없는 카드 문자 상태: $code');
+  }
+}
+
+class CardSmsItem {
+  /// 붙여넣은 순서 (1부터).
+  final int msgNo;
+  final CardSmsStatus status;
+  final String? company;
+
+  /// `APPROVAL` | `CANCEL`. 못 읽었으면 null.
+  final String? kind;
+  final String? tranDate;
+  final String? tranTime;
+  final String? merchant;
+  final int? amount;
+  final int? entryId;
+
+  /// 못 읽은 이유.
+  final String? reason;
+
+  const CardSmsItem({
+    required this.msgNo,
+    required this.status,
+    this.company,
+    this.kind,
+    this.tranDate,
+    this.tranTime,
+    this.merchant,
+    this.amount,
+    this.entryId,
+    this.reason,
+  });
+
+  bool get isCancel => kind == 'CANCEL';
+
+  factory CardSmsItem.fromJson(Map<String, dynamic> json) {
+    final r = _Reader(json, '카드 문자 대조');
+    return CardSmsItem(
+      msgNo: r.integer('msg_no'),
+      status: CardSmsStatus.parse(r.text('status')),
+      company: r.maybeText('company'),
+      kind: r.maybeText('kind'),
+      tranDate: r.maybeText('tran_date'),
+      tranTime: r.maybeText('tran_time'),
+      merchant: r.maybeText('merchant'),
+      amount: r.maybeInteger('amount'),
+      entryId: r.maybeInteger('entry_id'),
+      reason: r.maybeText('reason'),
+    );
+  }
+}
+
+class CardSmsSummary {
+  final int total;
+  final int matched;
+  final int matchedPending;
+  final int unregistered;
+
+  /// 미등록 **승인** 합계 — 카드로 나갔는데 장부에 없는 돈.
+  final int unregisteredAmount;
+  final int unreadable;
+
+  const CardSmsSummary({
+    required this.total,
+    required this.matched,
+    required this.matchedPending,
+    required this.unregistered,
+    required this.unregisteredAmount,
+    required this.unreadable,
+  });
+
+  factory CardSmsSummary.fromJson(Map<String, dynamic> json) {
+    final r = _Reader(json, '카드 문자 대조 요약');
+    return CardSmsSummary(
+      total: r.integer('total'),
+      matched: r.integer('matched'),
+      matchedPending: r.integer('matched_pending'),
+      unregistered: r.integer('unregistered'),
+      unregisteredAmount: r.integer('unregistered_amount'),
+      unreadable: r.integer('unreadable'),
+    );
+  }
+}
+
+class CardSmsCheckResult {
+  final int termId;
+
+  /// 붙여넣은 원문(UTF-8) SHA-256. 서버는 저장하지 않는다 (PRD §4.6 「원문 해시 보관」의 근거값).
+  final String textHash;
+  final CardSmsSummary summary;
+  final List<CardSmsItem> items;
+
+  const CardSmsCheckResult({required this.termId, required this.textHash, required this.summary, required this.items});
+
+  factory CardSmsCheckResult.fromJson(Map<String, dynamic> json) {
+    final r = _Reader(json, '카드 문자 대조');
+    final summary = json['summary'];
+    if (summary is! Map<String, dynamic>) throw const FormatException('카드 문자 대조 응답의 summary 형식이 올바르지 않아요');
+    return CardSmsCheckResult(
+      termId: r.integer('term_id'),
+      textHash: r.text('text_hash'),
+      summary: CardSmsSummary.fromJson(summary),
+      items: r.list('items', CardSmsItem.fromJson),
+    );
+  }
+}
+
 /// 필드를 타입대로 꺼내고, 틀리면 어느 필드인지 적어 [FormatException] 을 던진다.
 /// (`settlement_model.dart` 의 것과 같은 방식. 두 PR 이 따로 리뷰 중이라 아직 합치지 않았다.)
 class _Reader {
