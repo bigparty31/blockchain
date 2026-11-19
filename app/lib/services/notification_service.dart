@@ -86,11 +86,12 @@ class NotificationService {
   ///
   /// 헤더는 [request] 가 받는 것을 쓴다 — **보내기 직전에 잡은 토큰**과 한 쌍이라야, 늦게 돌아온 401 이
   /// 그 사이 다시 로그인해 만든 새 세션을 지우지 않는다.
-  static Future<http.Response?> _send(Future<http.Response> Function(Map<String, String> headers) request) async {
+  static Future<http.Response?> _send(Future<http.Response> Function(Map<String, String> headers) request,
+      {Duration wait = timeout}) async {
     final auth = AuthService().authSnapshot;
     final http.Response res;
     try {
-      res = await request(auth.headers).timeout(timeout);
+      res = await request(auth.headers).timeout(wait);
     } catch (_) {
       return null;
     }
@@ -134,6 +135,41 @@ class NotificationService {
       return count is int && count >= 0 ? count : null;
     } catch (_) {
       return null;
+    }
+  }
+
+  /// 이 기기의 FCM 토큰을 올린다 (`POST /notifications/device-tokens`, §4). **임원만** 부른다 —
+  /// 학생 푸시는 토픽이라 서버에 올리지 않는다.
+  ///
+  /// 같은 토큰을 다시 올려도 200 이라 앱을 켤 때마다 불러도 된다. 한 기기에서 계정을 바꿔
+  /// 로그인하면 서버가 이전 사람의 행을 해제하고 이 사람에게 붙인다.
+  /// 푸시는 부가 기능이라 **못 올려도 던지지 않는다** (false) — 알림함 폴링이 같은 내용을 준다.
+  static Future<bool> registerDeviceToken(String fcmToken, {Duration wait = timeout}) async {
+    final res = await _send((headers) => client.post(
+          _uri('/notifications/device-tokens'),
+          headers: {...headers, 'Content-Type': 'application/json'},
+          body: jsonEncode({'platform': 'android', 'token': fcmToken}),
+        ), wait: wait);
+    return res != null && res.statusCode == 200;
+  }
+
+  /// 로그아웃할 때 토큰을 해제한다 (`DELETE /notifications/device-tokens/{token}`, §5).
+  ///
+  /// **끝나는 세션을 인자로 받는다.** 로그아웃은 세션을 먼저 비우므로 그 뒤에는 인증 헤더도,
+  /// 임원 서버 주소(`ApiConfig.activeRole`)도 남지 않는다. 주소와 헤더는 **첫 `await` 전에**
+  /// 만든다 — 그 뒤에 읽으면 이미 비워진 값을 본다.
+  ///
+  /// 못 해제해도 던지지 않는다. 그리고 이 요청의 401 은 **이미 끝난 세션**의 것이라
+  /// `reportUnauthorized` 로 알리지 않는다 — 방금 새로 로그인한 사람을 로그아웃시키게 된다.
+  static Future<bool> revokeDeviceToken(String fcmToken, Session session) async {
+    final uri = Uri.parse(
+        '${ApiConfig.baseUrlFor(session.role)}/notifications/device-tokens/${Uri.encodeComponent(fcmToken)}');
+    final headers = <String, String>{'Authorization': 'Bearer ${session.token}'};
+    try {
+      final res = await client.delete(uri, headers: headers).timeout(timeout);
+      return res.statusCode == 200;
+    } catch (_) {
+      return false;
     }
   }
 

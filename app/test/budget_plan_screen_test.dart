@@ -288,6 +288,41 @@ void main() {
       expect(confirmButton(tester).onPressed, isNull);
     });
 
+    testWidgets('응답이 없으면 「결과 확인」으로 체인에서 확인해 발행됨으로 바뀐다 (#120 리뷰)', (tester) async {
+      final issuer = FakeBudgetIssuer(
+        delay: const Duration(milliseconds: 100),
+        forcedOutcomes: {BudgetCategory.event: BudgetIssueOutcome.noResponse},
+      );
+      await pumpScreen(tester, issuer: issuer);
+      await addCard(tester);
+      await fillCard(tester, 0, category: '행사비', amount: '1000000');
+      await pressConfirmAndAccept(tester);
+      await tester.pumpAndSettle();
+
+      final check = find.byKey(const Key('budget_check_result'));
+      expect(check, findsOneWidget);
+      expect(find.textContaining('응답 없음 ·'), findsOneWidget);
+
+      // 아직 모름 — 이유가 붙고 버튼은 남는다
+      await tester.tap(check);
+      await tester.pump();
+      expect(find.text('체인에서 결과를 확인하는 중이에요'), findsOneWidget);
+      expect(find.text('온체인에 기록하는 중이에요'), findsNothing);
+      expect(tester.widget<OutlinedButton>(check).onPressed, isNull, reason: '확인 중에는 다시 못 누른다');
+      await tester.pumpAndSettle();
+      expect(find.text('응답 없음 · 아직 체인에서 확인되지 않았어요'), findsOneWidget);
+      expect(confirmButton(tester).onPressed, isNull);
+
+      // 다시 확인 — 체인에 있었다
+      issuer.checkOutcomes[BudgetCategory.event] = const BudgetIssueOutcome.existing(amount: 1000000);
+      await tester.tap(check);
+      await tester.pumpAndSettle();
+      expect(find.text('예산이 확정됐어요'), findsOneWidget);
+      expect(find.byKey(const Key('budget_check_result')), findsNothing);
+      expect(issuer.sent, [BudgetCategory.event], reason: '확인은 다시 보내지 않는다');
+      expect(issuer.checked, [BudgetCategory.event, BudgetCategory.event]);
+    });
+
     testWidgets('발행 중에는 뒤로 나갈 수 없고, 끝나면 나갈 수 있다', (tester) async {
       tester.view.physicalSize = const Size(411, 2400);
       tester.view.devicePixelRatio = 1.0;
