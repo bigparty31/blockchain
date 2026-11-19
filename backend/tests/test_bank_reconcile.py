@@ -558,9 +558,46 @@ def test_broken_balance_chain_is_rejected(db_session, auth_header):
 
 
 def test_dates_against_balance_order_are_rejected(db_session, auth_header):
-    """잔액으로는 시간순인데 날짜가 거꾸로 가면 고친 파일이다"""
+    """잔액으로는 시간순인데 날짜가 거꾸로 가면 고친 파일이다 — 어느 줄인지 알려 준다 (#124 리뷰)"""
     res = upload(auth_header, raw=csv_of("2026-03-06,입금,0,1000,1000", "2026-03-05,출금,200,0,800"))
     assert res.status_code == 400
+    assert "1번째·2번째" in res.json()["detail"]
+    assert "2026-03-06 → 2026-03-05" in res.json()["detail"]
+
+
+# 「날짜는 최신순, 같은 날 안은 오래된 것 먼저」로 내려주는 은행 파일 (#124 리뷰).
+# 3/5: 1,000 입금 → 200 출금 / 3/6: 100 출금 → 50 입금. 파일 순서로도 거꾸로도 잔액이 이어지지 않는다
+DATE_DESC_DAY_ASC = ["2026-03-06,출금A,100,0,700", "2026-03-06,입금B,0,50,750",
+                     "2026-03-05,입금C,0,1000,1000", "2026-03-05,출금D,200,0,800"]
+
+
+def test_newest_date_first_but_oldest_within_day_is_accepted(db_session, auth_header):
+    rep = upload(auth_header, raw=csv_of(*DATE_DESC_DAY_ASC)).json()
+    assert rep["bank_balance"] == 750
+    assert [t["description"] for t in rep["transactions"]] == ["입금C", "출금D", "출금A", "입금B"]
+
+
+def test_newest_date_first_but_oldest_within_day_with_times(db_session, auth_header):
+    header = "거래일시,적요,출금액,입금액,거래후잔액"
+    rows = ["2026-03-06 11:00:00,출금A,100,0,700", "2026-03-06 15:00:00,입금B,0,50,750",
+            "2026-03-05 09:00:00,입금C,0,1000,1000", "2026-03-05 18:00:00,출금D,200,0,800"]
+    rep = upload(auth_header, raw=csv_of(*rows, header=header)).json()
+    assert rep["bank_balance"] == 750
+
+
+def test_single_row_file(db_session, auth_header):
+    """한 줄이면 순서가 없다 — 그 잔액이 계좌 잔액"""
+    rep = upload(auth_header, raw=csv_of("2026-03-05,입금,0,1000,1000")).json()
+    assert rep["bank_balance"] == 1000
+    assert rep["summary"]["total"] == 1
+
+
+def test_header_only_file_is_rejected(db_session, auth_header):
+    res = upload(auth_header, raw=csv_of())
+    assert res.status_code == 400
+    assert "한 건도" in res.json()["detail"]
+    with db_session() as s:
+        assert s.query(Snapshot).count() == 0
 
 
 # ================================================================ 정정 뒤의 보고서 (#100)

@@ -229,22 +229,37 @@ def _chronological(rows: List[BankRow]) -> List[BankRow]:
     """파일을 시간순(오래된 것 → 최신)으로 맞춘다. 마지막 줄의 잔액이 계좌 잔액이 된다.
 
     은행 파일은 최신순·시간순이 섞여 있고, 하루치이거나 시각이 없으면 날짜로는 방향을 알 수 없다 (#107).
-    그래서 **잔액이 이어지는 방향**을 고른다. 두 방향 다 이어지면(+100 뒤 −100 처럼) 그때만 날짜·시각으로 정하고,
+    그래서 **잔액이 이어지는 순서**를 고른다:
+      1. 파일 순서 그대로, 또는 거꾸로
+      2. 둘 다 안 이어지면 날짜·시각으로 정렬한 순서 (같은 시각은 파일 순서·거꾸로 순서를 각각 유지).
+         「날짜는 최신순, 같은 날 안은 오래된 것 먼저」로 내려주는 은행 파일이 여기서 맞춰진다 (#124 리뷰)
+    후보가 둘 이상 이어지는데 최종 잔액이 다르면(+100 뒤 −100 처럼) 그때만 날짜·시각으로 정하고,
     그래도 모르면 잘못된 잔액을 저장하는 대신 파일을 다시 받아 달라고 한다.
     """
     forward, backward = list(rows), list(reversed(rows))
     fits = [o for o in (forward, backward) if _balance_continues(o)]
     if not fits:
+        by_time = [sorted(forward, key=_when), sorted(backward, key=_when)]
+        fits = [o for o in by_time if _balance_continues(o)]
+    if not fits:
         raise BankCsvError("거래후잔액이 거래 순서대로 이어지지 않습니다. 한 계좌의 거래내역을 은행에서 받은 그대로 올려 주세요.")
-    if len(fits) == 2 and len(rows) > 1:
-        first, last = _when(rows[0]), _when(rows[-1])
-        if first == last:
+    if len({o[-1].balance_after for o in fits}) > 1:
+        # 잔액만으로는 방향을 못 정한다 — 시간이 앞으로 가는 쪽만 남긴다
+        fits = [o for o in fits if _when(o[0]) < _when(o[-1])]
+        if len({o[-1].balance_after for o in fits}) != 1:
             raise BankCsvError("거래 순서를 정할 수 없습니다 (같은 시각, 잔액으로도 구분되지 않음). 거래 시각이 들어간 거래내역을 받아 주세요.")
-        fits = [forward if first < last else backward]
     ordered = fits[0]
-    if any(_when(b) < _when(a) for a, b in zip(ordered, ordered[1:])):
-        raise BankCsvError("거래 날짜·시각이 잔액 순서와 맞지 않습니다. 은행에서 받은 원본을 고치지 말고 올려 주세요.")
+    for a, b in zip(ordered, ordered[1:]):
+        if _when(b) < _when(a):
+            raise BankCsvError(
+                f"파일 {a.row_no}번째·{b.row_no}번째 거래의 날짜·시각({_show(a)} → {_show(b)})이 잔액 순서와 거꾸로입니다. "
+                "은행에서 받은 원본을 고치지 말고 올려 주세요."
+            )
     return ordered
+
+
+def _show(r: BankRow) -> str:
+    return f"{r.tran_date} {r.tran_time}" if r.tran_time else r.tran_date
 
 
 def _apply_matching(db: Session, snap: DBSnapshot) -> None:
