@@ -342,7 +342,7 @@ def test_raise_objection_recovers_after_chain_unavailable(monkeypatch):
     assert data2["tx_raise"].startswith("0x")
     assert len(client.get("/objections").json()) == 1
 
-    # 2. landed=False 시 503 반환 후 재시도하면 같은 행을 재전송하여 성공
+    # 2. landed=False(채굴 대기 중) 시 503 반환 후 같은 질문 재요청은 중복 전송을 막기 위해 409 차단
     _test_chain.unavailable_next("raise_objection", landed=False, sent=True)
     res3 = client.post(
         "/objections",
@@ -357,50 +357,62 @@ def test_raise_objection_recovers_after_chain_unavailable(monkeypatch):
         json={"entry_id": 1, "content": "미안착 재전송 질문"},
         headers=_auth(Role.STUDENT),
     )
-    assert res4.status_code == 201
-    assert res4.json()["id"] == 2
-    assert len(client.get("/objections").json()) == 2
+    assert res4.status_code == 409
+    assert len(client.get("/objections").json()) == 1
 
 
 def test_answer_objection_recovers_after_chain_unavailable(monkeypatch):
-    """답변 전송 후 ChainUnavailable 발생 시(landed=True/False) 본문·답변자를 보존하고 재요청 시 복구한다."""
+    """답변 전송 후 ChainUnavailable 발생 시(landed=True/False) 미확정 전송 덮어쓰기를 차단하고 채굴 시 복구한다."""
     _grant_student_sbt()
-    created = client.post(
+    created1 = client.post(
         "/objections",
-        json={"entry_id": 1, "content": "답변 복구 테스트 질문"},
+        json={"entry_id": 1, "content": "답변 미채굴 테스트 질문"},
         headers=_auth(Role.STUDENT),
     ).json()
-    oid = created["id"]
+    oid1 = created1["id"]
 
-    prep = client.post(
-        f"/objections/{oid}/prepare-answer",
+    prep1 = client.post(
+        f"/objections/{oid1}/prepare-answer",
         json={"answer": "첫 번째 답변"},
         headers=_auth(Role.AUDITOR),
     ).json()
 
-    # 1. landed=False -> 503 후 prepare-answer 와 answer 재요청이 409로 막히지 않고 통과해야 함
+    # 1. landed=False(채굴 대기 중) -> 503 후 미확정 답변이 덮어씌워지지 않도록 409 차단
     _test_chain.unavailable_next("answer_objection", landed=False, sent=True)
     res_unlanded = client.post(
-        f"/objections/{oid}/answer",
+        f"/objections/{oid1}/answer",
         json={
             "answer": "첫 번째 답변",
-            "answer_hash": prep["answer_hash"],
-            "deadline": prep["deadline"],
+            "answer_hash": prep1["answer_hash"],
+            "deadline": prep1["deadline"],
             "signature": fake_signature(AUDITOR_WALLET),
         },
         headers=_auth(Role.AUDITOR),
     )
     assert res_unlanded.status_code == 503
 
-    prep_retry = client.post(
+    assert (
+        client.post(
+            f"/objections/{oid1}/prepare-answer",
+            json={"answer": "다른 답변 시도"},
+            headers=_auth(Role.AUDITOR),
+        ).status_code
+        == 409
+    )
+
+    # 2. 별도 이의(oid2)에서 landed=True + 첫 get_objection 도 실패 -> 503 후 재요청 시 본문·답변자·tx_answer 복구
+    created2 = client.post(
+        "/objections",
+        json={"entry_id": 1, "content": "답변 복구 테스트 질문"},
+        headers=_auth(Role.STUDENT),
+    ).json()
+    oid = created2["id"]
+    prep2 = client.post(
         f"/objections/{oid}/prepare-answer",
         json={"answer": "최종 복구 답변"},
         headers=_auth(Role.AUDITOR),
-    )
-    assert prep_retry.status_code == 200
-    prep2 = prep_retry.json()
+    ).json()
 
-    # 2. landed=True + 첫 get_objection 도 실패 -> 503 후 재요청 시 본문·답변자·tx_answer 복구
     _test_chain.unavailable_next("answer_objection", landed=True, sent=True)
     orig_get = _test_chain.get_objection
     calls = {"n": 0}
@@ -567,13 +579,13 @@ def test_unmined_then_retry_then_late_mined_preserves_question_and_answer():
         == 503
     )
 
-    # 아직 미채굴인 동안 다른 답변 B로 prepare-answer를 호출해도 DB에 보존된 답변 A가 지워지지 않아야 함
+    # 아직 미채굴인 동안 다른 답변 B로 prepare-answer/answer를 호출하면 덮어쓰지 않고 409로 차단하며 답변 A 보존
     prep_b = client.post(
         "/objections/1/prepare-answer",
         json={"answer": "새 답변 B"},
         headers=_auth(Role.AUDITOR),
     )
-    assert prep_b.status_code == 200
+    assert prep_b.status_code == 409
 
     # 5) 뒤늦게 원래 답변 A가 체인에서 채굴됨 -> 이후 답변 A(또는 B) 제출 시 보존된 답변 A로 복구됨
     _test_chain._objections[1] = OnChainObjection(

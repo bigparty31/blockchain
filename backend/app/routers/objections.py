@@ -327,8 +327,10 @@ async def raise_objection(
             if cand.entry_id == entry.id and cand.content == normalized:
                 if landed:
                     return _to_schema(cand)
-                if obj is None:
-                    obj = cand
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="이전 이의 제기 트랜잭션이 처리 중입니다. 잠시 후 다시 확인해 주세요.",
+                )
 
         if obj is None:
             unrecorded_rows = (
@@ -348,11 +350,6 @@ async def raise_objection(
                 if onchain is None:
                     obj = cand
                     break
-                if onchain.content_hash.lower() == content_hash.lower():
-                    cand.tx_raise = "0x" + "0" * 64
-                    db.commit()
-                    db.refresh(cand)
-                    return _to_schema(cand)
 
         if obj is None:
             obj = DBObjection(
@@ -386,7 +383,6 @@ async def raise_objection(
             detail="데이터베이스 처리 중 오류가 발생했습니다.",
         )
 
-    prev_tx_raise = obj.tx_raise
     claimed_tx: Optional[str] = None
 
     async def _claim_tx_raise(tx_hash: str) -> None:
@@ -394,10 +390,7 @@ async def raise_objection(
         inflight_marker = "?" + tx_hash[2:]
         rows = (
             db.query(DBObjection)
-            .filter(
-                DBObjection.id == obj.id,
-                (DBObjection.tx_raise.is_(None)) | (DBObjection.tx_raise == prev_tx_raise),
-            )
+            .filter(DBObjection.id == obj.id, DBObjection.tx_raise.is_(None))
             .update({DBObjection.tx_raise: inflight_marker}, synchronize_session=False)
         )
         if rows == 0:
@@ -414,7 +407,7 @@ async def raise_objection(
             return
         try:
             db.query(DBObjection).filter(DBObjection.id == obj.id).update(
-                {DBObjection.tx_raise: prev_tx_raise}, synchronize_session=False
+                {DBObjection.tx_raise: None}, synchronize_session=False
             )
             db.commit()
         except SQLAlchemyError:
@@ -431,17 +424,6 @@ async def raise_objection(
         raise
     except ChainRevert as e:
         _clear_tx_raise()
-        if e.reason == ObjectionRevertReason.OBJECTION_ALREADY_EXISTS:
-            # 이전 전송에서 응답만 유실되고 실제 체인에는 이미 기록된 경우 복구한다.
-            try:
-                onchain = await chain.get_objection(obj.id)
-                if onchain is not None and onchain.content_hash.lower() == content_hash.lower():
-                    obj.tx_raise = claimed_tx or ("0x" + "0" * 64)
-                    db.commit()
-                    db.refresh(obj)
-                    return _to_schema(obj)
-            except (ChainUnavailable, ChainSetupError, SQLAlchemyError):
-                db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"온체인 이의 제기 기록이 거절되었습니다: {e}",
@@ -526,10 +508,10 @@ async def prepare_answer_objection(
             detail="데이터베이스 처리 중 오류가 발생했습니다.",
         )
 
-    if obj.status != ObjectionStatus.OPEN.value:
+    if obj.status != ObjectionStatus.OPEN.value or obj.tx_answer is not None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="이미 답변이 완료된 이의 제기입니다.",
+            detail="이미 답변이 완료되었거나 답변 트랜잭션이 처리 중인 이의 제기입니다.",
         )
 
     answer_hash = text_hash(normalized)
@@ -606,10 +588,10 @@ async def answer_objection(
     if recovered_now and obj.answer == normalized:
         return _to_schema(obj)
 
-    if obj.status != ObjectionStatus.OPEN.value:
+    if obj.status != ObjectionStatus.OPEN.value or obj.tx_answer is not None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="이미 답변이 완료된 이의 제기입니다.",
+            detail="이미 답변이 완료되었거나 답변 트랜잭션이 처리 중인 이의 제기입니다.",
         )
     if db_user is None or not db_user.wallet_address:
         raise HTTPException(
@@ -638,7 +620,6 @@ async def answer_objection(
     if now < raised_utc:
         now = raised_utc
 
-    prev_answer_state = (obj.tx_answer, obj.answer, obj.answered_by, obj.answered_at)
     claimed = False
 
     async def _claim_tx_answer(tx_hash: str) -> None:
@@ -648,7 +629,7 @@ async def answer_objection(
             .filter(
                 DBObjection.id == obj.id,
                 DBObjection.status == ObjectionStatus.OPEN.value,
-                (DBObjection.tx_answer.is_(None)) | (DBObjection.tx_answer == prev_answer_state[0]),
+                DBObjection.tx_answer.is_(None),
             )
             .update(
                 {
@@ -669,7 +650,7 @@ async def answer_objection(
         db.commit()
         claimed = True
 
-    def _restore_prev_answer_state() -> None:
+    def _clear_claimed_tx() -> None:
         if not claimed:
             return
         try:
@@ -678,10 +659,10 @@ async def answer_objection(
                 DBObjection.status == ObjectionStatus.OPEN.value,
             ).update(
                 {
-                    DBObjection.tx_answer: prev_answer_state[0],
-                    DBObjection.answer: prev_answer_state[1],
-                    DBObjection.answered_by: prev_answer_state[2],
-                    DBObjection.answered_at: prev_answer_state[3],
+                    DBObjection.tx_answer: None,
+                    DBObjection.answer: None,
+                    DBObjection.answered_by: None,
+                    DBObjection.answered_at: None,
                 },
                 synchronize_session=False,
             )
@@ -694,43 +675,7 @@ async def answer_objection(
     except HTTPException:
         raise
     except ChainRevert as e:
-        _restore_prev_answer_state()
-        if e.reason == ObjectionRevertReason.OBJECTION_ALREADY_ANSWERED:
-            try:
-                onchain = await chain.get_objection(obj.id)
-                if onchain is not None and onchain.status == ObjectionStatus.ANSWERED.value:
-                    prev_tx, prev_ans, prev_by, prev_at = prev_answer_state
-                    if prev_ans is not None and onchain.answer_hash.lower() == text_hash(prev_ans):
-                        db.query(DBObjection).filter(DBObjection.id == obj.id).update(
-                            {
-                                DBObjection.tx_answer: prev_tx,
-                                DBObjection.answer: prev_ans,
-                                DBObjection.answered_by: prev_by,
-                                DBObjection.answered_at: prev_at,
-                                DBObjection.status: ObjectionStatus.ANSWERED.value,
-                            },
-                            synchronize_session=False,
-                        )
-                        db.commit()
-                        db.refresh(obj)
-                        if prev_ans == normalized:
-                            return _to_schema(obj)
-                    elif onchain.answer_hash.lower() == computed_hash:
-                        db.query(DBObjection).filter(DBObjection.id == obj.id).update(
-                            {
-                                DBObjection.tx_answer: prev_tx or ("0x" + "0" * 64),
-                                DBObjection.answer: normalized,
-                                DBObjection.answered_by: user.id,
-                                DBObjection.answered_at: now,
-                                DBObjection.status: ObjectionStatus.ANSWERED.value,
-                            },
-                            synchronize_session=False,
-                        )
-                        db.commit()
-                        db.refresh(obj)
-                        return _to_schema(obj)
-            except (ChainUnavailable, ChainSetupError, SQLAlchemyError):
-                db.rollback()
+        _clear_claimed_tx()
         code = (
             status.HTTP_409_CONFLICT
             if e.reason == ObjectionRevertReason.OBJECTION_ALREADY_ANSWERED
@@ -738,7 +683,7 @@ async def answer_objection(
         )
         raise HTTPException(status_code=code, detail=f"온체인 답변 기록이 거절되었습니다: {e}")
     except ChainSetupError as e:
-        _restore_prev_answer_state()
+        _clear_claimed_tx()
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"블록체인 네트워크와 통신할 수 없습니다: {e}",
@@ -747,7 +692,11 @@ async def answer_objection(
         if claimed:
             try:
                 onchain = await chain.get_objection(obj.id)
-                if onchain is not None and onchain.status == ObjectionStatus.ANSWERED.value:
+                if (
+                    onchain is not None
+                    and onchain.status == ObjectionStatus.ANSWERED.value
+                    and onchain.answer_hash.lower() == computed_hash
+                ):
                     db.query(DBObjection).filter(DBObjection.id == obj.id).update(
                         {DBObjection.status: ObjectionStatus.ANSWERED.value},
                         synchronize_session=False,
