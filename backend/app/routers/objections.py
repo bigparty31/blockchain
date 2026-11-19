@@ -464,10 +464,13 @@ async def raise_objection(
     def _clear_tx_raise() -> None:
         if claimed_tx is None:
             return
+        expected_marker = "?" + claimed_tx[2:]
         try:
-            db.query(DBObjection).filter(DBObjection.id == obj.id).update(
-                {DBObjection.tx_raise: None}, synchronize_session=False
-            )
+            db.query(DBObjection).filter(
+                DBObjection.id == obj.id,
+                DBObjection.status == ObjectionStatus.OPEN.value,
+                DBObjection.tx_raise == expected_marker,
+            ).update({DBObjection.tx_raise: None}, synchronize_session=False)
             db.commit()
         except SQLAlchemyError:
             db.rollback()
@@ -679,10 +682,10 @@ async def answer_objection(
     if now < raised_utc:
         now = raised_utc
 
-    claimed = False
+    claimed_tx_answer: Optional[str] = None
 
     async def _claim_tx_answer(tx_hash: str) -> None:
-        nonlocal claimed
+        nonlocal claimed_tx_answer
         rows = (
             db.query(DBObjection)
             .filter(
@@ -707,15 +710,16 @@ async def answer_objection(
                 detail="이미 답변이 완료되었거나 다른 요청이 처리 중입니다.",
             )
         db.commit()
-        claimed = True
+        claimed_tx_answer = tx_hash
 
     def _clear_claimed_tx() -> None:
-        if not claimed:
+        if claimed_tx_answer is None:
             return
         try:
             db.query(DBObjection).filter(
                 DBObjection.id == obj.id,
                 DBObjection.status == ObjectionStatus.OPEN.value,
+                DBObjection.tx_answer == claimed_tx_answer,
             ).update(
                 {
                     DBObjection.tx_answer: None,
@@ -748,7 +752,7 @@ async def answer_objection(
             detail=f"블록체인 네트워크와 통신할 수 없습니다: {e}",
         )
     except ChainUnavailable as e:
-        if claimed:
+        if claimed_tx_answer is not None:
             try:
                 onchain = await chain.get_objection(obj.id)
                 if (
@@ -756,7 +760,10 @@ async def answer_objection(
                     and onchain.status == ObjectionStatus.ANSWERED.value
                     and onchain.answer_hash.lower() == computed_hash
                 ):
-                    db.query(DBObjection).filter(DBObjection.id == obj.id).update(
+                    db.query(DBObjection).filter(
+                        DBObjection.id == obj.id,
+                        DBObjection.tx_answer == claimed_tx_answer,
+                    ).update(
                         {DBObjection.status: ObjectionStatus.ANSWERED.value},
                         synchronize_session=False,
                     )

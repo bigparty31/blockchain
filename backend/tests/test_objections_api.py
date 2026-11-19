@@ -828,3 +828,94 @@ def test_concurrent_reconcile_does_not_clear_newly_claimed_raise_or_answer():
         assert updated_obj.answer == "새로 선점된 답변"
         assert updated_obj.answered_by == 3
         assert updated_obj.answered_at is not None
+
+
+def test_late_revert_cleanup_does_not_clear_replaced_raise_or_answer_claim(monkeypatch):
+    """Codex 6차 회귀: 요청 A 가 revert 사유 조회 중 다른 요청이 선점 B 로 교체하면 A 의 오류 정리가 B 를 지우지 않아야 한다."""
+    from datetime import datetime, timezone
+    from app.chain.models import ChainRevert, ObjectionRevertReason
+
+    _grant_student_sbt()
+
+    replaced_raise_marker = "?" + "c" * 64
+    replaced_answer_hash = "0x" + "d" * 64
+    orig_raise = _test_chain.raise_objection
+    orig_answer = _test_chain.answer_objection
+
+    # 1) raise_objection: A 가 before_broadcast 선점 후 revert 되기 전에 B 가 선점을 교체
+    async def racing_raise(objection_id, entry_id, content_hash, raiser, before_broadcast=None):
+        assert before_broadcast is not None
+        await before_broadcast("0x" + "1" * 64)
+        with _test_session_factory() as other_db:
+            row = other_db.query(DBObjection).filter(DBObjection.id == objection_id).first()
+            row.tx_raise = replaced_raise_marker
+            other_db.commit()
+        raise ChainRevert(ObjectionRevertReason.UNKNOWN, "delayed revert on A")
+
+    monkeypatch.setattr(_test_chain, "raise_objection", racing_raise)
+    res_raise_fail = client.post(
+        "/objections",
+        json={"entry_id": 1, "content": "지연 revert 경쟁 테스트"},
+        headers=_auth(Role.STUDENT),
+    )
+    assert res_raise_fail.status_code == 400
+    with _test_session_factory() as db:
+        row = db.query(DBObjection).filter(DBObjection.id == 1).first()
+        assert row is not None
+        assert row.tx_raise == replaced_raise_marker
+
+    # 정상 등록으로 원복 후 답변 경쟁 테스트
+    monkeypatch.setattr(_test_chain, "raise_objection", orig_raise)
+    with _test_session_factory() as db:
+        row = db.query(DBObjection).filter(DBObjection.id == 1).first()
+        row.tx_raise = None
+        db.commit()
+    assert (
+        client.post(
+            "/objections",
+            json={"entry_id": 1, "content": "지연 revert 경쟁 테스트"},
+            headers=_auth(Role.STUDENT),
+        ).status_code
+        == 201
+    )
+
+    prep = client.post(
+        "/objections/1/prepare-answer",
+        json={"answer": "요청 A 답변"},
+        headers=_auth(Role.AUDITOR),
+    ).json()
+
+    # 2) answer_objection: A 가 before_broadcast 선점 후 revert 되기 전에 B 가 선점을 교체
+    async def racing_answer(request, signature, before_broadcast=None):
+        assert before_broadcast is not None
+        await before_broadcast("0x" + "2" * 64)
+        with _test_session_factory() as other_db:
+            row = other_db.query(DBObjection).filter(DBObjection.id == request.objection_id).first()
+            row.tx_answer = replaced_answer_hash
+            row.answer = "요청 B 새 답변"
+            row.answered_by = 3
+            row.answered_at = datetime.now(timezone.utc)
+            other_db.commit()
+        raise ChainRevert(ObjectionRevertReason.UNKNOWN, "delayed answer revert on A")
+
+    monkeypatch.setattr(_test_chain, "answer_objection", racing_answer)
+    res_ans_fail = client.post(
+        "/objections/1/answer",
+        json={
+            "answer": "요청 A 답변",
+            "answer_hash": prep["answer_hash"],
+            "deadline": prep["deadline"],
+            "signature": fake_signature(AUDITOR_WALLET),
+        },
+        headers=_auth(Role.AUDITOR),
+    )
+    assert res_ans_fail.status_code == 400
+    monkeypatch.setattr(_test_chain, "answer_objection", orig_answer)
+
+    with _test_session_factory() as db:
+        row = db.query(DBObjection).filter(DBObjection.id == 1).first()
+        assert row is not None
+        assert row.tx_answer == replaced_answer_hash
+        assert row.answer == "요청 B 새 답변"
+        assert row.answered_by == 3
+        assert row.answered_at is not None
