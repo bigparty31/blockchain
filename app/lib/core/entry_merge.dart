@@ -137,6 +137,15 @@ class EntryMerge {
   static int ledgerBalance(List<EntryModel> entries) =>
       totalIncome(entries) - totalExpense(entries);
 
+  /// 한 학기의 장부 잔액 — 계좌 대조 카드용 (#117 리뷰).
+  ///
+  /// 통장 스냅샷은 학기마다 따로 올라오고, 서버의 잔액 불일치 알림도 **그 학기**
+  /// 확정 내역만 더한다. 카드가 전 학기 합계와 비교하면 학기가 둘 이상일 때
+  /// 맞는 계좌를 「맞지 않습니다」로, 틀린 계좌를 「일치」로 보일 수 있다.
+  /// [termId] 는 DB 학기 id(`term_id`)다 — 체인의 학기 코드가 아니다.
+  static int ledgerBalanceOfTerm(List<EntryModel> entries, int termId) =>
+      ledgerBalance([for (final e in entries) if (e.termId == termId) e]);
+
   /// 확정(CONFIRMED)된 항목만 더한다.
   ///
   /// 대기 건을 미리 반영하면 승인되지 않은 수치가 학생 화면 합계에 섞인다.

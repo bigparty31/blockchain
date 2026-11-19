@@ -173,7 +173,8 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
                     if (_snapshot != null) ...[
                       _BankDiffCard(
                         snapshot: _snapshot!,
-                        ledgerBalance: _ledgerBalance,
+                        // 스냅샷과 같은 학기만 비교한다 — 서버 불일치 알림과 같은 기준 (#117 리뷰)
+                        ledgerBalance: EntryMerge.ledgerBalanceOfTerm(_entries, _snapshot!.termId),
                       ),
                       const SizedBox(height: 20),
                     ]
