@@ -119,7 +119,8 @@ async def _reconcile_pending_raise(
 ) -> bool:
     """'?...' 인플라이트 표기가 남은 이의 제기의 온체인 등록 여부를 확인해 복구한다.
 
-    아직 체인 조회 결과가 None 이면 채굴 대기 중일 수 있으므로 기존 해시·본문을 삭제하지 않고 보존한다.
+    아직 체인 조회 결과가 None 이고 receipt 도 없으면 채굴 대기 중일 수 있으므로 기존 해시·본문을 보존한다.
+    receipt 가 실패(ChainRevert)로 확정되면 선점을 해제한다.
     """
     if not obj.tx_raise or not obj.tx_raise.startswith("?"):
         return bool(obj.tx_raise and obj.tx_raise.startswith("0x"))
@@ -139,6 +140,19 @@ async def _reconcile_pending_raise(
         db.refresh(obj)
         return True
 
+    try:
+        await chain.objection_tx_result(inflight_hash)
+    except ChainRevert:
+        obj.tx_raise = None
+        db.commit()
+        db.refresh(obj)
+        return False
+    except (ChainUnavailable, ChainSetupError) as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"이전 이의 제기 트랜잭션 결과를 확인할 수 없습니다: {e}",
+        )
+
     return False
 
 
@@ -147,7 +161,8 @@ async def _reconcile_pending_answer(
 ) -> tuple[DBObjection, bool]:
     """OPEN 상태에서 tx_answer 선점이 남아 있는 항목의 온체인 안착 여부를 확인해 DB를 복구한다.
 
-    체인 상태가 아직 OPEN 이면 채굴 대기 중일 수 있으므로 보존된 답변 본문·해시를 삭제하지 않는다.
+    체인 상태가 아직 OPEN 이고 receipt 도 없으면 채굴 대기 중일 수 있으므로 보존된 답변 본문·해시를 유지한다.
+    receipt 가 실패(ChainRevert)로 확정되면 선점과 임시 답변 정보를 해제한다.
 
     Returns:
         (갱신된 obj, 방금 복구되어 ANSWERED로 전환되었는지 여부)
@@ -175,6 +190,22 @@ async def _reconcile_pending_answer(
         db.commit()
         db.refresh(obj)
         return obj, True
+
+    try:
+        await chain.objection_tx_result(obj.tx_answer)
+    except ChainRevert:
+        obj.tx_answer = None
+        obj.answer = None
+        obj.answered_by = None
+        obj.answered_at = None
+        db.commit()
+        db.refresh(obj)
+        return obj, False
+    except (ChainUnavailable, ChainSetupError) as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"이전 답변 트랜잭션 결과를 확인할 수 없습니다: {e}",
+        )
 
     return obj, False
 
@@ -327,10 +358,11 @@ async def raise_objection(
             if cand.entry_id == entry.id and cand.content == normalized:
                 if landed:
                     return _to_schema(cand)
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail="이전 이의 제기 트랜잭션이 처리 중입니다. 잠시 후 다시 확인해 주세요.",
-                )
+                if cand.tx_raise is not None:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="이전 이의 제기 트랜잭션이 처리 중입니다. 잠시 후 다시 확인해 주세요.",
+                    )
 
         if obj is None:
             unrecorded_rows = (

@@ -115,6 +115,7 @@ class FakeChainClient:
         # tx hash 에 섞는 인스턴스별 값. 서버를 다시 켜 새 가짜가 생겨도 DB 에 남은 옛 hash 와 겹치지 않는다 (tx_result)
         self._tx_salt = secrets.token_hex(8)
         self._landed: dict[str, tuple[int, Result]] = {}  # 블록에 들어간 트랜잭션 hash → (id, 결과). tx_result 가 읽는다
+        self._reverted_txs: set[str] = set()  # 블록에 들어갔으나 실패(status 0)로 끝난 트랜잭션 hash 집합
         self._blocks: dict[str, int] = {}  # 트랜잭션 hash → 블록 번호. 들어간 순서대로 하나씩 오른다 (entry_tx_detail)
         self._reasons: dict[str, tuple[Optional[str], bool]] = {}  # 트랜잭션 hash → (사유 해시, 경고 승인 여부)
         self._fail: dict[str, Union[RevertReason, BudgetRevertReason, MembershipRevertReason]] = {}
@@ -329,6 +330,22 @@ class FakeChainClient:
 
     async def get_objection(self, objection_id: int) -> Optional[OnChainObjection]:
         return self._objections.get(objection_id)
+
+    def mark_reverted(self, tx_hash: str) -> None:
+        """타임아웃(ChainUnavailable) 이후 해당 트랜잭션이 블록에서 실패(status=0)로 확정된 상태를 흉내 낸다."""
+        self._reverted_txs.add(check_tx_hash(tx_hash))
+
+    async def objection_tx_result(self, tx_hash: str) -> Optional[ObjectionTxResult]:
+        key = check_tx_hash(tx_hash)
+        if key in self._reverted_txs:
+            raise ChainRevert(ObjectionRevertReason.UNKNOWN, f"트랜잭션이 실패로 끝났다 (tx={tx_hash})")
+        landed = self._landed.get(key)
+        if landed is None:
+            return None
+        _landed_id, result = landed
+        if not isinstance(result, ObjectionTxResult):
+            raise ChainUnavailable(f"이의 제기 트랜잭션이 아니다 (tx={tx_hash})")
+        return result
 
     def _raise_objection(
         self, objection_id: int, entry_id: int, content_hash: str, raiser: str, tx_hash: str

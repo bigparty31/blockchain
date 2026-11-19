@@ -280,3 +280,10 @@ class ChainClient(Protocol):
     async def get_objection(self, objection_id: int) -> Optional[OnChainObjection]:
         """IObjectionRegistry.getObjection 결과를 조회한다. 없으면 None."""
         ...
+
+    async def objection_tx_result(self, tx_hash: str) -> Optional[ObjectionTxResult]:
+        """보낸 이의 제기/답변 트랜잭션의 receipt 상태를 확인한다.
+
+        None 은 아직 블록에 없다는 뜻이며, 블록에 들어갔으나 실패(status != 1)로 끝났으면 ChainRevert 를 던진다.
+        """
+        ...

@@ -972,6 +972,12 @@ class Web3ChainClient:
         tx_hash, _receipt = await self._relay(call, before_broadcast, self._objection_reverts)
         return ObjectionTxResult(tx_hash=tx_hash)
 
+    async def objection_tx_result(self, tx_hash: str) -> Optional[ObjectionTxResult]:
+        receipt = await self._landed_receipt(check_tx_hash(tx_hash))
+        if receipt is None:
+            return None
+        return ObjectionTxResult(tx_hash=check_tx_hash(tx_hash))
+
     async def answer_objection(
         self,
         request: AnswerRequest,
@@ -987,6 +993,12 @@ class Web3ChainClient:
         call = reg.functions.answer(msg, _signature_bytes(signature))
         tx_hash, _receipt = await self._relay(call, before_broadcast, self._objection_reverts)
         return ObjectionTxResult(tx_hash=tx_hash)
+
+    async def objection_tx_result(self, tx_hash: str) -> Optional[ObjectionTxResult]:
+        receipt = await self._landed_receipt(check_tx_hash(tx_hash))
+        if receipt is None:
+            return None
+        return ObjectionTxResult(tx_hash=check_tx_hash(tx_hash))
 
     async def get_objection(self, objection_id: int) -> Optional[OnChainObjection]:
         reg = self._objection_contract()

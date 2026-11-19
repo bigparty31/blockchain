@@ -650,3 +650,120 @@ def test_objection_eip712_vectors():
         td = typed_data_for(req, domain)
         assert digest(td) == expected_digest
         assert recover_signer(td, sig) == expected_signer
+
+
+def test_raise_timeout_then_reverted_receipt_allows_retry():
+    """등록 타임아웃 후 최종 revert 된 receipt 가 확정되면 '?...' 선점을 해제하고 재제출이 성공해야 한다."""
+    _grant_student_sbt()
+    _test_chain.unavailable_next("raise_objection", sent=True, landed=False)
+    res1 = client.post(
+        "/objections",
+        json={"entry_id": 1, "content": "지연 실패 테스트 질문"},
+        headers=_auth(Role.STUDENT),
+    )
+    assert res1.status_code == 503
+
+    with _test_session_factory() as db:
+        row = db.query(DBObjection).filter(DBObjection.id == 1).first()
+        assert row is not None
+        assert row.tx_raise is not None and row.tx_raise.startswith("?")
+        timed_out_hash = "0x" + row.tx_raise[1:]
+
+    # 아직 블록에 없으면 동일 질문 재시도는 409로 대기 안내
+    res_pending = client.post(
+        "/objections",
+        json={"entry_id": 1, "content": "지연 실패 테스트 질문"},
+        headers=_auth(Role.STUDENT),
+    )
+    assert res_pending.status_code == 409
+
+    # 이후 해당 트랜잭션이 블록에서 실패(status=0)로 확정됨
+    _test_chain.mark_reverted(timed_out_hash)
+
+    # 동일 질문 재시도 시 선점이 해제되고 같은 행을 재사용해 정상 등록
+    res_retry = client.post(
+        "/objections",
+        json={"entry_id": 1, "content": "지연 실패 테스트 질문"},
+        headers=_auth(Role.STUDENT),
+    )
+    assert res_retry.status_code == 201
+    body = res_retry.json()
+    assert body["id"] == 1
+    assert body["tx_raise"].startswith("0x")
+    assert body["tx_raise"] != timed_out_hash
+
+
+def test_answer_timeout_then_reverted_receipt_allows_prepare_and_retry():
+    """답변 타임아웃 후 최종 revert 된 receipt 가 확정되면 선점을 해제하고 prepare·제출이 성공해야 한다."""
+    _grant_student_sbt()
+    res_raise = client.post(
+        "/objections",
+        json={"entry_id": 1, "content": "답변 지연 실패 테스트"},
+        headers=_auth(Role.STUDENT),
+    )
+    assert res_raise.status_code == 201
+
+    prep1 = client.post(
+        "/objections/1/prepare-answer",
+        json={"answer": "첫 번째 답변"},
+        headers=_auth(Role.AUDITOR),
+    ).json()
+
+    # 답변 전송 후 receipt 대기 타임아웃 (landed=False)
+    _test_chain.unavailable_next("answer_objection", sent=True, landed=False)
+    res_fail = client.post(
+        "/objections/1/answer",
+        json={
+            "answer": "첫 번째 답변",
+            "answer_hash": prep1["answer_hash"],
+            "deadline": prep1["deadline"],
+            "signature": fake_signature(AUDITOR_WALLET),
+        },
+        headers=_auth(Role.AUDITOR),
+    )
+    assert res_fail.status_code == 503
+
+    with _test_session_factory() as db:
+        row = db.query(DBObjection).filter(DBObjection.id == 1).first()
+        assert row is not None
+        assert row.status == "OPEN"
+        assert row.tx_answer is not None
+        timed_out_hash = row.tx_answer
+
+    # 아직 블록에 없으면 prepare/answer 모두 409
+    assert (
+        client.post(
+            "/objections/1/prepare-answer",
+            json={"answer": "새 답변"},
+            headers=_auth(Role.AUDITOR),
+        ).status_code
+        == 409
+    )
+
+    # 이후 해당 트랜잭션이 블록에서 실패(status=0)로 확정됨
+    _test_chain.mark_reverted(timed_out_hash)
+
+    # prepare 및 재제출 모두 정상 성공
+    prep2 = client.post(
+        "/objections/1/prepare-answer",
+        json={"answer": "재시도 답변"},
+        headers=_auth(Role.AUDITOR),
+    )
+    assert prep2.status_code == 200
+    p2 = prep2.json()
+
+    res_retry = client.post(
+        "/objections/1/answer",
+        json={
+            "answer": "재시도 답변",
+            "answer_hash": p2["answer_hash"],
+            "deadline": p2["deadline"],
+            "signature": fake_signature(AUDITOR_WALLET),
+        },
+        headers=_auth(Role.AUDITOR),
+    )
+    assert res_retry.status_code == 200
+    ans_body = res_retry.json()
+    assert ans_body["status"] == "ANSWERED"
+    assert ans_body["answer"] == "재시도 답변"
+    assert ans_body["tx_answer"] != timed_out_hash
