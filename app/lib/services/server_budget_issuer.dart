@@ -170,7 +170,10 @@ class ServerBudgetIssuer implements BudgetIssuer {
       case 'DRAFT':
         final tx = body['tx_hash'];
         if (tx is String && tx.isNotEmpty) return _unknown('아직 체인에서 확인되지 않았어요. 잠시 후 다시 확인해 주세요.');
-        return _rejected('체인에 기록되지 않았어요'); // 화면이 「· 고쳐서 다시 확정할 수 있어요」를 붙인다
+        // 「실패해 선점이 풀렸다」뿐 아니라 「서버가 아직 브로드캐스트 전」일 수도 있다(선점은 보내기 직전에 쓴다).
+        // 그래도 다시 확정해 안전하다 — 서버의 선점 UPDATE(tx_issue IS NULL 조건)가 두 번째 전송을 막고,
+        // 컨트랙트도 같은 (학기, 항목) 재발행을 막는다(BudgetAlreadyIssued). 그래서 단정하지 않는 문구로 둔다 (#125 리뷰)
+        return _rejected('체인 기록이 확인되지 않았어요'); // 화면이 「· 고쳐서 다시 확정할 수 있어요」를 붙인다
       default:
         return _unknown(_checkFailed);
     }

@@ -228,6 +228,15 @@ class BudgetPlanController extends ChangeNotifier {
       }
     } on BudgetIssueException catch (e) {
       _blockedBy = e.failure;
+    } catch (_) {
+      // 예상 못 한 오류(결과 수 불일치 등) — 줄은 「응답 없음」 그대로 두고 이유만 붙인다.
+      // 버튼 콜백 밖으로 던지지 않는다 (발행기 약속과 같은 원칙, #125 리뷰)
+      for (final i in targets) {
+        if (_lines[i].state == BudgetLineState.noResponse) {
+          _lines[i] = BudgetLine(_lines[i].item,
+              state: BudgetLineState.noResponse, message: '결과를 확인하지 못했어요. 잠시 후 다시 확인해 주세요.');
+        }
+      }
     } finally {
       _checking = false;
       _phase = _lines.every((l) => l.isIssued) ? BudgetPlanPhase.issued : BudgetPlanPhase.editing;

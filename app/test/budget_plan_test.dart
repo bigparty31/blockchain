@@ -322,7 +322,7 @@ void main() {
 
       test('체인에 없고 보낸 기록도 없으면 거부 — 고쳐서 다시 확정할 수 있다', () async {
         final (c, issuer) = await pendingEvent(checks: {
-          BudgetCategory.event: const BudgetIssueOutcome(BudgetIssueStatus.rejected, message: '체인에 기록되지 않았어요'),
+          BudgetCategory.event: const BudgetIssueOutcome(BudgetIssueStatus.rejected, message: '체인 기록이 확인되지 않았어요'),
         });
 
         await c.checkPending();
@@ -361,6 +361,21 @@ void main() {
         expect(c.checking, isFalse);
       });
 
+      test('예상 못 한 오류(결과 수 불일치)도 던지지 않고 응답 없음을 유지한다 (#125 리뷰)', () async {
+        final issuer = _ShortCheckIssuer(forcedOutcomes: {BudgetCategory.event: BudgetIssueOutcome.noResponse});
+        final c = build(issuer);
+        addFilled(c, BudgetCategory.event);
+        await c.confirm();
+
+        await c.checkPending(); // 던지면 여기서 테스트가 실패한다
+
+        expect(c.lines.single.state, BudgetLineState.noResponse);
+        expect(c.lines.single.message, contains('확인하지 못했어요'));
+        expect(c.phase, BudgetPlanPhase.editing);
+        expect(c.checking, isFalse);
+        expect(c.canCheck, isTrue);
+      });
+
       test('회장이 아니면 줄은 그대로 두고 이유만 보인다', () async {
         final (c, issuer) = await pendingEvent();
         issuer.isPresident = false;
@@ -381,4 +396,12 @@ void main() {
       await expectLater(pending, completes);
     });
   });
+}
+
+/// 확인 결과를 항목 수보다 적게 돌려주는 고장 난 발행기 — 컨트롤러가 던지지 않는지 본다
+class _ShortCheckIssuer extends FakeBudgetIssuer {
+  _ShortCheckIssuer({super.forcedOutcomes});
+
+  @override
+  Future<List<BudgetIssueOutcome>> checkAll({int? termId, required List<BudgetDraftItem> items}) async => [];
 }
