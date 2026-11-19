@@ -1,7 +1,7 @@
 {
   "network": "localhost",
   "chainId": 31337,
-  "deployedAt": "2026-11-09T02:43:10.000Z",
+  "deployedAt": "2026-11-18T12:40:17.000Z",
   "solidity": "0.8.28",
   "pathBase": "abi 경로는 이 파일이 있는 폴더(contracts/deployments/) 기준",
   "contracts": {
@@ -24,6 +24,11 @@
       "address": "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9",
       "deployBlock": 5,
       "abi": "abi/MembershipSBT.json"
+    },
+    "ObjectionRegistry": {
+      "address": "0x5FC8d32690cc91D4c39d9d3abcBD16989F875707",
+      "deployBlock": 6,
+      "abi": "abi/ObjectionRegistry.json"
     }
   },
   "setLedgerBlock": 4,
@@ -55,6 +60,13 @@
       "chainId": 31337,
       "verifyingContract": "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9",
       "domainSeparator": "0xf444fbbb6b315e54e4c5cb770eb1db1669ce7880e8bbccd8eba12ecb8127281f"
+    },
+    "ObjectionRegistry": {
+      "name": "ObjectionRegistry",
+      "version": "1",
+      "chainId": 31337,
+      "verifyingContract": "0x5FC8d32690cc91D4c39d9d3abcBD16989F875707",
+      "domainSeparator": "0x416805697be1ff041a4ce947f9cbc23108bba4e7fde1ccf4ab4145ae330f9dfc"
     }
   },
   "roles": {

@@ -5,7 +5,7 @@ Solidity 컨트랙트. 규칙의 정본은 `interfaces/*.sol`, 요약은 `../doc
 | 경로 | 내용 |
 | --- | --- |
 | `interfaces/` | 인터페이스 5종 (정본). `docs/` 가 이 경로를 참조한다 |
-| `src/` | 구현. `RoleManager` `BudgetToken` `AccountingLedger` `MembershipSBT` (`IObjectionRegistry`는 범위 밖) |
+| `src/` | 구현. `RoleManager` `BudgetToken` `AccountingLedger` `MembershipSBT` `ObjectionRegistry` |
 | `mocks/` | 테스트 전용 컨트랙트 (`MockLedger`). 배포하지 않는다 |
 | `test/` | Mocha + ethers 테스트. `docs/CONTRACTS.md` "필수 테스트" 절 전 항목 |
 | `scripts/deploy.ts` | 로컬 배포. 결과를 `deployments/<network>.json` 과 `deployments/abi/` 에 쓴다 |
@@ -51,11 +51,11 @@ npx hardhat node
 npx hardhat run scripts/deploy.ts --network localhost
 ```
 
-배포 순서는 `RoleManager(회장, 총무, 감사1, 감사2)` → `BudgetToken` → `AccountingLedger` → `BudgetToken.setLedger` → `MembershipSBT`. 네 임원은 생성자 인자라 롤 부여 단계가 없고, 끝나면 배포자에게 남는 권한이 없다. 감사는 최소 2명이다. 회장 키를 잃었을 때 감사 둘이 복구하기 위해서다 (`docs/CONTRACTS.md` "롤" 절).
+배포 순서는 `RoleManager(회장, 총무, 감사1, 감사2)` → `BudgetToken` → `AccountingLedger` → `BudgetToken.setLedger` → `MembershipSBT` → `ObjectionRegistry(roleManager, ledger, membershipSBT, relayer)`. 네 임원은 생성자 인자라 롤 부여 단계가 없고, 끝나면 배포자에게 남는 권한이 없다. 감사는 최소 2명이다. 회장 키를 잃었을 때 감사 둘이 복구하기 위해서다 (`docs/CONTRACTS.md` "롤" 절).
 
 `--network localhost` 를 빠뜨리면 스크립트가 바로 멈춘다. 기록 전에 롤 배치, 컨트랙트끼리 가리키는 주소, 네 컨트랙트의 DOMAIN_SEPARATOR 를 다시 계산해 대조하고, 하나라도 틀리면 기록하지 않는다.
 
-서명을 받는 컨트랙트가 넷이라 도메인도 넷이다. 앱은 서명 대상에 맞는 도메인을 골라야 한다: 등록·확정·반려는 `AccountingLedger`, 예산 발행·증액·회수는 `BudgetToken`, 롤 변경은 `RoleManager`, 회원권 발행·소각은 `MembershipSBT`.
+서명을 받는 컨트랙트가 다섯이라 도메인도 다섯이다. 앱은 서명 대상에 맞는 도메인을 골라야 한다: 등록·확정·반려는 `AccountingLedger`, 예산 발행·증액·회수는 `BudgetToken`, 롤 변경은 `RoleManager`, 회원권 발행·소각은 `MembershipSBT`, 이의 답변은 `ObjectionRegistry`. 이의 제기(`raise`)는 서명이 없고 생성자에서 정한 릴레이어만 부른다.
 
 계정은 Hardhat 기본 니모닉 순서를 그대로 쓴다. 개인키는 Hardhat 이 공개한 테스트 키라 저장소에 두지 않는다.
 
@@ -67,6 +67,8 @@ npx hardhat run scripts/deploy.ts --network localhost
 | 3 | 감사 1 | `0x90F7…b906` |
 | 4 | 릴레이어 (롤 없음) | `0x15d3…6A65` |
 | 5 | 감사 2 | `0x9965…A4dc` |
+
+시연용으로 임원을 실제 기기 주소로 배포할 때는 `OFFICER_PRESIDENT`·`OFFICER_TREASURER`·`OFFICER_AUDITOR1`·`OFFICER_AUDITOR2` 를 넷 다 환경변수로 준다. 위 표의 1·2·3·5번 대신 이 주소가 초기 롤이 된다. 하나라도 비면 Hardhat 계정을 쓰고, 일부만 주면 배포하지 않고 멈춘다. 배포자(0)와 릴레이어(4)는 그대로라 컨트랙트 주소도 같다. 저장소의 `deployments/localhost.json` 은 Hardhat 임원 기준이므로 이 배포 결과로 덮어써 커밋하지 않는다.
 
 노드를 새로 띄우면 nonce 가 0 부터라 컨트랙트 주소가 `deployments/localhost.json` 과 같게 나온다. 노드를 띄운 채로 다시 배포하면 주소가 달라지니 파일을 갱신하거나 노드를 재시작한다.
 

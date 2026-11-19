@@ -84,6 +84,7 @@ export async function deployFixture(opts: DeployOptions = {}) {
       auditor1: auditor.address,
       auditor2: auditor2.address,
     },
+    relayer.address,
     deployer,
     opts,
   );
@@ -556,4 +557,59 @@ export async function signedBurn(f: Fixture, o: BurnOpts, signer: any = f.presid
 export async function burnMembership(f: Fixture, o: BurnOpts, signer: any = f.president) {
   const { req, sig } = await signedBurn(f, o, signer);
   return { req, sig, tx: f.membershipSBT.connect(f.relayer).burnRelayed(req, sig) };
+}
+
+// ---------------------------------------------------------------- ObjectionRegistry
+
+export const OBJECTION_TYPES = {
+  AnswerRequest: [
+    { name: "objectionId", type: "uint256" },
+    { name: "answerHash", type: "bytes32" },
+    { name: "deadline", type: "uint256" },
+  ],
+} as const;
+
+/** docs/enums.md objection status 표 순서 */
+export const ObjectionStatus = { OPEN: 0, ANSWERED: 1 } as const;
+
+export async function signAnswer(signer: any, registry: any, req: any): Promise<string> {
+  return sign(signer, registry, "ObjectionRegistry", "AnswerRequest", OBJECTION_TYPES.AnswerRequest, req);
+}
+
+export interface RaiseOpts {
+  objectionId: bigint;
+  entryId: bigint;
+  raiser: string;
+  contentHash?: string;
+}
+
+/** 릴레이어(기본)가 이의를 올린다. 학생 서명은 없다. */
+export function raiseObjection(f: Fixture, o: RaiseOpts, caller: any = f.relayer) {
+  const contentHash = o.contentHash ?? textHash(`이의:${o.objectionId}`);
+  return {
+    contentHash,
+    tx: f.objectionRegistry.connect(caller).raise(o.objectionId, o.entryId, contentHash, o.raiser),
+  };
+}
+
+export interface AnswerOpts {
+  objectionId: bigint;
+  answerHash?: string;
+  deadline?: bigint;
+}
+
+/** 서명만 만든다 (보내지 않음). */
+export async function signedAnswer(f: Fixture, o: AnswerOpts, signer: any = f.auditor) {
+  const req = {
+    objectionId: o.objectionId,
+    answerHash: o.answerHash ?? textHash(`답변:${o.objectionId}`),
+    deadline: o.deadline ?? (await deadlineIn()),
+  };
+  return { req, sig: await signAnswer(signer, f.objectionRegistry, req) };
+}
+
+/** 감사 서명(기본)으로 답변. 릴레이어가 보낸다. */
+export async function answerObjection(f: Fixture, o: AnswerOpts, signer: any = f.auditor) {
+  const { req, sig } = await signedAnswer(f, o, signer);
+  return { req, sig, tx: f.objectionRegistry.connect(f.relayer).answer(req, sig) };
 }

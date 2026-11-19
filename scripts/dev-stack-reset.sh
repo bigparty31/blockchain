@@ -3,6 +3,8 @@
 # VM 을 재시작해 체인이 지워졌을 때도 이것으로 복구한다. DB 내용도 함께 지워진다.
 #   --yes         확인 없이 진행
 #   --no-budgets  체인 예산 발행을 건너뛴다. 예산 편성 화면을 시험할 때 쓴다
+# 임원을 실제 기기 주소로 배포하려면 OFFICER_PRESIDENT·OFFICER_TREASURER·OFFICER_AUDITOR1·OFFICER_AUDITOR2 를
+# 넷 다 환경변수로 준다 (contracts/scripts/deploy.ts). 이때는 Hardhat 키로 예산을 발행할 수 없어 --no-budgets 가 필요하다.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -24,6 +26,16 @@ for name in RELAYER_PRIVATE_KEY STUDENT_WALLET_MNEMONIC; do
     exit 1
   fi
 done
+
+officer_vars=(OFFICER_PRESIDENT OFFICER_TREASURER OFFICER_AUDITOR1 OFFICER_AUDITOR2)
+device_officers=0
+for v in "${officer_vars[@]}"; do
+  [ -n "${!v:-}" ] && device_officers=1
+done
+if [ "$device_officers" -eq 1 ] && [ "$issue_budgets" -eq 1 ]; then
+  echo "임원 주소 환경변수가 있으면 Hardhat 키로 예산을 발행할 수 없습니다. --no-budgets 를 붙이세요." >&2
+  exit 2
+fi
 
 if [ "$assume_yes" -ne 1 ]; then
   read -r -p "체인과 DB 를 모두 지웁니다. 계속할까요? [y/N] " answer
@@ -95,7 +107,11 @@ fi
 
 docker compose down -v --remove-orphans
 docker compose up -d --build --wait db chain
-docker compose exec -T chain npx hardhat run scripts/deploy.ts --network localhost
+officer_env=()
+for v in "${officer_vars[@]}"; do
+  officer_env+=(-e "$v=${!v:-}")
+done
+docker compose exec -T "${officer_env[@]}" chain npx hardhat run scripts/deploy.ts --network localhost
 init_command="alembic upgrade head && python -m scripts.seed"
 if [ "$issue_budgets" -eq 1 ]; then
   init_command="$init_command && python -m scripts.issue_seed_budgets"

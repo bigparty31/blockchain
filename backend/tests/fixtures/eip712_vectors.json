@@ -241,5 +241,38 @@
       "signature": "0x5f05604ca286709f6a7728ea533b1a7d3e3f325679805572b5e0e615aec4ee532e5396efdaabd26cc031ec17cd6c37e5c2af87387230e97904db758e0391d9781c",
       "signer": "0x90F79bf6EB2c4f870365E785982E1f101E93b906"
     }
+  ],
+  "objectionDomain": {
+    "name": "ObjectionRegistry",
+    "version": "1",
+    "chainId": 31337,
+    "verifyingContract": "0x5FC8d32690cc91D4c39d9d3abcBD16989F875707",
+    "domainSeparator": "0x416805697be1ff041a4ce947f9cbc23108bba4e7fde1ccf4ab4145ae330f9dfc"
+  },
+  "objectionVectors": [
+    {
+      "name": "answer_auditor",
+      "primaryType": "AnswerRequest",
+      "message": {
+        "objectionId": 1,
+        "answerHash": "0x441076584b2fc8da010f82ea6727c17b7a05df0aef7087bbf1ccc072a865efde",
+        "deadline": 1790700000
+      },
+      "digest": "0x9dd2e581a12e0fdf2696b0b32f36bd1c30d972be8539d36392a041359d8307aa",
+      "signature": "0x4d13b117b5ae8b3df899901e3b8d583ca503d9b04456bfed7b7b414f759efb651ad453a8eca0f666161bd7a3ca86f04ad20d85dbe11bff0134f1553bd600bfb31b",
+      "signer": "0x90F79bf6EB2c4f870365E785982E1f101E93b906"
+    },
+    {
+      "name": "answer_president",
+      "primaryType": "AnswerRequest",
+      "message": {
+        "objectionId": 2,
+        "answerHash": "0x441076584b2fc8da010f82ea6727c17b7a05df0aef7087bbf1ccc072a865efde",
+        "deadline": 1790700000
+      },
+      "digest": "0x4e48f1c4c6d0d68e7bcce39b011b7ab3d804e9af77ed3818357a45361822728b",
+      "signature": "0x824448c59930316a32410761b725b011e11c8dafe01220fa99f8168a4c3b5b583f98cdba7286c4a9e3e61009478d104076cde3d68c8427928271d472a74442cf1c",
+      "signer": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+    }
   ]
 }
