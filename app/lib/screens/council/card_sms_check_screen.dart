@@ -72,7 +72,7 @@ class _CardSmsCheckScreenState extends State<CardSmsCheckScreen> {
           _input(),
           if (result != null) ...[
             const SizedBox(height: 12),
-            _summary(result.summary),
+            _summary(result),
             const SizedBox(height: 12),
             for (final item in _ordered(result.items)) _ItemTile(item: item),
           ],
@@ -123,8 +123,19 @@ class _CardSmsCheckScreenState extends State<CardSmsCheckScreen> {
     );
   }
 
-  Widget _summary(CardSmsSummary s) {
-    final alert = s.unregistered > 0;
+  /// 요약 한 줄. **미등록 0건이 곧 「모두 맞음」은 아니다** — 못 읽었거나 학기 밖이라 대조하지 못한 문자가
+  /// 있으면 그 사실을 먼저 말한다. 전부 못 읽었는데 녹색 「맞아요」가 뜨면 안 된다 (#135 리뷰).
+  Widget _summary(CardSmsCheckResult result) {
+    final s = result.summary;
+    final outOfTerm = result.items.where((i) => i.status == CardSmsStatus.outOfTerm).length;
+    final notChecked = s.unreadable + outOfTerm;
+    final checked = s.matched + s.matchedPending;
+    final (String title, Color color) = switch (()) {
+      _ when s.unregistered > 0 => ('장부에 없는 카드 사용 ${s.unregistered}건', AppTheme.expense),
+      _ when checked == 0 => ('장부와 대조한 문자가 없어요', AppTheme.pending),
+      _ when notChecked > 0 => ('읽은 문자는 장부와 맞아요 · $notChecked건은 대조하지 못했어요', AppTheme.pending),
+      _ => ('모든 카드 사용이 장부와 맞아요', AppTheme.success),
+    };
     return Card(
       key: const Key('card_sms_summary'),
       color: AppTheme.bgCard,
@@ -133,14 +144,7 @@ class _CardSmsCheckScreenState extends State<CardSmsCheckScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              alert ? '장부에 없는 카드 사용 ${s.unregistered}건' : '모든 카드 사용이 장부와 맞아요',
-              style: TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.w700,
-                color: alert ? AppTheme.expense : AppTheme.success,
-              ),
-            ),
+            Text(title, style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: color)),
             if (s.unregisteredAmount > 0) ...[
               const SizedBox(height: 4),
               Text('미등록 승인 합계 ${Fmt.won(s.unregisteredAmount)}',
@@ -149,7 +153,8 @@ class _CardSmsCheckScreenState extends State<CardSmsCheckScreen> {
             const SizedBox(height: 8),
             Text(
               '문자 ${s.total}건 · 맞음 ${s.matched} · 승인 대기와 맞음 ${s.matchedPending}'
-              '${s.unreadable > 0 ? ' · 읽지 못함 ${s.unreadable}' : ''}',
+              '${s.unreadable > 0 ? ' · 읽지 못함 ${s.unreadable}' : ''}'
+              '${outOfTerm > 0 ? ' · 학기 밖 $outOfTerm' : ''}',
               style: const TextStyle(fontSize: 12, color: AppTheme.textSub),
             ),
           ],
@@ -157,6 +162,7 @@ class _CardSmsCheckScreenState extends State<CardSmsCheckScreen> {
       ),
     );
   }
+
 
   /// 확인이 필요한 것부터: 미등록 → 읽지 못함 → 승인 대기 → 나머지. 같은 상태 안에서는 붙여 넣은 순서.
   static List<CardSmsItem> _ordered(List<CardSmsItem> items) {

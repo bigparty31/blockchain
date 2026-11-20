@@ -470,6 +470,42 @@ void main() {
       expect(find.text('모든 카드 사용이 장부와 맞아요'), findsOneWidget);
     });
 
+    testWidgets('못 읽거나 학기 밖인 문자가 있으면 「모두 맞아요」라고 하지 않는다', (tester) async {
+      final partly = result(clean: true)
+        ..['summary'] = {
+          'total': 3, 'matched': 1, 'matched_pending': 0, 'unregistered': 0,
+          'unregistered_amount': 0, 'unreadable': 1,
+        }
+        ..['items'] = [
+          sms(1, 'MATCHED', entry: 2),
+          sms(2, 'UNREADABLE', reason: '날짜를 찾지 못했어요'),
+          sms(3, 'OUT_OF_TERM'),
+        ];
+      BankReconcileService.client = server(onPost: (_) => json(partly));
+      await openSms(tester);
+      await tester.enterText(find.byKey(const Key('card_sms_text')), 'x');
+      await tester.tap(find.byKey(const Key('card_sms_check')));
+      await tester.pumpAndSettle();
+      expect(find.text('모든 카드 사용이 장부와 맞아요'), findsNothing);
+      expect(find.text('읽은 문자는 장부와 맞아요 · 2건은 대조하지 못했어요'), findsOneWidget);
+    });
+
+    testWidgets('전부 못 읽었으면 「대조한 문자가 없어요」', (tester) async {
+      final none = result(clean: true)
+        ..['summary'] = {
+          'total': 1, 'matched': 0, 'matched_pending': 0, 'unregistered': 0,
+          'unregistered_amount': 0, 'unreadable': 1,
+        }
+        ..['items'] = [sms(1, 'UNREADABLE', reason: '카드사를 알 수 없습니다')];
+      BankReconcileService.client = server(onPost: (_) => json(none));
+      await openSms(tester);
+      await tester.enterText(find.byKey(const Key('card_sms_text')), 'x');
+      await tester.tap(find.byKey(const Key('card_sms_check')));
+      await tester.pumpAndSettle();
+      expect(find.text('모든 카드 사용이 장부와 맞아요'), findsNothing);
+      expect(find.text('장부와 대조한 문자가 없어요'), findsOneWidget);
+    });
+
     testWidgets('대조 중에는 버튼이 잠겨 두 번 보내지 않는다', (tester) async {
       var posts = 0;
       BankReconcileService.client = server(onPost: (_) {

@@ -103,6 +103,20 @@ def test_pair_respects_approval_no_and_company():
     assert pair_cancellations([(1, sms(APPROVAL)), (2, sms(CANCEL, amount=4000))]) == set()
 
 
+def test_pair_never_cancels_a_later_approval():
+    """3/9 취소가 3/10 승인을 지우면 안 된다 — 그 승인이 미등록이면 대조에서 사라진다 (#135 리뷰)"""
+    items = [(1, sms(CANCEL)), (2, sms(APPROVAL))]
+    assert pair_cancellations(items, dates={1: "2026-03-09", 2: "2026-03-10"}) == set()
+    assert pair_cancellations(items, dates={1: "2026-03-10", 2: "2026-03-09"}) == {1, 2}
+
+
+def test_pair_picks_latest_approval_before_cancel():
+    a1, a2, c = sms(APPROVAL), sms(APPROVAL), sms(CANCEL)
+    items = [(1, a1), (2, a2), (3, c)]
+    dates = {1: "2026-03-05", 2: "2026-03-08", 3: "2026-03-09"}
+    assert pair_cancellations(items, dates=dates) == {2, 3}
+
+
 # ================================================================ API (테스트용 파서)
 
 _FAKE = re.compile(r"NH (승인|취소) (\d{2})/(\d{2}) (\S+) (\d+)원(?: #(\d+))?")
@@ -196,6 +210,8 @@ KB_CHECK_OK = "[Web발신]\nKB국민체크(0000)\n홍*동님\n11/19 11:30\n10,00
 NH_OK = "[Web발신]\nNH카드0*0*승인\n홍*동\n10,000원 일시불\n11/19 11:30\n가맹점명\n누적100,000원"
 NH_CHECK_OK = "[Web발신]\nNH카드0*0*승인\n홍*동\n10,000원 체크\n11/19 11:30\n가맹점명\n잔액000,000원"
 NH_CANCEL = "[Web발신]\nNH카드0*0*취소\n홍*동\n10,000원 일시불\n11/19 11:35\n가맹점명\n누적90,000원"
+# KB 체크 취소 — 첫 줄엔 「취소」가 없고 가맹점 줄 끝에 붙는다 (#135 리뷰)
+KB_CHECK_CANCEL = "[Web발신]\nKB국민체크(0000)\n홍*동님\n11/19 11:35\n10,000원\n가맹점명 취소"
 
 
 @pytest.mark.parametrize("msg, company, kind, time", [
@@ -205,6 +221,7 @@ NH_CANCEL = "[Web발신]\nNH카드0*0*취소\n홍*동\n10,000원 일시불\n11/1
     (NH_OK, "NH", APPROVAL, "11:30:00"),
     (NH_CHECK_OK, "NH", APPROVAL, "11:30:00"),    # 「일시불」 대신 「체크」, 끝에 잔액 줄
     (NH_CANCEL, "NH", CANCEL, "11:35:00"),
+    (KB_CHECK_CANCEL, "KB", CANCEL, "11:35:00"),
 ])
 def test_parse_sample_formats(msg, company, kind, time):
     s = parse_message(msg)
@@ -230,6 +247,7 @@ def test_parse_without_web_sent_header():
     ("[Web발신]\nNH카드0*0*승인\n홍*동\n10,000원 일시불\n11/19 11:30\n누적100,000원", "가맹점"),
     ("[Web발신]\nNH카드0*0*승인\n홍*동\n10,000원 일시불\n13/40 11:30\n가맹점명", "올바르지"),
     ("[Web발신]\nNH카드0*0*승인\n홍*동\n0원 일시불\n11/19 11:30\n가맹점명", "금액"),
+    ("[Web발신]\nNH카드0*0*승인\n홍*동\n10,000원 일시불\n11/19 11:30:75\n가맹점명", "올바르지"),  # 초 60 이상
 ])
 def test_parse_rejects_broken(msg, why):
     with pytest.raises(CardSmsError, match=why):
@@ -254,3 +272,26 @@ def test_card_sms_flow_with_real_formats(db_session, auth_header):
     assert got == [(1, "MATCHED", 2), (2, "UNREGISTERED", None), (3, "CANCELLED_PAIR", None), (4, "CANCELLED_PAIR", None)]
     assert body["items"][1]["merchant"] == "OO편의점"
     assert body["summary"]["unregistered_amount"] == 12000
+
+
+def test_card_sms_cancel_before_approval_is_not_paired(db_session, auth_header):
+    """앞날짜 취소와 뒷날짜 승인 — 상쇄하지 않고 각각 대조한다. 미등록 승인이 숨지 않는다 (#135 리뷰)"""
+    demo_ledger(db_session)
+    text = "\n".join([
+        sample("NH카드0*0*", 4500, "03/09", "12:15", "OO매점", kind_word="취소", tail="누적0원"),  # 1 짝 없는 취소
+        sample("NH카드0*0*", 4500, "03/10", "12:10", "OO매점"),                                 # 2 장부에 없는 승인
+    ])
+    body = check(auth_header, text).json()
+    assert [(i["msg_no"], i["status"]) for i in body["items"]] == [(1, "UNREGISTERED"), (2, "UNREGISTERED")]
+    assert body["summary"]["unregistered_amount"] == 4500
+
+
+def test_card_sms_kb_check_cancel_pairs(db_session, auth_header):
+    demo_ledger(db_session)
+    text = "\n".join([
+        "[Web발신]\nKB국민체크(0000)\n홍*동님\n03/18 08:55\n12,000원\nOO편의점 사용",
+        "[Web발신]\nKB국민체크(0000)\n홍*동님\n03/18 09:05\n12,000원\nOO편의점 취소",
+    ])
+    body = check(auth_header, text).json()
+    assert [i["status"] for i in body["items"]] == ["CANCELLED_PAIR", "CANCELLED_PAIR"]
+    assert body["items"][1]["kind"] == "CANCEL"

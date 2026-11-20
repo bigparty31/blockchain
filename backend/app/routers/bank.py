@@ -427,7 +427,7 @@ async def check_card_sms(body: CardSmsCheckRequest, user: User = Depends(treasur
         if d is not None:
             parsed.append((n, sms, d))
 
-    cancelled = pair_cancellations([(n, s) for n, s, _ in parsed])
+    cancelled = pair_cancellations([(n, s) for n, s, _ in parsed], dates={n: d for n, _, d in parsed})
     to_match = [(n, s, d) for n, s, d in parsed if n not in cancelled]
     for n in cancelled:
         items[n].status = SmsStatus.CANCELLED_PAIR
