@@ -462,3 +462,51 @@ def test_cache_hit_does_not_open_db_session(test_env, monkeypatch):
     assert test_env.client.get("/entries").status_code == 200
     assert test_env.client.get("/budgets").status_code == 200
     assert db_opens == 0
+
+
+def test_cache_shares_uncached_degraded_result_and_cleans_up_inflight_keys(monkeypatch):
+    """Codex 3차 회귀:
+    1) should_cache=False(예: 체인 지연으로 불완전한 /entries)여도 동시 대기자는 직렬 재조회 없이 결과를 공유한다.
+    2) 서로 다른 키를 대량 조회한 뒤에도 _inflight 맵에 키가 누적되지 않는다.
+    """
+    import asyncio
+
+    monkeypatch.setenv("CACHE_ENABLED", "1")
+    fake_redis = FakeRedis()
+    monkeypatch.setattr(cache, "_get_client", lambda: fake_redis)
+
+    calls = 0
+
+    async def _slow_degraded_produce():
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.05)
+        return [{"id": 1, "registrant": None}]
+
+    async def _run():
+        # 1) 동시 10개 요청이 should_cache=False 여도 produce 는 1회만 호출되고 Redis 는 비어 있음
+        results = await asyncio.gather(
+            *[
+                cache.get_or_set(
+                    "entries:all",
+                    _slow_degraded_produce,
+                    should_cache=lambda _: False,
+                )
+                for _ in range(10)
+            ]
+        )
+        assert calls == 1
+        assert all(r == [{"id": 1, "registrant": None}] for r in results)
+        assert "entries:all" not in fake_redis.store
+        assert len(cache._inflight) == 0
+
+        # 2) 서로 다른 키 200개 조회 완료 후에도 _inflight 는 완전히 비워짐
+        for i in range(200):
+            async def _p(idx=i):
+                return {"term": idx}
+
+            val = await cache.get_or_set(f"balance:{i}", _p)
+            assert val == {"term": i}
+        assert len(cache._inflight) == 0
+
+    asyncio.run(_run())

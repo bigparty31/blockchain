@@ -52,22 +52,18 @@ def ttl_seconds() -> int:
 
 _client = None
 _unavailable = False
-_key_locks: dict[str, asyncio.Lock] = {}
-_locks_loop: Optional[asyncio.AbstractEventLoop] = None
+_inflight: dict[str, asyncio.Future] = {}
+_inflight_loop: Optional[asyncio.AbstractEventLoop] = None
 
 
-def _get_key_lock(key: str) -> asyncio.Lock:
-    """같은 캐시 키의 만료 직후 동시 요청(stampede)을 프로세스 내에서 1회만 원본 조회하도록 직렬화한다."""
-    global _locks_loop
+def _inflight_map() -> dict[str, asyncio.Future]:
+    """진행 중(in-flight) 키별 Future 맵. 요청 완료 시 즉시 키를 제거해 메모리 누적을 막는다."""
+    global _inflight_loop
     loop = asyncio.get_running_loop()
-    if _locks_loop is not loop:
-        _key_locks.clear()
-        _locks_loop = loop
-    lock = _key_locks.get(key)
-    if lock is None:
-        lock = asyncio.Lock()
-        _key_locks[key] = lock
-    return lock
+    if _inflight_loop is not loop:
+        _inflight.clear()
+        _inflight_loop = loop
+    return _inflight
 
 
 def _get_client():
@@ -122,10 +118,11 @@ async def get_or_set(
 ) -> Any:
     """[key] 에 담긴 값을 돌려주고, 없으면 [produce] 를 불러 담는다.
 
-    - 같은 키가 만료된 직후 동시에 여러 요청이 몰려도 프로세스 내 키별 Lock 으로 한 요청만
-      [produce] 를 실행하고, 나머지 요청은 채워진 캐시를 읽는다(stampede 방지).
-    - [should_cache] 가 False 를 반환하면(예: 체인 조회 일부 실패로 불완전한 응답) 캐시에
-      저장하지 않고 이번 요청에만 결과를 반환한다.
+    - 같은 키가 만료된 직후 동시에 여러 요청이 몰려도 프로세스 내 진행 중(in-flight) Future 로
+      한 요청만 [produce] 를 실행하고, 나머지 대기자는 그 결과를 공유한다(stampede·직렬 대기 방지).
+    - 완료 시 in-flight 키를 즉시 제거해 존재하지 않는 term_id 등으로 인한 메모리 누적을 막는다.
+    - [should_cache] 가 False 를 반환하면(예: 체인 조회 일부 실패로 불완전한 응답) Redis 에는
+      저장하지 않되, 동시에 기다리던 요청끼리는 이번 조회 결과를 공유한다.
     - **Redis 가 말을 안 들으면 [produce] 결과를 그대로 돌려준다.** 캐시 장애가 조회 장애가
       되면 안 된다 — 학생 화면이 통째로 멈춘다.
 
@@ -145,36 +142,49 @@ async def get_or_set(
         logger.warning("캐시 조회 실패(%s). 원본을 읽는다: %s", key, e)
         return await produce()
 
-    async with _get_key_lock(key):
-        try:
-            found, cached = await _read_cached(client, key)
-            if found:
-                return cached
-        except Exception as e:
-            logger.warning("캐시 재조회 실패(%s). 원본을 읽는다: %s", key, e)
-            return await produce()
+    inflight = _inflight_map()
+    existing = inflight.get(key)
+    if existing is not None:
+        return await asyncio.shield(existing)
 
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future = loop.create_future()
+    inflight[key] = future
+    try:
         value = await produce()
-        if should_cache is not None and not should_cache(value):
-            return value
-
-        try:
-            await client.set(key, json.dumps(value, default=str), ex=ttl or ttl_seconds())
-        except TypeError as e:
-            logger.warning("캐시에 담을 수 없는 값(%s): %s", key, e)
-        except Exception as e:
-            logger.warning("캐시 저장 실패(%s): %s", key, e)
+        if should_cache is None or should_cache(value):
+            try:
+                await client.set(key, json.dumps(value, default=str), ex=ttl or ttl_seconds())
+            except TypeError as e:
+                logger.warning("캐시에 담을 수 없는 값(%s): %s", key, e)
+            except Exception as e:
+                logger.warning("캐시 저장 실패(%s): %s", key, e)
+    except asyncio.CancelledError:
+        if not future.done():
+            future.cancel()
+        raise
+    except BaseException as exc:
+        if not future.done():
+            future.set_exception(exc)
+            future.exception()
+        raise
+    else:
+        if not future.done():
+            future.set_result(value)
         return value
+    finally:
+        if inflight.get(key) is future:
+            inflight.pop(key, None)
 
 
 async def close() -> None:
-    """프로세스를 내릴 때 Redis 연결과 키별 락을 정리한다 (`main_student.py` lifespan 종료 시 호출)."""
-    global _client, _locks_loop
+    """프로세스를 내릴 때 Redis 연결과 진행 중 Future 맵을 정리한다 (`main_student.py` lifespan 종료 시 호출)."""
+    global _client, _inflight_loop
     if _client is not None:
         try:
             await _client.aclose()
         except Exception:
             pass
         _client = None
-    _key_locks.clear()
-    _locks_loop = None
+    _inflight.clear()
+    _inflight_loop = None
