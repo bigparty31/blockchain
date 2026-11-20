@@ -5,7 +5,7 @@
 """
 import hashlib
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -76,6 +76,18 @@ def test_resolve_date_term_crossing_new_year():
     start, end = datetime(2026, 9, 1, tzinfo=timezone.utc), datetime(2027, 2, 28, tzinfo=timezone.utc)
     assert resolve_date(12, 20, start, end) == "2026-12-20"
     assert resolve_date(1, 15, start, end) == "2027-01-15"
+
+
+def test_resolve_date_uses_kst_dates_of_the_term():
+    """학기 시작이 UTC 로 표현돼 와도(9/1 00:00 KST = 8/31 15:00 UTC) 8/31 문자는 학기 밖이다 (#135 리뷰 2차)."""
+    kst = timezone(timedelta(hours=9))
+    start = datetime(2026, 9, 1, tzinfo=kst).astimezone(timezone.utc)
+    end = datetime(2027, 2, 28, 23, 59, 59, tzinfo=kst).astimezone(timezone.utc)
+    assert resolve_date(8, 31, start, end) is None
+    assert resolve_date(9, 1, start, end) == "2026-09-01"
+    assert resolve_date(2, 28, start, end) == "2027-02-28"
+    # 시간대 없는 값(SQLite)은 UTC 로 본다
+    assert resolve_date(8, 31, start.replace(tzinfo=None), end.replace(tzinfo=None)) is None
 
 
 # ================================================================ 승인·취소 상쇄

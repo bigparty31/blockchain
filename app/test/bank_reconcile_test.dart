@@ -531,5 +531,35 @@ void main() {
       final button = tester.widget<ButtonStyleButton>(find.byKey(const Key('card_sms_check')));
       expect(button.onPressed, isNotNull);
     });
+
+    testWidgets('앞 대조가 성공한 뒤 다시 대조하다 실패하면 앞 결과를 남기지 않는다 (#135 리뷰 2차)', (tester) async {
+      var fail = false;
+      BankReconcileService.client =
+          server(onPost: (_) => fail ? json({'detail': '잠시 후 다시 시도해 주세요.'}, 400) : json(result(clean: true)));
+      await openSms(tester);
+      await tester.enterText(find.byKey(const Key('card_sms_text')), 'A');
+      await tester.tap(find.byKey(const Key('card_sms_check')));
+      await tester.pumpAndSettle();
+      expect(find.text('모든 카드 사용이 장부와 맞아요'), findsOneWidget);
+
+      fail = true;
+      await tester.tap(find.byKey(const Key('card_sms_check')));
+      await tester.pumpAndSettle();
+      expect(find.text('잠시 후 다시 시도해 주세요.'), findsOneWidget);
+      expect(find.byKey(const Key('card_sms_summary')), findsNothing, reason: '실패한 대조 아래 앞 결과가 남았다');
+    });
+
+    testWidgets('입력을 바꾸면 앞 결과를 지운다 — 결과는 늘 지금 입력의 결과', (tester) async {
+      BankReconcileService.client = server(onPost: (_) => json(result(clean: true)));
+      await openSms(tester);
+      await tester.enterText(find.byKey(const Key('card_sms_text')), 'A');
+      await tester.tap(find.byKey(const Key('card_sms_check')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('card_sms_summary')), findsOneWidget);
+
+      await tester.enterText(find.byKey(const Key('card_sms_text')), 'B');
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('card_sms_summary')), findsNothing);
+    });
   });
 }

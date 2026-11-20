@@ -11,7 +11,7 @@
 """
 import re
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 APPROVAL = "APPROVAL"
@@ -75,12 +75,26 @@ def parse_message(message: str) -> CardSms:
     return parser(message)
 
 
+KST = timezone(timedelta(hours=9))
+
+
+def _kst_date(dt: datetime) -> date:
+    """학기 일시의 **KST 날짜**. 문자 속 MM/DD 는 KST 라서 같은 기준으로 비교해야 한다 (#135 리뷰 2차).
+
+    `2026-09-01T00:00+09:00` 이 UTC(`2026-08-31T15:00Z`)로 들어와도 9/1 로 본다.
+    시간대가 없으면 UTC 로 본다 — SQLite 는 시간대를 저장하지 않고, 저장할 때 UTC 로 넣는다 (services/membership.py `_aware` 와 같은 규칙).
+    """
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(KST).date()
+
+
 def resolve_date(month: int, day: int, started_at: datetime, ended_at: datetime) -> Optional[str]:
     """MM/DD 에 학기 기간 안에 들어가는 연도를 붙인다. 어느 연도로도 기간 밖이면 None.
 
     2학기(9월~다음 해 2월처럼 해를 넘기는 학기)도 시작·종료 연도 두 후보를 모두 본다.
     """
-    start, end = started_at.date(), ended_at.date()
+    start, end = _kst_date(started_at), _kst_date(ended_at)
     for year in sorted({start.year, end.year}):
         try:
             d = date(year, month, day)
