@@ -933,7 +933,59 @@ PRD v0.15 §4.6. 총무가 은행에서 내려받은 거래내역 CSV를 올리�
 ```
 - `404` 학기 또는 업로드가 아직 없음(앱은 「계좌 대조를 불러오지 못했습니다」), `422` `term_id` 형식 오류, `503` DB 오류.
 
-**한계** — 파일 해시의 온체인 기록은 컨트랙트가 정해지지 않아 아직 없습니다(`tx_hash` 비어 있음). 원본 파일은 저장하지 않고 해시만 저장합니다. 날짜는 같은 날만 짝으로 봅니다.
+### 6. 카드 승인 문자 대조 (`POST /bank/card-sms/check`)
+- PRD §4.6 「카드 승인 문자 붙여넣기 대조」. **총무만**. 카드사 승인·취소 문자를 여러 건 붙여 넣으면 한 건씩 읽어 원장과 맞춥니다.
+- **아무것도 저장하지 않습니다** — 스냅샷도, 짝도, 원문도. CSV 스냅샷의 짝(`uq_bank_tran_matched_entry`)과 부딪히지 않게 하고, 문자에는 계좌 잔액이 없어서입니다. 같은 문자를 몇 번 보내도 됩니다.
+- 매칭은 위 **대조 규칙**과 같습니다. 승인은 출금(`EXPENSE`), 취소는 입금(`INCOME`)으로 봅니다.
+- 날짜는 `MM/DD` 뿐이라 **학기 기간 안에 들어가는 연도**를 붙입니다(해를 넘기는 학기는 시작·종료 연도 둘 다 봄). 학기 시작·종료는 **KST 날짜**로 바꿔 비교합니다(UTC 로 저장돼 있어도 9/1 00:00 KST 학기에 8/31 문자가 들어가지 않게). 어느 연도로도 기간 밖이면 `OUT_OF_TERM`.
+- 같은 붙여넣기 안에서 **승인과 그 취소**(카드사·금액·가맹점이 같음)는 서로 상쇄해 `CANCELLED_PAIR` 로 대조에서 뺍니다. 취소보다 **늦은** 승인과는 짝짓지 않고, 후보가 여럿이면 취소 직전의 승인과 짝짓습니다.
+- 한 건을 못 읽어도 나머지는 대조합니다 — 그 건만 `UNREADABLE` + `reason`.
+
+**Request**
+```json
+{ "term_id": 1, "text": "[Web발신]\nKB국민카드 승인\n홍*동\n12,000원 일시불\n09/12 12:31\nOO편의점\n누적 152,000원\n[Web발신]\n…" }
+```
+- `text`: 최대 20,000자, 메시지 500건. `[Web발신]` 이 있으면 그 기준으로, 없으면 빈 줄 기준으로 나눕니다.
+- 지원 카드사: NH농협·KB국민(첫 줄의 `NH`·`농협`·`KB`·`국민`으로 구분). 승인·취소는 첫 줄로, KB 체크처럼 첫 줄에 없으면 가맹점 줄 끝(`사용`·`취소`)으로 봅니다. 줄 순서가 달라도 날짜(`MM/DD HH:MM`)·금액(`N원`) 줄을 찾아 읽고, 그 다음 줄을 가맹점으로 봅니다.
+
+**Response (`200`)**
+```json
+{
+  "term_id": 1,
+  "text_hash": "0x…",
+  "summary": { "total": 3, "matched": 1, "matched_pending": 0, "unregistered": 1,
+               "unregistered_amount": 12000, "unreadable": 1 },
+  "items": [
+    { "msg_no": 1, "status": "MATCHED", "company": "NH", "kind": "APPROVAL", "tran_date": "2026-09-10",
+      "tran_time": "14:03:00", "merchant": "OO문구점", "amount": 35000, "approval_no": null, "entry_id": 2, "reason": null },
+    { "msg_no": 2, "status": "UNREGISTERED", "company": "KB", "kind": "APPROVAL", "tran_date": "2026-09-12",
+      "tran_time": "12:31:00", "merchant": "OO편의점", "amount": 12000, "approval_no": null, "entry_id": null, "reason": null },
+    { "msg_no": 3, "status": "UNREADABLE", "company": null, "kind": null, "tran_date": null, "tran_time": null,
+      "merchant": null, "amount": null, "approval_no": null, "entry_id": null, "reason": "카드사를 알 수 없습니다 (NH농협·KB국민만 지원)" }
+  ]
+}
+```
+
+| 필드 | 설명 |
+| --- | --- |
+| `text_hash` | 붙여 넣은 원문(UTF-8) SHA-256. **응답에만 있고 저장하지 않습니다** |
+| `items[]` | 붙여 넣은 순서(`msg_no`, 1부터) |
+| `kind` | `APPROVAL`(승인) · `CANCEL`(취소) |
+| `approval_no` | 지금 지원하는 형식에는 승인번호가 없어 항상 `null` |
+| `summary.unregistered_amount` | 미등록 **승인** 합계 — 카드로 나갔는데 장부에 없는 돈 |
+
+| `status` | 의미 |
+| --- | --- |
+| `MATCHED` | 확정 원장 항목과 짝 |
+| `MATCHED_PENDING` | 승인 대기 항목과 짝 |
+| `UNREGISTERED` | 카드 사용·취소가 원장에 없음 (미등록 의심) |
+| `CANCELLED_PAIR` | 같은 붙여넣기 안의 승인·취소가 상쇄됨 |
+| `OUT_OF_TERM` | 학기 기간 밖 날짜 |
+| `UNREADABLE` | 형식을 읽지 못함 (`reason`) |
+
+- `400` 내용 없음·500건 초과, `404` 학기 없음, `422` 필드 누락·20,000자 초과, `503` DB 오류.
+
+**한계** — 파일 해시의 온체인 기록은 컨트랙트가 정해지지 않아 아직 없습니다(`tx_hash` 비어 있음). 원본 파일은 저장하지 않고 해시만 저장합니다. 날짜는 같은 날만 짝으로 봅니다. 카드 문자 대조는 결과·원문 해시를 저장하지 않습니다.
 
 ---
 

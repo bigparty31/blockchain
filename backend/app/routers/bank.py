@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 from app.auth.deps import require_roles
 from app.auth.users import User
 from app.bank import BankCsvError, BankRow, Candidate, match, parse_bank_csv
+from app.bank.card_sms import APPROVAL, CardSmsError, pair_cancellations, parse_message, resolve_date, split_messages
 from app.database import get_db
 from app.models import BankTransaction as DBBankTx
 from app.models import Entry as DBEntry
@@ -32,9 +33,14 @@ from app.schemas.auth import Role
 from app.schemas.bank import (
     BankRowResult,
     BankUploadRequest,
+    CardSmsCheckRequest,
+    CardSmsCheckResponse,
+    CardSmsItem,
+    CardSmsSummary,
     ReconcileSummary,
     ReconciliationReport,
     RowStatus,
+    SmsStatus,
     SnapshotItem,
     UnbackedEntry,
 )
@@ -432,3 +438,73 @@ async def get_report(snapshot_id: int, user: User = Depends(council_only), db: S
         return _report(db, snap)
     except SQLAlchemyError as e:
         raise _db_error(e, db, "대조 결과 조회")
+
+
+# ---------------------------------------------------------------- 카드 승인 문자
+
+
+@router.post("/card-sms/check", response_model=CardSmsCheckResponse, summary="카드 승인 문자 붙여넣기 대조 (저장 안 함)")
+async def check_card_sms(body: CardSmsCheckRequest, user: User = Depends(treasurer_only), db: Session = Depends(get_db)):
+    """붙여넣은 승인·취소 문자를 원장과 대조한다. CSV 와 같은 매칭을 쓰지만 결과를 저장하지 않는다.
+
+    저장하면 CSV 스냅샷의 짝(uq_bank_tran_matched_entry)과 부딪히고, 문자에는 계좌 잔액이 없어 snapshots 에 맞지 않는다.
+    한 메시지를 못 읽어도 나머지는 대조한다 — 그 메시지만 UNREADABLE.
+    """
+    text_hash = "0x" + hashlib.sha256(body.text.encode("utf-8")).hexdigest()
+    messages = split_messages(body.text)
+    if not messages:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="문자 내용이 없습니다.")
+    if len(messages) > 500:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="한 번에 500건까지 붙여넣을 수 있습니다.")
+
+    try:
+        term = db.get(DBTerm, body.term_id)
+        if term is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"ID {body.term_id}에 해당하는 학기를 찾을 수 없습니다.")
+        candidates = _Ledger(db, body.term_id).candidates()
+    except SQLAlchemyError as e:
+        raise _db_error(e, db, "카드 문자 대조")
+
+    items: Dict[int, CardSmsItem] = {}
+    parsed: List[tuple] = []
+    for n, msg in enumerate(messages, start=1):
+        try:
+            sms = parse_message(msg)
+        except CardSmsError as e:
+            items[n] = CardSmsItem(msg_no=n, status=SmsStatus.UNREADABLE, reason=str(e))
+            continue
+        d = resolve_date(sms.month, sms.day, term.started_at, term.ended_at)
+        items[n] = CardSmsItem(
+            msg_no=n, status=SmsStatus.OUT_OF_TERM, company=sms.company, kind=sms.kind, tran_date=d,
+            tran_time=sms.time, merchant=sms.merchant, amount=sms.amount, approval_no=sms.approval_no,
+        )
+        if d is not None:
+            parsed.append((n, sms, d))
+
+    cancelled = pair_cancellations([(n, s) for n, s, _ in parsed], dates={n: d for n, _, d in parsed})
+    to_match = [(n, s, d) for n, s, d in parsed if n not in cancelled]
+    for n in cancelled:
+        items[n].status = SmsStatus.CANCELLED_PAIR
+
+    rows = [
+        BankRow(n, d, s.time, s.merchant, "OUT" if s.kind == APPROVAL else "IN", s.amount, 0)
+        for n, s, d in to_match
+    ]
+    for (n, _, _), c in zip(to_match, match(rows, candidates)):
+        if c is None:
+            items[n].status = SmsStatus.UNREGISTERED
+        else:
+            items[n].status = SmsStatus.MATCHED if c.confirmed else SmsStatus.MATCHED_PENDING
+            items[n].entry_id = c.entry_id
+
+    ordered = [items[n] for n in sorted(items)]
+    unreg = [i for i in ordered if i.status == SmsStatus.UNREGISTERED]
+    summary = CardSmsSummary(
+        total=len(ordered),
+        matched=sum(i.status == SmsStatus.MATCHED for i in ordered),
+        matched_pending=sum(i.status == SmsStatus.MATCHED_PENDING for i in ordered),
+        unregistered=len(unreg),
+        unregistered_amount=sum(i.amount for i in unreg if i.kind == APPROVAL),
+        unreadable=sum(i.status == SmsStatus.UNREADABLE for i in ordered),
+    )
+    return CardSmsCheckResponse(term_id=body.term_id, text_hash=text_hash, summary=summary, items=ordered)

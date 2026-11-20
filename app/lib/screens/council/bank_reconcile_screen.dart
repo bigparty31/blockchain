@@ -6,6 +6,7 @@ import '../../core/format.dart';
 import '../../models/bank_reconcile_model.dart';
 import '../../services/api_service.dart';
 import '../../services/bank_reconcile_service.dart';
+import 'card_sms_check_screen.dart';
 
 /// CSV 파일을 골라 **원본 바이트**를 돌려준다. 고르지 않고 닫으면 null.
 typedef CsvPicker = Future<List<int>?> Function();
@@ -123,6 +124,15 @@ class _BankReconcileScreenState extends State<BankReconcileScreen> {
     await _write(() => _service.upload(termId: termId, bytes: file), '대조했어요.');
   }
 
+  /// 카드 문자 대조는 저장하지 않아서 목록이 바뀌지 않는다 — 돌아와도 다시 읽지 않는다.
+  void _openCardSms() {
+    final termId = _termId;
+    if (termId == null) return;
+    Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => CardSmsCheckScreen(termId: termId, service: _service),
+    ));
+  }
+
   Future<void> _rematch(int snapshotId) =>
       _write(() => _service.rematch(snapshotId), '다시 대조했어요.');
 
@@ -228,6 +238,13 @@ class _BankReconcileScreenState extends State<BankReconcileScreen> {
                 ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
                 : const Icon(Icons.upload_file_rounded),
             label: Text(_busy ? '대조하는 중…' : 'CSV 파일 고르기'),
+          ),
+          const SizedBox(height: 8),
+          OutlinedButton.icon(
+            key: const Key('bank_card_sms'),
+            onPressed: _busy || _termId == null ? null : _openCardSms,
+            icon: const Icon(Icons.sms_rounded),
+            label: const Text('카드 승인 문자 붙여넣기'),
           ),
         ],
       ),
