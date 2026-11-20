@@ -246,8 +246,20 @@ class StudentApiService {
   /// 가까워져서 「아직 집행이 없다」로 읽힌다. 계좌 스냅샷은 서버가 고른 학기로 오므로
   /// 대조 기준도 서로 어긋난다.
   ///
-  /// 고르는 기준은 임원 쪽([ApiService.fetchCurrentTermId])과 같다 — 시작·종료 사이인
-  /// 학기, 없으면 가장 최근(id 가 큰) 학기. 두 화면이 다른 학기를 말하면 안 된다.
+  /// 고르는 기준은 **서버와 같다** (`backend/app/services/membership.py` 의 `current_term`):
+  /// 이미 시작한 학기만 후보로 두고, 그중 아직 안 끝난 학기가 있으면 그 안에서,
+  /// 없으면 시작한 학기 전체에서 **시작일이 가장 늦은** 것을 고른다.
+  ///
+  /// **`id` 가 아니라 `started_at` 으로 고르고, 미래 학기는 후보에서 뺀다.** 예전에는
+  /// 배열에서 처음 걸리는 기간 내 학기를 쓰고 없으면 id 가 가장 큰 학기를 썼는데,
+  /// 그러면 두 자리에서 서버와 갈린다 — ① 다음 학기가 미리 등록된 채 학기 사이 공백에
+  /// 들어가면 앱은 아직 시작도 안 한 다음 학기를 고르고 서버는 이전 학기를 고른다,
+  /// ② 기간이 겹치면 앱은 배열 순서상 첫 학기를, 서버는 나중에 시작한 학기를 고른다.
+  /// 계좌 스냅샷은 서버가 고른 학기로 오므로, 기준이 갈리면 **장부 합계와 계좌 차액이
+  /// 서로 다른 학기를 말한다** (#130 Codex 2차).
+  ///
+  /// 임원 쪽([ApiService.fetchCurrentTermId])은 아직 id 기준이다. 그쪽은 파트가 다르고
+  /// 학기가 어긋나도 체인이 `TermMismatch` 로 막아 주므로 여기서 같이 바꾸지 않았다.
   ///
   /// **못 읽으면 null 이고, 그때는 거르지 않는다.** 모르는 채로 거르면 멀쩡한 항목이
   /// 합계에서 사라진다 — 모르는 것을 없는 것으로 취급하지 않는다.
@@ -255,29 +267,32 @@ class StudentApiService {
     final json = await _getJson('${ApiConfig.baseUrl}/terms');
     if (json is! List || json.isEmpty) return null;
 
-    final terms = json.whereType<Map<String, dynamic>>().toList();
     final t = now ?? DateTime.now();
-    for (final term in terms) {
+    // 시작·종료를 못 읽는 학기는 아예 뺀다 — 서버와 같은 기준으로 고를 수가 없다.
+    final windows = <({Map<String, dynamic> term, DateTime start, DateTime end})>[];
+    for (final term in json.whereType<Map<String, dynamic>>()) {
       final started = term['started_at'];
       final ended = term['ended_at'];
       if (started is! String || ended is! String) continue;
       try {
-        final start = Fmt.parseServerTime(started);
-        final end = Fmt.parseServerTime(ended);
-        if (!t.isBefore(start) && !t.isAfter(end)) return term['term_code'] as int?;
+        windows.add((term: term, start: Fmt.parseServerTime(started), end: Fmt.parseServerTime(ended)));
       } catch (_) {
         // 시각을 못 읽는 학기는 건너뛴다 — 나머지로 고른다
       }
     }
 
-    // 기간에 드는 학기가 없으면 가장 최근 학기. id 가 없거나 코드가 없으면 null 이다.
-    Map<String, dynamic>? latest;
-    for (final term in terms) {
-      final id = term['id'];
-      if (id is! int) continue;
-      if (latest == null || id > (latest['id'] as int)) latest = term;
+    // 아직 시작하지 않은 학기는 후보가 아니다. 진행 중인 것이 있으면 그 안에서만 고른다.
+    final started = windows.where((w) => !w.start.isAfter(t)).toList();
+    final ongoing = started.where((w) => !w.end.isBefore(t)).toList();
+    final pool = ongoing.isNotEmpty ? ongoing : started;
+    if (pool.isEmpty) return null;
+
+    // 시작일이 가장 늦은 것. 같으면 먼저 온 것을 둔다 (서버의 `max` 와 같은 결과다).
+    var pick = pool.first;
+    for (final w in pool.skip(1)) {
+      if (w.start.isAfter(pick.start)) pick = w;
     }
-    return latest?['term_code'] as int?;
+    return pick.term['term_code'] as int?;
   }
 
   /// GET /users/wallets — **지갑 주소 → user id** 매핑 (검증 2단계)

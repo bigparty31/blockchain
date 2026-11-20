@@ -144,7 +144,87 @@ void main() {
       );
     });
 
-    test('기간에 드는 학기가 없으면 가장 최근 학기다', () async {
+    /// 아래 네 개는 codex-loop 2차 지적 — 앱과 서버의 학기 선택 규칙이 달라서,
+    /// **장부 합계와 계좌 차액이 서로 다른 학기를 말하는** 경우들이다.
+    /// 기준은 `backend/app/services/membership.py` 의 `current_term` 이다.
+
+    test('학기 사이 공백에서는 다음 학기가 등록돼 있어도 이전 학기다', () async {
+      // 서버는 「이미 시작한」 학기만 후보로 둔다. id 가 큰 쪽을 고르면 아직 시작도
+      // 안 한 다음 학기가 잡혀서, 계좌 스냅샷(서버 기준)과 합계가 갈린다.
+      serve(termsJson([
+        {
+          'id': 2,
+          'term_code': 20262,
+          'started_at': '2026-09-01T00:00:00Z',
+          'ended_at': '2027-02-28T23:59:59Z',
+        },
+        {
+          'id': 3,
+          'term_code': 20271,
+          'started_at': '2027-04-01T00:00:00Z',
+          'ended_at': '2027-08-31T23:59:59Z',
+        },
+      ]));
+
+      expect(
+        await StudentApiService()
+            .fetchCurrentTermCode(now: DateTime.utc(2027, 3, 15)),
+        20262,
+      );
+    });
+
+    test('기간이 겹치면 나중에 시작한 학기다', () async {
+      // 배열 순서상 첫 번째가 아니라 시작일이 가장 늦은 것을 고른다 (서버의 max 와 같다).
+      serve(termsJson([
+        {
+          'id': 2,
+          'term_code': 20262,
+          'started_at': '2026-09-01T00:00:00Z',
+          'ended_at': '2027-02-28T23:59:59Z',
+        },
+        {
+          'id': 3,
+          'term_code': 20271,
+          'started_at': '2026-12-01T00:00:00Z',
+          'ended_at': '2027-05-31T23:59:59Z',
+        },
+      ]));
+
+      expect(
+        await StudentApiService()
+            .fetchCurrentTermCode(now: DateTime.utc(2027, 1, 15)),
+        20271,
+      );
+    });
+
+    test('아직 시작하지 않은 학기뿐이면 null 이다', () async {
+      // null 이면 화면이 **거르지 않는다.** 시작도 안 한 학기로 거르면 합계가 통째로 0 이다.
+      serve(termsJson([
+        {
+          'id': 3,
+          'term_code': 20271,
+          'started_at': '2027-04-01T00:00:00Z',
+          'ended_at': '2027-08-31T23:59:59Z',
+        },
+      ]));
+
+      expect(
+        await StudentApiService()
+            .fetchCurrentTermCode(now: DateTime.utc(2026, 11, 19)),
+        isNull,
+      );
+    });
+
+    test('시각을 못 읽는 학기뿐이면 null 이다', () async {
+      // 서버와 같은 기준으로 고를 수가 없다 — 모르면 거르지 않는 쪽으로 둔다.
+      serve(termsJson([
+        {'id': 2, 'term_code': 20262, 'started_at': '언제인지 모름', 'ended_at': '모름'},
+      ]));
+
+      expect(await StudentApiService().fetchCurrentTermCode(), isNull);
+    });
+
+    test('끝난 학기만 있으면 시작일이 가장 늦은 학기다', () async {
       serve(termsJson([
         {
           'id': 1,
