@@ -14,6 +14,7 @@
 
 Redis 가 없거나 꺼져 있으면 **조용히 통과한다** — 캐시는 성능 장치지 정확성 장치가 아니다.
 """
+import asyncio
 import json
 import logging
 import os
@@ -51,6 +52,22 @@ def ttl_seconds() -> int:
 
 _client = None
 _unavailable = False
+_key_locks: dict[str, asyncio.Lock] = {}
+_locks_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _get_key_lock(key: str) -> asyncio.Lock:
+    """같은 캐시 키의 만료 직후 동시 요청(stampede)을 프로세스 내에서 1회만 원본 조회하도록 직렬화한다."""
+    global _locks_loop
+    loop = asyncio.get_running_loop()
+    if _locks_loop is not loop:
+        _key_locks.clear()
+        _locks_loop = loop
+    lock = _key_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _key_locks[key] = lock
+    return lock
 
 
 def _get_client():
@@ -84,11 +101,33 @@ def _get_client():
     return _client
 
 
-async def get_or_set(key: str, produce: Callable[[], Awaitable[Any]], ttl: Optional[int] = None) -> Any:
+async def _read_cached(client, key: str) -> tuple[bool, Any]:
+    """캐시 조회. (적중 여부, 역직렬화 값) 반환. Redis 오류는 호출자가 fail-open 처리한다."""
+    hit = await client.get(key)
+    if hit is None:
+        return False, None
+    try:
+        return True, json.loads(hit)
+    except Exception as e:
+        logger.warning("캐시 역직렬화 실패(%s). 원본을 다시 읽는다: %s", key, e)
+        return False, None
+
+
+async def get_or_set(
+    key: str,
+    produce: Callable[[], Awaitable[Any]],
+    ttl: Optional[int] = None,
+    *,
+    should_cache: Optional[Callable[[Any], bool]] = None,
+) -> Any:
     """[key] 에 담긴 값을 돌려주고, 없으면 [produce] 를 불러 담는다.
 
-    **Redis 가 말을 안 들으면 [produce] 결과를 그대로 돌려준다.** 캐시 장애가 조회 장애가
-    되면 안 된다 — 학생 화면이 통째로 멈춘다.
+    - 같은 키가 만료된 직후 동시에 여러 요청이 몰려도 프로세스 내 키별 Lock 으로 한 요청만
+      [produce] 를 실행하고, 나머지 요청은 채워진 캐시를 읽는다(stampede 방지).
+    - [should_cache] 가 False 를 반환하면(예: 체인 조회 일부 실패로 불완전한 응답) 캐시에
+      저장하지 않고 이번 요청에만 결과를 반환한다.
+    - **Redis 가 말을 안 들으면 [produce] 결과를 그대로 돌려준다.** 캐시 장애가 조회 장애가
+      되면 안 된다 — 학생 화면이 통째로 멈춘다.
 
     담는 값은 JSON 으로 직렬화할 수 있어야 한다. 직렬화에 실패하면 담지 않고 값만 돌려준다.
     """
@@ -99,33 +138,43 @@ async def get_or_set(key: str, produce: Callable[[], Awaitable[Any]], ttl: Optio
         return await produce()
 
     try:
-        hit = await client.get(key)
-        if hit is not None:
-            return json.loads(hit)
+        found, cached = await _read_cached(client, key)
+        if found:
+            return cached
     except Exception as e:
         logger.warning("캐시 조회 실패(%s). 원본을 읽는다: %s", key, e)
         return await produce()
 
-    value = await produce()
-    try:
-        await client.set(key, json.dumps(value, default=str), ex=ttl or ttl_seconds())
-    except TypeError as e:
-        logger.warning("캐시에 담을 수 없는 값(%s): %s", key, e)
-    except Exception as e:
-        logger.warning("캐시 저장 실패(%s): %s", key, e)
-    return value
+    async with _get_key_lock(key):
+        try:
+            found, cached = await _read_cached(client, key)
+            if found:
+                return cached
+        except Exception as e:
+            logger.warning("캐시 재조회 실패(%s). 원본을 읽는다: %s", key, e)
+            return await produce()
+
+        value = await produce()
+        if should_cache is not None and not should_cache(value):
+            return value
+
+        try:
+            await client.set(key, json.dumps(value, default=str), ex=ttl or ttl_seconds())
+        except TypeError as e:
+            logger.warning("캐시에 담을 수 없는 값(%s): %s", key, e)
+        except Exception as e:
+            logger.warning("캐시 저장 실패(%s): %s", key, e)
+        return value
 
 
 async def close() -> None:
-    """프로세스를 내릴 때 연결을 닫는다.
-
-    아직 부르는 곳이 없다 — 이 모듈을 라우터에 연결할 때 `main_student.py` 의 lifespan 에서
-    함께 부른다.
-    """
-    global _client
+    """프로세스를 내릴 때 Redis 연결과 키별 락을 정리한다 (`main_student.py` lifespan 종료 시 호출)."""
+    global _client, _locks_loop
     if _client is not None:
         try:
             await _client.aclose()
         except Exception:
             pass
         _client = None
+    _key_locks.clear()
+    _locks_loop = None

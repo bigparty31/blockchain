@@ -1,10 +1,10 @@
+from contextlib import contextmanager
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
 from sqlalchemy import func
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
 
 from app import cache
 from app.database import get_db
@@ -17,11 +17,23 @@ router = APIRouter(prefix="/balance", tags=["Balance"])
 query_router = router
 
 
+@contextmanager
+def _lazy_db(request: Request):
+    """캐시 미스 시에만 DB 세션을 열어 적중 경로의 커넥션 풀 점유를 없앤다."""
+    getter = request.app.dependency_overrides.get(get_db, get_db)
+    gen = getter()
+    db = next(gen)
+    try:
+        yield db
+    finally:
+        gen.close()
+
+
 @router.get("", response_model=BalanceResponse, summary="장부 잔액 요약 조회")
 @router.get("/", response_model=BalanceResponse, include_in_schema=False)
 async def get_balance(
+    request: Request,
     term_id: Optional[int] = Query(None, ge=1, description="조회할 학기 ID (미지정 시 전체 학기)"),
-    db: Session = Depends(get_db),
 ):
     """모바일 앱 메인 대시보드 상단에 표시되는 계좌/장부 잔액 및 총 수입·지출 합계 조회 API입니다.
     PRD §7.4 산출식 (장부잔액 = Σ확정수입 - Σ확정지출)을 따르며, CONFIRMED 상태 건(정정 포함)만 집계합니다.
@@ -29,27 +41,28 @@ async def get_balance(
     cache_key = f"balance:{term_id if term_id is not None else 'all'}"
 
     async def _produce():
-        try:
-            base_filter = [DBEntry.status == "CONFIRMED"]
-            if term_id is not None:
-                base_filter.append(DBEntry.term_id == term_id)
+        with _lazy_db(request) as db:
+            try:
+                base_filter = [DBEntry.status == "CONFIRMED"]
+                if term_id is not None:
+                    base_filter.append(DBEntry.term_id == term_id)
 
-            rows = (
-                db.query(
-                    DBEntry.kind,
-                    func.coalesce(func.sum(DBEntry.amount), 0),
+                rows = (
+                    db.query(
+                        DBEntry.kind,
+                        func.coalesce(func.sum(DBEntry.amount), 0),
+                    )
+                    .filter(*base_filter)
+                    .group_by(DBEntry.kind)
+                    .all()
                 )
-                .filter(*base_filter)
-                .group_by(DBEntry.kind)
-                .all()
-            )
-            totals = {str(kind): int(total) for kind, total in rows}
-        except SQLAlchemyError as e:
-            logger.exception("장부 잔액 요약 조회 중 데이터베이스 오류: %s", e)
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="데이터베이스 처리 중 오류가 발생했습니다.",
-            )
+                totals = {str(kind): int(total) for kind, total in rows}
+            except SQLAlchemyError as e:
+                logger.exception("장부 잔액 요약 조회 중 데이터베이스 오류: %s", e)
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="데이터베이스 처리 중 오류가 발생했습니다.",
+                )
 
         income = totals.get("INCOME", 0)
         expense = totals.get("EXPENSE", 0)

@@ -381,3 +381,84 @@ def test_budgets_cache_hit_skips_chain_provider_even_if_provider_fails(test_env,
     assert r_miss.status_code == 503
     assert provider_calls == 1
     assert "budgets:1" not in test_env.redis.store
+
+
+def test_entries_does_not_cache_when_chain_registrant_lookup_fails(test_env, monkeypatch):
+    """PR #134 리뷰 #1: 체인 조회 실패/부분 실패로 registrant=null 이 섞인 /entries 응답은 캐시에 저장하지 않는다."""
+    monkeypatch.setenv("CACHE_ENABLED", "1")
+
+    orig_get_entry = test_env.chain.get_entry
+
+    async def _failing_get_entry(entry_id: int):
+        raise RuntimeError("simulated RPC timeout")
+
+    monkeypatch.setattr(test_env.chain, "get_entry", _failing_get_entry)
+
+    # 1) 체인 실패 시 200 (registrant=None) 응답은 주되, 캐시에 저장하지 않음
+    r_degraded = test_env.client.get("/entries")
+    assert r_degraded.status_code == 200
+    assert len(r_degraded.json()) == 2
+    assert all(item["registrant"] is None for item in r_degraded.json())
+    assert "entries:all" not in test_env.redis.store
+
+    # 2) 체인 복구 후 다음 요청은 실제 registrant 를 채워 반환하고 캐시에 저장
+    monkeypatch.setattr(test_env.chain, "get_entry", orig_get_entry)
+    r_ok = test_env.client.get("/entries")
+    assert r_ok.status_code == 200
+    assert all(item["registrant"] == "0x1111111111111111111111111111111111111111" for item in r_ok.json())
+    assert "entries:all" in test_env.redis.store
+
+
+def test_cache_get_or_set_coalesces_concurrent_misses(monkeypatch):
+    """PR #134 리뷰 #2: 캐시 미스·만료 순간 동시 요청이 몰려도 같은 키는 produce 를 1번만 실행한다."""
+    import asyncio
+
+    monkeypatch.setenv("CACHE_ENABLED", "1")
+    fake_redis = FakeRedis()
+    monkeypatch.setattr(cache, "_get_client", lambda: fake_redis)
+
+    calls = 0
+
+    async def _slow_produce():
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.05)
+        return {"balance": 400_000}
+
+    async def _run_burst():
+        return await asyncio.gather(*[cache.get_or_set("balance:all", _slow_produce) for _ in range(10)])
+
+    results = asyncio.run(_run_burst())
+    assert calls == 1
+    assert all(r == {"balance": 400_000} for r in results)
+
+
+def test_cache_hit_does_not_open_db_session(test_env, monkeypatch):
+    """PR #134 참고: 캐시 적중 시 /balance, /entries, /budgets 모두 DB 세션을 열지 않는다."""
+    monkeypatch.setenv("CACHE_ENABLED", "1")
+
+    db_opens = 0
+
+    def _counting_db():
+        nonlocal db_opens
+        db_opens += 1
+        db = test_env.SessionLocal()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    student_app.dependency_overrides[get_db] = _counting_db
+
+    # 1) 최초 호출(미스)로 캐시 워밍
+    assert test_env.client.get("/balance").status_code == 200
+    assert test_env.client.get("/entries").status_code == 200
+    assert test_env.client.get("/budgets").status_code == 200
+    assert db_opens == 3
+
+    # 2) 캐시 적중 경로에서는 DB 세션 0회 오픈
+    db_opens = 0
+    assert test_env.client.get("/balance").status_code == 200
+    assert test_env.client.get("/entries").status_code == 200
+    assert test_env.client.get("/budgets").status_code == 200
+    assert db_opens == 0

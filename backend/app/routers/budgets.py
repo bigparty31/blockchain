@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import inspect
 import logging
@@ -546,6 +547,18 @@ async def _execute_budget_issue(
         )
 
 
+@contextmanager
+def _lazy_db(request: Request):
+    """캐시 미스 시에만 DB 세션을 열어 적중 경로의 커넥션 풀 점유를 없앤다."""
+    getter = request.app.dependency_overrides.get(get_db, get_db)
+    gen = getter()
+    db = next(gen)
+    try:
+        yield db
+    finally:
+        gen.close()
+
+
 async def _resolve_chain_client(request: Request) -> ChainClient:
     """캐시 미스 시에만 체인 클라이언트를 지연 획득한다.
 
@@ -564,7 +577,6 @@ async def _resolve_chain_client(request: Request) -> ChainClient:
 async def get_budgets(
     request: Request,
     term_id: Optional[int] = Query(None, ge=1, description="조회할 학기 ID (미지정 시 전체 학기)"),
-    db: Session = Depends(get_db),
 ):
     """모바일 앱 '예산 현황' 및 집행률 그래프 화면에서 호출하는 카테고리별 예산 현황 API입니다.
     스마트 컨트랙트 BudgetToken에 발행 완료된 예산의 온체인 한도(issued)·실시간 잔량(remaining)과
@@ -573,72 +585,73 @@ async def get_budgets(
     cache_key = f"budgets:{term_id if term_id is not None else 'all'}"
 
     async def _produce():
-        try:
-            query = db.query(DBBudget).options(selectinload(DBBudget.versions))
-            if term_id is not None:
-                query = query.filter(DBBudget.term_id == term_id)
-            db_budgets = query.order_by(DBBudget.id.asc()).all()
-        except SQLAlchemyError as e:
-            logger.exception("예산 목록 조회 중 데이터베이스 오류: %s", e)
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="데이터베이스 처리 중 오류가 발생했습니다.",
-            )
-
-        if not db_budgets:
-            return []
-
-        chain = await _resolve_chain_client(request)
-        result: List[dict] = []
-
-        for b in db_budgets:
+        with _lazy_db(request) as db:
             try:
-                chain_budget = await chain.get_budget(b.id)
-            except ChainError as e:
-                logger.error("체인 예산(id=%s) 조회 실패: %s", b.id, e)
+                query = db.query(DBBudget).options(selectinload(DBBudget.versions))
+                if term_id is not None:
+                    query = query.filter(DBBudget.term_id == term_id)
+                db_budgets = query.order_by(DBBudget.id.asc()).all()
+            except SQLAlchemyError as e:
+                logger.exception("예산 목록 조회 중 데이터베이스 오류: %s", e)
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="블록체인 네트워크와 통신할 수 없습니다.",
+                    detail="데이터베이스 처리 중 오류가 발생했습니다.",
                 )
 
-            # 온체인에 발행되지 않은 행(초안, 시드 전용 더미, NO_RESPONSE 대기 건)은 목록에서 제외
-            if chain_budget is None:
-                continue
+            if not db_budgets:
+                return []
 
-            planned_amount = int(chain_budget.issued)
-            remaining_amount = max(0, int(chain_budget.remaining))
-            version = int(chain_budget.version)
+            chain = await _resolve_chain_client(request)
+            result: List[dict] = []
 
-            matched_ver = next((v for v in b.versions if v.version == version), None)
-            if matched_ver is None and b.versions:
-                valid_versions = [v for v in b.versions if v.version <= version]
-                if valid_versions:
-                    matched_ver = max(valid_versions, key=lambda v: v.version)
-            revision_reason = matched_ver.revision_reason if matched_ver is not None else None
+            for b in db_budgets:
+                try:
+                    chain_budget = await chain.get_budget(b.id)
+                except ChainError as e:
+                    logger.error("체인 예산(id=%s) 조회 실패: %s", b.id, e)
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail="블록체인 네트워크와 통신할 수 없습니다.",
+                    )
 
-            spent_amount = max(0, planned_amount - remaining_amount)
-            execution_rate = round(spent_amount / planned_amount, 4) if planned_amount > 0 else 0.0
-            expires_at = (
-                int(chain_budget.expires_at)
-                if chain_budget.expires_at
-                else _to_unix_seconds(b.expires_at)
-            )
+                # 온체인에 발행되지 않은 행(초안, 시드 전용 더미, NO_RESPONSE 대기 건)은 목록에서 제외
+                if chain_budget is None:
+                    continue
 
-            result.append(
-                BudgetResponse(
-                    id=b.id,
-                    term_id=b.term_id,
-                    category=b.category,
-                    planned_amount=planned_amount,
-                    remaining_amount=remaining_amount,
-                    execution_rate=execution_rate,
-                    version=version,
-                    expires_at=expires_at,
-                    revision_reason=revision_reason,
-                ).model_dump(mode="json")
-            )
+                planned_amount = int(chain_budget.issued)
+                remaining_amount = max(0, int(chain_budget.remaining))
+                version = int(chain_budget.version)
 
-        return result
+                matched_ver = next((v for v in b.versions if v.version == version), None)
+                if matched_ver is None and b.versions:
+                    valid_versions = [v for v in b.versions if v.version <= version]
+                    if valid_versions:
+                        matched_ver = max(valid_versions, key=lambda v: v.version)
+                revision_reason = matched_ver.revision_reason if matched_ver is not None else None
+
+                spent_amount = max(0, planned_amount - remaining_amount)
+                execution_rate = round(spent_amount / planned_amount, 4) if planned_amount > 0 else 0.0
+                expires_at = (
+                    int(chain_budget.expires_at)
+                    if chain_budget.expires_at
+                    else _to_unix_seconds(b.expires_at)
+                )
+
+                result.append(
+                    BudgetResponse(
+                        id=b.id,
+                        term_id=b.term_id,
+                        category=b.category,
+                        planned_amount=planned_amount,
+                        remaining_amount=remaining_amount,
+                        execution_rate=execution_rate,
+                        version=version,
+                        expires_at=expires_at,
+                        revision_reason=revision_reason,
+                    ).model_dump(mode="json")
+                )
+
+            return result
 
     return await cache.get_or_set(cache_key, _produce)
 
