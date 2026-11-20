@@ -357,4 +357,80 @@ void main() {
       expect(out.single.status, BudgetIssueStatus.noResponse);
     });
   });
+
+  group('결과 확인 (#120 리뷰) — 준비(POST /budgets)만 다시 부르고 서명·제출하지 않는다', () {
+    Map<String, dynamic> withTx(Map<String, dynamic> d, String? tx) => {...d, 'tx_hash': tx};
+
+    test('체인에 있으면 이미 발행됨 — 서버가 준 체인 값과 함께', () async {
+      server(prepare: (req) => json({...draftJson(11, '행사비', status: 'ALREADY_ISSUED'), 'planned_amount': 1200000}));
+      final out = await issuer().checkAll(items: [item(BudgetCategory.event, 1000000)]);
+
+      expect(out.single.status, BudgetIssueStatus.alreadyIssued);
+      expect(out.single.issuedAmount, 1200000);
+      expect(out.single.issuedExpiresAt, expiresAt);
+      expect(paths(), ['/terms', '/budgets'], reason: '제출하지 않는다');
+      expect(signCalls, 0, reason: '서명하지 않는다');
+      final prep = jsonDecode(sent[1].body) as Map<String, dynamic>;
+      expect(prep, {'term_id': 4, 'category': '행사비', 'planned_amount': 1000000, 'expires_at': expiresAt});
+    });
+
+    test('초안인데 보낸 트랜잭션이 남아 있으면 아직 모름', () async {
+      server(prepare: (req) => json(withTx(draftJson(11, '행사비'), '0x${'ab' * 32}'), 201));
+      final out = await issuer().checkAll(termId: 4, items: [item(BudgetCategory.event, 1)]);
+      expect(out.single.status, BudgetIssueStatus.noResponse);
+      expect(out.single.message, contains('아직'));
+      expect(signCalls, 0);
+    });
+
+    test('초안이고 보낸 트랜잭션도 없으면 거부 — 다시 확정할 수 있다', () async {
+      server(prepare: (req) => json(withTx(draftJson(11, '행사비'), null), 201));
+      final out = await issuer().checkAll(termId: 4, items: [item(BudgetCategory.event, 1)]);
+      expect(out.single.status, BudgetIssueStatus.rejected);
+      expect(paths(), ['/budgets']);
+    });
+
+    for (final (name, res) in [
+      ('503', () => http.Response('{}', 503)),
+      ('응답을 못 읽음', () => http.Response('not json', 201)),
+      ('모르는 상태', () => json({'status': 'WHAT'}, 201)),
+    ]) {
+      test('$name 이면 아직 모름 — 잠금을 풀지 않는다', () async {
+        server(prepare: (req) => res());
+        final out = await issuer().checkAll(termId: 4, items: [item(BudgetCategory.event, 1)]);
+        expect(out.single.status, BudgetIssueStatus.noResponse);
+        expect(out.single.message, contains('확인하지 못했어요'));
+      });
+    }
+
+    test('연결이 끊긴 줄만 모름, 다음 줄은 계속 확인한다', () async {
+      var first = true;
+      server(prepare: (req) {
+        if (first) {
+          first = false;
+          throw http.ClientException('끊김');
+        }
+        return json(draftJson(12, '사업비', status: 'ALREADY_ISSUED'));
+      });
+      final out = await issuer().checkAll(termId: 4, items: [item(BudgetCategory.event, 1), item(BudgetCategory.project, 1)]);
+      expect([for (final o in out) o.status], [BudgetIssueStatus.noResponse, BudgetIssueStatus.alreadyIssued]);
+    });
+
+    test('회장이 아니면 아무것도 묻지 않고 던진다', () async {
+      await signInAs(UserRole.TREASURER);
+      server();
+      await expectLater(
+        issuer().checkAll(termId: 4, items: [item(BudgetCategory.event, 1)]),
+        throwsA(isA<BudgetIssueException>()),
+      );
+      expect(sent, isEmpty);
+    });
+
+    test('로그인이 끝나면(401) 남은 줄도 확인하지 않는다', () async {
+      server(prepare: (req) => http.Response('{}', 401));
+      final out = await issuer().checkAll(termId: 4, items: [item(BudgetCategory.event, 1), item(BudgetCategory.project, 1)]);
+      expect([for (final o in out) o.status], [BudgetIssueStatus.noResponse, BudgetIssueStatus.noResponse]);
+      expect(out.first.message, contains('로그인'));
+      expect(paths(), ['/budgets'], reason: '두 번째 줄은 보내지 않는다');
+    });
+  });
 }

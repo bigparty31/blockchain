@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 from app.auth.deps import require_roles
 from app.auth.users import User
 from app.bank import BankCsvError, BankRow, Candidate, match, parse_bank_csv
+from app.bank.card_sms import APPROVAL, CardSmsError, pair_cancellations, parse_message, resolve_date, split_messages
 from app.database import get_db
 from app.models import BankTransaction as DBBankTx
 from app.models import Entry as DBEntry
@@ -32,9 +33,14 @@ from app.schemas.auth import Role
 from app.schemas.bank import (
     BankRowResult,
     BankUploadRequest,
+    CardSmsCheckRequest,
+    CardSmsCheckResponse,
+    CardSmsItem,
+    CardSmsSummary,
     ReconcileSummary,
     ReconciliationReport,
     RowStatus,
+    SmsStatus,
     SnapshotItem,
     UnbackedEntry,
 )
@@ -99,6 +105,15 @@ class _Ledger:
         self.entries = {i: by_id[i] for i, amt in net.items() if amt > 0}
         self.net = {i: net[i] for i in self.entries}
 
+    def still_matches(self, entry_id: int, t: DBBankTx) -> bool:
+        """짝을 정할 때의 조건(방향·순금액·날짜, matcher.match)이 지금 원장에서도 맞는가."""
+        e = self.entries[entry_id]
+        return (
+            _KIND_TO_DIRECTION.get(e.kind) == t.direction
+            and self.net[entry_id] == t.amount
+            and _kst_date(e.occurred_at) == t.tran_date
+        )
+
     def candidates(self) -> List[Candidate]:
         return [
             Candidate(
@@ -147,7 +162,10 @@ def _report(db: Session, snap: DBSnapshot) -> ReconciliationReport:
     used = set()
     for t in txs:
         entry = ledger.entries.get(t.matched_entry_id) if t.matched_entry_id else None
-        # 업로드 뒤에 짝 항목이 반려됐다면 지금은 짝이 아니다
+        # 업로드 뒤에 짝 항목이 반려됐거나, 정정으로 순금액이 달라졌다면 지금은 짝이 아니다 (#100).
+        # 저장된 짝은 재대조 때 다시 정한다 — 그 전에도 보고서는 재대조한 것과 같은 판정을 보여 준다
+        if entry is not None and not ledger.still_matches(entry.id, t):
+            entry = None
         if entry is None:
             rows.append(_row(t, RowStatus.UNREGISTERED, None))
             continue
@@ -201,10 +219,53 @@ def _row(t: DBBankTx, st: Optional[RowStatus], entry_id: Optional[int]) -> BankR
 # ---------------------------------------------------------------- 매칭 저장
 
 
+def _when(r: BankRow):
+    return (r.tran_date, r.tran_time or "")
+
+
+def _balance_continues(rows: List[BankRow]) -> bool:
+    """이 순서가 시간순이라면 각 줄의 거래후잔액 = 앞 줄 잔액 + 입금 − 출금 이어야 한다."""
+    return all(
+        cur.balance_after == prev.balance_after + (cur.amount if cur.direction == "IN" else -cur.amount)
+        for prev, cur in zip(rows, rows[1:])
+    )
+
+
 def _chronological(rows: List[BankRow]) -> List[BankRow]:
-    # 은행 파일은 최신 거래가 위에 오는 경우가 많다. 첫 줄이 마지막 줄보다 늦으면 뒤집어서 시간순으로 맞춘다
-    ordered = list(reversed(rows)) if (rows[0].tran_date, rows[0].tran_time or "") > (rows[-1].tran_date, rows[-1].tran_time or "") else list(rows)
-    return sorted(ordered, key=lambda r: (r.tran_date, r.tran_time or ""))  # 같은 시각이면 파일 순서 유지
+    """파일을 시간순(오래된 것 → 최신)으로 맞춘다. 마지막 줄의 잔액이 계좌 잔액이 된다.
+
+    은행 파일은 최신순·시간순이 섞여 있고, 하루치이거나 시각이 없으면 날짜로는 방향을 알 수 없다 (#107).
+    그래서 **잔액이 이어지는 순서**를 고른다:
+      1. 파일 순서 그대로, 또는 거꾸로
+      2. 둘 다 안 이어지면 날짜·시각으로 정렬한 순서 (같은 시각은 파일 순서·거꾸로 순서를 각각 유지).
+         「날짜는 최신순, 같은 날 안은 오래된 것 먼저」로 내려주는 은행 파일이 여기서 맞춰진다 (#124 리뷰)
+    후보가 둘 이상 이어지는데 최종 잔액이 다르면(+100 뒤 −100 처럼) 그때만 날짜·시각으로 정하고,
+    그래도 모르면 잘못된 잔액을 저장하는 대신 파일을 다시 받아 달라고 한다.
+    """
+    forward, backward = list(rows), list(reversed(rows))
+    fits = [o for o in (forward, backward) if _balance_continues(o)]
+    if not fits:
+        by_time = [sorted(forward, key=_when), sorted(backward, key=_when)]
+        fits = [o for o in by_time if _balance_continues(o)]
+    if not fits:
+        raise BankCsvError("거래후잔액이 거래 순서대로 이어지지 않습니다. 한 계좌의 거래내역을 은행에서 받은 그대로 올려 주세요.")
+    if len({o[-1].balance_after for o in fits}) > 1:
+        # 잔액만으로는 방향을 못 정한다 — 시간이 앞으로 가는 쪽만 남긴다
+        fits = [o for o in fits if _when(o[0]) < _when(o[-1])]
+        if len({o[-1].balance_after for o in fits}) != 1:
+            raise BankCsvError("거래 순서를 정할 수 없습니다 (같은 시각, 잔액으로도 구분되지 않음). 거래 시각이 들어간 거래내역을 받아 주세요.")
+    ordered = fits[0]
+    for a, b in zip(ordered, ordered[1:]):
+        if _when(b) < _when(a):
+            raise BankCsvError(
+                f"파일 {a.row_no}번째·{b.row_no}번째 거래의 날짜·시각({_show(a)} → {_show(b)})이 잔액 순서와 거꾸로입니다. "
+                "은행에서 받은 원본을 고치지 말고 올려 주세요."
+            )
+    return ordered
+
+
+def _show(r: BankRow) -> str:
+    return f"{r.tran_date} {r.tran_time}" if r.tran_time else r.tran_date
 
 
 def _apply_matching(db: Session, snap: DBSnapshot) -> None:
@@ -271,7 +332,7 @@ async def upload_snapshot(body: BankUploadRequest, user: User = Depends(treasure
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="file_hash 가 업로드한 파일의 해시와 다릅니다.")
 
     try:
-        rows = parse_bank_csv(raw)
+        ordered = _chronological(parse_bank_csv(raw))
     except BankCsvError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
@@ -289,7 +350,6 @@ async def upload_snapshot(body: BankUploadRequest, user: User = Depends(treasure
                 detail=f"같은 파일이 이미 업로드되어 있습니다 (스냅샷 {dup[0]}). 원장을 고친 뒤 다시 맞추려면 재대조를 쓰세요.",
             )
 
-        ordered = _chronological(rows)
         snap = DBSnapshot(
             term_id=body.term_id,
             bank_balance=ordered[-1].balance_after,
@@ -378,3 +438,73 @@ async def get_report(snapshot_id: int, user: User = Depends(council_only), db: S
         return _report(db, snap)
     except SQLAlchemyError as e:
         raise _db_error(e, db, "대조 결과 조회")
+
+
+# ---------------------------------------------------------------- 카드 승인 문자
+
+
+@router.post("/card-sms/check", response_model=CardSmsCheckResponse, summary="카드 승인 문자 붙여넣기 대조 (저장 안 함)")
+async def check_card_sms(body: CardSmsCheckRequest, user: User = Depends(treasurer_only), db: Session = Depends(get_db)):
+    """붙여넣은 승인·취소 문자를 원장과 대조한다. CSV 와 같은 매칭을 쓰지만 결과를 저장하지 않는다.
+
+    저장하면 CSV 스냅샷의 짝(uq_bank_tran_matched_entry)과 부딪히고, 문자에는 계좌 잔액이 없어 snapshots 에 맞지 않는다.
+    한 메시지를 못 읽어도 나머지는 대조한다 — 그 메시지만 UNREADABLE.
+    """
+    text_hash = "0x" + hashlib.sha256(body.text.encode("utf-8")).hexdigest()
+    messages = split_messages(body.text)
+    if not messages:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="문자 내용이 없습니다.")
+    if len(messages) > 500:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="한 번에 500건까지 붙여넣을 수 있습니다.")
+
+    try:
+        term = db.get(DBTerm, body.term_id)
+        if term is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"ID {body.term_id}에 해당하는 학기를 찾을 수 없습니다.")
+        candidates = _Ledger(db, body.term_id).candidates()
+    except SQLAlchemyError as e:
+        raise _db_error(e, db, "카드 문자 대조")
+
+    items: Dict[int, CardSmsItem] = {}
+    parsed: List[tuple] = []
+    for n, msg in enumerate(messages, start=1):
+        try:
+            sms = parse_message(msg)
+        except CardSmsError as e:
+            items[n] = CardSmsItem(msg_no=n, status=SmsStatus.UNREADABLE, reason=str(e))
+            continue
+        d = resolve_date(sms.month, sms.day, term.started_at, term.ended_at)
+        items[n] = CardSmsItem(
+            msg_no=n, status=SmsStatus.OUT_OF_TERM, company=sms.company, kind=sms.kind, tran_date=d,
+            tran_time=sms.time, merchant=sms.merchant, amount=sms.amount, approval_no=sms.approval_no,
+        )
+        if d is not None:
+            parsed.append((n, sms, d))
+
+    cancelled = pair_cancellations([(n, s) for n, s, _ in parsed], dates={n: d for n, _, d in parsed})
+    to_match = [(n, s, d) for n, s, d in parsed if n not in cancelled]
+    for n in cancelled:
+        items[n].status = SmsStatus.CANCELLED_PAIR
+
+    rows = [
+        BankRow(n, d, s.time, s.merchant, "OUT" if s.kind == APPROVAL else "IN", s.amount, 0)
+        for n, s, d in to_match
+    ]
+    for (n, _, _), c in zip(to_match, match(rows, candidates)):
+        if c is None:
+            items[n].status = SmsStatus.UNREGISTERED
+        else:
+            items[n].status = SmsStatus.MATCHED if c.confirmed else SmsStatus.MATCHED_PENDING
+            items[n].entry_id = c.entry_id
+
+    ordered = [items[n] for n in sorted(items)]
+    unreg = [i for i in ordered if i.status == SmsStatus.UNREGISTERED]
+    summary = CardSmsSummary(
+        total=len(ordered),
+        matched=sum(i.status == SmsStatus.MATCHED for i in ordered),
+        matched_pending=sum(i.status == SmsStatus.MATCHED_PENDING for i in ordered),
+        unregistered=len(unreg),
+        unregistered_amount=sum(i.amount for i in unreg if i.kind == APPROVAL),
+        unreadable=sum(i.status == SmsStatus.UNREADABLE for i in ordered),
+    )
+    return CardSmsCheckResponse(term_id=body.term_id, text_hash=text_hash, summary=summary, items=ordered)

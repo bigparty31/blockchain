@@ -2,13 +2,9 @@
 
 `feat/app-student` · 2026-09-18 (2차) · **2026-11-04 PRD v0.14 기준으로 갱신**
 
-> **11/4 갱신 — 아래 두 가지가 바뀌었습니다.**
->
-> **① §1-3 `GET/POST /objections` 요청을 철회합니다.** 이의 제기가 PRD v0.13에서
-> 범위 밖이 됐습니다 (§4.5 — 학생 화면 5와 감사 이의 답변 화면은 목업으로 두고
-> 발표에서 목업이라고 밝힌다). **만들지 마세요.** 앱은 세션 동안만 유지되는
-> 로컬 폴백으로 목업을 돌립니다.
->
+> **11/18 갱신 — §1-3 `GET/POST /objections` 가 다시 범위 안에 포함되었습니다.**
+> `GET /objections`, `GET /objections/open-count`는 `student_api`와 `council_api` 양쪽에, `POST /objections`와 임원 답변 API는 `council_api`에 탑재됩니다.
+
 > **② 담당이 정해진 것** (PRD v0.14 §10) — §1-1 `GET /entries/{id}/onchain` 은 김경윤,
 > §1-4 `GET /memberships/me` 는 손종인입니다. 전에는 비어 있어 서로 기다리던 자리입니다.
 >
@@ -88,10 +84,9 @@
 `approved_by` 는 user id 라 값 자체가 달라 대조할 수 없습니다. **이 두 필드가
 「누가 등록하고 누가 승인했는가」의 유일한 온체인 증거**입니다.
 
-### 1-3. ~~`GET /objections?entry_id=` · `POST /objections` — S8~~ · **철회 (11/4)**
+### 1-3. `GET /objections?entry_id=` · `POST /objections` — S8
 
-> **만들지 마세요.** 이의 제기가 PRD v0.13에서 범위 밖이 됐습니다 (§4.5, §5 S8).
-> 아래 명세는 나중에 되살릴 때를 위해 남겨 둡니다.
+> `GET /objections`와 `GET /objections/open-count`는 `student_api`·`council_api` 양쪽에, `POST /objections`는 `council_api`에만 탑재됩니다 (`PRD §9.1`).
 
 ```json
 [{

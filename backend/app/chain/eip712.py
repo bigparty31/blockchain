@@ -28,6 +28,7 @@ from app.chain.deployment import Eip712Domain
 from app.chain.models import (
     BURN_REASON_ORDER,
     KIND_ORDER,
+    AnswerRequest,
     BurnRequest,
     ConfirmApproval,
     IncreaseRequest,
@@ -105,13 +106,26 @@ BURN_REQUEST_FIELDS = (
     ("deadline", "uint256"),
 )
 
+ANSWER_REQUEST_FIELDS = (
+    ("objectionId", "uint256"),
+    ("answerHash", "bytes32"),
+    ("deadline", "uint256"),
+)
+
 # docs/CONTRACTS.md category 표 그대로. 표가 바뀌면 같이 고친다 (tests/test_budget_relay.py 가 대조한다)
 APPROVED_CATEGORIES = frozenset(
     {"학생회비", "지원금", "후원금", "이자수입", "행사비", "사업비", "운영비", "홍보비", "복지비", "회의비", "비품비", "예비비"}
 )
 
 SignedPayload = Union[
-    RecordRequest, ConfirmApproval, RejectDecision, IssueRequest, IncreaseRequest, MintBatchRequest, BurnRequest
+    RecordRequest,
+    ConfirmApproval,
+    RejectDecision,
+    IssueRequest,
+    IncreaseRequest,
+    MintBatchRequest,
+    BurnRequest,
+    AnswerRequest,
 ]
 # BudgetToken 도메인으로 서명하는 구조체. MEMBERSHIP_PAYLOADS 는 MembershipSBT 도메인, 나머지는 AccountingLedger 도메인이다
 BUDGET_PAYLOADS = (IssueRequest, IncreaseRequest)
@@ -196,6 +210,14 @@ def category_hash(name: str) -> str:
     """
     if name not in APPROVED_CATEGORIES:
         raise ValueError("항목명이 승인된 표에 없다. docs/CONTRACTS.md category 표에 먼저 추가한다 (팀장 승인)")
+    return category_hash_unchecked(name)
+
+
+def category_hash_unchecked(name: str) -> str:
+    """category_hash 와 같은 계산(keccak256(utf8(이름)))을 승인 표 검사 없이 한다. 해시 규칙은 이 한 곳에만 둔다.
+
+    API 는 쓰지 않는다 — 예산 편성 화면의 항목과 겹치지 않아야 하는 체인 시험·관문 2 스모크의 전용 항목명에만 쓴다.
+    """
     return "0x" + keccak(text=name).hex()
 
 
@@ -263,6 +285,20 @@ def burn_request_typed_data(request: BurnRequest, domain: Eip712Domain) -> dict:
     )
 
 
+def answer_request_typed_data(request: AnswerRequest, domain: Eip712Domain) -> dict:
+    """임원이 서명하는 AnswerRequest. domain 은 배포 기록의 eip712["ObjectionRegistry"]."""
+    return typed_data(
+        "AnswerRequest",
+        ANSWER_REQUEST_FIELDS,
+        domain,
+        {
+            "objectionId": request.objection_id,
+            "answerHash": request.answer_hash,
+            "deadline": request.deadline,
+        },
+    )
+
+
 def typed_data_for(payload: SignedPayload, domain: Eip712Domain) -> dict:
     """서명 대상 모델에 맞는 typed data. ChainClient.signer_of 구현이 쓴다."""
     if isinstance(payload, IssueRequest):
@@ -279,6 +315,8 @@ def typed_data_for(payload: SignedPayload, domain: Eip712Domain) -> dict:
         return mint_batch_request_typed_data(payload, domain)
     if isinstance(payload, BurnRequest):
         return burn_request_typed_data(payload, domain)
+    if isinstance(payload, AnswerRequest):
+        return answer_request_typed_data(payload, domain)
     raise TypeError(f"서명 대상이 아니다: {type(payload).__name__}")
 
 

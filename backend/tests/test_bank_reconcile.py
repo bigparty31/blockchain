@@ -505,3 +505,141 @@ def test_no_push_when_balanced(db_session, auth_header):
     sender = TopicRecorder()
     push.drain(db_session, sender)
     assert sender.topics == []
+
+
+# ================================================================ 파일 순서는 잔액으로 정한다 (#107)
+
+DAY_HEADER = "거래일자,적요,출금액,입금액,거래후잔액"
+
+
+def csv_of(*lines, header=DAY_HEADER):
+    return ("\n".join([header, *lines]) + "\n").encode("utf-8")
+
+
+# 같은 날 1,000 입금 → 200 출금 → 100 출금. 시각이 없어 날짜로는 순서를 알 수 없다
+SAME_DAY_OLDEST_FIRST = ["2026-03-05,최초,0,1000,1000", "2026-03-05,중간,200,0,800", "2026-03-05,최근,100,0,700"]
+
+
+def test_same_day_newest_first_file_uses_last_balance(db_session, auth_header):
+    """이슈 재현: 최신순 하루치 파일에서 가장 오래된 잔액(1,000)이 계좌 잔액으로 저장되던 문제"""
+    rep = upload(auth_header, raw=csv_of(*reversed(SAME_DAY_OLDEST_FIRST))).json()
+    assert rep["bank_balance"] == 700
+    assert [t["description"] for t in rep["transactions"]] == ["최초", "중간", "최근"]  # 시간순 저장
+
+
+def test_same_day_oldest_first_file_kept(db_session, auth_header):
+    rep = upload(auth_header, raw=csv_of(*SAME_DAY_OLDEST_FIRST)).json()
+    assert rep["bank_balance"] == 700
+    assert [t["description"] for t in rep["transactions"]] == ["최초", "중간", "최근"]
+
+
+def test_order_undecidable_is_rejected(db_session, auth_header):
+    """+100 뒤 −100 은 두 방향 다 잔액이 이어진다. 같은 시각이면 어느 잔액이 최종인지 몰라 보완을 요구한다"""
+    res = upload(auth_header, raw=csv_of("2026-03-05,입금,0,100,1100", "2026-03-05,출금,100,0,1000"))
+    assert res.status_code == 400
+    assert "순서" in res.json()["detail"]
+    with db_session() as s:
+        assert s.query(Snapshot).count() == 0
+
+
+def test_order_undecidable_by_balance_uses_time(db_session, auth_header):
+    """두 방향 다 잔액이 이어져도 시각이 다르면 시각으로 정한다 — 최신순 파일"""
+    header = "거래일시,적요,출금액,입금액,거래후잔액"
+    rep = upload(auth_header, raw=csv_of("2026-03-05 15:00:00,출금,100,0,1000", "2026-03-05 09:00:00,입금,0,100,1100",
+                                         header=header)).json()
+    assert rep["bank_balance"] == 1000
+
+
+def test_broken_balance_chain_is_rejected(db_session, auth_header):
+    """잔액이 어느 방향으로도 이어지지 않으면 (다른 계좌가 섞였거나 줄을 고친 파일) 잔액을 믿을 수 없다"""
+    res = upload(auth_header, raw=csv_of("2026-03-05,입금,0,1000,1000", "2026-03-06,출금,200,0,900"))
+    assert res.status_code == 400
+    assert "거래후잔액" in res.json()["detail"]
+
+
+def test_dates_against_balance_order_are_rejected(db_session, auth_header):
+    """잔액으로는 시간순인데 날짜가 거꾸로 가면 고친 파일이다 — 어느 줄인지 알려 준다 (#124 리뷰)"""
+    res = upload(auth_header, raw=csv_of("2026-03-06,입금,0,1000,1000", "2026-03-05,출금,200,0,800"))
+    assert res.status_code == 400
+    assert "1번째·2번째" in res.json()["detail"]
+    assert "2026-03-06 → 2026-03-05" in res.json()["detail"]
+
+
+# 「날짜는 최신순, 같은 날 안은 오래된 것 먼저」로 내려주는 은행 파일 (#124 리뷰).
+# 3/5: 1,000 입금 → 200 출금 / 3/6: 100 출금 → 50 입금. 파일 순서로도 거꾸로도 잔액이 이어지지 않는다
+DATE_DESC_DAY_ASC = ["2026-03-06,출금A,100,0,700", "2026-03-06,입금B,0,50,750",
+                     "2026-03-05,입금C,0,1000,1000", "2026-03-05,출금D,200,0,800"]
+
+
+def test_newest_date_first_but_oldest_within_day_is_accepted(db_session, auth_header):
+    rep = upload(auth_header, raw=csv_of(*DATE_DESC_DAY_ASC)).json()
+    assert rep["bank_balance"] == 750
+    assert [t["description"] for t in rep["transactions"]] == ["입금C", "출금D", "출금A", "입금B"]
+
+
+def test_newest_date_first_but_oldest_within_day_with_times(db_session, auth_header):
+    header = "거래일시,적요,출금액,입금액,거래후잔액"
+    rows = ["2026-03-06 11:00:00,출금A,100,0,700", "2026-03-06 15:00:00,입금B,0,50,750",
+            "2026-03-05 09:00:00,입금C,0,1000,1000", "2026-03-05 18:00:00,출금D,200,0,800"]
+    rep = upload(auth_header, raw=csv_of(*rows, header=header)).json()
+    assert rep["bank_balance"] == 750
+
+
+def test_single_row_file(db_session, auth_header):
+    """한 줄이면 순서가 없다 — 그 잔액이 계좌 잔액"""
+    rep = upload(auth_header, raw=csv_of("2026-03-05,입금,0,1000,1000")).json()
+    assert rep["bank_balance"] == 1000
+    assert rep["summary"]["total"] == 1
+
+
+def test_header_only_file_is_rejected(db_session, auth_header):
+    res = upload(auth_header, raw=csv_of())
+    assert res.status_code == 400
+    assert "한 건도" in res.json()["detail"]
+    with db_session() as s:
+        assert s.query(Snapshot).count() == 0
+
+
+# ================================================================ 정정 뒤의 보고서 (#100)
+
+
+def correct(Session, id, original_id, amount, date, status="CONFIRMED"):
+    add_entry(Session, id, "INCOME" if original_id in (1, 4) else "EXPENSE", amount, date, status=status,
+              corrects_entry_id=original_id, correction_reason="INPUT_ERROR")
+
+
+def test_report_unmatches_after_correction_changes_net_amount(db_session, auth_header):
+    """이슈 재현: 50,000 입금과 짝지은 수입을 −20,000 정정해 순금액이 30,000 이 되면 더 이상 짝이 아니다"""
+    demo_ledger(db_session)
+    snap_id = upload(auth_header).json()["snapshot_id"]
+    correct(db_session, 9, 4, -20000, "2026-03-16")
+
+    rep = client.get(f"/bank/snapshots/{snap_id}", headers=auth_header(Role.AUDITOR)).json()
+    assert (50000, "UNREGISTERED", None) in statuses(rep)
+    assert [(u["entry_id"], u["amount"]) for u in rep["unbacked_entries"]] == [(4, 30000)]
+    s = rep["summary"]
+    assert (s["matched"], s["unregistered"], s["unregistered_in_amount"], s["unbacked"]) == (3, 2, 50000, 1)
+
+    # 재대조해도 같은 판정 — 보고서가 재대조 전후로 다르게 말하지 않는다
+    after = client.post(f"/bank/snapshots/{snap_id}/rematch", headers=auth_header(Role.TREASURER)).json()
+    assert after["summary"] == rep["summary"]
+    assert after["transactions"] == rep["transactions"]
+
+
+def test_report_keeps_match_while_correction_pending(db_session, auth_header):
+    """확정 전 정정은 순금액에 넣지 않는다 (_Ledger) — 짝도 그대로"""
+    demo_ledger(db_session)
+    snap_id = upload(auth_header).json()["snapshot_id"]
+    correct(db_session, 9, 4, -20000, "2026-03-16", status="PENDING")
+    rep = client.get(f"/bank/snapshots/{snap_id}", headers=auth_header(Role.AUDITOR)).json()
+    assert (50000, "MATCHED", 4) in statuses(rep)
+
+
+def test_student_card_reflects_correction(db_session, auth_header):
+    """학생 계좌 대조 카드(GET /snapshots/latest)도 같은 보고서를 쓴다 — 정정으로 짝이 풀린 출금은 미등록 출금으로 보인다"""
+    demo_ledger(db_session)
+    upload(auth_header)
+    correct(db_session, 9, 3, -2000, "2026-03-13")  # 82,000 출금과 짝이던 지출이 80,000 이 됨
+    res = client.get("/snapshots/latest", params={"term_id": TERM}, headers=auth_header(Role.STUDENT))
+    assert res.status_code == 200
+    assert sorted(t["amount"] for t in res.json()["unrecorded"]) == [12000, 82000]

@@ -12,8 +12,9 @@ import 'package:flutter/foundation.dart';
 /// 분의 알림 행을 쌓지 않으려고 이렇게 정했다.
 ///
 /// **임원은 기기 토큰**을 학생회 서버에 등록한다 (`DeviceToken`). 받는 사람이
-/// 4명이고 사람마다 처리할 건이 달라서 알림함이 필요하기 때문이다. 그쪽 등록
-/// 경로는 임원 앱(이승호) 몫이라 여기서는 [token] 만 노출한다.
+/// 4명이고 사람마다 처리할 건이 달라서 알림함이 필요하기 때문이다. 등록은
+/// 로그인할 때 [deviceToken] 으로 받은 토큰을 `NotificationService.registerDeviceToken`
+/// 이 올리고, 로그아웃할 때 `revokeDeviceToken` 이 해제한다 (`main.dart`).
 ///
 /// **학생 알림함(S14)은 없다.** 푸시를 누르면 대시보드로 가고, 거기 미확인
 /// 뱃지와 차액 배너가 이미 있다 (§4.8).
@@ -64,6 +65,16 @@ class PushService {
 
   /// 이 기기의 FCM 토큰. **임원 기기 등록에만 쓴다** — 학생은 토픽이라 불필요하다.
   String? get token => _token;
+
+  /// 초기화가 끝나길 기다렸다가 토큰을 준다. 못 얻으면 null — 던지지 않는다.
+  ///
+  /// `main()` 이 [init] 을 await 하지 않아서 임원 로그인(세션 복원 포함)이 그보다 먼저 끝날 수
+  /// 있다. 그때 [token] 을 바로 읽으면 null 이라 **그 세션 내내 기기 등록이 빠진다.**
+  /// 알림 권한 대화상자가 떠 있는 동안 끝나지 않으므로, 호출자는 기다리지 말고 뒤에서 부른다.
+  Future<String?> deviceToken() async {
+    await init();
+    return _token;
+  }
 
   /// 지금 구독 중인 토픽. 구독한 적이 없으면 null.
   String? get subscribedTopic => _topic;

@@ -27,7 +27,15 @@ from eth_utils import function_signature_to_4byte_selector, to_checksum_address
 from eth_utils.abi import abi_to_signature, collapse_if_tuple, filter_abi_by_type
 from web3.exceptions import ContractLogicError, Web3RPCError
 
-from app.chain.models import KIND_ORDER, STATUS_ORDER, BudgetRevertReason, ChainRevert, MembershipRevertReason, RevertReason
+from app.chain.models import (
+    KIND_ORDER,
+    STATUS_ORDER,
+    BudgetRevertReason,
+    ChainRevert,
+    MembershipRevertReason,
+    ObjectionRevertReason,
+    RevertReason,
+)
 
 # Solidity 가 내장으로 쓰는 두 에러. 원장 ABI 에는 없다
 _ERROR_STRING = function_signature_to_4byte_selector("Error(string)")
@@ -47,6 +55,9 @@ _RPC_REVERTED = 3
 _KNOWN = {reason.value: reason for reason in RevertReason if reason is not RevertReason.UNKNOWN}
 _KNOWN_BUDGET = {reason.value: reason for reason in BudgetRevertReason}
 _KNOWN_MEMBERSHIP = {reason.value: reason for reason in MembershipRevertReason}
+_KNOWN_OBJECTION = {
+    reason.value: reason for reason in ObjectionRevertReason if reason is not ObjectionRevertReason.UNKNOWN
+}
 # 원장이 부르는 BudgetToken.spend·refund 가 내는 에러 (IBudgetToken). 이것만 BudgetToken ABI 에서 이름으로 분류한다
 _BUDGET_TOKEN_REASONS = {
     RevertReason.INSUFFICIENT_BUDGET,
@@ -201,3 +212,8 @@ def budget_revert_decoder(budget_token_abi: list) -> RevertDecoder:
 def membership_revert_decoder(membership_sbt_abi: list) -> RevertDecoder:
     """MembershipSBT 를 직접 부를 때(발행·소각)의 해석기. 이름이 MembershipRevertReason 에 없는 에러는 UNKNOWN 이다."""
     return RevertDecoder(membership_sbt_abi, known=_KNOWN_MEMBERSHIP, source="MembershipSBT")
+
+
+def objection_revert_decoder(objection_registry_abi: list) -> RevertDecoder:
+    """ObjectionRegistry 를 직접 부를 때(이의 제기·답변)의 해석기. 이름이 ObjectionRevertReason 에 없는 에러는 UNKNOWN 이다."""
+    return RevertDecoder(objection_registry_abi, known=_KNOWN_OBJECTION, source="ObjectionRegistry")

@@ -103,6 +103,87 @@ class ServerBudgetIssuer implements BudgetIssuer {
     return outcomes;
   }
 
+  /// 「응답 없음」 줄의 결과 확인 (#120 리뷰). ①(`POST /budgets`)만 다시 부른다 — **서명도 제출도 하지 않는다.**
+  /// 서버는 그 (학기, 항목)이 체인에 있으면 `ALREADY_ISSUED`(체인 값)를, 없으면 `DRAFT` 를 주는데,
+  /// `DRAFT` 의 `tx_hash` 가 남아 있으면 앞서 보낸 트랜잭션이 아직 끝나지 않은 것이고, 없으면 실패해 선점이 풀린 것이다.
+  @override
+  Future<List<BudgetIssueOutcome>> checkAll({
+    int? termId,
+    required List<BudgetDraftItem> items,
+  }) async {
+    final session = AuthService().session;
+    if (session != null && session.role != UserRole.PRESIDENT) {
+      throw const BudgetIssueException(BudgetIssueFailure.notPresident);
+    }
+    final int term;
+    try {
+      term = termId ?? await _currentTermId();
+    } on _Abort catch (e) {
+      return [for (final _ in items) _unknown(e.message)];
+    }
+
+    final outcomes = <BudgetIssueOutcome>[];
+    String? abort;
+    for (final item in items) {
+      if (abort != null) {
+        outcomes.add(_unknown(abort));
+        continue;
+      }
+      try {
+        outcomes.add(await _checkOne(item, termId: term));
+      } on _Abort catch (e) {
+        abort = e.message;
+        outcomes.add(_unknown(abort));
+      } catch (_) {
+        outcomes.add(_unknown(_checkFailed));
+      }
+    }
+    return outcomes;
+  }
+
+  Future<BudgetIssueOutcome> _checkOne(BudgetDraftItem item, {required int termId}) async {
+    final http.Response res;
+    try {
+      res = await _post('/budgets', {
+        'term_id': termId,
+        'category': item.category!.label,
+        'planned_amount': item.amount!,
+        'expires_at': BudgetPlanRules.expiresAtSeconds(item.expiresOn!),
+      }, readTimeout);
+    } on _Abort {
+      rethrow;
+    } catch (_) {
+      return _unknown(_checkFailed);
+    }
+    if (res.statusCode == 403) throw const _Abort('회장만 예산 발행 결과를 확인할 수 있어요.');
+    if (res.statusCode != 201 && res.statusCode != 200) return _unknown(_checkFailed);
+
+    final Map<String, dynamic> body;
+    try {
+      body = jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
+    } catch (_) {
+      return _unknown(_checkFailed);
+    }
+    switch (body['status']) {
+      case 'ALREADY_ISSUED':
+        return _existing(body);
+      case 'DRAFT':
+        final tx = body['tx_hash'];
+        if (tx is String && tx.isNotEmpty) return _unknown('아직 체인에서 확인되지 않았어요. 잠시 후 다시 확인해 주세요.');
+        // 「실패해 선점이 풀렸다」뿐 아니라 「서버가 아직 브로드캐스트 전」일 수도 있다(선점은 보내기 직전에 쓴다).
+        // 그래도 다시 확정해 안전하다 — 서버의 선점 UPDATE(tx_issue IS NULL 조건)가 두 번째 전송을 막고,
+        // 컨트랙트도 같은 (학기, 항목) 재발행을 막는다(BudgetAlreadyIssued). 그래서 단정하지 않는 문구로 둔다 (#125 리뷰)
+        return _rejected('체인 기록이 확인되지 않았어요'); // 화면이 「· 고쳐서 다시 확정할 수 있어요」를 붙인다
+      default:
+        return _unknown(_checkFailed);
+    }
+  }
+
+  static const _checkFailed = '결과를 확인하지 못했어요. 잠시 후 다시 확인해 주세요.';
+
+  static BudgetIssueOutcome _unknown(String message) =>
+      BudgetIssueOutcome(BudgetIssueStatus.noResponse, message: message);
+
   /// 한 줄 발행. [first] 면 아직 아무것도 안 보냈으므로 403 을 [BudgetIssueException] 으로 던질 수 있다.
   Future<BudgetIssueOutcome> _issueOne(
     BudgetDraftItem item, {
