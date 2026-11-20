@@ -1032,7 +1032,11 @@ PRD v0.15 §4.6. 총무가 은행에서 내려받은 거래내역 CSV를 올리�
 | `budget_revisions`·`budget_revisions_after_block` | 승인된 예산 증액 횟수, 그중 차단(`BLOCKED`) 지출을 근거로 한 횟수 |
 | `revision_after_block_rate` | 초과 집행 이후 개정 비율. 증액이 0회면 `null` |
 
-- 이의 제기 건수는 v0.13에서 범위 밖이라 없습니다.
+- **이의 제기 API (`/objections`)**:
+  - `GET /objections?entry_id=&status=`: 이의 제기 목록 조회 (`student_api`·`council_api`)
+  - `GET /objections/open-count`: 미답변(`OPEN`) 이의 건수 조회 (`student_api`·`council_api`)
+  - `POST /objections`: 학생 이의 제기 (`council_api`, `Role.STUDENT`, SBT 보유 fail-closed 검증 + 온체인 `raise` 릴레이)
+  - `POST /objections/{id}/prepare-answer` → `POST /objections/{id}/answer`: 임원(`AUDITOR`·`PRESIDENT`) EIP-712 `AnswerRequest` 답변 준비 및 제출
 - 시각은 시간대가 붙은 ISO 8601 문자열입니다. 표기(`Z`/`+09:00`)는 DB 설정에 따라 다를 수 있으니 문자열로 비교하지 말고 시각으로 파싱해 쓰세요.
 
 | 코드 | 경우 |

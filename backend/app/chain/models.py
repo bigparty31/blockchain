@@ -480,6 +480,55 @@ class MembershipRevertReason(str, Enum):
     INVALID_NONCE = "InvalidNonce"  # 서명한 nonce 가 지금 값과 다름 — 같은 서명자의 다른 발행·소각이 먼저 들어감, 서명 재사용
 
 
+class AnswerRequest(_Frozen):
+    """임원 기기가 서명한 이의 답변 요청 (IObjectionRegistry.AnswerRequest, 도메인 "ObjectionRegistry")."""
+
+    objection_id: int = Field(..., ge=1, le=UINT64_MAX)
+    answer_hash: str = Field(..., description="정본화된 답변 본문 SHA-256 해시 (0x + 64 hex)")
+    deadline: int = Field(..., ge=0, le=UINT256_MAX, description="서명 유효 시한 (Unix 초)")
+
+    @field_validator("answer_hash")
+    @classmethod
+    def _answer_hash(cls, v: str) -> str:
+        if _bytes32(v) == ZERO_BYTES32:
+            raise ValueError("answer_hash 가 0 이다")
+        return v
+
+
+class ObjectionTxResult(_Frozen):
+    """이의 제기·답변 트랜잭션 결과."""
+
+    tx_hash: str
+
+
+class OnChainObjection(_Frozen):
+    """IObjectionRegistry.getObjection(objectionId) 결과."""
+
+    entry_id: int
+    content_hash: str
+    answer_hash: str
+    status: str  # "OPEN" | "ANSWERED"
+    raiser: str
+    responder: str
+
+
+class ObjectionRevertReason(str, Enum):
+    """IObjectionRegistry custom error 이름."""
+
+    UNKNOWN = "Unknown"
+    UNAUTHORIZED = "Unauthorized"
+    RESERVED_ID = "ReservedId"
+    ZERO_ADDRESS = "ZeroAddress"
+    OBJECTION_ALREADY_EXISTS = "ObjectionAlreadyExists"
+    OBJECTION_NOT_FOUND = "ObjectionNotFound"
+    OBJECTION_ALREADY_ANSWERED = "ObjectionAlreadyAnswered"
+    ENTRY_NOT_FOUND = "EntryNotFound"
+    NOT_MEMBER = "NotMember"
+    INVALID_SIGNATURE = "InvalidSignature"
+    SIGNATURE_EXPIRED = "SignatureExpired"
+    NOT_RESPONDER = "NotResponder"
+
+
 class ChainError(Exception):
     """체인 호출 실패의 공통 부모."""
 
@@ -487,7 +536,11 @@ class ChainError(Exception):
 class ChainRevert(ChainError):
     """트랜잭션이 revert 됐다. 온체인 상태는 바뀌지 않는다."""
 
-    def __init__(self, reason: Union[RevertReason, BudgetRevertReason, "MembershipRevertReason"], detail: str = ""):
+    def __init__(
+        self,
+        reason: Union[RevertReason, BudgetRevertReason, "MembershipRevertReason", ObjectionRevertReason],
+        detail: str = "",
+    ):
         self.reason = reason
         self.detail = detail
         super().__init__(f"{reason.value}: {detail}" if detail else reason.value)

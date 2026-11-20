@@ -28,6 +28,7 @@ from app.chain.deployment import Eip712Domain
 from app.chain.models import (
     BURN_REASON_ORDER,
     KIND_ORDER,
+    AnswerRequest,
     BurnRequest,
     ConfirmApproval,
     IncreaseRequest,
@@ -105,13 +106,26 @@ BURN_REQUEST_FIELDS = (
     ("deadline", "uint256"),
 )
 
+ANSWER_REQUEST_FIELDS = (
+    ("objectionId", "uint256"),
+    ("answerHash", "bytes32"),
+    ("deadline", "uint256"),
+)
+
 # docs/CONTRACTS.md category 표 그대로. 표가 바뀌면 같이 고친다 (tests/test_budget_relay.py 가 대조한다)
 APPROVED_CATEGORIES = frozenset(
     {"학생회비", "지원금", "후원금", "이자수입", "행사비", "사업비", "운영비", "홍보비", "복지비", "회의비", "비품비", "예비비"}
 )
 
 SignedPayload = Union[
-    RecordRequest, ConfirmApproval, RejectDecision, IssueRequest, IncreaseRequest, MintBatchRequest, BurnRequest
+    RecordRequest,
+    ConfirmApproval,
+    RejectDecision,
+    IssueRequest,
+    IncreaseRequest,
+    MintBatchRequest,
+    BurnRequest,
+    AnswerRequest,
 ]
 # BudgetToken 도메인으로 서명하는 구조체. MEMBERSHIP_PAYLOADS 는 MembershipSBT 도메인, 나머지는 AccountingLedger 도메인이다
 BUDGET_PAYLOADS = (IssueRequest, IncreaseRequest)
@@ -271,6 +285,20 @@ def burn_request_typed_data(request: BurnRequest, domain: Eip712Domain) -> dict:
     )
 
 
+def answer_request_typed_data(request: AnswerRequest, domain: Eip712Domain) -> dict:
+    """임원이 서명하는 AnswerRequest. domain 은 배포 기록의 eip712["ObjectionRegistry"]."""
+    return typed_data(
+        "AnswerRequest",
+        ANSWER_REQUEST_FIELDS,
+        domain,
+        {
+            "objectionId": request.objection_id,
+            "answerHash": request.answer_hash,
+            "deadline": request.deadline,
+        },
+    )
+
+
 def typed_data_for(payload: SignedPayload, domain: Eip712Domain) -> dict:
     """서명 대상 모델에 맞는 typed data. ChainClient.signer_of 구현이 쓴다."""
     if isinstance(payload, IssueRequest):
@@ -287,6 +315,8 @@ def typed_data_for(payload: SignedPayload, domain: Eip712Domain) -> dict:
         return mint_batch_request_typed_data(payload, domain)
     if isinstance(payload, BurnRequest):
         return burn_request_typed_data(payload, domain)
+    if isinstance(payload, AnswerRequest):
+        return answer_request_typed_data(payload, domain)
     raise TypeError(f"서명 대상이 아니다: {type(payload).__name__}")
 
 

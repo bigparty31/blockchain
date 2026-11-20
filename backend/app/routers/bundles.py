@@ -41,6 +41,10 @@ from app.routers.bank import router as bank_command_router
 from app.routers.snapshots import query_router as snapshots_query_router
 # 알림은 임원 전용이고 기기 토큰 등록·읽음 처리로 DB 에 쓴다. 학생 서버에는 붙이지 않는다 (PRD §9.1)
 from app.routers.notifications import router as notifications_command_router
+from app.routers.objections import (
+    command_router as objections_command_router,
+    query_router as objections_query_router,
+)
 
 
 # 학생용 조회 전용 라우터 목록 (student_api)
@@ -58,6 +62,7 @@ STUDENT_QUERY_ROUTERS: List[APIRouter] = [
     receipts_query_router,
     users_query_router,
     snapshots_query_router,
+    objections_query_router,
 ]
 
 # 학생회용 쓰기/명령 전용 라우터 목록
@@ -72,6 +77,7 @@ COUNCIL_COMMAND_ROUTERS: List[APIRouter] = [
     events_command_router,
     bank_command_router,
     notifications_command_router,
+    objections_command_router,
 ]
 
 # 학생회용 전체 라우터 (조회 + 쓰기)
@@ -97,4 +103,6 @@ COUNCIL_ALL_ROUTERS: List[APIRouter] = [
     bank_command_router,
     snapshots_query_router,
     notifications_command_router,
+    objections_query_router,
+    objections_command_router,
 ]
