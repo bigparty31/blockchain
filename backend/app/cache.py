@@ -14,11 +14,10 @@
 
 Redis 가 없거나 꺼져 있으면 **조용히 통과한다** — 캐시는 성능 장치지 정확성 장치가 아니다.
 """
-import asyncio
 import json
 import logging
 import os
-from typing import Any, Awaitable, Callable, Dict, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -52,12 +51,6 @@ def ttl_seconds() -> int:
 
 _client = None
 _unavailable = False
-
-# 키별 생성 잠금 (single-flight). 키가 몇 개뿐이라(`entries:…`·`balance:…`·`budgets:…`)
-# 지우지 않아도 늘어나지 않는다. 인스턴스마다 따로 있으므로 2대면 만료 때 최대 2번
-# [produce] 가 돈다 — 수백 번이 되는 것을 막는 것이 목적이고, 1번까지 줄이려면
-# Redis 분산 잠금이 필요한데 캐시 장애가 조회 장애가 되는 쪽이 더 나쁘다.
-_locks: Dict[str, asyncio.Lock] = {}
 
 
 def _get_client():
@@ -113,32 +106,13 @@ async def get_or_set(key: str, produce: Callable[[], Awaitable[Any]], ttl: Optio
         logger.warning("캐시 조회 실패(%s). 원본을 읽는다: %s", key, e)
         return await produce()
 
-    # **만료 순간에 [produce] 가 한 번만 돌게 한다 (single-flight).**
-    #
-    # 잠금이 없으면 TTL 이 끝나는 순간 그때 들어온 요청 전부가 미스가 되어 한꺼번에
-    # [produce] 로 들어간다. `/entries` 의 [produce] 는 DB 커넥션을 쥔 채 체인 조회를
-    # 기다리므로(최대 1.5초), 동시 요청이 풀 크기를 넘으면 남은 요청은 커넥션을
-    # **이벤트 루프 위에서** 기다리게 되고 그 사이 인스턴스가 통째로 멈춘다 —
-    # DB 를 쓰지 않는 `/` 까지 응답하지 못한다 (deploy/README.md 「측정에서 나온 것」).
-    #
-    # 잠금을 잡고 **한 번 더 조회**한다. 기다리는 동안 앞선 요청이 채워 놨으면 그 값을 쓴다.
-    lock = _locks.setdefault(key, asyncio.Lock())
-    async with lock:
-        try:
-            hit = await client.get(key)
-            if hit is not None:
-                return json.loads(hit)
-        except Exception as e:
-            logger.warning("캐시 재조회 실패(%s). 원본을 읽는다: %s", key, e)
-            return await produce()
-
-        value = await produce()
-        try:
-            await client.set(key, json.dumps(value, default=str), ex=ttl or ttl_seconds())
-        except TypeError as e:
-            logger.warning("캐시에 담을 수 없는 값(%s): %s", key, e)
-        except Exception as e:
-            logger.warning("캐시 저장 실패(%s): %s", key, e)
+    value = await produce()
+    try:
+        await client.set(key, json.dumps(value, default=str), ex=ttl or ttl_seconds())
+    except TypeError as e:
+        logger.warning("캐시에 담을 수 없는 값(%s): %s", key, e)
+    except Exception as e:
+        logger.warning("캐시 저장 실패(%s): %s", key, e)
     return value
 
 
@@ -149,7 +123,6 @@ async def close() -> None:
     함께 부른다.
     """
     global _client
-    _locks.clear()
     if _client is not None:
         try:
             await _client.aclose()
