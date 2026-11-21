@@ -67,6 +67,15 @@ class SigningService {
       toInt(Uint8List.sublistView(bytes, 32, 64)),
       bytes[64],
     );
-    return Eip712.toHex(web3.publicKeyToAddress(web3.ecRecover(digest, sig)));
+    return Eip712.toHex(web3.publicKeyToAddress(padPublicKey(web3.ecRecover(digest, sig))));
+  }
+
+  /// web3dart `ecRecover` 는 공개키를 정수에서 바이트로 바꾸며 앞쪽 0 바이트를 떨군다.
+  /// x 좌표가 `00` 으로 시작하는 키(약 1/256)는 63바이트 이하가 되어 엉뚱한 주소가 나오므로
+  /// 주소를 내기 전에 64바이트로 앞을 0 으로 채운다.
+  static Uint8List padPublicKey(Uint8List publicKey) {
+    if (publicKey.length > 64) throw ArgumentError('공개키는 64바이트 이하여야 합니다');
+    if (publicKey.length == 64) return publicKey;
+    return Uint8List(64)..setRange(64 - publicKey.length, 64, publicKey);
   }
 }

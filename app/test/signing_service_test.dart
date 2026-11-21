@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -12,6 +13,7 @@ import 'package:student_council_app/core/signing/eip712.dart';
 import 'package:student_council_app/core/signing/ledger_types.dart';
 import 'package:student_council_app/core/signing/signing_service.dart';
 import 'package:student_council_app/services/chain_domain_service.dart';
+import 'package:web3dart/web3dart.dart' as web3;
 
 /// 가짜 본인 확인 — 몇 번 불렸는지 센다.
 class FakeAuthenticator implements DeviceAuthenticator {
@@ -104,6 +106,26 @@ void main() {
 
       final sig = await SigningService(authenticator: FakeAuthenticator()).sign(domain, confirmMessage, reason: '승인 서명');
       expect(SigningService.recoverSigner(Eip712.digest(domain, confirmMessage), sig), address);
+    });
+
+    test('공개키 x 좌표가 00 으로 시작하는 키도 주소가 바르게 복구된다 — web3dart 가 앞 0 바이트를 떨군다', () {
+      // 개인키 0x99 의 공개키는 첫 바이트가 00 이다 (64바이트로 채우지 않으면 63바이트를 해시해 엉뚱한 주소가 나온다)
+      final pk = Uint8List(32)..[31] = 0x99;
+      expect(web3.privateKeyBytesToPublic(pk)[0], 0);
+      final address = Eip712.toHex(web3.publicKeyToAddress(web3.privateKeyBytesToPublic(pk)));
+      final digest = Eip712.digest(domain, confirmMessage);
+      final sig = SigningService.encodeSignature(web3.sign(digest, pk));
+      expect(SigningService.recoverSigner(digest, sig), address);
+    });
+
+    test('padPublicKey — 64바이트는 그대로, 짧으면 앞을 0 으로 채우고, 길면 거부한다', () {
+      final full = Uint8List.fromList(List.generate(64, (i) => i + 1));
+      expect(SigningService.padPublicKey(full), same(full));
+      final padded = SigningService.padPublicKey(Uint8List.sublistView(full, 1));
+      expect(padded.length, 64);
+      expect(padded[0], 0);
+      expect(padded.sublist(1), full.sublist(1));
+      expect(() => SigningService.padPublicKey(Uint8List(65)), throwsArgumentError);
     });
 
     test('이미 키가 있으면 덮어쓰지 않는다 — 덮어쓰면 체인 롤과 주소가 어긋난다', () async {
