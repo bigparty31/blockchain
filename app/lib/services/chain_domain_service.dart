@@ -6,6 +6,7 @@ import '../core/api_config.dart';
 import '../core/signing/eip712.dart';
 import '../core/signing/budget_types.dart';
 import '../core/signing/ledger_types.dart';
+import '../core/signing/objection_types.dart';
 import '../core/signing/sbt_types.dart';
 import 'auth_service.dart';
 
@@ -38,6 +39,7 @@ class ChainDomainService {
   static String expectedLedgerAddress = const String.fromEnvironment('EXPECTED_LEDGER_ADDRESS');
   static String expectedBudgetAddress = const String.fromEnvironment('EXPECTED_BUDGET_ADDRESS');
   static String expectedSbtAddress = const String.fromEnvironment('EXPECTED_SBT_ADDRESS');
+  static String expectedObjectionAddress = const String.fromEnvironment('EXPECTED_OBJECTION_ADDRESS');
 
   /// 모든 도메인 (컨트랙트 이름 → 도메인).
   static Future<Map<String, Eip712Domain>> fetchAll() async {
@@ -84,6 +86,14 @@ class ChainDomainService {
     final domain = (await fetchAll())[SbtTypes.domainName];
     if (domain == null) throw const ChainDomainException('회원권 서명 도메인이 서버에 없어요.');
     checkTrusted(domain, expectedAddress: expectedSbtAddress);
+    return domain;
+  }
+
+  /// 이의 제기 도메인 — 임원의 이의 답변(`AnswerRequest`) 서명에 쓴다. 검산을 통과한 것만 돌려준다.
+  static Future<Eip712Domain> objection() async {
+    final domain = (await fetchAll())[ObjectionTypes.domainName];
+    if (domain == null) throw const ChainDomainException('이의 제기 서명 도메인이 서버에 없어요.');
+    checkTrusted(domain, expectedAddress: expectedObjectionAddress);
     return domain;
   }
 

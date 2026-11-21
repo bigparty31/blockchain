@@ -9,6 +9,7 @@ import 'package:student_council_app/screens/council/inquiry_response_screen.dart
 import 'package:student_council_app/services/api_service.dart';
 
 import 'support/registration.dart';
+import 'support/objection_fake.dart';
 
 /// 총무·감사 화면이 좁은 폰·큰 글자에서 픽셀이 넘치지(RenderFlex overflow) 않는지 본다.
 ///
@@ -96,7 +97,7 @@ void main() {
     '지출 등록': const ExpenseCreateScreen(),
     '수입 등록': const IncomeCreateScreen(),
     '정정 신청': const CorrectionScreen(),
-    '이의 답변': const InquiryResponseScreen(),
+    '이의 답변': InquiryResponseScreen(api: FakeObjectionApi(sampleObjections())),
   };
   for (final e in screens.entries) {
     for (final width in widths) {
@@ -209,7 +210,7 @@ void main() {
       });
 
       testWidgets('이의 답변 다이얼로그 · $label', (tester) async {
-        await pump(tester, const InquiryResponseScreen());
+        await pump(tester, InquiryResponseScreen(api: FakeObjectionApi(sampleObjections())));
         await tester.tap(find.text('답변 작성하기'));
         await tester.pumpAndSettle();
         expect(find.text('답변 등록'), findsOneWidget);
