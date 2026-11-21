@@ -109,6 +109,27 @@ async def _read_cached(client, key: str) -> tuple[bool, Any]:
         return False, None
 
 
+async def _wait_inflight(
+    existing: asyncio.Future,
+    key: str,
+    produce: Callable[[], Awaitable[Any]],
+    ttl: Optional[int],
+    should_cache: Optional[Callable[[Any], bool]],
+) -> Any:
+    """진행 중인 선행 요청을 기다린다.
+
+    - 대기자 본인이 취소되었거나(`task.cancelling()`), 선행 Future 가 취소 외 이유로 끝났으면 그대로 재-raise 한다.
+    - 선행 요청만 취소된 경우 `get_or_set` 을 다시 진입해 대기자 중 하나가 새 리더로 조회·캐시 저장까지 수행한다.
+    """
+    try:
+        return await asyncio.shield(existing)
+    except asyncio.CancelledError:
+        task = asyncio.current_task()
+        if (task is not None and task.cancelling()) or not existing.cancelled():
+            raise
+        return await get_or_set(key, produce, ttl, should_cache=should_cache)
+
+
 async def get_or_set(
     key: str,
     produce: Callable[[], Awaitable[Any]],
@@ -134,6 +155,11 @@ async def get_or_set(
     if client is None:
         return await produce()
 
+    inflight = _inflight_map()
+    existing = inflight.get(key)
+    if existing is not None:
+        return await _wait_inflight(existing, key, produce, ttl, should_cache)
+
     try:
         found, cached = await _read_cached(client, key)
         if found:
@@ -142,20 +168,25 @@ async def get_or_set(
         logger.warning("캐시 조회 실패(%s). 원본을 읽는다: %s", key, e)
         return await produce()
 
-    inflight = _inflight_map()
     existing = inflight.get(key)
     if existing is not None:
-        try:
-            return await asyncio.shield(existing)
-        except asyncio.CancelledError:
-            if not existing.cancelled():
-                raise
-            return await produce()
+        return await _wait_inflight(existing, key, produce, ttl, should_cache)
 
     loop = asyncio.get_running_loop()
     future: asyncio.Future = loop.create_future()
     inflight[key] = future
     try:
+        # 느린 Redis GET 사이에 선행 리더가 저장하고 빠졌을 수 있으므로 슬롯 선점 후 한 번 더 확인
+        try:
+            found, cached = await _read_cached(client, key)
+        except Exception as e:
+            logger.warning("캐시 재조회 실패(%s). 원본을 읽는다: %s", key, e)
+        else:
+            if found:
+                if not future.done():
+                    future.set_result(cached)
+                return cached
+
         value = await produce()
         if should_cache is None or should_cache(value):
             try:

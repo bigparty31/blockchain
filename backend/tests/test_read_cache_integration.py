@@ -74,9 +74,13 @@ class FakeChainClient:
 def _reset_cache_state():
     cache._client = None
     cache._unavailable = False
+    cache._inflight.clear()
+    cache._inflight_loop = None
     yield
     cache._client = None
     cache._unavailable = False
+    cache._inflight.clear()
+    cache._inflight_loop = None
 
 
 @pytest.fixture()
@@ -548,6 +552,121 @@ def test_cache_waiter_recovers_when_leader_is_cancelled(monkeypatch):
 
         results = await asyncio.gather(*waiters)
         assert results == [{"balance": 777_000}] * 3
+        # 대기자 3명이 각각 produce() 를 3번 돌지 않고 1명만 새 리더가 되어 결과를 공유·저장한다
+        assert calls == 2
+        assert "balance:cancel-test" in fake_redis.store
         assert len(cache._inflight) == 0
 
     asyncio.run(_run())
+
+
+def test_cache_waiter_preserves_own_cancellation_when_leader_also_cancelled(monkeypatch):
+    """대기자와 리더가 같은 루프 반복에서 함께 취소되면 대기자 자신의 취소를 삼키지 않고 CancelledError 를 전파한다."""
+    import asyncio
+
+    monkeypatch.setenv("CACHE_ENABLED", "1")
+    fake_redis = FakeRedis()
+    monkeypatch.setattr(cache, "_get_client", lambda: fake_redis)
+
+    leader_started = asyncio.Event()
+    calls = 0
+
+    async def _produce():
+        nonlocal calls
+        calls += 1
+        leader_started.set()
+        await asyncio.sleep(10)
+        return {"balance": 1}
+
+    async def _run():
+        leader = asyncio.create_task(cache.get_or_set("balance:both-cancel", _produce))
+        await leader_started.wait()
+
+        waiter = asyncio.create_task(cache.get_or_set("balance:both-cancel", _produce))
+        await asyncio.sleep(0)
+
+        leader.cancel()
+        waiter.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await leader
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+
+        assert calls == 1
+        assert len(cache._inflight) == 0
+
+    asyncio.run(_run())
+
+
+def test_cache_slow_get_rechecks_redis_before_producing(monkeypatch):
+    """느린 Redis GET 사이에 선행 리더가 저장하고 빠졌어도 슬롯 선점 후 재확인해 중복 produce() 를 막는다."""
+    import asyncio
+
+    monkeypatch.setenv("CACHE_ENABLED", "1")
+
+    slow_get_started = asyncio.Event()
+    release_slow_get = asyncio.Event()
+
+    class SlowOnceRedis(FakeRedis):
+        def __init__(self):
+            super().__init__()
+            self.get_count = 0
+
+        async def get(self, key):
+            self.get_count += 1
+            if self.get_count == 1:
+                slow_get_started.set()
+                await release_slow_get.wait()
+            return await super().get(key)
+
+    fake_redis = SlowOnceRedis()
+    monkeypatch.setattr(cache, "_get_client", lambda: fake_redis)
+
+    calls = 0
+
+    async def _produce():
+        nonlocal calls
+        calls += 1
+        return {"balance": 555_000}
+
+    async def _run():
+        slow_req = asyncio.create_task(cache.get_or_set("balance:slow-get", _produce))
+        await slow_get_started.wait()
+
+        # 선행 리더가 먼저 조회·저장·in-flight 정리를 끝냄
+        leader_res = await cache.get_or_set("balance:slow-get", _produce)
+        assert leader_res == {"balance": 555_000}
+        assert calls == 1
+
+        # 이제 첫 번째 요청의 느린 GET 이 None 을 반환하며 풀리더라도 재확인으로 Redis 적중
+        release_slow_get.set()
+        slow_res = await slow_req
+        assert slow_res == {"balance": 555_000}
+        assert calls == 1
+
+    asyncio.run(_run())
+
+
+def test_entries_caches_when_chain_returns_none_for_unrecorded_entry(test_env, monkeypatch):
+    """DB 에는 있지만 체인에 아직 없는 항목(get_entry -> None)은 예외가 아니므로 정상 캐싱된다."""
+    monkeypatch.setenv("CACHE_ENABLED", "1")
+
+    class PartialNoneChainStub(FakeChainClient):
+        async def get_entry(self, entry_id: int):
+            if entry_id == 2:
+                self.entry_calls += 1
+                return None
+            return await super().get_entry(entry_id)
+
+    stub = PartialNoneChainStub()
+    student_app.dependency_overrides[get_chain_client] = lambda: stub
+
+    r1 = test_env.client.get("/entries")
+    assert r1.status_code == 200
+    assert stub.entry_calls == 2
+    assert "entries:all" in test_env.redis.store
+
+    r2 = test_env.client.get("/entries")
+    assert r2.status_code == 200
+    assert stub.entry_calls == 2

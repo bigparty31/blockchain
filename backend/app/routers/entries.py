@@ -558,23 +558,22 @@ async def get_entries(
 
             if db_entries:
                 try:
-                    async def _fetch_all():
+                    async def _fetch_all() -> bool:
                         chain = await _get_chain_client_safe(request)
                         if chain is None:
-                            return
+                            return True
                         tasks = [chain.get_entry(e.id) for e in db_entries]
                         fetched = await asyncio.gather(*tasks, return_exceptions=True)
+                        incomplete = False
                         for e, res in zip(db_entries, fetched):
-                            if not isinstance(res, Exception) and res and res.registrant:
+                            if isinstance(res, Exception):
+                                incomplete = True
+                            elif res and res.registrant:
                                 chain_registrants[e.id] = res.registrant
+                        return incomplete
 
-                    await asyncio.wait_for(_fetch_all(), timeout=1.5)
+                    registrant_incomplete = await asyncio.wait_for(_fetch_all(), timeout=1.5)
                 except Exception:
-                    pass
-
-                # 등록자를 하나라도 가져오지 못했으면(체인 오류·타임아웃 등) 불완전한 응답이
-                # 30초 동안 모든 학생에게 퍼지지 않도록 캐시에 저장하지 않는다.
-                if len(chain_registrants) < len(db_entries):
                     registrant_incomplete = True
 
             return [
