@@ -23,9 +23,11 @@ def _reset_cache_module():
     """
     cache._client = None
     cache._unavailable = False
+    cache._locks.clear()
     yield
     cache._client = None
     cache._unavailable = False
+    cache._locks.clear()
 
 
 class FakeRedis:
@@ -246,3 +248,148 @@ def test_close_중_오류가_나도_비운다():
     cache._client = FakeRedis(fail_on={"aclose"})
     asyncio.run(cache.close())
     assert cache._client is None
+
+
+# ── 만료 순간 중복 생성 막기 (single-flight) ──────────────────────────
+#
+# 이 성질이 없으면 TTL 이 끝나는 순간 그때 들어온 요청 전부가 미스가 되어 한꺼번에 produce 로
+# 들어간다. k6 로 실제로 재 보니 그 구간에서 인스턴스가 통째로 멈췄다 — `/entries` 의 produce 가
+# DB 커넥션을 쥔 채 체인 조회를 기다리고(최대 1.5초), 동시 요청이 풀(5+10)을 넘으면 남은 요청이
+# 커넥션을 **이벤트 루프 위에서** 기다려서 DB 를 쓰지 않는 `/` 까지 30초 타임아웃이 됐다.
+
+def _slow_producer(value, *, delay=0.01):
+    """늦게 끝나는 produce. 잠금이 없으면 이 시간 동안 다른 요청이 전부 밀려든다."""
+    calls = []
+
+    async def produce():
+        calls.append(1)
+        await asyncio.sleep(delay)
+        return value
+
+    return produce, calls
+
+
+def test_만료_순간_동시_요청이_몰려도_produce_는_한_번만(monkeypatch):
+    monkeypatch.setenv("CACHE_ENABLED", "1")
+    fake = FakeRedis()  # 비어 있다 = 막 만료된 상태
+    monkeypatch.setattr(cache, "_get_client", lambda: fake)
+    produce, calls = _slow_producer({"balance": 1000})
+
+    async def run():
+        return await asyncio.gather(
+            *(cache.get_or_set("balance:all", produce) for _ in range(50))
+        )
+
+    results = asyncio.run(run())
+
+    assert len(calls) == 1, f"produce 가 {len(calls)}번 돌았다 (1번이어야 한다)"
+    assert all(r == {"balance": 1000} for r in results)
+    assert len(fake.sets) == 1, "저장도 한 번만 일어나야 한다"
+
+
+def test_기다린_쪽은_먼저_채워진_값을_읽는다(monkeypatch):
+    """잠금을 잡은 뒤 **한 번 더 조회**하지 않으면 기다린 요청들이 produce 를 다시 돈다."""
+    monkeypatch.setenv("CACHE_ENABLED", "1")
+    fake = FakeRedis()
+    monkeypatch.setattr(cache, "_get_client", lambda: fake)
+    produce, calls = _slow_producer([1, 2, 3])
+
+    async def run():
+        first = asyncio.create_task(cache.get_or_set("entries:all", produce))
+        await asyncio.sleep(0)  # 첫 요청이 잠금을 잡게 한다
+        later = await asyncio.gather(
+            *(cache.get_or_set("entries:all", produce) for _ in range(5))
+        )
+        return await first, later
+
+    head, later = asyncio.run(run())
+
+    assert len(calls) == 1
+    assert head == [1, 2, 3]
+    assert later == [[1, 2, 3]] * 5
+
+
+def test_키가_다르면_서로_막지_않는다(monkeypatch):
+    """잠금은 키별이어야 한다. 하나로 묶으면 `/balance` 가 `/entries` 생성을 기다린다."""
+    monkeypatch.setenv("CACHE_ENABLED", "1")
+    fake = FakeRedis()
+    monkeypatch.setattr(cache, "_get_client", lambda: fake)
+
+    started = []
+
+    def tracking_producer(name):
+        async def produce():
+            started.append(name)
+            await asyncio.sleep(0.02)
+            return name
+
+        return produce
+
+    async def run():
+        return await asyncio.gather(
+            cache.get_or_set("entries:all", tracking_producer("entries")),
+            cache.get_or_set("balance:all", tracking_producer("balance")),
+            cache.get_or_set("budgets:all", tracking_producer("budgets")),
+        )
+
+    results = asyncio.run(run())
+
+    assert sorted(results) == ["balance", "budgets", "entries"]
+    # 셋이 모두 시작했다 = 서로 기다리지 않았다
+    assert sorted(started) == ["balance", "budgets", "entries"]
+    assert len(cache._locks) == 3
+
+
+def test_꺼져_있으면_잠금으로_직렬화하지_않는다(monkeypatch):
+    """캐시를 끈 측정(CACHE_ENABLED=0)에서 잠금이 걸리면 OFF 수치가 느려져 비교가 깨진다."""
+    monkeypatch.setenv("CACHE_ENABLED", "0")
+    produce, calls = _slow_producer("v")
+
+    async def run():
+        return await asyncio.gather(
+            *(cache.get_or_set("entries:all", produce) for _ in range(10))
+        )
+
+    results = asyncio.run(run())
+
+    assert len(calls) == 10, "꺼져 있으면 요청마다 원본을 읽는다"
+    assert results == ["v"] * 10
+    assert cache._locks == {}
+
+
+def test_재조회가_터지면_원본을_돌려준다(monkeypatch):
+    """잠금을 잡은 뒤의 재조회도 실패할 수 있다. 그때도 조회는 끝까지 가야 한다."""
+    monkeypatch.setenv("CACHE_ENABLED", "1")
+
+    class FailSecondGet(FakeRedis):
+        def __init__(self):
+            super().__init__()
+            self.gets = 0
+
+        async def get(self, key):
+            self.gets += 1
+            if self.gets >= 2:
+                raise RuntimeError("redis 가 중간에 죽었다")
+            return None
+
+    fake = FailSecondGet()
+    monkeypatch.setattr(cache, "_get_client", lambda: fake)
+    produce, calls = _counting_producer({"ok": True})
+
+    assert asyncio.run(cache.get_or_set("budgets:all", produce)) == {"ok": True}
+    assert len(calls) == 1
+
+
+def test_close_는_잠금도_비운다(monkeypatch):
+    """잠금은 이벤트 루프에 묶여 있다. 루프가 바뀐 뒤 그대로 쓰면 엉뚱한 곳에서 기다린다."""
+    monkeypatch.setenv("CACHE_ENABLED", "1")
+    fake = FakeRedis()
+    monkeypatch.setattr(cache, "_get_client", lambda: fake)
+    produce, _ = _counting_producer(1)
+
+    asyncio.run(cache.get_or_set("balance:all", produce))
+    assert cache._locks
+
+    cache._client = fake
+    asyncio.run(cache.close())
+    assert cache._locks == {}
