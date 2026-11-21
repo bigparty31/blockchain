@@ -1,5 +1,9 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:student_council_app/core/enums.dart';
 import 'package:student_council_app/core/hashing.dart';
 import 'package:student_council_app/models/entry_model.dart';
@@ -7,60 +11,55 @@ import 'package:student_council_app/models/objection_model.dart';
 import 'package:student_council_app/screens/student/objection_screen.dart';
 import 'package:student_council_app/services/student_api_service.dart';
 
-/// 제기한 이의가 화면을 나갔다 와도 남아 있는지 확인한다.
+/// 이의 제기가 **서버에 그대로 가는지**만 본다.
 ///
-/// 서버에 `POST /objections` 가 아직 없어서 폴백으로 동작하는데, 예전 구현은
-/// 객체를 만들어 돌려주기만 하고 아무 데도 담지 않아 **바로 사라졌다.**
-/// 학생이 이의를 올렸는데 자기 화면에서도 안 보이는 상태였다.
+/// 예전에는 서버에 `POST /objections` 가 없어서 세션 동안 로컬 사본을 들고 있었고,
+/// 이 파일은 그 사본이 화면을 나갔다 와도 남아 있는지를 봤다. #128 로 엔드포인트가
+/// 생긴 뒤 그 사본을 지웠다 — 접수되지 않은 이의가 「접수되었습니다」로 뜨는 길이고,
+/// 목록의 정본은 서버 하나여야 한다. 제기한 이의가 다시 보이는지는 이제 서버가
+/// 답할 몫이다 (`GET /objections`).
+///
+/// 남은 성질은 **앱이 본문을 건드리지 않는다**는 것이다.
 void main() {
-  // 서비스가 싱글턴이라 테스트 사이에 상태가 남는다. 각 테스트에서
-  // 직접 올린 것만 세도록 기준값을 먼저 잡는다.
-  late StudentApiService api;
+  late List<String> postedBodies;
 
   setUp(() {
-    api = StudentApiService();
+    postedBodies = [];
+    StudentApiService.client = MockClient((req) async {
+      if (req.method == 'POST' && req.url.path == '/objections') {
+        postedBodies.add(req.body);
+        final sent = jsonDecode(req.body) as Map<String, dynamic>;
+        return http.Response(
+          jsonEncode({
+            'id': 1,
+            'entry_id': sent['entry_id'],
+            'user_id': 3,
+            'content': sent['content'],
+            'status': 'OPEN',
+            'raised_at': 1794841200,
+          }),
+          201,
+          headers: {'content-type': 'application/json; charset=utf-8'},
+        );
+      }
+      return http.Response('[]', 200,
+          headers: {'content-type': 'application/json; charset=utf-8'});
+    });
   });
 
-  test('제기한 이의가 다시 조회할 때 남아 있다', () async {
-    final before = await api.fetchObjections(entryId: 2);
-
-    await api.raiseObjection(entryId: 2, content: '세부 품목 내역서를 확인할 수 있을까요?');
-
-    final after = await api.fetchObjections(entryId: 2);
-    expect(after.length, before.length + 1);
-    expect(
-      after.map((o) => o.content),
-      contains('세부 품목 내역서를 확인할 수 있을까요?'),
-    );
+  tearDown(() async {
+    StudentApiService.client = http.Client();
+    await StudentApiService().resetSessionState();
   });
 
-  test('제기한 이의는 답변 대기 상태로 남는다', () async {
-    final created = await api.raiseObjection(entryId: 4, content: '금액 확인 부탁드립니다');
+  test('접수된 이의는 서버 응답을 그대로 돌려준다 — 로컬 사본을 만들지 않는다', () async {
+    final created = await StudentApiService()
+        .raiseObjection(entryId: 4, content: '금액 확인 부탁드립니다');
 
+    expect(created.id, 1);
+    expect(created.entryId, 4);
     expect(created.status, ObjectionStatus.OPEN);
     expect(created.answer, isNull);
-    expect(created.entryId, 4);
-  });
-
-  test('다른 항목의 이의는 섞이지 않는다', () async {
-    await api.raiseObjection(entryId: 6, content: '포스터 인쇄 금액이 이상합니다');
-
-    final forSix = await api.fetchObjections(entryId: 6);
-    final forSeven = await api.fetchObjections(entryId: 7);
-
-    expect(forSix.map((o) => o.content), contains('포스터 인쇄 금액이 이상합니다'));
-    expect(forSeven.map((o) => o.content), isNot(contains('포스터 인쇄 금액이 이상합니다')));
-  });
-
-  test('id 가 기존 이의와 겹치지 않는다', () async {
-    final a = await api.raiseObjection(entryId: 2, content: '첫 번째 질문입니다');
-    final b = await api.raiseObjection(entryId: 2, content: '두 번째 질문입니다');
-
-    final all = await api.fetchObjections();
-    final ids = all.map((o) => o.id).toList();
-
-    expect(a.id, isNot(b.id));
-    expect(ids.toSet().length, ids.length, reason: 'id 가 중복되면 안 된다');
   });
 
   testWidgets('본문을 앱이 다듬지 않고 원문 그대로 보낸다', (tester) async {
@@ -97,16 +96,17 @@ void main() {
     await tester.ensureVisible(find.text('이의 제출'));
     await tester.pumpAndSettle();
 
-    // 제출은 실제 http 호출(및 그 폴백)을 타므로 가짜 시계 밖에서 돌려야 한다.
+    // 제출은 실제 http 호출을 타므로 가짜 시계 밖에서 돌려야 한다.
     await tester.runAsync(() async {
       await tester.tap(find.text('이의 제출'));
       await tester.pump();
       await Future<void>.delayed(const Duration(milliseconds: 500));
     });
 
-    final raised = await StudentApiService().fetchObjections(entryId: 21);
-    expect(raised, hasLength(1));
-    expect(raised.single.content, typed);
+    expect(postedBodies, hasLength(1));
+    final sent = jsonDecode(postedBodies.single) as Map<String, dynamic>;
+    expect(sent['content'], typed);
+    expect(sent['entry_id'], 21);
   });
 }
 

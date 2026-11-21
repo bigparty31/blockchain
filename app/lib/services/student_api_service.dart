@@ -106,15 +106,10 @@ class StudentApiService {
   int get skippedEntryCount => _skippedEntryCount;
   int _skippedEntryCount = 0;
 
-  /// 데모 모드에서 제기한 이의를 담아 두는 곳.
-  ///
-  /// **엔드포인트는 생겼다** (PR #128 — 조회는 양쪽 서버, 쓰기는 학생회 서버).
-  /// 실서버를 보고 있으면 이 목록을 쓰지 않고 [ObjectionFailed] 를 던진다. #128 이
-  /// develop 에 들어오면 통째로 지운다 — 그때까지는 데모 화면이 비지 않게 남겨 둔다.
-  ///
-  /// **항목(`entries`)에는 이런 폴백을 두지 않는다** — `POST /entries` 는 이미 서버에
-  /// 있어서, 여기에도 사본을 두면 「어느 쪽이 진짜 데이터냐」가 갈린다.
-  final List<ObjectionModel> _pendingObjections = [];
+  // 이의 제기에는 로컬 폴백을 두지 않는다. #128 이 `POST /objections`(학생회 서버)를
+  // 넣으면서 엔드포인트가 생겼고, 그 뒤로 사본을 들고 있으면 **접수되지 않은 이의가
+  // 「접수되었습니다」로 뜬다.** 항목(`entries`)에 폴백을 두지 않는 것과 같은 이유다 —
+  // 서버에 경로가 있는데 사본까지 두면 「어느 쪽이 진짜 데이터냐」가 갈린다.
 
   // ── 원장 ────────────────────────────────────────────────────
 
@@ -466,11 +461,9 @@ class StudentApiService {
       return json.map((e) => ObjectionModel.fromJson(e)).toList();
     }
 
-    // 이번 세션에 직접 제기한 것만 돌려준다. 미리 넣어 둔 예시 이의는 두지 않는다 —
-    // 쓴 적 없는 질문이 「답변 대기」로 떠 있으면 자기가 올린 것과 구분되지 않는다.
-    return entryId == null
-        ? List.of(_pendingObjections)
-        : _pendingObjections.where((o) => o.entryId == entryId).toList();
+    // 못 읽었으면 빈 목록이다. 예시 이의를 끼워 넣지 않는다 — 쓴 적 없는 질문이
+    // 「답변 대기」로 떠 있으면 자기가 올린 것과 구분되지 않는다.
+    return const [];
   }
 
   /// POST /objections — 이의 제기 (S8)
@@ -483,9 +476,9 @@ class StudentApiService {
   /// 본문의 정본화·해시는 백엔드가 한다 (HASHING.md §1.1, §3).
   /// 학생 앱은 쓰기 권한이 없어 직접 서명하지 않는다 (PRD §9.2).
   ///
-  /// 서버 원장을 보고 있는데 전송이 실패하면 [ObjectionFailed] 를 던진다.
-  /// 조용히 로컬 폴백으로 넘어가면 **접수되지도 않은 이의가 「접수되었습니다」로
-  /// 뜬다** — 학생은 답변을 기다리지만 학생회에는 아무것도 가 있지 않다
+  /// 접수되지 않았으면 **데모 모드에서도** [ObjectionFailed] 를 던진다. 로컬 사본으로
+  /// 넘어가면 **접수되지도 않은 이의가 「접수되었습니다」로 뜬다** — 학생은 답변을
+  /// 기다리지만 학생회에는 아무것도 가 있지 않다
   /// (스토리보드 5 ③ 「실패: 서버 무응답 → 토스트 · 입력 내용은 남겨둔다」).
   /// Throws [ObjectionFailed], [SessionExpired].
   Future<ObjectionModel> raiseObjection({
@@ -523,33 +516,10 @@ class StudentApiService {
       }
     }
 
-    // **보낸 세션이 아직 그 세션인지 먼저 본다.** 로그아웃·세션 만료가 이
-    // 응답보다 먼저 도착하면 [resetSessionState] 가 목록을 비우고 데모 깃발을
-    // 다시 켜 두는데, 그 상태에서 아래 폴백으로 내려가면 **지난 사용자가 쓴
-    // 이의가 목록에 들어간다.** 다음 사람의 조회가 실패하면(그때 폴백이
-    // `_pendingObjections` 를 돌려준다) 남의 이의 내용이 자기 것으로 보인다.
-    //
-    // 세션이 바뀌었으면 폴백도 성공도 아니다 — 받을 화면 자체가 없다.
-    if (_staleSession(auth.generation)) throw const ObjectionFailed();
-
-    if (!_usingDemoData) throw const ObjectionFailed();
-
-    // 서버가 없을 때. 만들어서 돌려주기만 하면 화면을 나가는 순간 사라지므로
-    // 세션 동안 들고 있는다.
-    final nextId = _pendingObjections.isEmpty
-        ? 1
-        : _pendingObjections.map((o) => o.id).reduce((a, b) => a > b ? a : b) + 1;
-
-    final created = ObjectionModel(
-      id: nextId,
-      entryId: entryId,
-      userId: 3,
-      content: content,
-      status: ObjectionStatus.OPEN,
-      raisedAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
-    );
-    _pendingObjections.add(created);
-    return created;
+    // 여기까지 왔으면 접수되지 않았다. 서버가 없든 응답이 실패든, 학생에게는
+    // **실패로 말한다** — 로컬 사본으로 「접수되었습니다」를 만들면 학생은 답변을
+    // 기다리지만 학생회에는 아무것도 가 있지 않다.
+    throw const ObjectionFailed();
   }
 
   /// GET /memberships/me — 본인 SBT 보유 여부와 QR 페이로드 (S5)
@@ -731,10 +701,10 @@ class StudentApiService {
   /// 로그아웃·세션 만료 때 **세션에 묶인 상태를 비운다** (`main.dart` 가 연결).
   ///
   /// 이 클래스는 싱글턴이라 로그아웃해도 살아 있다. 비우지 않으면 같은 기기의
-  /// 다음 사람에게 **이전 사용자가 제기한 이의 목록**이 보이고, 미확인 뱃지가
-  /// 이전 사용자의 「마지막으로 본 항목」을 기준으로 계산된다. 데모 깃발도
-  /// 되돌려 두어야 다음 사용자의 첫 조회가 실패했을 때 예시 데이터를 실제
-  /// 원장으로 읽지 않는다.
+  /// 다음 사람에게 미확인 뱃지가 **이전 사용자의 「마지막으로 본 항목」**을 기준으로
+  /// 계산되고, 「읽지 못한 건수」도 이전 조회의 값이 남는다. 데모 깃발도 되돌려
+  /// 두어야 다음 사용자의 첫 조회가 실패했을 때 예시 데이터를 실제 원장으로
+  /// 읽지 않는다.
   /// 진행 중인 [resetSessionState] 의 보관소 삭제. 없으면 null 이다.
   ///
   /// `main.dart` 는 `onSessionCleared` 가 `void` 라 **이것을 기다리지 않는다.**
@@ -747,7 +717,6 @@ class StudentApiService {
   Future<void> resetSessionState() {
     // **`await` 전에 비운다.** `onSessionCleared` 는 세션이 비워지는 순간
     // 동기로 불리므로, 여기까지는 다음 사용자의 요청이 끼어들 틈이 없다.
-    _pendingObjections.clear();
     _usingDemoData = true;
     _skippedEntryCount = 0;
     final reset = _clearLastSeen();
