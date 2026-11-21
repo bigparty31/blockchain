@@ -25,6 +25,10 @@ from app.routers.ocr import router as ocr_router
 from app.routers.bank import router as bank_router
 from app.routers.snapshots import router as snapshots_router
 from app.routers.receipts import router as receipts_router
+from app.routers.objections import (
+    command_router as objections_command_router,
+    query_router as objections_query_router,
+)
 
 
 @asynccontextmanager
@@ -97,6 +101,8 @@ app.include_router(ocr_router)
 app.include_router(bank_router)
 app.include_router(snapshots_router)
 app.include_router(receipts_router)
+app.include_router(objections_query_router)
+app.include_router(objections_command_router)
 
 
 @app.get("/", tags=["Health"])

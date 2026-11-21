@@ -10,7 +10,7 @@
 | `BudgetToken` | 학기+항목 1줄 단위 예산 한도·소모액. 발행·회수는 회장 서명, 증액은 회장+감사 서명. `spend/refund`는 `AccountingLedger`만 호출 |
 | `AccountingLedger` | 수입·지출 원장. 확정 항목 수정 불가, 정정은 `correctsId`로 원본을 가리키는 새 항목 |
 | `MembershipSBT` | 학기 단위 학생 회원 증명. PRESIDENT 또는 AUDITOR 서명으로 발행·소각. 전송 불가. 온체인에는 지갑 주소만 있고 학번 등 식별정보는 없음 |
-| `ObjectionRegistry` | 학생 이의 제기·답변. 해시만 온체인. entry 상태에 영향 없음 |
+| `ObjectionRegistry` | 학생 이의 제기·감사 답변. 해시만 온체인. entry 상태에 영향 없음. PRD v0.17에서 범위에 다시 넣었다 |
 
 거래내역 CSV 파일 해시를 남기는 `recordBankSnapshot`은 원장에 넣지 않는다. 별도 컨트랙트로 추후 설계한다 (문승준과 필드·서명 주체 확정 후).
 
@@ -124,8 +124,9 @@
 | `BudgetToken` | `(roleManager)` |
 | `AccountingLedger` | `(roleManager, budgetToken)` — 0 이면 `ZeroAddress` |
 | `MembershipSBT` | `(roleManager)` — 0 이면 `ZeroAddress` |
+| `ObjectionRegistry` | `(roleManager, ledger, membershipSBT, relayer)` — 넷 중 0 이 있으면 `ZeroAddress`. `relayer`는 `raise`를 부를 수 있는 유일한 주소이고 바꾸는 함수가 없다 (릴레이어 키를 바꾸면 재배포) |
 
-배포 순서: `RoleManager` → `BudgetToken` → `AccountingLedger` → `BudgetToken.setLedger(ledger)` → `MembershipSBT`. `MembershipSBT`를 맨 뒤에 두어 앞의 세 컨트랙트 주소(배포자 nonce로 정해짐)가 SBT 추가 전과 같다. 릴레이어 계정은 롤이 없다. 배포 스크립트가 끝나면 배포자에게 남는 권한은 없다.
+배포 순서: `RoleManager` → `BudgetToken` → `AccountingLedger` → `BudgetToken.setLedger(ledger)` → `MembershipSBT` → `ObjectionRegistry`. 새 컨트랙트를 맨 뒤에 두어 앞의 컨트랙트 주소(배포자 nonce로 정해짐)가 추가 전과 같다. 로컬(31337)에서는 `ObjectionRegistry`를 넣어도 앞의 네 주소와 도메인이 v0.15 배포와 같다. 릴레이어 계정은 롤이 없다. 배포 스크립트가 끝나면 배포자에게 남는 권한은 없다.
 
 ### 저장 배치
 
@@ -204,8 +205,9 @@ meta_hash = SHA256( amount ␟ counterparty ␟ purpose ␟ occurred_at ␟ rece
 | AccountingLedger | `getEntry`, `statusOf`, `exists`, `entryCommitOf`, `netAmountOf`, `roleManager`, `budgetToken`, `MAX_AMOUNT`, `DOMAIN_SEPARATOR` | view. `statusOf`는 없는 id면 `EntryNotFound` |
 | MembershipSBT | `mintBatchRelayed(MintBatchRequest, signature)`, `burnRelayed(BurnRequest, signature)` | 릴레이어 호출, 서명자 = PRESIDENT 또는 AUDITOR |
 | MembershipSBT | `hasValidMembership`, `tokenOf`, `nonces`, `DOMAIN_SEPARATOR`, `MAX_BATCH_SIZE` | view. 서명자별 nonce, 배치 상한 100 |
-| ObjectionRegistry | `raise` | 릴레이어 호출, `raiser`는 SBT 보유자 (릴레이어 신뢰) |
-| ObjectionRegistry | `answer(AnswerRequest, sig)` | 릴레이어 호출, 서명자 = 임원 |
+| ObjectionRegistry | `raise(objectionId, entryId, contentHash, raiser)` | **생성자의 `relayer`만** 호출 (학생 서명 없음, 릴레이어 신뢰). `raiser`는 대상 항목 학기(`entry.term`)의 SBT 보유자 |
+| ObjectionRegistry | `answer(AnswerRequest, sig)` | 릴레이어 호출, 서명자 = AUDITOR 또는 PRESIDENT |
+| ObjectionRegistry | `getObjection`, `exists`, `relayer`, `roleManager`, `ledger`, `membershipSBT`, `DOMAIN_SEPARATOR` | view. `getObjection`은 없는 id면 빈 구조체(`raiser == 0`) — 원장 `getEntry`와 같다 |
 
 확정된 항목을 수정하는 함수는 존재하지 않는다. `Entry`를 바꾸는 경로는 `PENDING → CONFIRMED / REJECTED` 상태 전이 하나뿐이다.
 
@@ -256,10 +258,10 @@ meta_hash = SHA256( amount ␟ counterparty ␟ purpose ␟ occurred_at ␟ rece
 | `InvalidCorrectionTarget` | AccountingLedger | 정정 대상이 원본도 재분류 양수 정정도 아님 |
 | `EntryCommitMismatch` | AccountingLedger | 승인·반려자가 서명한 `entryCommit`이 저장된 항목과 다름 |
 | `HashRequired` | AccountingLedger | `hash == 0` |
-| `ReservedId` | AccountingLedger, BudgetToken | `id == 0` / `budgetId == 0`. 중복이 아니라 예약값 위반 |
+| `ReservedId` | AccountingLedger, BudgetToken, ObjectionRegistry | `id == 0` / `budgetId == 0` / `objectionId == 0`. 중복이 아니라 예약값 위반 |
 | `AmountOutOfRange` | AccountingLedger, BudgetToken | 금액이 `MAX_AMOUNT`를 넘음 |
 | `FieldOutOfRange` | AccountingLedger, BudgetToken | id·term·시각이 저장 폭을 넘음 |
-| `ZeroAddress` | AccountingLedger (신규), BudgetToken·RoleManager (기존), MembershipSBT | 생성자 인자 0 / SBT 수령자·소각 대상 0 |
+| `ZeroAddress` | AccountingLedger (신규), BudgetToken·RoleManager (기존), MembershipSBT, ObjectionRegistry | 생성자 인자 0 / SBT 수령자·소각 대상 0 |
 | `ZeroAmount` (기존) | AccountingLedger | 차액 0인 정정도 여기에 걸린다. 새 이름 없음 |
 | `BudgetAlreadyIssued` | BudgetToken | 같은 `(term, category)`에 두 번째 발행 |
 | `VersionMismatch` | BudgetToken | 증액 요청의 `version`이 현재 version과 다름 (서명 재사용·경합) |
@@ -267,7 +269,7 @@ meta_hash = SHA256( amount ␟ counterparty ␟ purpose ␟ occurred_at ␟ rece
 | `ReclaimCountMismatch` | BudgetToken | 회수 요청의 `reclaimCount`가 현재 회수 횟수와 다름 (서명 재사용) |
 | `NotPresident` | BudgetToken, RoleManager | 발행·회수 서명자, 증액 요청 서명자, 회장 복구 취소 서명자가 회장이 아님 |
 | `NotAuditor` | BudgetToken, RoleManager | 증액 승인 서명자, 회장 복구 제안자가 감사가 아님 |
-| `InvalidSignature` / `SignatureExpired` | BudgetToken, RoleManager (신규), AccountingLedger (기존), MembershipSBT | 서명 바이트 깨짐 / deadline 경과 |
+| `InvalidSignature` / `SignatureExpired` | BudgetToken, RoleManager (신규), AccountingLedger (기존), MembershipSBT, ObjectionRegistry | 서명 바이트 깨짐 / deadline 경과 |
 | `BudgetExpired` | BudgetToken (기존), AccountingLedger ABI | 확정 시 `spend`에서 마감 경과(`confirmEntry`를 통과해 그대로 올라옴), 마감 뒤 증액. 원장 ABI에도 선언 |
 | `InsufficientBudget` | BudgetToken (기존), AccountingLedger ABI | 확정 시 잔량 부족. 원장 ABI에도 선언 |
 | `LedgerAlreadySet` | BudgetToken | `setLedger` 두 번째 호출 |
@@ -287,12 +289,19 @@ meta_hash = SHA256( amount ␟ counterparty ␟ purpose ␟ occurred_at ␟ rece
 | `NoMembership` | MembershipSBT | 소각할 `(holder, term)` 회원권이 없음 |
 | `InvalidBurnReason` | MembershipSBT | `reason`이 `BurnReason` 범위 밖 |
 | `Soulbound` | MembershipSBT | 전송·승인 시도 |
+| `Unauthorized` | ObjectionRegistry | `raise` 호출자가 생성자의 `relayer`가 아님 |
+| `ObjectionAlreadyExists` | ObjectionRegistry | 같은 `objectionId` 두 번째 제기 |
+| `EntryNotFound` | ObjectionRegistry (원장에도 있음) | 제기 대상 `entryId`가 원장에 없음 |
+| `NotMember` | ObjectionRegistry | `raiser`가 대상 항목 학기의 SBT를 갖고 있지 않음 (0 주소 포함) |
+| `NotResponder` | ObjectionRegistry | 답변 서명자가 AUDITOR 또는 PRESIDENT가 아님 |
+| `ObjectionNotFound` | ObjectionRegistry | 답변할 이의가 없음 (`objectionId == 0` 포함) |
+| `ObjectionAlreadyAnswered` | ObjectionRegistry | 이미 답변된 이의. 같은 답변 서명 재제출도 여기에 걸린다 (nonce 없음) |
 
-이름이 바뀌거나 없어진 것: RoleManager의 `Unauthorized`·`SelfApproval`·`RotationNotFound`·`RotationAlreadyExecuted`는 새 구조에서 쓰지 않는다. 원장의 `Unauthorized`는 쓰이지 않아 뺐다.
+이름이 바뀌거나 없어진 것: RoleManager의 `Unauthorized`·`SelfApproval`·`RotationNotFound`·`RotationAlreadyExecuted`는 새 구조에서 쓰지 않는다. 원장의 `Unauthorized`는 쓰이지 않아 뺐다. `Unauthorized`는 이제 ObjectionRegistry에만 있다.
 
 ## EIP-712
 
-서명을 받는 컨트랙트마다 도메인이 따로 있다: `name = 컨트랙트명`, `version = "1"`, `chainId`, `verifyingContract`. 서명 도메인은 AccountingLedger·BudgetToken·RoleManager·MembershipSBT의 4개이며 모두 `DOMAIN_SEPARATOR()`를 노출한다. ObjectionRegistry는 v0.13에서 구현·배포하지 않아 범위 밖이다. 앱은 서명 대상에 맞는 도메인을 골라야 한다.
+서명을 받는 컨트랙트마다 도메인이 따로 있다: `name = 컨트랙트명`, `version = "1"`, `chainId`, `verifyingContract`. 서명 도메인은 AccountingLedger·BudgetToken·RoleManager·MembershipSBT·ObjectionRegistry의 5개이며 모두 `DOMAIN_SEPARATOR()`를 노출한다 (ObjectionRegistry는 PRD v0.17에서 추가). 앱은 서명 대상에 맞는 도메인을 골라야 한다.
 
 | 컨트랙트 | struct | typehash 문자열 |
 | --- | --- | --- |
@@ -328,7 +337,7 @@ nonce가 없으므로 같은 id에 `ConfirmApproval`과 `RejectDecision` 서명�
 
 ## 필수 테스트
 
-네 컨트랙트(RoleManager·BudgetToken·AccountingLedger·MembershipSBT)가 통과해야 하는 목록이다.
+다섯 컨트랙트(RoleManager·BudgetToken·AccountingLedger·MembershipSBT·ObjectionRegistry)가 통과해야 하는 목록이다.
 
 | # | 항목 | 이번 범위 |
 | --- | --- | --- |
@@ -362,6 +371,8 @@ nonce가 없으므로 같은 id에 `ConfirmApproval`과 `RejectDecision` 서명�
 - 회장 복구: 살아 있는 회장이 취소 → 실행 `NoPendingRecovery` / 회장 아닌 취소 `NotPresident` / 감사 아닌 제안 `NotAuditor` / 같은 감사 두 서명 `SameSigner` / 제안 서명 재사용 `InvalidNonce` / 대기 중 제안 감사가 교체되면 실행 `NotAuditor` / 대기 중 회장이 바뀌면 `RoleNotGranted` / 대기 중 `to`가 임원이 되면 `AlreadyOfficer` / 새 제안이 옛 제안을 덮어씀
 - 회수 서명 재사용: 같은 금액 환불 뒤 옛 회수 서명 재제출 → `ReclaimCountMismatch` / 회수는 `version`을 바꾸지 않음
 - 해시: `hash == 0` 등록 → `HashRequired`
+- 이의 (제기): 릴레이어 외 호출(임원·학생 본인 포함) → `Unauthorized` / `objectionId == 0` → `ReservedId` / 중복 → `ObjectionAlreadyExists` / 없는 항목 → `EntryNotFound` / 회원권 없음·다른 학기 회원권·소각된 회원권·0 주소 → `NotMember` / 항목 상태 불변
+- 이의 (답변): 감사·회장·두 번째 감사 서명으로 성공, `responder`는 서명자 / 총무·외부인·학생·릴레이어 서명 → `NotResponder` / 롤에서 내려간 감사 → `NotResponder` / 시한 경과 → `SignatureExpired` / 값 변조·다른 도메인 서명 → `NotResponder` / 깨진 서명 → `InvalidSignature` / 없는 이의 → `ObjectionNotFound` / 두 번째 답변·서명 재제출 → `ObjectionAlreadyAnswered`
 - 반려 범위: 등록과 다른 값으로 계산한 `entryCommit`의 반려 → `EntryCommitMismatch` / 날짜(`occurredAt`)만 다른 `entryCommit`도 확정 거부
 - 에러 해석: `confirmEntry`의 `InsufficientBudget`·`BudgetExpired`를 원장 ABI로 해석 가능
 - 승인 범위: 등록과 다른 budgetId·kind·term·registrant로 계산한 `entryCommit` → `EntryCommitMismatch` / `entryCommitOf`가 문서의 식과 일치

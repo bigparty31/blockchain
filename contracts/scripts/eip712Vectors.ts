@@ -303,6 +303,42 @@ for (const c of sbtCases) {
   });
 }
 
+const ob = deployment.eip712.ObjectionRegistry;
+if (!ob) throw new Error("배포 기록에 ObjectionRegistry 도메인이 없다. scripts/deploy.ts 로 다시 배포한다");
+const objectionDomain = { name: ob.name, version: ob.version, chainId: BigInt(ob.chainId), verifyingContract: ob.verifyingContract };
+
+if (TypedDataEncoder.hashDomain(objectionDomain) !== ob.domainSeparator.toLowerCase()) {
+  throw new Error("배포 기록의 ObjectionRegistry domainSeparator 가 도메인 네 필드로 계산한 값과 다르다");
+}
+
+// test/helpers/fixture.ts OBJECTION_TYPES 와 같다 (docs/CONTRACTS.md EIP-712 표)
+const OBJECTION_TYPES = {
+  AnswerRequest: [
+    { name: "objectionId", type: "uint256" },
+    { name: "answerHash", type: "bytes32" },
+    { name: "deadline", type: "uint256" },
+  ],
+} as const;
+
+const answerHash = sha256(toUtf8Bytes("영수증은 장부 상세에 첨부했습니다."));
+const objectionCases: { name: string; signer: HDNodeWallet; message: Record<string, unknown> }[] = [
+  { name: "answer_auditor", signer: auditor, message: { objectionId: 1n, answerHash, deadline: DEADLINE } },
+  { name: "answer_president", signer: president, message: { objectionId: 2n, answerHash, deadline: DEADLINE } },
+];
+
+const objectionVectors = [];
+for (const c of objectionCases) {
+  const types = { AnswerRequest: [...OBJECTION_TYPES.AnswerRequest] };
+  objectionVectors.push({
+    name: c.name,
+    primaryType: "AnswerRequest",
+    message: plain(c.message),
+    digest: TypedDataEncoder.hash(objectionDomain, types, c.message),
+    signature: await c.signer.signTypedData(objectionDomain, types, c.message),
+    signer: c.signer.address,
+  });
+}
+
 const out = {
   generatedBy: `contracts/scripts/eip712Vectors.ts (ethers ${version})`,
   domain: { ...domain, chainId: Number(domain.chainId), domainSeparator: d.domainSeparator.toLowerCase() },
@@ -311,8 +347,10 @@ const out = {
   budgetVectors,
   sbtDomain: { ...sbtDomain, chainId: Number(sbtDomain.chainId), domainSeparator: sb.domainSeparator.toLowerCase() },
   sbtVectors,
+  objectionDomain: { ...objectionDomain, chainId: Number(objectionDomain.chainId), domainSeparator: ob.domainSeparator.toLowerCase() },
+  objectionVectors,
 };
 
 await mkdir(path.dirname(OUT), { recursive: true });
 await writeFile(OUT, JSON.stringify(out, null, 2) + "\n");
-console.log(`${vectors.length}+${budgetVectors.length}+${sbtVectors.length}개 벡터 → ${path.relative(path.resolve(ROOT, ".."), OUT)}`);
+console.log(`${vectors.length}+${budgetVectors.length}+${sbtVectors.length}+${objectionVectors.length}개 벡터 → ${path.relative(path.resolve(ROOT, ".."), OUT)}`);

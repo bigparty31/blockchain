@@ -26,6 +26,7 @@ O는 넣는다, **비움**은 넣지 않거나 빈 값으로 둔다는 뜻이다
 |---|---|---|---|---|
 | `DATABASE_URL` | O 읽기·쓰기 계정 | O **읽기 전용 계정** | O | 없으면 컨테이너 안 SQLite 파일로 뜬다. 반드시 넣는다 |
 | `JWT_SECRET` | O | O **학생회 서버와 다른 값** (6절) | O | 서버가 뜨지 않는다 |
+| `STUDENT_JWT_SECRET` (#128) | O **학생 서버의 `JWT_SECRET`** | **비움** | O | 두 서버의 `JWT_SECRET`을 분리했을 때 비우면 학생의 `POST /objections`가 401이다 |
 | `CHAIN_RPC_URL` | O | O | Amoy는 O (주소에 API 키가 들어간다) | `CHAIN_FAKE`도 없으면 서버가 뜨지 않는다 |
 | `DEPLOYMENTS_FILE` | O | O 같은 파일 | | 없으면 `contracts/deployments/localhost.json`을 읽는다. 컨테이너에는 그 경로가 없다 |
 | `RELAYER_PRIVATE_KEY` | O | **비움** | O | 비우면 체인을 조회만 한다. 쓰기 API는 503이다 |
@@ -54,6 +55,7 @@ O는 넣는다, **비움**은 넣지 않거나 빈 값으로 둔다는 뜻이다
 |---|---|---|
 | `DATABASE_URL` | compose의 `db` 서비스. 학생회 서버는 `council` 계정, 학생 서버는 읽기 전용 계정 (5절) | 같다. 비밀번호는 새로 만든다 |
 | `JWT_SECRET` | `.env`에서 서버마다 하나씩 (6절) | 새로 만든다 |
+| `STUDENT_JWT_SECRET` | 학생 서버의 `JWT_SECRET`과 같은 값 (6절, 학생회 서버에만 설정) | 같다 |
 | `CHAIN_RPC_URL` | `http://chain:8545` | Amoy RPC 제공자 주소 (chainId 80002) |
 | `DEPLOYMENTS_FILE` | `/deployments/localhost.json` (배포 볼륨, 읽기 전용) | Amoy 배포 결과 파일 (장석연) |
 | `RELAYER_PRIVATE_KEY` | 비우면 진입 스크립트가 Hardhat 공개 키를 넣는다 (`docker-entrypoint.sh`) | **반드시 넣는다.** 새 지갑을 만들어 POL을 충전하고 롤은 주지 않는다 |
@@ -121,6 +123,7 @@ openssl rand -hex 32
 - 학생 서버가 발급한 토큰은 학생회 서버에서 서명 검증에 실패한다. 각 서버가 자기 롤이 아닌 토큰을 받지 않는다는 §9.1 규칙을 키로도 지킨다
 - 학생 서버의 비밀이 새어도 학생회 서버에서 쓸 임원 토큰을 만들 수 없다
 - 앱은 로그인 전에 역할을 몰라 학생 서버로 먼저 로그인하고, 응답의 역할이 임원이면 **학생회 서버로 한 번 더 로그인해** 그 토큰을 쓴다(#108). 학생 서버에서 받은 토큰을 학생회 서버에 보내면 401이다
+- 단, 학생 이의 제기(`POST /objections`)만 DB 쓰기·릴레이가 필요해 학생회 서버에 두므로, 학생회 서버는 `STUDENT_JWT_SECRET`에 학생 서버의 토큰 키를 **검증 전용**으로 받아 `POST /objections`의 `STUDENT` 롤 토큰만 허용한다 (PRD v0.17 §9.1, §13). 다른 경로·임원 롤에는 쓰지 않는다
 - 값을 바꾸면 그 서버의 로그인이 모두 풀린다
 
 **`STUDENT_WALLET_MNEMONIC` — 두 서버에 같은 값을 둔다.**

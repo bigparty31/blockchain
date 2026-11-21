@@ -250,10 +250,10 @@ class _BudgetPlanScreenState extends State<BudgetPlanScreen> {
     void add(_InfoBanner banner) => banners.addAll([const SizedBox(height: 12), banner]);
 
     if (_c.phase == BudgetPlanPhase.processing) {
-      add(const _InfoBanner(
+      add(_InfoBanner(
         icon: Icons.hourglass_top_rounded,
         color: AppTheme.pending,
-        title: '온체인에 기록하는 중이에요',
+        title: _c.checking ? '체인에서 결과를 확인하는 중이에요' : '온체인에 기록하는 중이에요',
         body: '다시 누르지 마세요.',
       ));
     }
@@ -275,11 +275,16 @@ class _BudgetPlanScreenState extends State<BudgetPlanScreen> {
     }
 
     if (_c.hasPendingResponse) {
-      add(const _InfoBanner(
+      add(_InfoBanner(
         icon: Icons.sync_problem_rounded,
         color: AppTheme.pending,
         title: '응답이 없는 항목이 있어요',
-        body: '체인에 기록됐는지 아직 알 수 없어요. 확인되기 전에는 다시 보낼 수 없어요.',
+        body: '체인에 기록됐는지 아직 알 수 없어요. 확인되기 전에는 다시 보낼 수 없어요. '
+            '「결과 확인」은 서명하거나 다시 보내지 않고 체인에서 결과만 확인해요.',
+        actionLabel: '결과 확인',
+        actionKey: const Key('budget_check_result'),
+        // 확인 중(processing)에는 눌리지 않는다 — 두 번 누르기 방지
+        onAction: _c.canCheck ? _c.checkPending : null,
       ));
     }
 
@@ -451,9 +456,9 @@ class _BudgetPlanScreenState extends State<BudgetPlanScreen> {
           style: const TextStyle(fontSize: 12, color: AppTheme.expense, fontWeight: FontWeight.bold),
         );
       case BudgetLineState.noResponse:
-        return const Text(
-          '응답 없음 · 체인에 기록됐는지 확인 중',
-          style: TextStyle(fontSize: 12, color: AppTheme.pending, fontWeight: FontWeight.bold),
+        return Text(
+          '응답 없음 · ${line.message ?? '체인에 기록됐는지 아직 몰라요'}',
+          style: const TextStyle(fontSize: 12, color: AppTheme.pending, fontWeight: FontWeight.bold),
         );
       case BudgetLineState.draft:
         return const SizedBox.shrink();
@@ -558,6 +563,7 @@ class _InfoBanner extends StatelessWidget {
     required this.title,
     this.body,
     this.actionLabel,
+    this.actionKey,
     this.onAction,
   });
 
@@ -566,6 +572,7 @@ class _InfoBanner extends StatelessWidget {
   final String title;
   final String? body;
   final String? actionLabel;
+  final Key? actionKey;
   final VoidCallback? onAction;
 
   @override
@@ -597,7 +604,7 @@ class _InfoBanner extends StatelessWidget {
                 ],
                 if (actionLabel != null) ...[
                   const SizedBox(height: 8),
-                  OutlinedButton(onPressed: onAction, child: Text(actionLabel!)),
+                  OutlinedButton(key: actionKey, onPressed: onAction, child: Text(actionLabel!)),
                 ],
               ],
             ),

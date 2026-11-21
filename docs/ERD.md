@@ -667,7 +667,7 @@ erDiagram
 | `kind` | `VARCHAR(40)` | N | - | `docs/enums.md` notification kind |
 | `entry_id` | `BIGINT` | Y | NULL | **FK** -> `entries(id)` ON DELETE CASCADE |
 | `budget_revision_request_id` | `BIGINT` | Y | NULL | **FK** -> `budget_revision_requests(id)` ON DELETE CASCADE |
-| `objection_id` | `BIGINT` | Y | NULL | **FK** -> `objections(id)` ON DELETE CASCADE (이의는 범위 밖이라 비어 있음) |
+| `objection_id` | `BIGINT` | Y | NULL | **FK** -> `objections(id)` ON DELETE CASCADE (이의 제기 알림 연결 시 참조) |
 | `body` | `TEXT` | N | - | 서버가 kind로 만든 문구. 만들 때 저장 |
 | `created_at` | `TIMESTAMPTZ` | N | `now()` | 처음 알린 일시 |
 | `notified_at` | `TIMESTAMPTZ` | N | `now()` | 마지막으로 알린 일시. 재알림 때 갱신, 목록 정렬 기준 |

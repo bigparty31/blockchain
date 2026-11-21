@@ -918,6 +918,12 @@ class AuthService {
   /// 직접 부르지 않고 `main.dart` 가 연결한다.
   void Function(Session)? onSessionStarted;
 
+  /// 세션이 **비워지기 직전.** 끝나는 세션을 넘긴다 — 비운 뒤에는 토큰도 임원 서버 주소도 남지 않아서,
+  /// 임원 기기 토큰 해제(`DELETE /notifications/device-tokens/{token}`)는 이 값으로 보내야 한다.
+  /// 이미 로그아웃 상태이거나 앱 시작 복원이 거부된 경로에서는 끝낼 세션이 없어 불리지 않는다.
+  /// [onSessionCleared] 와 같은 이유로 `main.dart` 가 연결한다.
+  void Function(Session)? onSessionEnding;
+
   /// 로그아웃. 토큰을 지우고 세션을 비운다.
   ///
   /// Throws [TokenClearFailed] — 기기에서 토큰을 지우지 못한 경우. **세션은
@@ -945,6 +951,8 @@ class AuthService {
   /// 두 값이 갈리지 않도록 한 함수에서만 바꾼다.
   void _setSession(Session? session) {
     final had = _session != null;
+    final ending = _session;
+    if (ending != null && session == null) onSessionEnding?.call(ending);
     _session = session;
     _sessionGeneration++;
     ApiConfig.activeRole = session?.role;
