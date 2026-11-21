@@ -258,6 +258,19 @@ class StudentApiService {
   ///
   /// **못 읽으면 null 이고, 그때는 거르지 않는다.** 모르는 채로 거르면 멀쩡한 항목이
   /// 합계에서 사라진다 — 모르는 것을 없는 것으로 취급하지 않는다.
+  /// 학기 경계 시각을 **서버 `current_term` 과 같게** 읽는다.
+  ///
+  /// 시간대가 없는 값은 UTC 로 본다 (`backend/app/services/membership.py` 의 `_aware`).
+  /// SQLite 는 시간대를 저장하지 않아 `/terms` 가 시간대 없이 내려오는데,
+  /// 화면 표시용 [Fmt.parseServerTime] 처럼 KST 로 읽으면 학기 경계 앞뒤 9시간 동안
+  /// 앱과 서버가 서로 다른 학기를 고른다 (#130 Codex 3차). 표시용 함수는 그대로 둔다.
+  static DateTime parseTermTime(String text) {
+    var t = text.trim();
+    if (!t.contains('T')) t = '${t}T00:00:00';
+    final hasZone = RegExp(r'(Z|[+-]\d{2}(:?\d{2})?)$').hasMatch(t);
+    return DateTime.parse(hasZone ? t : '${t}Z');
+  }
+
   Future<int?> fetchCurrentTermCode({DateTime? now}) async {
     final json = await _getJson('${ApiConfig.baseUrl}/terms');
     if (json is! List || json.isEmpty) return null;
@@ -270,7 +283,7 @@ class StudentApiService {
       final ended = term['ended_at'];
       if (started is! String || ended is! String) continue;
       try {
-        windows.add((term: term, start: Fmt.parseServerTime(started), end: Fmt.parseServerTime(ended)));
+        windows.add((term: term, start: parseTermTime(started), end: parseTermTime(ended)));
       } catch (_) {
         // 시각을 못 읽는 학기는 건너뛴다 — 나머지로 고른다
       }

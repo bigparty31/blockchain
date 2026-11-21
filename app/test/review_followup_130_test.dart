@@ -174,6 +174,42 @@ void main() {
       );
     });
 
+    test('시간대 없는 시각은 서버처럼 UTC 로 읽는다 — 시작 경계 (#130 Codex 3차)', () async {
+      // SQLite 는 시간대를 빼고 내려준다. 서버는 이를 UTC 로 본다.
+      // 2027-03-01T00:00 UTC 전인 02-28T18:00Z 는 서버 기준 아직 이전 학기다
+      // (KST 로 읽으면 이미 03-01 03:00 이라 다음 학기로 갈린다).
+      serve(termsJson([
+        {'id': 2, 'term_code': 20262, 'started_at': '2026-09-01T00:00:00', 'ended_at': '2027-02-28T23:59:59'},
+        {'id': 3, 'term_code': 20271, 'started_at': '2027-03-01T00:00:00', 'ended_at': '2027-08-31T23:59:59'},
+      ]));
+
+      expect(
+        await StudentApiService()
+            .fetchCurrentTermCode(now: DateTime.utc(2027, 2, 28, 18)),
+        20262,
+      );
+    });
+
+    test('시간대 없는 시각은 서버처럼 UTC 로 읽는다 — 시작 직후', () async {
+      serve(termsJson([
+        {'id': 2, 'term_code': 20262, 'started_at': '2026-09-01T00:00:00', 'ended_at': '2027-02-28T23:59:59'},
+        {'id': 3, 'term_code': 20271, 'started_at': '2027-03-01T00:00:00', 'ended_at': '2027-08-31T23:59:59'},
+      ]));
+
+      expect(
+        await StudentApiService()
+            .fetchCurrentTermCode(now: DateTime.utc(2027, 3, 1, 0, 30)),
+        20271,
+      );
+    });
+
+    test('parseTermTime — 시간대가 있으면 그대로, 없으면 UTC', () {
+      expect(StudentApiService.parseTermTime('2027-03-01T00:00:00'), DateTime.utc(2027, 3, 1));
+      expect(StudentApiService.parseTermTime('2027-03-01'), DateTime.utc(2027, 3, 1));
+      expect(StudentApiService.parseTermTime('2027-03-01T09:00:00+09:00'), DateTime.utc(2027, 3, 1));
+      expect(StudentApiService.parseTermTime('2027-03-01T00:00:00Z'), DateTime.utc(2027, 3, 1));
+    });
+
     test('기간이 겹치면 나중에 시작한 학기다', () async {
       // 배열 순서상 첫 번째가 아니라 시작일이 가장 늦은 것을 고른다 (서버의 max 와 같다).
       serve(termsJson([
