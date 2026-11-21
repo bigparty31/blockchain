@@ -272,5 +272,87 @@ void main() {
       await pumpScreen(tester, FakeObjectionApi([]));
       expect(find.text('해당 이의 내역이 없습니다'), findsOneWidget);
     });
+
+    Future<void> openAndType(WidgetTester tester, String text) async {
+      await tester.tap(find.text('답변 작성하기'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextFormField), text);
+    }
+
+    testWidgets('서명·기록 중에는 시스템 뒤로가기로도 창이 닫히지 않고, 끝나면 결과가 보인다', (tester) async {
+      final api = FakeObjectionApi([open(3)])..gate = Completer<void>();
+      await pumpScreen(tester, api);
+      await openAndType(tester, '답변');
+      await tester.tap(find.text('답변 등록'));
+      await tester.pump();
+
+      expect(find.text('서명·기록 중…'), findsOneWidget);
+      final app = tester.state(find.byType(WidgetsApp)) as WidgetsBindingObserver;
+      await app.didPopRoute(); // Android 뒤로가기
+      await tester.pump();
+      expect(find.text('서명·기록 중…'), findsOneWidget, reason: '뒤로가기로 닫히면 결과 메시지를 아무도 못 본다');
+
+      api.gate!.complete();
+      await tester.pumpAndSettle();
+      expect(find.text('서명·기록 중…'), findsNothing);
+      expect(find.textContaining('답변이 등록되었습니다'), findsOneWidget);
+    });
+
+    testWidgets('결과를 모르는 실패인데 다시 읽어 보니 이미 기록돼 있으면 창을 닫는다', (tester) async {
+      final api = FakeObjectionApi([open(3)])
+        ..answerError = const EntryDecisionException(EntryDecisionFailure.unknownOutcome, '이의 답변 결과를 확인하지 못했어요.')
+        ..recordBeforeError = true;
+      await pumpScreen(tester, api);
+      final before = api.listCalls;
+      await openAndType(tester, '답변');
+      await tester.tap(find.text('답변 등록'));
+      await tester.pumpAndSettle();
+
+      expect(api.listCalls, before + 1, reason: '목록을 새로 읽었다');
+      expect(find.text('답변 등록'), findsNothing, reason: '이미 ANSWERED 라 다시 누를 수 없다(409 방지) — 창이 닫혔다');
+      expect(find.textContaining('이미 기록되어 있어요'), findsOneWidget);
+      expect(find.text('답변 작성하기'), findsNothing);
+    });
+
+    testWidgets('결과를 모르는 실패인데 아직 대기면 입력을 둔 채 이유를 보인다', (tester) async {
+      final api = FakeObjectionApi([open(3)])
+        ..answerError = const EntryDecisionException(EntryDecisionFailure.unknownOutcome, '이의 답변 결과를 확인하지 못했어요.');
+      await pumpScreen(tester, api);
+      await openAndType(tester, '답변');
+      await tester.tap(find.text('답변 등록'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('이의 답변 결과를 확인하지 못했어요.'), findsOneWidget);
+      expect(find.text('답변 등록'), findsOneWidget, reason: '대기 그대로라 다시 보낼 수 있다');
+    });
+
+    testWidgets('로그인이 끝났으면(401) 목록을 다시 읽지 않고 창을 닫는다', (tester) async {
+      final api = FakeObjectionApi([open(3)])
+        ..answerError = const EntryDecisionException(EntryDecisionFailure.unauthorized, '로그인이 끝났어요. 다시 로그인해 주세요.');
+      await pumpScreen(tester, api);
+      final before = api.listCalls;
+      await openAndType(tester, '답변');
+      await tester.tap(find.text('답변 등록'));
+      await tester.pumpAndSettle();
+
+      expect(api.listCalls, before, reason: '세션이 없는데 다시 읽어 봐야 같은 401 이다');
+      expect(find.text('답변 등록'), findsNothing);
+      expect(find.textContaining('로그인이 끝났어요'), findsOneWidget);
+    });
+
+    testWidgets('답변은 5000자까지 — 넘으면 서버에 보내기 전에 알린다', (tester) async {
+      final api = FakeObjectionApi([open(3)]);
+      await pumpScreen(tester, api);
+      await openAndType(tester, '가' * 5001);
+      await tester.tap(find.text('답변 등록'));
+      await tester.pumpAndSettle();
+      expect(find.text('답변은 5000자까지 쓸 수 있어요'), findsOneWidget);
+      expect(api.answered, isEmpty);
+
+      await tester.enterText(find.byType(TextFormField), '가' * 5000);
+      await tester.tap(find.text('답변 등록'));
+      await tester.pumpAndSettle();
+      expect(api.answered, hasLength(1), reason: '정확히 5000자는 보낸다');
+    });
   });
 }

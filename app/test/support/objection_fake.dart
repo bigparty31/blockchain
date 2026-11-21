@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:student_council_app/models/objection_model.dart';
 import 'package:student_council_app/services/objection_answer_service.dart';
 
@@ -34,28 +36,48 @@ class FakeObjectionApi implements ObjectionAnswerApi {
   Object? listError;
   Object? answerError;
 
+  /// 목록을 읽은 횟수 (처음 열 때 포함).
+  int listCalls = 0;
+
+  /// 주면 풀릴 때까지 답변을 붙잡아 둔다 — 서명·기록 중의 화면을 본다.
+  Completer<void>? gate;
+
+  /// true 면 [answerError] 를 던지기 **전에** 서버에는 답변이 기록된 것으로 한다 —
+  /// 시간 초과인데 실제로는 체인에 들어간 경우.
+  bool recordBeforeError = false;
+
   FakeObjectionApi(this.items);
 
   @override
   Future<List<ObjectionModel>> list() async {
+    listCalls++;
     if (listError != null) throw listError!;
     return List.of(items);
   }
 
+  ObjectionModel _answered(ObjectionModel o, String answer) => ObjectionModel(
+        id: o.id,
+        entryId: o.entryId,
+        userId: o.userId,
+        content: o.content,
+        answer: answer,
+        answeredBy: 3,
+        status: ObjectionStatus.ANSWERED,
+        raisedAt: o.raisedAt,
+        answeredAt: o.raisedAt + 60,
+      );
+
   @override
   Future<ObjectionModel> answer(ObjectionModel objection, String answer) async {
-    if (answerError != null) throw answerError!;
+    if (gate != null) await gate!.future;
+    if (answerError != null) {
+      if (recordBeforeError) {
+        final i = items.indexWhere((x) => x.id == objection.id);
+        if (i >= 0) items[i] = _answered(objection, answer);
+      }
+      throw answerError!;
+    }
     answered.add(answer);
-    return ObjectionModel(
-      id: objection.id,
-      entryId: objection.entryId,
-      userId: objection.userId,
-      content: objection.content,
-      answer: answer,
-      answeredBy: 3,
-      status: ObjectionStatus.ANSWERED,
-      raisedAt: objection.raisedAt,
-      answeredAt: objection.raisedAt + 60,
-    );
+    return _answered(objection, answer);
   }
 }
