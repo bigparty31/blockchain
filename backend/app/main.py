@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from app.chain import ChainSetupError
 from app.chain.provider import check_chain_config, close_chain_client
 from app.database import SessionLocal
-from app.services import notification_worker
+from app.services import fcm_sender, notification_worker
 from app.routers.auth import router as auth_router
 from app.routers.entries import router as entries_router
 from app.routers.balance import router as balance_router
@@ -37,9 +37,11 @@ async def lifespan(app: FastAPI):
     check_chain_config()
     # 재알림 작업과 푸시 전송 (PRD §4.8 — API 프로세스 안에서 돈다). 학생 서버는 NOTIFICATION_WORKER=0 으로 끈다
     notification_worker.check_config()
-    worker = notification_worker.start(SessionLocal)
-    yield
-    await notification_worker.stop(worker)
+    # 공용 서버의 api 컨테이너는 이 진입점(app.main:app)으로 뜬다 — 키 경로가 있으면 실제 FCM 전송기를 끼운다
+    with fcm_sender.installed_for_server():
+        worker = notification_worker.start(SessionLocal)
+        yield
+        await notification_worker.stop(worker)
     await close_chain_client()  # 릴레이어의 RPC 연결을 닫는다
 
 

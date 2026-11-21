@@ -7,6 +7,8 @@ os.environ["ENV_FILE"] = os.devnull
 os.environ.setdefault("JWT_DEV_SECRET", "1")
 # 앱 시작(lifespan)을 도는 시험이 개발 DB 로 재알림 작업·푸시 전송을 띄우지 않게 한다. 작업은 tests/test_notification_worker.py 가 직접 부른다
 os.environ["NOTIFICATION_WORKER"] = "0"
+# 셸에 서비스 계정 키 경로가 있어도 시험이 실제 Firebase 로 푸시를 보내지 않게 한다 (app/services/fcm_sender.py)
+os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
 
 import pytest  # noqa: E402
 

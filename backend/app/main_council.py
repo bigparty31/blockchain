@@ -26,10 +26,10 @@ async def lifespan(app: FastAPI):
     # 학생회 서버에서만 띄운다. 학생 서버(main_student.py)는 읽기 전용 DB 라 띄우지 않는다
     notification_worker.check_config()
     # 서비스 계정 키 경로(GOOGLE_APPLICATION_CREDENTIALS)가 있으면 실제 FCM 전송기를 끼운다. 없으면 로그만 남긴다
-    fcm_sender.install_from_env()
-    worker = notification_worker.start(SessionLocal)
-    yield
-    await notification_worker.stop(worker)
+    with fcm_sender.installed_for_server():
+        worker = notification_worker.start(SessionLocal)
+        yield
+        await notification_worker.stop(worker)
     await close_chain_client()
 
 
