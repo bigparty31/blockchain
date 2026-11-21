@@ -10,6 +10,8 @@ import 'package:student_council_app/screens/student/my_sbt_screen.dart';
 import 'package:student_council_app/screens/student/student_home_screen.dart';
 import 'package:student_council_app/services/student_api_service.dart';
 
+import 'support/session.dart';
+
 /// 스토리보드 2 ⑤(미확인 뱃지 → 새 항목만)와 6 ②(QR 을 누르면 화면 밝기)를
 /// 못박는다. 둘 다 **화면이 멀쩡해 보이는 채로 뚫리는** 종류다.
 ///
@@ -107,7 +109,12 @@ void main() {
   });
 
   group('대시보드가 넘기는 기준 id', () {
-    tearDown(_clearSecureStorageMock);
+    // 기준 id 는 로그인한 학번별 키에 저장된다 — 로그인해 있어야 읽고 쓴다
+    setUp(() => signInAs(UserRole.STUDENT, userId: 1));
+    tearDown(() async {
+      await signOutForTest();
+      _clearSecureStorageMock();
+    });
 
     /// **가장 중요한 회귀.** 목록을 여는 순간 `markEntriesSeen` 이 저장된 기준을
     /// 최신 id 로 덮어쓴다. 목록 화면이 기준을 직접 읽으면 **이미 덮어쓴 뒤라

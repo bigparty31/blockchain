@@ -71,7 +71,20 @@ class StudentApiService {
   StudentApiService._internal();
 
   static const _storage = FlutterSecureStorage();
-  static const _lastSeenKey = 'student_last_seen_entry_id';
+  /// 예전 키 — 계정 구분 없이 기기에 하나였다. 이제 쓰지 않고, 로그아웃 때 남은 것만 지운다.
+  static const _legacyLastSeenKey = 'student_last_seen_entry_id';
+
+  /// 미확인 뱃지의 「마지막으로 본 내역 id」 저장 키 — **로그인한 학번별**이다.
+  ///
+  /// 기기에 하나만 두면 다른 사람의 기준이 넘어오므로 로그아웃 때 지웠는데, 그러면 같은 학생이 다시 로그인해도
+  /// 기준이 0 으로 돌아가 **전체 내역이 새 항목으로 뜬다.** 학번별로 나누면 지우지 않아도 섞이지 않는다.
+  /// 로그인한 학번을 모르면 null — 읽지도 쓰지도 않는다 (전체를 새 항목으로 띄우는 오표시보다 낫다).
+  static String? _lastSeenKeyFor(String? studentNo) {
+    final no = studentNo?.trim() ?? '';
+    return no.isEmpty ? null : 'student_last_seen_entry_id:$no';
+  }
+
+  static String? get _currentLastSeenKey => _lastSeenKeyFor(AuthService().session?.studentNo);
   static const _timeout = Duration(seconds: 3);
 
   /// HTTP 클라이언트. **테스트에서 갈아끼운다.**
@@ -632,8 +645,10 @@ class StudentApiService {
 
   Future<int> lastSeenEntryId() async {
     await _sessionReset; // 지난 사용자의 기준을 읽지 않는다 ([_sessionReset])
+    final key = _currentLastSeenKey;
+    if (key == null) return 0;
     try {
-      final raw = await _storage.read(key: _lastSeenKey);
+      final raw = await _storage.read(key: key);
       return int.tryParse(raw ?? '') ?? 0;
     } catch (_) {
       return 0;
@@ -642,8 +657,10 @@ class StudentApiService {
 
   Future<void> markEntriesSeen(int maxEntryId) async {
     await _sessionReset; // 지난 사용자의 삭제가 이 값을 지우지 않게 ([_sessionReset])
+    final key = _currentLastSeenKey;
+    if (key == null) return;
     try {
-      await _storage.write(key: _lastSeenKey, value: maxEntryId.toString());
+      await _storage.write(key: key, value: maxEntryId.toString());
     } catch (_) {
       // 저장 실패는 조용히 넘긴다 — 뱃지가 안 지워질 뿐 기능에 지장 없다.
     }
@@ -743,9 +760,10 @@ class StudentApiService {
 
   Future<void> _clearLastSeen() async {
     try {
-      await _storage.delete(key: _lastSeenKey);
+      // 계정별 키는 지우지 않는다 — 같은 학생이 다시 로그인하면 이어서 본다. 예전(기기 공용) 키만 정리한다.
+      await _storage.delete(key: _legacyLastSeenKey);
     } catch (_) {
-      // 뱃지 기준이 남을 뿐이다. 로그아웃 자체를 막을 이유는 아니다.
+      // 예전 키가 남을 뿐이다. 로그아웃 자체를 막을 이유는 아니다.
     }
   }
 
