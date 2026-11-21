@@ -14,6 +14,7 @@ import 'package:student_council_app/services/api_service.dart';
 import 'package:student_council_app/services/entry_registration_service.dart';
 
 import 'support/registration.dart';
+import 'support/objection_fake.dart';
 
 /// 정정 화면은 **증감분**을 기록하고, 이의 답변은 **다시 답변할 수 없다**.
 ///
@@ -624,7 +625,7 @@ void main() {
       tester.view.physicalSize = const Size(411, 2400);
       tester.view.devicePixelRatio = 1.0;
       addTearDown(tester.view.reset);
-      await tester.pumpWidget(const MaterialApp(home: InquiryResponseScreen()));
+      await tester.pumpWidget(MaterialApp(home: InquiryResponseScreen(api: FakeObjectionApi(sampleObjections()))));
       await tester.pumpAndSettle();
     }
 

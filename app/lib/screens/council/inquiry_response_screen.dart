@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import '../../core/app_theme.dart';
 import '../../core/elapsed_days.dart';
+import '../../models/objection_model.dart';
+import '../../services/objection_answer_service.dart';
+import '../../services/signed_post.dart';
 import 'input_rules.dart';
 
 String _daysAgo(int days) {
@@ -8,7 +11,7 @@ String _daysAgo(int days) {
   return '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 }
 
-/// **목업** 이의 목록. 서버가 붙으면 이의 목록 API 로 바꾼다.
+/// **시험용 예시** 이의 목록. 화면은 서버에서 읽는다 — 이 목록은 화면이 쓰지 않고 시험이 가짜 서버를 채우는 데만 쓴다.
 List<Map<String, dynamic>> buildInquiryMockItems() => [
     {
       'id': 101,
@@ -43,25 +46,143 @@ int inquiryElapsedDays(String raisedDate, {DateTime? now}) =>
 
 /// [이승호 담당: app/lib/screens/council/]
 /// 5. 학생 이의 제기 답변 화면 — 답변 주체는 감사·회장이다 (PRD §4.5)
+///
+/// 목록은 서버(`GET /objections`)에서 읽고, 답변은 임원 기기 키로 서명해 체인에 기록한다
+/// ([ObjectionAnswerService]). 못 읽으면 예시로 메우지 않고 「다시 시도」를 보인다.
 class InquiryResponseScreen extends StatefulWidget {
-  const InquiryResponseScreen({super.key});
+  /// 서버 연동. 테스트에서 가짜로 갈아끼운다.
+  final ObjectionAnswerApi? api;
+
+  const InquiryResponseScreen({super.key, this.api});
 
   @override
   State<InquiryResponseScreen> createState() => _InquiryResponseScreenState();
 }
 
+/// 제기 시각(Unix 초)의 한국 날짜(`yyyy-MM-dd`). 경과일 계산은 [inquiryElapsedDays] 와 같은 KST 기준이다.
+String inquiryDateOf(int raisedAtEpochSeconds) {
+  final d = DateTime.fromMillisecondsSinceEpoch(raisedAtEpochSeconds * 1000, isUtc: true).add(const Duration(hours: 9));
+  return '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+}
+
+Map<String, dynamic> _itemOf(ObjectionModel o) => {
+      'id': o.id,
+      'entryId': o.entryId,
+      'studentName': '재학생',
+      'question': o.content,
+      'date': inquiryDateOf(o.raisedAt),
+      'isAnswered': o.status == ObjectionStatus.ANSWERED,
+      'answer': o.answer,
+      'model': o,
+    };
+
 class _InquiryResponseScreenState extends State<InquiryResponseScreen> {
   int _selectedFilterIndex = 0;
 
-  final List<Map<String, dynamic>> _inquiries = buildInquiryMockItems();
+  late final ObjectionAnswerApi _api = widget.api ?? ObjectionAnswerService();
+  List<Map<String, dynamic>> _inquiries = const [];
+  bool _loading = true;
+  String? _loadError;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _loadError = null;
+    });
+    try {
+      final list = await _api.list();
+      if (!mounted) return;
+      // 오래 기다린 건이 위로 — 답하지 않은 사실이 남는 것이 압력이다 (PRD §4.5)
+      final items = [for (final o in list) _itemOf(o)]..sort((a, b) => (a['id'] as int).compareTo(b['id'] as int));
+      setState(() {
+        _inquiries = items;
+        _loading = false;
+      });
+    } on EntryDecisionException catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loadError = e.message;
+        _loading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _loadError = '이의 목록을 불러오지 못했어요.';
+        _loading = false;
+      });
+    }
+  }
+
+  /// 서명해 답변을 기록한다. 성공하면 목록의 그 건을 서버가 돌려준 값으로 바꾼다.
+  /// 결과를 모르는 실패(시간 초과 등)는 목록을 새로 읽어 처리됐는지 보인다.
+  Future<void> _submitAnswer(
+    Map<String, dynamic> item,
+    String text,
+    BuildContext dialogContext,
+    ValueNotifier<bool> busy,
+    ValueNotifier<String?> error,
+  ) async {
+    busy.value = true;
+    error.value = null;
+    try {
+      final saved = await _api.answer(item['model'] as ObjectionModel, text);
+      if (!mounted) return;
+      setState(() {
+        final i = _inquiries.indexWhere((e) => e['id'] == item['id']);
+        if (i >= 0) _inquiries = [..._inquiries]..[i] = _itemOf(saved);
+      });
+      if (dialogContext.mounted) Navigator.pop(dialogContext);
+      _toast('답변이 등록되었습니다.');
+    } on EntryDecisionException catch (e) {
+      error.value = e.message;
+      if (e.failure == EntryDecisionFailure.unknownOutcome ||
+          e.failure == EntryDecisionFailure.conflict ||
+          e.failure == EntryDecisionFailure.unauthorized) {
+        // 이미 답했거나 결과를 모른다 — 입력은 두고 목록만 새로 읽는다
+        _load();
+      }
+    } catch (_) {
+      error.value = '답변을 등록하지 못했어요. 잠시 후 다시 시도해 주세요.';
+    } finally {
+      busy.value = false;
+    }
+  }
+
+  void _toast(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Row(
+          children: [
+            const Icon(Icons.check_circle_rounded, color: Colors.white, size: 18),
+            const SizedBox(width: 10),
+            Expanded(child: Text(message)),
+          ],
+        ),
+        backgroundColor: AppTheme.success,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        margin: const EdgeInsets.all(16),
+      ),
+    );
+  }
 
   /// 답변 작성. **이미 답변한 이의에는 다시 답변할 수 없다** — 컨트랙트가
   /// `ObjectionAlreadyAnswered` 로 거부한다 (IObjectionRegistry). 그래서 답변 대기 건에만 연다.
   void _openAnswerDialog(Map<String, dynamic> item) {
     final textController = TextEditingController();
     final formKey = GlobalKey<FormState>();
+    final busy = ValueNotifier<bool>(false);
+    final error = ValueNotifier<String?>(null);
     showDialog(
       context: context,
+      barrierDismissible: false,
       builder: (ctx) => Dialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
         child: Padding(
@@ -126,12 +247,23 @@ class _InquiryResponseScreenState extends State<InquiryResponseScreen> {
               const Text('답변은 블록체인에 해시로 기록되어 등록 후 수정할 수 없어요.',
                 style: TextStyle(fontSize: 11, color: AppTheme.textSub),
               ),
-              const SizedBox(height: 16),
+              ValueListenableBuilder<String?>(
+                valueListenable: error,
+                builder: (_, message, __) => message == null
+                    ? const SizedBox(height: 16)
+                    : Padding(
+                        padding: const EdgeInsets.only(top: 8, bottom: 8),
+                        child: Text(message, key: const Key('answer_error'), style: const TextStyle(fontSize: 12, color: AppTheme.expense)),
+                      ),
+              ),
               Row(
                 children: [
                   Expanded(
                     child: OutlinedButton(
-                      onPressed: () => Navigator.pop(ctx),
+                      // 서명·기록 중에 닫으면 결과를 못 본다
+                      onPressed: () {
+                        if (!busy.value) Navigator.pop(ctx);
+                      },
                       style: OutlinedButton.styleFrom(
                         side: const BorderSide(color: AppTheme.divider),
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
@@ -143,33 +275,21 @@ class _InquiryResponseScreenState extends State<InquiryResponseScreen> {
                   const SizedBox(width: 12),
                   Expanded(
                     flex: 2,
-                    child: GradientButton(
-                      onPressed: () {
-                        if (!formKey.currentState!.validate()) return;
-                        setState(() {
-                          item['answer'] = textController.text; // 원문 그대로 — 다듬기는 해시 계산 때
-                          item['isAnswered'] = true;
-                        });
-                        Navigator.pop(ctx);
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: const Row(
-                              children: [
-                                Icon(Icons.check_circle_rounded, color: Colors.white, size: 18),
-                                SizedBox(width: 10),
-                                Expanded(child: Text('답변이 등록되었습니다.')),
-                              ],
-                            ),
-                            backgroundColor: AppTheme.success,
-                            behavior: SnackBarBehavior.floating,
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                            margin: const EdgeInsets.all(16),
-                          ),
-                        );
-                      },
-                      label: '답변 등록',
-                      icon: Icons.send_rounded,
-                      gradient: const LinearGradient(colors: [AppTheme.success, AppTheme.income]),
+                    child: ValueListenableBuilder<bool>(
+                      valueListenable: busy,
+                      builder: (_, isBusy, __) => GradientButton(
+                        // 서명·전송 중에는 다시 눌러도 아무 일도 없다 — 같은 답변이 두 번 가지 않게
+                        onPressed: isBusy
+                            ? null
+                            : () {
+                                if (!formKey.currentState!.validate()) return;
+                                // 원문 그대로 넘긴다 — 정본화·해시는 서비스가 서명 전에 한다
+                                _submitAnswer(item, textController.text, ctx, busy, error);
+                              },
+                        label: isBusy ? '서명·기록 중…' : '답변 등록',
+                        icon: isBusy ? Icons.hourglass_top_rounded : Icons.send_rounded,
+                        gradient: const LinearGradient(colors: [AppTheme.success, AppTheme.income]),
+                      ),
                     ),
                   ),
                 ],
@@ -207,7 +327,16 @@ class _InquiryResponseScreenState extends State<InquiryResponseScreen> {
         elevation: 0,
         centerTitle: true,
       ),
-      body: Column(
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _loadError != null
+              ? _LoadError(message: _loadError!, onRetry: _load)
+              : _content(unansweredCount, filteredList),
+    );
+  }
+
+  Widget _content(int unansweredCount, List<Map<String, dynamic>> filteredList) {
+    return Column(
         children: [
           // 요약 헤더
           Container(
@@ -308,6 +437,31 @@ class _InquiryResponseScreenState extends State<InquiryResponseScreen> {
                   ),
           ),
         ],
+    );
+  }
+}
+
+/// 목록을 못 읽었을 때 — 예시로 메우지 않고 이유와 「다시 시도」를 보인다.
+class _LoadError extends StatelessWidget {
+  final String message;
+  final VoidCallback onRetry;
+  const _LoadError({required this.message, required this.onRetry});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.cloud_off_rounded, size: 40, color: AppTheme.textSub),
+            const SizedBox(height: 12),
+            Text(message, key: const Key('inquiry_load_error'), textAlign: TextAlign.center, style: const TextStyle(color: AppTheme.textSub)),
+            const SizedBox(height: 12),
+            OutlinedButton(onPressed: onRetry, child: const Text('다시 시도')),
+          ],
+        ),
       ),
     );
   }

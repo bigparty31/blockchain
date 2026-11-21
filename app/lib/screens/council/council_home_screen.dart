@@ -738,8 +738,8 @@ class _NotificationBell extends StatelessWidget {
 }
 
 // ── 감사/회장: 학생 이의 답변 ────────────────────────────────────
-/// **건수를 적지 않는다.** 이의 제기를 받는 서버 API 가 아직 없어서 센 숫자가 없다 — 예시 목록의 건수를
-/// 실제 미답변 건수처럼 보여 주지 않는다. 열리는 화면도 예시 화면이다.
+/// 이의 답변 화면으로 가는 배너. **건수는 적지 않는다** — 미답변 건수는 화면 안에서 목록을 읽어 센다
+/// (홈에서 따로 세지 않아 홈과 화면의 숫자가 어긋나지 않는다).
 class _UnansweredBanner extends StatelessWidget {
   final VoidCallback onTap;
   const _UnansweredBanner({required this.onTap});
@@ -762,7 +762,7 @@ class _UnansweredBanner extends StatelessWidget {
             SizedBox(width: 10),
             Expanded(
               child: Text(
-                '학생 이의 답변 · 준비 중',
+                '학생 이의 답변',
                 style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14, color: AppTheme.textMain),
               ),
             ),

@@ -237,7 +237,7 @@ void main() {
 
       expect(find.text('승인 대기'), findsNWidgets(2), reason: '배너 + 메뉴');
       expect(find.text('대기 6건'), findsOneWidget);
-      expect(find.text('학생 이의 답변 · 준비 중'), findsOneWidget, reason: '이의 건수를 받는 서버 API 가 없어 숫자를 적지 않는다');
+      expect(find.text('학생 이의 답변'), findsOneWidget, reason: '미답변 건수는 화면 안에서 센다 — 홈에는 숫자를 적지 않는다');
       expect(find.textContaining('미답변 이의'), findsNothing);
       for (final t in ['이의 답변', '예산 개정 승인', '계좌 대조', '결산', 'QR 스캐너']) {
         expect(find.text(t), findsOneWidget, reason: t);
@@ -256,7 +256,7 @@ void main() {
       expect(find.text('대기 6건'), findsOneWidget);
       expect(find.text('서명할 증액 요청 2건'), findsOneWidget, reason: '서버의 PENDING 증액 요청 수');
       expect(revisionRequests.single.queryParameters['status_filter'], 'PENDING');
-      expect(find.text('학생 이의 답변 · 준비 중'), findsOneWidget);
+      expect(find.text('학생 이의 답변'), findsOneWidget);
       for (final t in ['이의 답변', '예산 개정 서명', '예산 편성·발행', '계좌 대조', '결산', 'QR 스캐너']) {
         expect(find.text(t), findsOneWidget, reason: t);
       }
