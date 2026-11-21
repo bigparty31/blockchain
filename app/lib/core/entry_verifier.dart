@@ -239,7 +239,17 @@ class EntryVerifier {
 
     final isRejected = e.status == EntryStatus.REJECTED;
     final reason = isRejected ? e.rejectReason : e.warningAckReason;
-    final expectsReason = isRejected || c.hadWarning == true;
+
+    // **`had_warning` 이 없으면 사유 해시에 묻는다.** 이 값만 보고 「경고 없는 확정」으로
+    // 단정하면, `reason_hash` 는 주면서 `had_warning` 은 빠뜨린 응답에서 **경고를 무시하고
+    // 확정한 멀쩡한 항목이 「불일치」로 뜬다** — 0 이 아닌 해시가 체인에 남아 있는데도
+    // 「사유가 없어야 한다」는 분기로 가기 때문이다. 체인에 사유 해시가 있다는 것 자체가
+    // 사유가 있었다는 증거이므로, 모르는 쪽(null)에서는 그 증거를 따른다.
+    final expectsReason = isRejected ||
+        c.hadWarning == true ||
+        (c.hadWarning == null &&
+            c.reasonHash != null &&
+            c.reasonHash != OnChainEntry.zeroHash);
 
     if (c.reasonHash == null) {
       // **서버가 아직 안 내려주는 필드다.** 여기서 무조건 「모름」을 남기면, 사유가

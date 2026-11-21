@@ -5,13 +5,14 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:student_council_app/core/entry_verifier.dart';
 import 'package:student_council_app/core/enums.dart';
+import 'package:student_council_app/core/hashing.dart';
 import 'package:student_council_app/models/entry_model.dart';
 import 'package:student_council_app/models/onchain_entry_model.dart';
 import 'package:student_council_app/services/student_api_service.dart';
 
-/// PR #130 리뷰(codex-loop 1차) 세 건의 회귀 시험.
+/// PR #130 리뷰 지적의 회귀 시험 — codex-loop 1·2차 네 건과 리뷰(이승호) 3번.
 ///
-/// 셋 다 **화면이 멀쩡해 보이는 채로 틀린 것을 말하는** 종류라 눈으로는 안 잡힌다.
+/// 전부 **화면이 멀쩡해 보이는 채로 틀린 것을 말하는** 종류라 눈으로는 안 잡힌다.
 void main() {
   const auditor = '0x90f79bf6eb2c4f870365e785982e1f101e93b906';
   const wallets = {auditor: 3};
@@ -253,6 +254,104 @@ void main() {
       StudentApiService.client =
           MockClient((_) async => http.Response('{}', 500));
       expect(await StudentApiService().fetchCurrentTermCode(), isNull);
+    });
+  });
+
+  /// 리뷰(이승호) 3번 — `had_warning` 이 빠진 응답에서 **경고 무시 확정이 「불일치」로
+  /// 보이던** 것. 체인에 0 이 아닌 사유 해시가 남아 있는데도 `had_warning` 만 보고
+  /// 「경고 없는 확정」 분기로 가서, 멀쩡한 항목에 빨간 배지가 붙었다.
+  group('had_warning 이 없으면 사유 해시로 판단한다', () {
+    const reason = '예산 항목이 달라도 행사 전날이라 집행했다';
+
+    EntryModel confirmedWith(String? warningAckReason) => EntryModel(
+          id: 11,
+          termId: 1,
+          termCode: 20262,
+          kind: EntryKind.EXPENSE,
+          amount: 48000,
+          counterparty: '한결문구',
+          purpose: '명찰 제작',
+          budgetId: 1,
+          occurredAt: 1794841200,
+          metaHash: '0x${'a' * 64}',
+          status: EntryStatus.CONFIRMED,
+          createdBy: 2,
+          approvedBy: 3,
+          warningAckReason: warningAckReason,
+        );
+
+    OnChainEntry chainWith({required String? reasonHash}) => OnChainEntry(
+          hash: '0x${'a' * 64}',
+          amount: 48000,
+          kind: EntryKind.EXPENSE,
+          status: EntryStatus.CONFIRMED,
+          occurredAt: 1794841200,
+          term: 20262,
+          budgetId: 1,
+          correctsId: 0,
+          registrant: '0x0000000000000000000000000000000000000001',
+          approver: auditor,
+          hadWarning: null, // 서버가 이 필드를 빠뜨린 응답
+          reasonHash: reasonHash,
+        );
+
+    FieldCheck checkOf(EntryModel e, OnChainEntry c) => EntryVerifier.verify(
+          e,
+          onChain: c,
+          userIdByAddress: wallets,
+        ).fieldChecks.firstWhere((f) => f.label == '승인·반려 사유');
+
+    test('사유 해시가 0 이 아니고 원문이 맞으면 통과다', () {
+      final check = checkOf(
+        confirmedWith(reason),
+        chainWith(reasonHash: Hashing.textHash(reason)),
+      );
+      expect(check.state, CheckState.passed);
+    });
+
+    test('사유 해시가 0 이 아니고 원문이 다르면 불일치다', () {
+      final check = checkOf(
+        confirmedWith('나중에 고친 사유'),
+        chainWith(reasonHash: Hashing.textHash(reason)),
+      );
+      expect(check.state, CheckState.failed);
+    });
+
+    /// 체인에 사유 해시는 있는데 원문을 못 받았다 — 재계산할 것이 없으니
+    /// 불일치가 아니라 「모름」이다.
+    test('사유 해시가 0 이 아닌데 원문이 없으면 모름이다', () {
+      final check = checkOf(
+        confirmedWith(null),
+        chainWith(reasonHash: Hashing.textHash(reason)),
+      );
+      expect(check.state, CheckState.unavailable);
+    });
+
+    /// 여기서는 판단이 바뀌지 않는다. 체인이 「사유 없음」(0)이라고 말하는데 장부에
+    /// 사유가 있으면, `had_warning` 을 몰라도 검증된 적 없는 글이다.
+    test('사유 해시가 0 인데 장부에 사유가 있으면 불일치다', () {
+      final check =
+          checkOf(confirmedWith(reason), chainWith(reasonHash: OnChainEntry.zeroHash));
+      expect(check.state, CheckState.failed);
+    });
+
+    test('사유 해시가 0 이고 장부에도 사유가 없으면 통과다', () {
+      final check =
+          checkOf(confirmedWith(null), chainWith(reasonHash: OnChainEntry.zeroHash));
+      expect(check.state, CheckState.passed);
+    });
+
+    /// `reason_hash` 자체가 없는 응답은 전과 같다 — 사유가 없는 평범한 확정을
+    /// 「부분 검증」으로 떨어뜨리지 않는다.
+    test('사유 해시가 아예 없으면 전과 같이 본다', () {
+      expect(
+        checkOf(confirmedWith(null), chainWith(reasonHash: null)).state,
+        CheckState.notApplicable,
+      );
+      expect(
+        checkOf(confirmedWith(reason), chainWith(reasonHash: null)).state,
+        CheckState.unavailable,
+      );
     });
   });
 }
