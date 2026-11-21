@@ -32,9 +32,11 @@ def _android(messaging: Any) -> Any:
 class FcmSender:
     """블로킹 호출이다. 전송 스레드에서만 불린다 (push.deliver)."""
 
-    def __init__(self, messaging: Any, app: Any = None):
+    def __init__(self, messaging: Any, app: Any = None, exceptions: Any = None):
         self._m = messaging
         self._app = app
+        # InvalidArgumentError 는 messaging 이 아니라 firebase_admin.exceptions 에 있다 (messaging 에 없어 AttributeError 가 난다)
+        self._x = exceptions
 
     def send_to_tokens(self, tokens: List[str], message: push.PushMessage) -> List[str]:
         """기기들로 보낸다. 서버가 해제해도 되는 토큰만 돌려준다.
@@ -62,17 +64,28 @@ class FcmSender:
             except Exception as e:
                 logger.warning("푸시 묶음 전송 실패(%s): 기기 %d대는 다음 알림에 다시 시도한다", type(e).__name__, len(chunk))
                 continue
-            any_ok = any(r.success for r in batch.responses)
-            for token, response in zip(chunk, batch.responses):
-                if response.success:
-                    continue
-                exc = response.exception
-                if isinstance(exc, (m.UnregisteredError, m.SenderIdMismatchError)) or (
-                    any_ok and isinstance(exc, m.InvalidArgumentError)
-                ):
-                    invalid.append(token)
-                else:
-                    logger.warning("푸시 전송 실패(토큰 유지): %s", type(exc).__name__)
+            try:
+                invalid.extend(self._invalid_in(chunk, batch.responses))
+            except Exception as e:
+                # 판정 중 오류가 나도 다음 묶음과 이미 모은 해제 대상을 잃지 않는다
+                logger.warning("푸시 응답 판정 실패(%s): 이 묶음의 토큰은 유지한다", type(e).__name__)
+        return invalid
+
+    def _invalid_in(self, chunk: List[str], responses: List[Any]) -> List[str]:
+        m = self._m
+        bad_argument = getattr(self._x, "InvalidArgumentError", None)
+        any_ok = any(r.success for r in responses)
+        invalid: List[str] = []
+        for token, response in zip(chunk, responses):
+            if response.success:
+                continue
+            exc = response.exception
+            if isinstance(exc, (m.UnregisteredError, m.SenderIdMismatchError)) or (
+                any_ok and bad_argument is not None and isinstance(exc, bad_argument)
+            ):
+                invalid.append(token)
+            else:
+                logger.warning("푸시 전송 실패(토큰 유지): %s", type(exc).__name__)
         return invalid
 
     def send_to_topic(self, topic: str, message: push.PushMessage) -> None:
@@ -99,7 +112,7 @@ def install_from_env(environ: Optional[dict] = None) -> bool:
         return False
     try:
         import firebase_admin
-        from firebase_admin import credentials, messaging
+        from firebase_admin import credentials, exceptions, messaging
 
         try:
             app = firebase_admin.get_app(APP_NAME)
@@ -109,7 +122,7 @@ def install_from_env(environ: Optional[dict] = None) -> bool:
         # 경로·파일 내용이 로그에 남지 않게 예외 종류만 적는다 (traceback 에 파싱 오류가 찍힌다)
         logger.error("FCM 초기화에 실패해 전송기를 끼우지 않는다 (%s)", type(e).__name__)
         return False
-    push.set_sender(FcmSender(messaging, app))
+    push.set_sender(FcmSender(messaging, app, exceptions))
     logger.info("FCM 전송기를 끼웠다")
     return True
 

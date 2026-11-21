@@ -5,25 +5,30 @@ import pytest
 
 from app.services import fcm_sender, push
 
-
-class Unregistered(Exception):
-    pass
-
-
-class SenderMismatch(Exception):
-    pass
+# 예외 클래스는 가짜가 아니라 실제 SDK 의 것을 쓴다 — 가짜가 실제에 없는 속성을 내주면 그 버그를 가린다
+firebase_admin = pytest.importorskip("firebase_admin")
+from firebase_admin import exceptions as fb_exceptions  # noqa: E402
+from firebase_admin import messaging as real_messaging  # noqa: E402
 
 
-class InvalidArgument(Exception):
-    pass
+def Unregistered(msg):
+    return real_messaging.UnregisteredError(msg)
+
+
+def SenderMismatch(msg):
+    return real_messaging.SenderIdMismatchError(msg)
+
+
+def InvalidArgument(msg):
+    return fb_exceptions.InvalidArgumentError(msg)
 
 
 class FakeMessaging:
     """firebase_admin.messaging 대역. failures: 토큰 → 예외."""
 
-    UnregisteredError = Unregistered
-    SenderIdMismatchError = SenderMismatch
-    InvalidArgumentError = InvalidArgument
+    # 실제 messaging 모듈과 같은 모양: UnregisteredError·SenderIdMismatchError 는 있고, InvalidArgumentError 는 없다
+    UnregisteredError = real_messaging.UnregisteredError
+    SenderIdMismatchError = real_messaging.SenderIdMismatchError
 
     def __init__(self, failures=None, explode_on=None):
         self.failures = failures or {}
@@ -58,7 +63,7 @@ MESSAGE = push.PushMessage(title="학생회 회계", body="새 지출 내역이 
 
 def test_토큰으로_보내고_제목_본문_data_채널을_담는다():
     m = FakeMessaging()
-    assert fcm_sender.FcmSender(m).send_to_tokens(["a", "b"], MESSAGE) == []
+    assert fcm_sender.FcmSender(m, exceptions=fb_exceptions).send_to_tokens(["a", "b"], MESSAGE) == []
     sent = m.multicasts[0]
     assert sent.tokens == ["a", "b"]
     assert (sent.notification.title, sent.notification.body) == ("학생회 회계", "새 지출 내역이 등록되었습니다.")
@@ -68,21 +73,21 @@ def test_토큰으로_보내고_제목_본문_data_채널을_담는다():
 
 def test_등록되지_않은_토큰만_돌려주고_다른_실패는_토큰을_남긴다():
     m = FakeMessaging({"gone": Unregistered("x"), "flaky": RuntimeError("일시 오류")})
-    invalid = fcm_sender.FcmSender(m).send_to_tokens(["ok", "gone", "flaky"], MESSAGE)
+    invalid = fcm_sender.FcmSender(m, exceptions=fb_exceptions).send_to_tokens(["ok", "gone", "flaky"], MESSAGE)
     assert invalid == ["gone"], "일시 오류로 토큰을 해제하면 알림을 영영 못 받는다"
 
 
 def test_토큰이_500개를_넘으면_나눠_보낸다():
     m = FakeMessaging({"t600": Unregistered("x")})
     tokens = [f"t{i}" for i in range(1, 701)]
-    invalid = fcm_sender.FcmSender(m).send_to_tokens(tokens, MESSAGE)
+    invalid = fcm_sender.FcmSender(m, exceptions=fb_exceptions).send_to_tokens(tokens, MESSAGE)
     assert [len(c.tokens) for c in m.multicasts] == [500, 200]
     assert invalid == ["t600"], "두 번째 묶음의 응답도 제 토큰과 맞춘다"
 
 
 def test_토픽으로_보낸다():
     m = FakeMessaging()
-    fcm_sender.FcmSender(m).send_to_topic("students_2026-2", MESSAGE)
+    fcm_sender.FcmSender(m, exceptions=fb_exceptions).send_to_topic("students_2026-2", MESSAGE)
     assert m.sent[0].topic == "students_2026-2"
     assert m.sent[0].notification.body == "새 지출 내역이 등록되었습니다."
 
@@ -134,25 +139,25 @@ def test_올바른_키면_FcmSender_를_이름_붙은_앱으로_끼운다(keep_s
 
 def test_다른_프로젝트_토큰은_해제하고_혼자_형식이_틀린_토큰도_해제한다():
     m = FakeMessaging({"other": SenderMismatch("x"), "bad": InvalidArgument("x")})
-    assert fcm_sender.FcmSender(m).send_to_tokens(["ok", "other", "bad"], MESSAGE) == ["other", "bad"]
+    assert fcm_sender.FcmSender(m, exceptions=fb_exceptions).send_to_tokens(["ok", "other", "bad"], MESSAGE) == ["other", "bad"]
 
 
 def test_묶음이_전부_InvalidArgument_면_메시지가_틀린_것일_수_있어_해제하지_않는다():
     m = FakeMessaging({"a": InvalidArgument("x"), "b": InvalidArgument("x")})
-    assert fcm_sender.FcmSender(m).send_to_tokens(["a", "b"], MESSAGE) == []
+    assert fcm_sender.FcmSender(m, exceptions=fb_exceptions).send_to_tokens(["a", "b"], MESSAGE) == []
 
 
 def test_뒤_묶음이_통째로_실패해도_앞_묶음의_해제_대상을_돌려주고_나머지를_보낸다():
     m = FakeMessaging({"t3": Unregistered("x")}, explode_on=1)
     tokens = [f"t{i}" for i in range(1, 1202)]  # 500 + 500 + 201
-    invalid = fcm_sender.FcmSender(m).send_to_tokens(tokens, MESSAGE)
+    invalid = fcm_sender.FcmSender(m, exceptions=fb_exceptions).send_to_tokens(tokens, MESSAGE)
     assert invalid == ["t3"], "첫 묶음에서 모은 것을 버리지 않는다"
     assert [len(c.tokens) for c in m.multicasts] == [500, 500, 201], "둘째가 실패해도 셋째를 보낸다"
 
 
 def test_이름_붙은_앱으로_보낸다():
     m = FakeMessaging()
-    sender = fcm_sender.FcmSender(m, app="APP")
+    sender = fcm_sender.FcmSender(m, app="APP", exceptions=fb_exceptions)
     sender.send_to_tokens(["a"], MESSAGE)
     sender.send_to_topic("t", MESSAGE)
     assert m.apps == ["APP", "APP"], "기본 앱이 이미 있어도 우리 키의 앱으로 보낸다"
@@ -202,3 +207,28 @@ def test_공용_서버가_쓰는_두_진입점_모두_시작할_때_전송기를
 
     asyncio.run(run())
     assert entered == [module]
+
+
+def test_성공_InvalidArgument_일시_오류가_섞인_묶음을_판정한다_실제_예외_클래스():
+    """리뷰 2차 — 한 임원이 기기 2대 이상일 때 하나는 성공·하나는 일시 오류면 AttributeError 로 뒤 묶음이 멈췄다."""
+    m = FakeMessaging({"bad": InvalidArgument("x"), "flaky": fb_exceptions.UnavailableError("일시")})
+    assert not hasattr(m, "InvalidArgumentError"), "fake 가 실제에 없는 속성을 내주면 안 된다"
+    assert fcm_sender.FcmSender(m, exceptions=fb_exceptions).send_to_tokens(["ok", "bad", "flaky"], MESSAGE) == ["bad"]
+
+
+def test_판정_중_오류가_나도_다음_묶음과_앞서_모은_해제_대상을_잃지_않는다():
+    m = FakeMessaging({"t3": Unregistered("x")})
+    tokens = [f"t{i}" for i in range(1, 1202)]
+    sender = fcm_sender.FcmSender(m, exceptions=fb_exceptions)
+    real = sender._invalid_in
+    calls = []
+
+    def flaky(chunk, responses):
+        calls.append(1)
+        if len(calls) == 2:
+            raise RuntimeError("판정 실패")
+        return real(chunk, responses)
+
+    sender._invalid_in = flaky
+    assert sender.send_to_tokens(tokens, MESSAGE) == ["t3"]
+    assert len(m.multicasts) == 3, "둘째 묶음 판정이 실패해도 셋째를 보낸다"
