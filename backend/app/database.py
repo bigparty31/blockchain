@@ -1,5 +1,6 @@
+from contextlib import contextmanager
 import os
-from typing import Generator
+from typing import Any, Generator
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
@@ -39,3 +40,15 @@ def get_db() -> Generator[Session, None, None]:
         yield db
     finally:
         db.close()
+
+
+@contextmanager
+def lazy_db(request: Any) -> Generator[Session, None, None]:
+    """캐시 미스 시에만 DB 세션을 열어 적중 경로의 커넥션 풀 점유를 없앤다."""
+    getter = request.app.dependency_overrides.get(get_db, get_db)
+    gen = getter()
+    db = next(gen)
+    try:
+        yield db
+    finally:
+        gen.close()

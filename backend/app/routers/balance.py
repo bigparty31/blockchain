@@ -1,4 +1,3 @@
-from contextlib import contextmanager
 import logging
 from typing import Optional
 
@@ -7,7 +6,7 @@ from sqlalchemy import func
 from sqlalchemy.exc import SQLAlchemyError
 
 from app import cache
-from app.database import get_db
+from app.database import lazy_db
 from app.models import Entry as DBEntry
 from app.schemas.balance import BalanceResponse
 
@@ -15,18 +14,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/balance", tags=["Balance"])
 query_router = router
-
-
-@contextmanager
-def _lazy_db(request: Request):
-    """캐시 미스 시에만 DB 세션을 열어 적중 경로의 커넥션 풀 점유를 없앤다."""
-    getter = request.app.dependency_overrides.get(get_db, get_db)
-    gen = getter()
-    db = next(gen)
-    try:
-        yield db
-    finally:
-        gen.close()
 
 
 @router.get("", response_model=BalanceResponse, summary="장부 잔액 요약 조회")
@@ -41,7 +28,7 @@ async def get_balance(
     cache_key = f"balance:{term_id if term_id is not None else 'all'}"
 
     async def _produce():
-        with _lazy_db(request) as db:
+        with lazy_db(request) as db:
             try:
                 base_filter = [DBEntry.status == "CONFIRMED"]
                 if term_id is not None:

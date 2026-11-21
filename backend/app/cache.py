@@ -145,7 +145,12 @@ async def get_or_set(
     inflight = _inflight_map()
     existing = inflight.get(key)
     if existing is not None:
-        return await asyncio.shield(existing)
+        try:
+            return await asyncio.shield(existing)
+        except asyncio.CancelledError:
+            if not existing.cancelled():
+                raise
+            return await produce()
 
     loop = asyncio.get_running_loop()
     future: asyncio.Future = loop.create_future()

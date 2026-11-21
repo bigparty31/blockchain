@@ -76,11 +76,14 @@ CACHE_ENABLED=0 .venv/bin/uvicorn app.main_student:app --port 8102 &
 **다만 제출용 수치는 compose 구성으로 재는 쪽이 맞다** — 구성 파일과 측정 환경이 다르면
 「이 구성으로 잰 수치가 아니다」가 된다. 임시 확인용으로만 쓴다.
 
+## 캐시 동작과 한계
+
+- `/balance` · `/entries` · `/budgets` 조회 라우터가 `backend/app/cache.py` 를 사용한다.
+  `CACHE_ENABLED=1` 로 올리면 Redis TTL 캐시(기본 `CACHE_TTL_SECONDS=30`초)가 동작하며,
+  `CACHE_ENABLED=0` 이거나 Redis 에 연결할 수 없으면 원본(DB·체인)을 직접 조회한다(fail-open).
+- **한계**: `/balance` · `/entries` · `/budgets` 는 각자 독립된 캐시 키로 만료되므로,
+  새 항목이 확정되거나 예산이 갱신된 직후 최대 TTL(기본 30초) 동안 세 조회가 서로 다른 숫자를 보일 수 있다.
+
 ## 아직 안 한 것
 
-- `cache.py` 를 조회 라우터에 **아직 연결하지 않았다.** `/balance` · `/entries` · `/budgets` 가
-  대상이고, 이 라우터들은 공용 파일이라 소유자(김경윤)와 맞춘 뒤 붙인다. 붙이기 전까지
-  `CACHE_ENABLED=1` 로 올려도 캐시는 동작하지 않는다.
-  `redis` 패키지는 `backend/requirements.txt` 에 넣어 두었다 — 라우터에 붙이는 날 의존성까지
-  같이 챙기지 않아도 되게 미리 넣은 것이고, 지금은 부르는 곳이 없어 아무 동작도 하지 않는다.
 - 읽기 전용 DB 계정 (`docs/SERVER_ENV.md` §5). 지금은 compose 가 `council` 계정을 그대로 쓴다.

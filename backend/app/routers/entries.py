@@ -1,7 +1,5 @@
 import asyncio
-from contextlib import contextmanager
 from datetime import datetime, timezone
-import inspect
 import logging
 import re
 from typing import List, Optional
@@ -26,7 +24,7 @@ from app.chain import (
     RejectDecision,
     entry_commit,
 )
-from app.chain.provider import get_chain_client
+from app.chain.provider import get_chain_client, resolve_chain_client
 from app.chain.models import BlockReason as ChainBlockReason
 from app.services.chain_tx import (
     EntryConflict,
@@ -35,7 +33,7 @@ from app.services.chain_tx import (
     relay_reject,
 )
 from app.services.notifications import NotificationKind, create_notification
-from app.database import get_db
+from app.database import get_db, lazy_db
 from app.models import Budget as DBBudget, Entry as DBEntry, Term as DBTerm, User as DBUser
 from app.ocr import ParsedReceipt, judge
 from app.ocr.readings import is_confident, load_reading
@@ -520,26 +518,10 @@ async def _get_chain_client_safe(request: Request) -> Optional[ChainClient]:
     노드 미기동·설정 미비(ChainSetupError) 등 클라이언트 초기화 실패 시
     503을 던지지 않고 None을 반환하여 DB 기본 데이터로 200 응답할 수 있도록 한다.
     """
-    getter = request.app.dependency_overrides.get(get_chain_client, get_chain_client)
     try:
-        res = getter()
-        if inspect.isawaitable(res):
-            res = await res
-        return res
+        return await resolve_chain_client(request)
     except Exception:
         return None
-
-
-@contextmanager
-def _lazy_db(request: Request):
-    """캐시 미스 시에만 DB 세션을 열어 적중 경로의 커넥션 풀 점유를 없앤다."""
-    getter = request.app.dependency_overrides.get(get_db, get_db)
-    gen = getter()
-    db = next(gen)
-    try:
-        yield db
-    finally:
-        gen.close()
 
 
 @query_router.get("", response_model=List[EntryResponse], summary="수입·지출 내역 목록 조회")
@@ -556,7 +538,7 @@ async def get_entries(
 
     async def _produce():
         nonlocal registrant_incomplete
-        with _lazy_db(request) as db:
+        with lazy_db(request) as db:
             try:
                 query = db.query(DBEntry).filter(DBEntry.status.isnot(None))
                 if term_id is not None:

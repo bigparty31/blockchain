@@ -1,7 +1,5 @@
 import asyncio
-from contextlib import contextmanager
 from datetime import datetime, timezone
-import inspect
 import logging
 from typing import Callable, List, Optional, TypeVar
 
@@ -22,7 +20,8 @@ from app.chain import (
 )
 from app.chain.eip712 import category_hash
 from app.chain.models import check_tx_hash
-from app.database import get_db
+from app.chain.provider import resolve_chain_client
+from app.database import get_db, lazy_db
 from app.models import (
     Budget as DBBudget,
     BudgetRevisionRequest as DBBudgetRevisionRequest,
@@ -547,31 +546,6 @@ async def _execute_budget_issue(
         )
 
 
-@contextmanager
-def _lazy_db(request: Request):
-    """캐시 미스 시에만 DB 세션을 열어 적중 경로의 커넥션 풀 점유를 없앤다."""
-    getter = request.app.dependency_overrides.get(get_db, get_db)
-    gen = getter()
-    db = next(gen)
-    try:
-        yield db
-    finally:
-        gen.close()
-
-
-async def _resolve_chain_client(request: Request) -> ChainClient:
-    """캐시 미스 시에만 체인 클라이언트를 지연 획득한다.
-
-    Depends(get_chain_client)를 라우트 시그니처에 두면 캐시 적중 경로에서도
-    체인 provider 초기화·RPC 점검이 실행되므로 _produce() 내부에서 호출한다.
-    """
-    getter = request.app.dependency_overrides.get(get_chain_client, get_chain_client)
-    res = getter()
-    if inspect.isawaitable(res):
-        res = await res
-    return res
-
-
 @query_router.get("", response_model=List[BudgetResponse], summary="항목별 예산 편성액 및 잔량 조회")
 @query_router.get("/", response_model=List[BudgetResponse], include_in_schema=False)
 async def get_budgets(
@@ -585,7 +559,7 @@ async def get_budgets(
     cache_key = f"budgets:{term_id if term_id is not None else 'all'}"
 
     async def _produce():
-        with _lazy_db(request) as db:
+        with lazy_db(request) as db:
             try:
                 query = db.query(DBBudget).options(selectinload(DBBudget.versions))
                 if term_id is not None:
@@ -601,7 +575,7 @@ async def get_budgets(
             if not db_budgets:
                 return []
 
-            chain = await _resolve_chain_client(request)
+            chain = await resolve_chain_client(request)
             result: List[dict] = []
 
             for b in db_budgets:

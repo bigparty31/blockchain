@@ -510,3 +510,44 @@ def test_cache_shares_uncached_degraded_result_and_cleans_up_inflight_keys(monke
         assert len(cache._inflight) == 0
 
     asyncio.run(_run())
+
+
+def test_cache_waiter_recovers_when_leader_is_cancelled(monkeypatch):
+    """PR #134 참고: 선행(leader) 요청이 취소돼도 대기자는 CancelledError로 연쇄 실패하지 않고 직접 조회한다."""
+    import asyncio
+
+    monkeypatch.setenv("CACHE_ENABLED", "1")
+    fake_redis = FakeRedis()
+    monkeypatch.setattr(cache, "_get_client", lambda: fake_redis)
+
+    leader_started = asyncio.Event()
+    calls = 0
+
+    async def _produce():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            leader_started.set()
+            await asyncio.sleep(10)
+        return {"balance": 777_000}
+
+    async def _run():
+        leader = asyncio.create_task(cache.get_or_set("balance:cancel-test", _produce))
+        await leader_started.wait()
+
+        waiters = [
+            asyncio.create_task(cache.get_or_set("balance:cancel-test", _produce))
+            for _ in range(3)
+        ]
+        # 대기자 3명이 모두 inflight future 를 잡도록 이벤트 루프 양보
+        await asyncio.sleep(0)
+
+        leader.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await leader
+
+        results = await asyncio.gather(*waiters)
+        assert results == [{"balance": 777_000}] * 3
+        assert len(cache._inflight) == 0
+
+    asyncio.run(_run())
