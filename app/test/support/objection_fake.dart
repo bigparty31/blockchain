@@ -46,6 +46,10 @@ class FakeObjectionApi implements ObjectionAnswerApi {
   /// 시간 초과인데 실제로는 체인에 들어간 경우.
   bool recordBeforeError = false;
 
+  /// [answerError] 를 던지기 직전에 부른다 — 실제 서비스가 401 에서 하는 전역 로그인 이동(`reportUnauthorized` →
+  /// `onUnauthorized`)을 시험이 흉내 낼 때 쓴다.
+  void Function()? beforeAnswerError;
+
   FakeObjectionApi(this.items);
 
   @override
@@ -71,6 +75,7 @@ class FakeObjectionApi implements ObjectionAnswerApi {
   Future<ObjectionModel> answer(ObjectionModel objection, String answer) async {
     if (gate != null) await gate!.future;
     if (answerError != null) {
+      beforeAnswerError?.call();
       if (recordBeforeError) {
         final i = items.indexWhere((x) => x.id == objection.id);
         if (i >= 0) items[i] = _answered(objection, answer);

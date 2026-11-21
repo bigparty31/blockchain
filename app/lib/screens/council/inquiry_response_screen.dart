@@ -94,7 +94,8 @@ class _InquiryResponseScreenState extends State<InquiryResponseScreen> {
   /// - 성공: 목록의 그 건을 서버가 돌려준 값으로 바꾸고 닫는다.
   /// - 결과를 모르는 실패(시간 초과)·409: 목록을 새로 읽어 **이미 답변 완료로 보이면 닫는다** — 열어 둔 채 다시
   ///   누르면 `prepare-answer` 가 409 로 또 실패한다. 아직 대기면 입력을 둔 채 이유를 보인다.
-  /// - 401: 로그인이 끝났다(세션은 이미 비웠다). 다시 읽지 않고 닫는다.
+  /// - 401: 로그인이 끝났다(세션은 이미 비웠다). 다시 읽지도, 닫지도, 알리지도 않는다 — 전역 401 처리가
+  ///   로그인 화면으로 갈아끼우고 안내한다. 여기서 pop 하면 그 로그인 화면이 pop 된다.
   Future<_AnswerResult> _submitAnswer(Map<String, dynamic> item, String text) async {
     try {
       final saved = await _api.answer(item['model'] as ObjectionModel, text);
@@ -106,10 +107,7 @@ class _InquiryResponseScreenState extends State<InquiryResponseScreen> {
       _toast('답변이 등록되었습니다.');
       return const _AnswerResult(close: true);
     } on EntryDecisionException catch (e) {
-      if (e.failure == EntryDecisionFailure.unauthorized) {
-        _toast(e.message, ok: false);
-        return const _AnswerResult(close: true);
-      }
+      if (e.failure == EntryDecisionFailure.unauthorized) return const _AnswerResult.sessionEnded();
       if (e.failure == EntryDecisionFailure.unknownOutcome || e.failure == EntryDecisionFailure.conflict) {
         await _load();
         if (mounted && _inquiries.any((x) => x['id'] == item['id'] && x['isAnswered'] == true)) {
@@ -325,7 +323,16 @@ class _AnswerResult {
 
   /// [close] 가 false 일 때 입력칸 아래에 보일 이유.
   final String? message;
-  const _AnswerResult({required this.close, this.message});
+
+  /// 401 — 세션이 끝났다. 전역 401 처리(`main.dart` `_forceLogin`)가 쌓인 화면을 모두 지우고 로그인 화면을 올린다.
+  /// 이때 다이얼로그가 `Navigator.pop` 을 하면 **맨 위의 로그인 화면이 pop 된다** — 아무것도 하지 않는다.
+  final bool sessionEnded;
+
+  const _AnswerResult({required this.close, this.message}) : sessionEnded = false;
+  const _AnswerResult.sessionEnded()
+      : close = false,
+        message = null,
+        sessionEnded = true;
 }
 
 /// 답변 작성 다이얼로그. 입력칸 컨트롤러는 이 위젯의 State 가 갖고 **사라질 때 함께 정리한다** —
@@ -369,7 +376,7 @@ class _AnswerDialogState extends State<_AnswerDialog> {
     });
     // 원문 그대로 넘긴다 — 정본화·해시는 서비스가 서명 전에 한다
     final result = await widget.onSubmit(_controller.text);
-    if (!mounted) return;
+    if (!mounted || result.sessionEnded) return;
     if (result.close) {
       Navigator.pop(context);
       return;
@@ -389,7 +396,10 @@ class _AnswerDialogState extends State<_AnswerDialog> {
       canPop: !_busy,
       child: Dialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-        child: Padding(
+        // 질문은 서버가 주는 값이라 길 수 있다(최대 5000자). 스크롤이 없으면 입력칸·버튼이 화면 밖으로 밀려
+        // 답변할 수 없다 — 키보드가 열려 좁아져도 마찬가지다.
+        child: SingleChildScrollView(
+         child: Padding(
           padding: const EdgeInsets.all(24),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -426,8 +436,14 @@ class _AnswerDialogState extends State<_AnswerDialog> {
                   borderRadius: BorderRadius.circular(12),
                   border: Border.all(color: AppTheme.divider),
                 ),
-                child: Text(item['question'],
-                  style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13.5, color: AppTheme.textMain, height: 1.4),
+                // 긴 질문은 이 안에서 따로 스크롤한다 — 입력칸까지 한 화면에 남게
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 160),
+                  child: SingleChildScrollView(
+                    child: Text(item['question'],
+                      style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13.5, color: AppTheme.textMain, height: 1.4),
+                    ),
+                  ),
                 ),
               ),
               const SizedBox(height: 16),
@@ -488,6 +504,7 @@ class _AnswerDialogState extends State<_AnswerDialog> {
               ),
             ],
           ),
+         ),
         ),
       ),
     );

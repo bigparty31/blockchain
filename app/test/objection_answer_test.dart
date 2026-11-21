@@ -326,18 +326,50 @@ void main() {
       expect(find.text('답변 등록'), findsOneWidget, reason: '대기 그대로라 다시 보낼 수 있다');
     });
 
-    testWidgets('로그인이 끝났으면(401) 목록을 다시 읽지 않고 창을 닫는다', (tester) async {
+    testWidgets('로그인이 끝났으면(401) 다시 읽지도 pop 하지도 않는다 — 전역 처리가 올린 로그인 화면이 그대로 남는다', (tester) async {
+      final navKey = GlobalKey<NavigatorState>();
       final api = FakeObjectionApi([open(3)])
-        ..answerError = const EntryDecisionException(EntryDecisionFailure.unauthorized, '로그인이 끝났어요. 다시 로그인해 주세요.');
-      await pumpScreen(tester, api);
+        ..answerError = const EntryDecisionException(EntryDecisionFailure.unauthorized, '로그인이 끝났어요. 다시 로그인해 주세요.')
+        // main.dart `_forceLogin` — 쌓인 화면을 모두 지우고 로그인 화면을 올린다 (AuthService.onUnauthorized)
+        ..beforeAnswerError = () => navKey.currentState!.pushAndRemoveUntil(
+              MaterialPageRoute(builder: (_) => const Scaffold(body: Text('LOGIN'))),
+              (route) => false,
+            );
+      tester.view.physicalSize = const Size(411, 2400);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(MaterialApp(navigatorKey: navKey, home: InquiryResponseScreen(api: api)));
+      await tester.pumpAndSettle();
       final before = api.listCalls;
       await openAndType(tester, '답변');
       await tester.tap(find.text('답변 등록'));
       await tester.pumpAndSettle();
 
+      expect(find.text('LOGIN'), findsOneWidget, reason: '다이얼로그가 pop 했다면 로그인 화면이 사라진다');
+      expect(find.byType(InquiryResponseScreen), findsNothing);
       expect(api.listCalls, before, reason: '세션이 없는데 다시 읽어 봐야 같은 401 이다');
-      expect(find.text('답변 등록'), findsNothing);
-      expect(find.textContaining('로그인이 끝났어요'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('질문이 길어도(입력칸 높이를 넘는 분량) 입력칸과 등록 버튼에 닿을 수 있다', (tester) async {
+      final api = FakeObjectionApi([open(3, content: '질문 ' * 400)]);
+      tester.view.physicalSize = const Size(411, 2400); // 카드의 버튼이 보이게 먼저 크게 열고
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(MaterialApp(home: InquiryResponseScreen(api: api)));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('답변 작성하기'));
+      await tester.pumpAndSettle();
+      tester.view.physicalSize = const Size(411, 500); // 키보드가 열린 것처럼 낮은 화면
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull, reason: '내용이 화면보다 길어 넘침이 나면 안 된다');
+
+      await tester.enterText(find.byType(TextFormField), '답변');
+      await tester.ensureVisible(find.text('답변 등록'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('답변 등록'));
+      await tester.pumpAndSettle();
+      expect(api.answered, ['답변'], reason: '버튼이 화면 밖으로 밀리지 않았다');
     });
 
     testWidgets('답변은 5000자까지 — 넘으면 서버에 보내기 전에 알린다', (tester) async {
