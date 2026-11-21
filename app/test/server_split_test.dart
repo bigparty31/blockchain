@@ -292,4 +292,77 @@ void main() {
       expect(AuthService().session, isNull);
     });
   });
+
+  /// #108 — 서버마다 JWT 키가 다르면 학생 서버가 발급한 토큰은 학생회 서버에서 401 이다.
+  /// 앱은 로그인 전에 역할을 모르므로 학생 서버로 먼저 로그인한다. 임원이면 **학생회 서버로 다시 로그인해**
+  /// 그 토큰을 써야 한다 (docs/SERVER_ENV.md §6).
+  group('서버별 JWT 키 (#108)', () {
+    ({MockClient client, List<Uri> seen}) keyedServers(UserRole role) {
+      final seen = <Uri>[];
+      final client = MockClient((req) async {
+        seen.add(req.url);
+        final origin = '${req.url.scheme}://${req.url.host}:${req.url.port}';
+        final atCouncil = origin == council;
+        final key = atCouncil ? 'council-key' : 'student-key';
+        http.Response ok(Object b) =>
+            http.Response(jsonEncode(b), 200, headers: {'content-type': 'application/json; charset=utf-8'});
+
+        if (req.url.path == '/auth/login') {
+          return ok({
+            'access_token': 'token-signed-by-$key',
+            'token_type': 'bearer',
+            'role': role.code,
+            'name': '아무개',
+            'wallet_address': atCouncil ? '0xabc' : null,
+          });
+        }
+        if (req.url.path == '/auth/me') {
+          // 자기 키로 서명한 토큰만 받는다
+          if (req.headers['Authorization'] != 'Bearer token-signed-by-$key') {
+            return http.Response('{"detail":"bad signature"}', 401);
+          }
+          return ok({'id': 1, 'student_no': '20240002', 'name': '아무개', 'role': role.code});
+        }
+        return http.Response('{}', 404);
+      });
+      return (client: client, seen: seen);
+    }
+
+    for (final role in [UserRole.TREASURER, UserRole.AUDITOR, UserRole.PRESIDENT]) {
+      test('${role.label} 는 학생회 서버가 발급한 토큰으로 로그인한다', () async {
+        final s = keyedServers(role);
+        AuthService.client = s.client;
+
+        final session = await AuthService().login('20240002', 'pw');
+        expect(session.token, 'token-signed-by-council-key');
+        expect(session.walletAddress, '0xabc', reason: '지갑 주소도 학생회 서버 응답에서 온다');
+        expect(ApiConfig.activeRole, role);
+      });
+    }
+
+    test('학생은 로그인을 한 번만 하고 학생 서버 토큰을 쓴다', () async {
+      final s = keyedServers(UserRole.STUDENT);
+      AuthService.client = s.client;
+
+      final session = await AuthService().login('20240001', 'pw');
+      expect(session.token, 'token-signed-by-student-key');
+      expect(s.seen.where((u) => u.path == '/auth/login'), hasLength(1));
+    });
+
+    test('학생회 서버 로그인이 실패하면 로그인하지 못한 것이고 세션을 남기지 않는다', () async {
+      // 학생 서버 로그인은 통과시키되 학생회 서버는 503
+      AuthService.client = MockClient((req) async {
+        if (req.url.port == Uri.parse(council).port) return http.Response('{"detail":"down"}', 503);
+        return http.Response(
+          jsonEncode({'access_token': 'token-signed-by-student-key', 'token_type': 'bearer', 'role': 'TREASURER', 'name': '아무개'}),
+          200,
+          headers: {'content-type': 'application/json; charset=utf-8'},
+        );
+      });
+
+      await expectLater(AuthService().login('20240002', 'pw'), throwsA(isA<LoginUnavailable>()));
+      expect(AuthService().session, isNull);
+      expect(ApiConfig.activeRole, isNull);
+    });
+  });
 }

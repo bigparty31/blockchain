@@ -597,6 +597,36 @@ class AuthService {
     );
   }
 
+  /// 임원의 학생회 서버 로그인 (#108). 학생 서버에서 역할을 안 뒤에 같은 자격 증명으로 부른다.
+  /// 어떤 실패든 [LoginUnavailable] 이다 — 학생 서버에서 이미 통과한 자격 증명이므로 틀린 횟수로 세지 않는다.
+  Future<({String token, Map<String, dynamic> body})> _councilLogin(
+    UserRole role,
+    String studentNo,
+    String password,
+  ) async {
+    try {
+      final res = await client
+          .post(
+            Uri.parse('${ApiConfig.baseUrlFor(role)}/auth/login'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({'student_no': studentNo, 'password': password}),
+          )
+          .timeout(timeout);
+      if (res.statusCode != 200) throw const LoginUnavailable();
+      final body = jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
+      final token = body['access_token'];
+      // 두 서버가 같은 계정에 다른 역할을 주면 믿지 않는다
+      if (token is! String || token.isEmpty || UserRole.fromCode('${body['role']}') != role) {
+        throw const LoginUnavailable();
+      }
+      return (token: token, body: body);
+    } on LoginUnavailable {
+      rethrow;
+    } catch (_) {
+      throw const LoginUnavailable();
+    }
+  }
+
   /// 학번·비밀번호로 로그인한다.
   ///
   /// 성공하면 토큰을 보관소에 쓰고 [session] 을 채운다. **`GET /auth/me` 까지
@@ -669,14 +699,14 @@ class AuthService {
 
     if (res.statusCode != 200) throw const LoginUnavailable();
 
-    final Map<String, dynamic> body;
+    Map<String, dynamic> body;
     try {
       body = jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
     } catch (_) {
       throw const LoginUnavailable();
     }
 
-    final token = body['access_token'];
+    var token = body['access_token'];
     final roleCode = body['role'];
     if (token is! String || token.isEmpty || roleCode is! String) {
       throw const LoginUnavailable();
@@ -685,6 +715,15 @@ class AuthService {
     // 서버 판정을 그대로 쓴다. docs/enums.md 에 없는 값이면 fromCode 가 STUDENT 로
     // 떨어뜨리므로, 모르는 역할에 임원 화면이 열리는 일은 없다.
     final role = UserRole.fromCode(roleCode);
+
+    // **임원은 학생회 서버로 한 번 더 로그인한다** (#108). 로그인 전에는 역할을 몰라 학생 서버로 먼저
+    // 보냈는데, 서버마다 JWT 키가 다르면(docs/SERVER_ENV.md §6) 학생 서버가 발급한 토큰은 학생회 서버에서
+    // 401 이다. 이미 자격 증명은 통과했으므로 여기서 실패해도 틀린 횟수로 세지 않는다.
+    if (role != UserRole.STUDENT) {
+      final council = await _councilLogin(role, studentNo, password);
+      token = council.token;
+      body = council.body;
+    }
 
     // **역할에 맞는 서버로 묻는다.** [ApiConfig.baseUrl] 을 쓰면 아직 `_setSession`
     // 전이라 `activeRole` 이 비어 있어 학생 서버로 가고, 학생 서버가 임원 토큰을
