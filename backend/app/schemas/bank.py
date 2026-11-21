@@ -103,3 +103,50 @@ class StudentSnapshot(BaseModel):
     snapshot_at: int = Field(..., description="스냅샷 일시 (Unix 초)")
     tx_hash: Optional[str] = Field(None, description="온체인 기록 TX 해시 (아직 컨트랙트가 없어 null)")
     unrecorded: List[UnrecordedTransaction]
+
+
+# ---------------------------------------------------------------- 카드 승인 문자 (저장하지 않는 확인)
+
+
+class CardSmsCheckRequest(BaseModel):
+    term_id: int = Field(..., gt=0, description="학기 ID")
+    text: str = Field(..., min_length=1, max_length=20000, description="붙여넣은 카드 승인·취소 문자 (여러 건 가능)")
+
+
+class SmsStatus(str, Enum):
+    MATCHED = "MATCHED"
+    MATCHED_PENDING = "MATCHED_PENDING"
+    UNREGISTERED = "UNREGISTERED"      # 카드로 결제됐는데 장부에 없음
+    CANCELLED_PAIR = "CANCELLED_PAIR"  # 같은 붙여넣기 안의 승인·취소가 서로 상쇄 — 대조에서 뺌
+    OUT_OF_TERM = "OUT_OF_TERM"        # 날짜가 학기 기간 밖
+    UNREADABLE = "UNREADABLE"          # 형식을 읽지 못함
+
+
+class CardSmsItem(BaseModel):
+    msg_no: int = Field(..., description="붙여넣은 순서 (1부터)")
+    status: SmsStatus
+    company: Optional[str] = None
+    kind: Optional[str] = Field(None, description="APPROVAL | CANCEL")
+    tran_date: Optional[str] = None
+    tran_time: Optional[str] = None
+    merchant: Optional[str] = None
+    amount: Optional[int] = None
+    approval_no: Optional[str] = None
+    entry_id: Optional[int] = None
+    reason: Optional[str] = Field(None, description="UNREADABLE 일 때 이유")
+
+
+class CardSmsSummary(BaseModel):
+    total: int
+    matched: int
+    matched_pending: int
+    unregistered: int
+    unregistered_amount: int = Field(..., description="미등록 승인 합계 — 카드로 나갔는데 장부에 없는 돈")
+    unreadable: int
+
+
+class CardSmsCheckResponse(BaseModel):
+    term_id: int
+    text_hash: str = Field(..., description="붙여넣은 원문(UTF-8 바이트) SHA-256. 저장하지 않으므로 앱이 보관한다")
+    summary: CardSmsSummary
+    items: List[CardSmsItem]

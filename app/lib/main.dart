@@ -7,6 +7,8 @@ import 'core/term_info.dart';
 import 'router.dart';
 import 'screens/login_screen.dart';
 import 'services/auth_service.dart';
+import 'services/device_token_sync.dart';
+import 'services/notification_service.dart';
 import 'services/push_service.dart';
 import 'services/student_api_service.dart';
 
@@ -62,13 +64,21 @@ class _StudentCouncilAppState extends State<StudentCouncilApp> {
       PushService().unsubscribe(termCode: TermInfo.currentTermCode);
     };
 
-    // 학생만 토픽을 쓴다 (PRD §4.8). 임원은 기기 토큰을 학생회 서버에 등록하며
-    // 그 경로는 임원 앱 몫이다 — 여기서 임원까지 토픽에 넣으면 임원 기기에
+    // 학생은 토픽, 임원은 기기 토큰이다 (PRD §4.8). 임원까지 토픽에 넣으면 임원 기기에
     // 학생용 공개 알림이 중복으로 뜬다.
     AuthService().onSessionStarted = (session) {
       if (session.role == UserRole.STUDENT) {
         PushService().subscribeStudentTopic(TermInfo.currentTermCode);
+      } else {
+        _deviceTokens.onStarted(session.token);
       }
+    };
+
+    // 임원 로그아웃 — 세션이 비워진 뒤에는 인증 헤더가 없어서, 비우기 직전의 세션으로 해제한다.
+    // 안 풀면 공용 기기에서 다음 사람이 이전 임원의 처리 알림을 계속 받는다.
+    AuthService().onSessionEnding = (ending) {
+      if (ending.role == UserRole.STUDENT) return;
+      _deviceTokens.onEnding(ending);
     };
 
     // 푸시를 누르면 **대시보드**로 간다. 학생 알림함이 없어서 보낼 곳이
@@ -88,10 +98,24 @@ class _StudentCouncilAppState extends State<StudentCouncilApp> {
     AuthService().onUnauthorized = null;
     AuthService().onSessionCleared = null;
     AuthService().onSessionStarted = null;
+    AuthService().onSessionEnding = null;
     PushService().onOpened = null;
     PushService().onForegroundMessage = null;
     super.dispose();
   }
+
+  /// 임원 기기 토큰의 등록·해제 (`docs/NOTIFICATION_API.md` §4·§5).
+  ///
+  /// **기다리지 않는다** — 토큰은 알림 권한 대화상자가 닫혀야 나오는데 그동안 화면을 막을 이유가 없다.
+  /// 대신 등록과 해제를 한 줄로 세워, 로그아웃의 해제가 먼저 닿은 뒤 뒤늦은 등록이 토큰을 되살리지 못하게 한다.
+  late final DeviceTokenSync _deviceTokens = DeviceTokenSync(
+    sessionToken: () => AuthService().session?.token,
+    fcmToken: () => PushService().deviceToken(),
+    cachedToken: () => PushService().token,
+    // 기다리는 시간을 늘려, 느린 등록이 끝난 뒤에 해제가 나가게 한다 (시간 초과는 요청을 취소하지 않는다)
+    register: (t) => NotificationService.registerDeviceToken(t, wait: const Duration(seconds: 30)),
+    revoke: NotificationService.revokeDeviceToken,
+  );
 
   /// 앱이 떠 있는 동안 온 푸시. 화면 위에 띄우고 대시보드로 갈 길을 준다.
   ///

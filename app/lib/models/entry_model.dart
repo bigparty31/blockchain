@@ -24,6 +24,12 @@ class EntryModel {
   final EntryStatus status;
   final int createdBy;
   final int? approvedBy;
+
+  /// 반려자 User id. 컨트랙트는 `approver` 하나로 확정자와 반려자를 겸하지만 DB 는
+  /// 둘을 나눠 담는다 — 반려 항목의 체인 `approver` 는 **이 값**과 대조해야 한다.
+  /// `CONFIRMED` 면 null, `REJECTED` 면 채워진다 (`EntryResponse`).
+  final int? rejectedBy;
+
   final String? rejectReason;
   final String? txPending;
   final String? txConfirm;
@@ -89,6 +95,7 @@ class EntryModel {
     required this.status,
     required this.createdBy,
     this.approvedBy,
+    this.rejectedBy,
     this.rejectReason,
     this.txPending,
     this.txConfirm,
@@ -125,6 +132,7 @@ class EntryModel {
       status: _requireStatus(json['status']),
       createdBy: json['created_by'] ?? 0,
       approvedBy: json['approved_by'],
+      rejectedBy: json['rejected_by'],
       rejectReason: json['reject_reason'],
       txPending: json['tx_pending'],
       txConfirm: json['tx_confirm'],

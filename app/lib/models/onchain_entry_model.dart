@@ -77,10 +77,17 @@ class OnChainEntry {
 
   /// 확정자 **또는 반려자**의 지갑 주소. 응답에 없으면 null, 미처리면 `address(0)`.
   ///
-  /// 컨트랙트의 `approver` 는 둘을 겸하는데 DB 에는 `approved_by` 만 있고
-  /// 반려자 컬럼이 없다. 그래서 `REJECTED` 항목에서는 이 필드를 비교하지 않는다
-  /// (`rejected_by` 컬럼 추가 요청됨 — HASHING.md §8).
+  /// 컨트랙트의 `approver` 는 둘을 겸한다. DB 는 둘을 나눠 담으므로 상태에 따라
+  /// 대조 상대가 갈린다 — `CONFIRMED` 면 `approved_by`, `REJECTED` 면 `rejected_by`.
   final String? approver;
+
+  /// 경고를 무시하고 확정했는지. 응답에 없으면 null.
+  final bool? hadWarning;
+
+  /// 사유 해시 — 반려 사유 또는 경고 무시 승인 사유 (`docs/HASHING.md` §3).
+  ///
+  /// 경고 없는 일반 확정에서는 `bytes32(0)` 이다. 응답에 없으면 null.
+  final String? reasonHash;
 
   const OnChainEntry({
     required this.hash,
@@ -93,7 +100,13 @@ class OnChainEntry {
     required this.correctsId,
     required this.registrant,
     required this.approver,
+    this.hadWarning,
+    this.reasonHash,
   });
+
+  /// 사유가 없음을 뜻하는 값 (`docs/HASHING.md` §3 — 빈 사유는 `text_hash("")` 가 아니다).
+  static const String zeroHash =
+      '0x0000000000000000000000000000000000000000000000000000000000000000';
 
   /// 비어 있는 주소. DB 의 `NULL` 에 대응한다.
   static const String zeroAddress = '0x0000000000000000000000000000000000000000';
@@ -125,6 +138,17 @@ class OnChainEntry {
   static bool isZeroAddress(String address) {
     final lower = address.toLowerCase();
     return lower == zeroAddress || lower == '0x0' || address.isEmpty;
+  }
+
+  /// 해시를 **0 도 값으로 남겨** 읽는다. 없거나 16진수가 아니면 null.
+  ///
+  /// `0x` 접두사와 대소문자만 정규화한다 — 사유 해시처럼 `bytes32(0)` 자체가 뜻을 갖는
+  /// 자리에서 쓴다. [_hashOrNull] 과 달리 0 을 「없음」으로 뭉개지 않는다.
+  static String? _rawHashOrNull(dynamic value) {
+    if (value is! String) return null;
+    final bare = value.toLowerCase().replaceFirst(RegExp(r'^0x'), '');
+    if (bare.isEmpty || !RegExp(r'^[0-9a-f]+$').hasMatch(bare)) return null;
+    return '0x$bare';
   }
 
   /// 「아직 기록되지 않음」을 뜻하는 해시 표기를 모두 null 로 모은다.
@@ -200,6 +224,12 @@ class OnChainEntry {
       correctsId: _intOrNull(json['corrects_id']),
       registrant: _addressOrNull(json['registrant']),
       approver: _addressOrNull(json['approver']),
+      hadWarning: json['had_warning'] is bool ? json['had_warning'] as bool : null,
+      // **[_hashOrNull] 을 쓰지 않는다.** 그쪽은 `0x000…0` 을 「기록 없음」으로 보고 null 로
+      // 떨어뜨리는데, 사유 해시에서 0 은 「사유가 없다」는 **값**이다 (HASHING.md §3 —
+      // 경고 없는 확정). 응답에 없는 것(null)과 뭉개면 「경고 없이 확정됐다」는 사실을
+      // 확인했는지 아닌지를 구분할 수 없다.
+      reasonHash: _rawHashOrNull(json['reason_hash']),
     );
   }
 }

@@ -2,18 +2,32 @@
 
     cd backend && .venv/bin/python -m scripts.relayer_smoke
 
-로컬 Hardhat 노드에 배포가 끝나 있어야 한다. 실행할 때마다 체인에 항목 2개를 실제로 남긴다 — 수입(PENDING 으로 등록한 뒤
-감사가 확정해 CONFIRMED)과 예산 없는 지출(BLOCKED, BUDGET_NOT_FOUND). id 는 등록 API 가 쓰는 DB id(1부터)와 겹치지 않는
-예약 구간이고 실행마다 다르다. 노드를 재시작하면 사라진다.
+로컬 Hardhat 노드에 배포가 끝나 있어야 한다. 실행할 때마다 체인에 실제로 남긴다:
 
-이 스크립트는 총무·감사 키로 EIP-712 서명하는 "앱 역할" 을 한다. 서버는 임원 키를 갖지 않으므로(PRD §9.2) app/ 밖에 두고,
+- 수입: PENDING 으로 등록한 뒤 감사가 확정해 CONFIRMED
+- 예산 없는 지출: BLOCKED (BUDGET_NOT_FOUND)
+- 반려: 수입을 등록한 뒤 감사가 사유와 함께 반려해 REJECTED (PRD §4.3)
+- 예산 경로 (시연 6번, PRD §4.1): 회장이 예산 발행 → 예산 안 지출 확정 → 잔량을 넘는 지출 BLOCKED (BUDGET_EXCEEDED)
+  → 회장 요청 + 감사 승인으로 증액 → 재등록한 지출 확정. 같은 증액 서명을 다시 보내면 VersionMismatch 로 보내지 않는다
+
+id 는 등록·예산 API 가 쓰는 DB id(1부터)와 겹치지 않는 예약 구간이고 실행마다 다르다. 노드를 재시작하면 사라진다.
+
+이 스크립트는 총무·감사·회장 키로 EIP-712 서명하는 "앱 역할" 을 한다. 서버는 임원 키를 갖지 않으므로(PRD §9.2) app/ 밖에 두고,
 로컬 체인(31337)에서만 동작한다. 서버 쪽은 등록·승인 API 와 같은 순서로 간다 — 앱 서명 → 서명자의 롤 대조 →
-record_pending / confirm_entry (CHAIN_CLIENT §1 ③, §4). 롤은 체인의 RoleManager 로 확인하고, 맞지 않으면 보내지 않는다.
-확정 서명의 entryCommit 은 앱처럼 체인에 등록된 값(get_entry)으로 계산한다 (CHAIN_CLIENT §5).
+record_pending / confirm_entry / reject_entry / issue_budget / increase_budget (CHAIN_CLIENT §1 ③, §4). 롤은 체인의 RoleManager 로 확인하고, 맞지 않으면 보내지 않는다.
+확정·반려 서명의 entryCommit 은 앱처럼 체인에 등록된 값(get_entry)으로 계산한다 (CHAIN_CLIENT §5).
 체인 상태(롤·nonce·잔액·시각)는 검사 대상인 클라이언트와 별도 연결로 읽는다.
 기록할 값은 docs/hashing_vectors.json 의 meta_hash 벡터라, 체인에 해시 규칙(HASHING.md)대로 계산된 값이 남는다.
-예산을 발행한 뒤의 지출(PENDING)은 하지 않는다 — BudgetToken 릴레이는 이번 범위가 아니고, 공용 개발 노드에 예산을 발행하면
-"학기·항목당 예산 하나" 규칙 때문에 예산 편성 화면이 막힌다.
+예산은 실행마다 다른 스모크 전용 항목명("스모크 예산 {base id}")으로 발행한다. 공용 개발 노드에 남아도 예산 편성 화면이 쓰는
+항목과 "학기·항목당 예산 하나" 규칙에서 겹치지 않는다 (체인 테스트의 issue_budget 과 같은 방식). 항목 해시는 API 의 category_hash 와
+같은 계산(category_hash_unchecked)이고 승인 항목표 검사만 건너뛴다. 예산 금액은 지출 벡터의 금액에서 정한다 — 첫 지출 뒤 잔량이
+다음 지출보다 작고, 증액 뒤 잔량이 정확히 그 지출만큼이 되게 한다.
+
+학기는 20262 다. 스모크 기록(예산 1건·항목 6건)은 체인에만 있고 DB 에는 없다. 서버·앱은 DB 기록을 기준으로 id 별로 체인을 읽고,
+체인을 학기 단위로 훑는 화면(이벤트 로그 조회 등)은 없어서 결산·예산 현황·회수 화면에는 섞이지 않는다.
+
+서명 유효 시한(deadline)은 항목·예산 단계마다 체인 시각으로 새로 정한다. 블록을 일정 간격으로 만드는 노드에서도 뒤 단계가
+처음 정한 시한을 넘겨 SignatureExpired 로 거짓 실패하지 않게 한다.
 """
 import asyncio
 import json
@@ -23,20 +37,31 @@ import time
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Awaitable, Callable, Optional, TypeVar
 
 import aiohttp
 from web3 import AsyncHTTPProvider, AsyncWeb3
 
 from app.chain import ChainEntry, ChainError, ChainRevert, RecordRequest, RevertReason
+from app.chain.commit import entry_commit_of
 from app.chain.deployment import Deployment, deployment_path, load_abi, load_deployment
-from app.chain.models import ZERO_ADDRESS, BlockReason
-from app.chain.web3_client import LEDGER, ROLE_MANAGER, RPC_TIMEOUT_SECONDS, Web3ChainClient
+from app.chain.eip712 import category_hash_unchecked
+from app.chain.models import (
+    ZERO_ADDRESS,
+    BlockReason,
+    BudgetRevertReason,
+    IncreaseRequest,
+    IssueRequest,
+    RejectDecision,
+)
+from app.chain.web3_client import BUDGET_TOKEN, LEDGER, ROLE_MANAGER, RPC_TIMEOUT_SECONDS, Web3ChainClient
 from app.schemas.entry import EntryKind, EntryStatus
+from app.utils.hashing import canonical_text, text_hash
 from scripts.local_chain import (
     AUDITOR_INDEX,
     LOCAL_CHAIN_ID,
     LOCAL_RPC_URL,
+    PRESIDENT_INDEX,
     RELAYER_INDEX,
     TREASURER_INDEX,
     approval_from_entry,
@@ -44,6 +69,9 @@ from scripts.local_chain import (
     hardhat_key,
     sign_as_app,
 )
+
+T = TypeVar("T")
+Deadline = Callable[[], Awaitable[int]]  # 보낼 단계마다 새로 정하는 서명 유효 시한 (체인 시각 + DEADLINE_SECONDS)
 
 # 등록 API 는 DB id 를 1부터 쓴다. 그 범위와 겹치지 않게 8000억에 실행 시각(밀리초) × 10 을 더한다 (지금은 18조대).
 # 실행마다 다르고, 체인 테스트의 스냅샷 구간(chain_support.TEST_ID_BASE, 9000억대)과도 겹치지 않는다
@@ -76,6 +104,26 @@ CASES = (
     ),
 )
 
+# 반려 (PRD §4.3). 사유 원문은 DB 에만 두고 체인에는 해시만 남는다 (HASHING §3)
+REJECT_CASE = SmokeCase(
+    "income_without_receipt", EntryKind.INCOME, 3, (EntryStatus.PENDING, None), try_duplicate=False, confirm=False
+)
+REJECT_REASON = "관문 2 스모크 반려"
+
+# 예산 경로 (시연 6번). 세 지출 모두 같은 지출 벡터다 — 해시가 같아도 id 가 다르면 다른 항목이다
+SPEND = SmokeCase("expense_with_receipt", EntryKind.EXPENSE, 4, (EntryStatus.PENDING, None), try_duplicate=False, confirm=True)
+OVER = SmokeCase(
+    "expense_with_receipt",
+    EntryKind.EXPENSE,
+    5,
+    (EntryStatus.BLOCKED, BlockReason.BUDGET_EXCEEDED),
+    try_duplicate=False,
+    confirm=False,
+)
+AGAIN = SmokeCase("expense_with_receipt", EntryKind.EXPENSE, 6, (EntryStatus.PENDING, None), try_duplicate=False, confirm=True)
+INCREASE_REASON = "관문 2 스모크 증액"
+BUDGET_DAYS = 30  # 집행 마감 = 체인 시각 + 30일
+
 
 def smoke_base_id(now_ns: int) -> int:
     """이번 실행의 id 기준 (실행 시각, 나노초). 항목 id 는 이 값 + offset 이다. 밀리초가 다르면 겹치지 않는다."""
@@ -102,6 +150,7 @@ class ChainView:
     w3: AsyncWeb3
     deployment: Deployment
     role_manager: object
+    _roles: dict = field(default_factory=dict)  # 롤 이름 → bytes32. 바뀌지 않는 상수라 한 번만 읽는다
 
     @classmethod
     def open(cls, rpc_url: str, deployment: Deployment, deployment_file: Path) -> "ChainView":
@@ -119,15 +168,29 @@ class ChainView:
         )
         return cls(w3, deployment, role_manager)
 
+    async def _role(self, name: str) -> bytes:
+        if name not in self._roles:
+            self._roles[name] = await getattr(self.role_manager.functions, name)().call()
+        return self._roles[name]
+
+    async def _role_of(self, address: str) -> bytes:
+        return await self.role_manager.functions.roleOf(address).call()
+
     async def is_treasurer(self, address: str) -> bool:
-        functions = self.role_manager.functions
-        return await functions.hasRole(await functions.TREASURER().call(), address).call()
+        return await self.role_manager.functions.hasRole(await self._role("TREASURER"), address).call()
 
     async def is_approver(self, address: str) -> bool:
         # 원장의 _requireApprover 와 같은 기준: roleOf 가 감사 또는 회장 (PRD §3 "회장도 감사와 같은 승인 권한").
         # RoleManager.isGovernor 는 지금 같은 집합이지만 "롤 변경 서명 자격" 이라 쓰지 않는다 — 확인할 것은 원장 규칙이다
-        functions = self.role_manager.functions
-        return await functions.roleOf(address).call() in {await functions.AUDITOR().call(), await functions.PRESIDENT().call()}
+        return await self._role_of(address) in {await self._role("AUDITOR"), await self._role("PRESIDENT")}
+
+    async def is_president(self, address: str) -> bool:
+        # BudgetToken 의 발행·증액 요청 서명자 기준 (PRD §4.1). 예산 API 도 회장 서명만 받는다
+        return await self._role_of(address) == await self._role("PRESIDENT")
+
+    async def is_auditor(self, address: str) -> bool:
+        # 증액 승인 서명자 기준. 회장은 요청자라 승인 서명을 할 수 없다
+        return await self._role_of(address) == await self._role("AUDITOR")
 
     async def nonce(self, address: str) -> int:
         return await self.w3.eth.get_transaction_count(address, "latest")
@@ -158,6 +221,10 @@ class Case:
     def failed(self, label: str, error: BaseException) -> None:
         self.check(label, False, f"{type(error).__name__}: {error}")
 
+    @property
+    def ok(self) -> bool:
+        return all(c.ok for c in self.checks)
+
 
 @dataclass
 class SmokeReport:
@@ -176,7 +243,10 @@ class SmokeReport:
             lines += [f"  {ok_mark if c.ok else fail_mark} {c.label}" + (f"  {c.detail}" if c.detail else "") for c in case.checks]
         lines.append("")
         if self.passed:
-            lines.append("관문 2·확정 통과: 서명 → 릴레이 → 체인 기록 (수입 PENDING → CONFIRMED 1건, 지출 BLOCKED 1건)")
+            lines.append(
+                "관문 2 통과: 서명 → 릴레이 → 체인 기록 (수입 확정 1건, 지출 BLOCKED 1건, 반려 1건, "
+                "예산 발행 → 지출 확정 → BLOCKED → 증액 → 재등록 확정)"
+            )
         else:
             lines.append(f"관문 2 실패: {fail_mark} 단계를 확인한다")
         return "\n".join(lines)
@@ -193,22 +263,54 @@ def marks_for(encoding: Optional[str]) -> tuple:
 
 
 # ---------------------------------------------------------------- 판정
+# 판정 도구라 어느 단계의 실패든(요청·서명을 만드는 준비 포함) 보고서에 남기고 run_smoke 밖으로 내보내지 않는다.
+# 그래야 앞서 통과한 단계의 결과를 잃지 않는다
+
+
+def _prepare(case: Case, label: str, build: Callable[[], T]) -> Optional[T]:
+    """요청을 만들고 서명하는 준비. 실패하면(배포 기록에 도메인 없음, 모델 검증 실패 등) 보고서에 남기고 None."""
+    try:
+        return build()
+    except Exception as e:
+        case.failed(label, e)
+        return None
+
+
+DEADLINE_LABEL = "서명 유효 시한 (체인 시각 + 10분)"
+
+
+async def _deadline(case: Case, deadline_of: Deadline) -> Optional[int]:
+    """이 단계가 서명할 deadline. 체인 시각을 읽지 못하면(노드가 단계 사이에 끊김) 이 단계의 ❌ 로 남기고 None."""
+    try:
+        return await deadline_of()
+    except Exception as e:
+        case.failed(DEADLINE_LABEL, e)
+        return None
+
+
+async def _signer_with_role(case: Case, label: str, client: Web3ChainClient, payload, signature: str, has_role, role: str) -> Optional[str]:
+    """API 처럼 보내기 전에 서명자를 체인의 롤과 대조한다. 맞으면 서명자, 아니면 None (보고서에 남기고 보내지 않는다).
+
+    기준은 서명한 키가 아니라 체인의 롤이다. role 은 조사까지 붙인 롤 이름이다 ("총무가", "감사·회장이")."""
+    try:
+        signer = client.signer_of(payload, signature)
+        ok = await has_role(signer)
+    except Exception as e:
+        case.failed(label, e)
+        return None
+    return signer if case.check(label, ok, signer if ok else f"{signer} 는 {role} 아니라 보내지 않았다") else None
 
 
 async def _record_case(
     client: Web3ChainClient, chain: ChainView, treasurer_key: str, case: Case, request: RecordRequest, spec: SmokeCase
 ) -> Optional[ChainEntry]:
     """등록 단계. 체인에서 다시 읽은 항목을 돌려준다 (확정 단계가 이 값으로 entryCommit 을 계산한다). 못 읽었으면 None."""
-    signature = sign_as_app(request, chain.deployment.eip712[LEDGER], treasurer_key)
-
-    # 등록 API 처럼 보내기 전에 서명자를 대조한다. 기준은 서명한 키가 아니라 체인의 총무 롤이다
-    try:
-        signer = client.signer_of(request, signature)
-        is_treasurer = await chain.is_treasurer(signer)
-    except Exception as e:  # 판정 도구라 어떤 실패든 보고서에 남긴다
-        case.failed("앱 서명 → 서명자가 체인의 총무", e)
+    label = "앱 서명 → 서명자가 체인의 총무"
+    signature = _prepare(case, label, lambda: sign_as_app(request, chain.deployment.eip712[LEDGER], treasurer_key))
+    if signature is None:
         return None
-    if not case.check("앱 서명 → 서명자가 체인의 총무", is_treasurer, signer if is_treasurer else f"{signer} 는 총무가 아니라 보내지 않았다"):
+    signer = await _signer_with_role(case, label, client, request, signature, chain.is_treasurer, "총무가")
+    if signer is None:
         return None
 
     claimed = []
@@ -277,17 +379,18 @@ async def _confirm_case(
 ) -> None:
     """확정 단계 (10/4 "confirmEntry 1건"). 승인 API 처럼 서명자가 체인의 감사·회장인지 대조한 뒤 보낸다."""
     # 앱(감사 기기)은 체인에 등록된 값으로 entryCommit 을 계산해 서명한다. 서버는 미리 대조하지 않는다 (CHAIN_CLIENT §5)
-    approval = approval_from_entry(entry, deadline)
-    signature = sign_as_app(approval, chain.deployment.eip712[LEDGER], approver_key)
-
     label = "확정 서명 → 서명자가 체인의 감사·회장"
-    try:
-        signer = client.signer_of(approval, signature)
-        is_approver = await chain.is_approver(signer)
-    except Exception as e:
-        case.failed(label, e)
+
+    def build():
+        approval = approval_from_entry(entry, deadline)
+        return approval, sign_as_app(approval, chain.deployment.eip712[LEDGER], approver_key)
+
+    prepared = _prepare(case, label, build)
+    if prepared is None:
         return
-    if not case.check(label, is_approver, signer if is_approver else f"{signer} 는 감사·회장이 아니라 보내지 않았다"):
+    approval, signature = prepared
+    signer = await _signer_with_role(case, label, client, approval, signature, chain.is_approver, "감사·회장이")
+    if signer is None:
         return
 
     claimed = []
@@ -316,43 +419,312 @@ async def _confirm_case(
     case.check(label, seen == (EntryStatus.CONFIRMED, signer), "" if seen == (EntryStatus.CONFIRMED, signer) else f"{seen[0].value}, {seen[1]}")
 
 
-async def run_smoke(
-    client: Web3ChainClient, chain: ChainView, treasurer_key: str, approver_key: str, base_id: int
-) -> SmokeReport:
-    """관문 2·확정 판정. 실제 실행(main)과 테스트(스냅샷 안)가 같이 쓴다. 등록은 treasurer_key, 확정은 approver_key 로 서명한다.
-
-    항목 단계(서명·릴레이·다시 읽기·재전송·확정)의 실패는 보고서에 남기고 다음 항목을 계속한다.
-    확정은 등록 단계가 모두 통과했을 때만 한다 — 등록이 어긋난 항목을 확정하면 그 여파의 실패가 원인을 가린다.
-    준비 단계(벡터·잔액·체인 시각)의 실패는 예외로 올라가고, main 이 "관문 2 실패" 로 알린다.
-    """
-    vectors = load_vectors(spec.vector for spec in CASES)
-    balance = await chain.w3.eth.get_balance(client.relayer_address)
-    report = SmokeReport(
-        f"관문 2 스모크: chainId {chain.deployment.chain_id}, 릴레이어 {client.relayer_address} (잔액 {balance / 10**18:,.4f} ETH)"
-    )
-    deadline = await chain_now(chain.w3) + DEADLINE_SECONDS
-
-    for spec in CASES:
-        values = vectors[spec.vector]["input"]
-        request = RecordRequest(
+async def _entry_case(
+    client: Web3ChainClient,
+    chain: ChainView,
+    treasurer_key: str,
+    approver_key: str,
+    spec: SmokeCase,
+    vectors: dict,
+    base_id: int,
+    deadline_of: Deadline,
+    budget_id: int = 0,
+    then: str = "",
+) -> tuple:
+    """항목 하나를 등록하고(spec.confirm 이면 확정까지) (Case, 체인에서 다시 읽은 항목) 을 돌려준다."""
+    values = vectors[spec.vector]["input"]
+    label = "[수입]" if spec.kind is EntryKind.INCOME else "[지출]"
+    budget = "" if spec.kind is EntryKind.INCOME else f", 예산 {budget_id}"
+    then = then or (", 감사 확정" if spec.confirm else "")
+    case = Case(f"{label} id={base_id + spec.offset}  {spec.vector}  {values['amount']:,}원{budget}{then}")
+    deadline = await _deadline(case, deadline_of)
+    if deadline is None:
+        return case, None
+    request = _prepare(
+        case,
+        "등록 요청 만들기",
+        lambda: RecordRequest(
             id=base_id + spec.offset,
             hash=vectors[spec.vector]["expected"],
             amount=values["amount"],
             kind=spec.kind,
             term=TERM,
             occurred_at=values["occurred_at"],
-            budget_id=0,
+            budget_id=budget_id,
             corrects_id=0,
             deadline=deadline,
+        ),
+    )
+    if request is None:
+        return case, None
+    entry = await _record_case(client, chain, treasurer_key, case, request, spec)
+    if spec.confirm and entry is not None and case.ok:
+        await _confirm_case(client, chain, approver_key, case, entry, deadline)
+    return case, entry
+
+
+async def _reject_case(
+    client: Web3ChainClient, chain: ChainView, treasurer_key: str, approver_key: str, vectors: dict, base_id: int, deadline_of: Deadline
+) -> Case:
+    """반려 (반려 API 와 같은 순서). 등록 단계가 모두 통과했을 때만 반려한다."""
+    case, entry = await _entry_case(
+        client, chain, treasurer_key, approver_key, REJECT_CASE, vectors, base_id, deadline_of, then=", 감사 반려"
+    )
+    if entry is None or not case.ok:
+        return case
+    deadline = await _deadline(case, deadline_of)
+    if deadline is None:
+        return case
+    label = "반려 서명 → 서명자가 체인의 감사·회장"
+    reason_hash = text_hash(canonical_text(REJECT_REASON))
+
+    def build():
+        decision = RejectDecision(id=entry.id, entry_commit=entry_commit_of(entry), reason_hash=reason_hash, deadline=deadline)
+        return decision, sign_as_app(decision, chain.deployment.eip712[LEDGER], approver_key)
+
+    prepared = _prepare(case, label, build)
+    if prepared is None:
+        return case
+    decision, signature = prepared
+    signer = await _signer_with_role(case, label, client, decision, signature, chain.is_approver, "감사·회장이")
+    if signer is None:
+        return case
+
+    claimed = []
+
+    async def before_broadcast(tx_hash: str) -> None:
+        claimed.append(tx_hash)  # 반려 API 라면 여기서 tx_confirm 을 반려로 선점한다
+
+    try:
+        result = await client.reject_entry(decision, signature, before_broadcast)
+    except Exception as e:
+        case.failed("반려 릴레이", e)
+        return case
+    case.check(f"반려 릴레이 → {result.status.value}", result.status is EntryStatus.REJECTED, f"tx {result.tx_hash}")
+    case.check("반려 before_broadcast hash = 결과 hash", claimed == [result.tx_hash])
+
+    label = "체인에서 다시 읽음 → REJECTED, 반려자 = 서명자, 사유 해시 일치"
+    try:
+        rejected = await client.get_entry(entry.id)
+        detail = await client.entry_tx_detail(result.tx_hash, entry.id)
+    except Exception as e:
+        case.failed(label, e)
+        return case
+    seen = (
+        rejected.status if rejected else None,
+        rejected.approver if rejected else None,
+        detail.reason_hash if detail else None,
+    )
+    want = (EntryStatus.REJECTED, signer, reason_hash)
+    case.check(label, seen == want, "" if seen == want else f"{seen[0]}, {seen[1]}, {seen[2]}")
+    return case
+
+
+async def _remaining_check(client: Web3ChainClient, case: Case, budget_id: int, expected: int) -> None:
+    label = f"예산 잔량 → {expected:,}원"
+    try:
+        budget = await client.get_budget(budget_id)
+    except Exception as e:
+        case.failed(label, e)
+        return
+    remaining = None if budget is None else budget.remaining
+    case.check(label, remaining == expected, "" if remaining == expected else f"체인 {remaining}")
+
+
+async def _issue_case(
+    client: Web3ChainClient, chain: ChainView, president_key: str, budget_id: int, amount: int, now: int, deadline_of: Deadline
+) -> Case:
+    """예산 발행 (예산 API 와 같은 순서). 회장 서명 1개."""
+    name = f"스모크 예산 {budget_id}"
+    case = Case(f"[예산 발행] budget_id={budget_id}  {name}  {amount:,}원, 회장 서명")
+    deadline = await _deadline(case, deadline_of)
+    if deadline is None:
+        return case
+    label = "발행 서명 → 서명자가 체인의 회장"
+
+    def build():
+        request = IssueRequest(
+            budget_id=budget_id,
+            term=TERM,
+            category=category_hash_unchecked(name),  # 승인 항목표 밖의 스모크 전용 이름 (모듈 docstring)
+            amount=amount,
+            expires_at=now + BUDGET_DAYS * 86400,
+            deadline=deadline,
         )
-        label = "[수입]" if spec.kind is EntryKind.INCOME else "[지출]"
-        budget = "" if spec.kind is EntryKind.INCOME else ", 예산 0"
-        then = ", 감사 확정" if spec.confirm else ""
-        case = Case(f"{label} id={request.id}  {spec.vector}  {values['amount']:,}원{budget}{then}")
+        return request, sign_as_app(request, chain.deployment.eip712[BUDGET_TOKEN], president_key)
+
+    prepared = _prepare(case, label, build)
+    if prepared is None:
+        return case
+    request, signature = prepared
+    if await _signer_with_role(case, label, client, request, signature, chain.is_president, "회장이") is None:
+        return case
+
+    claimed = []
+
+    async def before_broadcast(tx_hash: str) -> None:
+        claimed.append(tx_hash)  # 예산 API 라면 여기서 발행 tx_hash 를 선점한다
+
+    try:
+        result = await client.issue_budget(request, signature, before_broadcast)
+    except Exception as e:
+        case.failed("발행 릴레이", e)
+        return case
+    case.check(f"발행 릴레이 → version {result.version}", result.version == 1, f"tx {result.tx_hash}")
+    case.check("발행 before_broadcast hash = 결과 hash", claimed == [result.tx_hash])
+    await _remaining_check(client, case, budget_id, amount)
+    return case
+
+
+async def _increase_case(
+    client: Web3ChainClient,
+    chain: ChainView,
+    president_key: str,
+    auditor_key: str,
+    budget_id: int,
+    amount: int,
+    remaining_after: int,
+    deadline_of: Deadline,
+) -> Case:
+    """증액 (PRD §4.1). 회장(요청)과 감사(승인)가 같은 값에 서명한다. 같은 서명을 다시 보내면 VersionMismatch 다 (§4.9)."""
+    case = Case(f"[예산 증액] budget_id={budget_id}  +{amount:,}원, 회장 요청 + 감사 승인")
+    deadline = await _deadline(case, deadline_of)
+    if deadline is None:
+        return case
+    label = "증액 요청 서명 → 서명자가 체인의 회장"
+
+    def build():
+        request = IncreaseRequest(
+            budget_id=budget_id,
+            amount=amount,
+            reason_hash=text_hash(canonical_text(INCREASE_REASON)),
+            version=1,
+            deadline=deadline,
+        )
+        domain = chain.deployment.eip712[BUDGET_TOKEN]
+        return request, sign_as_app(request, domain, president_key), sign_as_app(request, domain, auditor_key)
+
+    prepared = _prepare(case, label, build)
+    if prepared is None:
+        return case
+    request, requester_signature, approver_signature = prepared
+    if await _signer_with_role(case, label, client, request, requester_signature, chain.is_president, "회장이") is None:
+        return case
+    if await _signer_with_role(
+        case, "증액 승인 서명 → 서명자가 체인의 감사", client, request, approver_signature, chain.is_auditor, "감사가"
+    ) is None:
+        return case
+
+    claimed = []
+
+    async def before_broadcast(tx_hash: str) -> None:
+        claimed.append(tx_hash)  # 증액 API 라면 여기서 증액 요청의 tx_hash 를 선점한다
+
+    try:
+        result = await client.increase_budget(request, requester_signature, approver_signature, before_broadcast)
+    except Exception as e:
+        case.failed("증액 릴레이", e)
+        return case
+    case.check(f"증액 릴레이 → version {result.version}", result.version == 2, f"tx {result.tx_hash}")
+    case.check("증액 before_broadcast hash = 결과 hash", claimed == [result.tx_hash])
+    await _remaining_check(client, case, budget_id, remaining_after)
+
+    # 같은 서명을 다시 보내면 시뮬레이션에서 걸려 보내지 않는다 — 증액 2건이 경쟁할 때 뒤 건이 받는 결과다 (§4.9)
+    label = "같은 증액 재전송 → VersionMismatch (nonce 그대로)"
+    try:
+        before = await chain.nonce(client.relayer_address)
+        try:
+            await client.increase_budget(request, requester_signature, approver_signature)
+            reason = None
+        except ChainRevert as e:
+            reason = e.reason
+        after = await chain.nonce(client.relayer_address)
+    except Exception as e:
+        case.failed(label, e)
+        return case
+    ok = reason is BudgetRevertReason.VERSION_MISMATCH and after == before
+    case.check(label, ok, "" if ok else f"결과 {reason}, nonce {before} → {after}")
+    return case
+
+
+async def _budget_cases(
+    client: Web3ChainClient,
+    chain: ChainView,
+    treasurer_key: str,
+    auditor_key: str,
+    president_key: str,
+    vectors: dict,
+    base_id: int,
+    now: int,
+    deadline_of: Deadline,
+) -> list:
+    """예산 경로 (시연 6번). 앞 단계가 어긋나면 멈춘다 — 잔량이 달라진 채 계속하면 그 여파의 실패가 원인을 가린다."""
+    spend = vectors[SPEND.vector]["input"]["amount"]
+    issued = spend + spend // 2  # 첫 지출 뒤 잔량(spend // 2)이 다음 지출보다 작다
+    increase = spend - spend // 2  # 증액 뒤 잔량이 정확히 한 번 더 쓸 만큼이 된다
+    budget_id = base_id
+
+    async def entry(spec: SmokeCase, then: str = "") -> Case:
+        case, _ = await _entry_case(
+            client, chain, treasurer_key, auditor_key, spec, vectors, base_id, deadline_of, budget_id=budget_id, then=then
+        )
+        return case
+
+    steps = (  # (단계, 단계가 통과한 뒤 확인할 잔량). 단계마다 deadline 을 새로 정한다 (_deadline)
+        (lambda: _issue_case(client, chain, president_key, budget_id, issued, now, deadline_of), None),
+        (lambda: entry(SPEND), issued - spend),
+        (lambda: entry(OVER, ", 잔량 초과"), None),
+        (
+            lambda: _increase_case(
+                client, chain, president_key, auditor_key, budget_id, increase, issued - spend + increase, deadline_of
+            ),
+            None,
+        ),
+        (lambda: entry(AGAIN, ", 증액 뒤 재등록 · 감사 확정"), 0),
+    )
+    cases = []
+    for make, remaining in steps:
+        case = await make()
+        if remaining is not None and case.ok:
+            await _remaining_check(client, case, budget_id, remaining)
+        cases.append(case)
+        if not case.ok:
+            break
+    return cases
+
+
+async def run_smoke(
+    client: Web3ChainClient,
+    chain: ChainView,
+    treasurer_key: str,
+    auditor_key: str,
+    base_id: int,
+    president_key: str = hardhat_key(PRESIDENT_INDEX),
+) -> SmokeReport:
+    """관문 2 판정. 실제 실행(main)과 테스트(스냅샷 안)가 같이 쓴다.
+
+    등록은 treasurer_key, 확정·반려와 증액 승인은 auditor_key, 예산 발행·증액 요청은 president_key 로 서명한다.
+    단계의 실패(요청·서명 준비, 서명자 대조, 릴레이, 다시 읽기, 재전송, 확정)는 보고서에 남기고 다음 항목을 계속한다.
+    확정·반려는 등록 단계가 모두 통과했을 때만 한다 — 등록이 어긋난 항목을 확정하면 그 여파의 실패가 원인을 가린다.
+    예산 경로는 단계가 서로 잇닿아 있어 어긋난 단계에서 멈춘다.
+    실행 전체의 준비(벡터·잔액·시작 시각)의 실패만 예외로 올라가고, main 이 "관문 2 실패" 로 알린다.
+    단계마다 다시 읽는 체인 시각(deadline)의 실패는 그 단계의 ❌ 다 — 앞서 통과한 결과를 잃지 않는다.
+    """
+    vectors = load_vectors({spec.vector for spec in (*CASES, REJECT_CASE, SPEND, OVER, AGAIN)})
+    balance = await chain.w3.eth.get_balance(client.relayer_address)
+    report = SmokeReport(
+        f"관문 2 스모크: chainId {chain.deployment.chain_id}, 릴레이어 {client.relayer_address} (잔액 {balance / 10**18:,.4f} ETH)"
+    )
+    now = await chain_now(chain.w3)
+
+    async def deadline_of() -> int:
+        return await chain_now(chain.w3) + DEADLINE_SECONDS
+
+    for spec in CASES:
+        case, _ = await _entry_case(client, chain, treasurer_key, auditor_key, spec, vectors, base_id, deadline_of)
         report.cases.append(case)
-        entry = await _record_case(client, chain, treasurer_key, case, request, spec)
-        if spec.confirm and entry is not None and all(c.ok for c in case.checks):
-            await _confirm_case(client, chain, approver_key, case, entry, deadline)
+    report.cases.append(await _reject_case(client, chain, treasurer_key, auditor_key, vectors, base_id, deadline_of))
+    report.cases += await _budget_cases(client, chain, treasurer_key, auditor_key, president_key, vectors, base_id, now, deadline_of)
     return report
 
 
@@ -392,9 +764,7 @@ async def main() -> int:
     chain = None
     try:
         chain = ChainView.open(rpc_url, deployment, path)
-        report = await run_smoke(
-            client, chain, hardhat_key(TREASURER_INDEX), hardhat_key(AUDITOR_INDEX), smoke_base_id(time.time_ns())
-        )
+        report = await run_smoke(client, chain, hardhat_key(TREASURER_INDEX), hardhat_key(AUDITOR_INDEX), smoke_base_id(time.time_ns()))
     except Exception as e:  # 판정 도구라 traceback 대신 결론을 먼저 알리고, 원인은 stderr 에 남긴다
         print(f"관문 2 실패: 판정 중 오류 ({type(e).__name__}: {e})")
         traceback.print_exc()

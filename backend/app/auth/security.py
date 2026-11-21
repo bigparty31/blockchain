@@ -2,6 +2,7 @@ import logging
 import os
 import re
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 import bcrypt
 import jwt
@@ -55,9 +56,16 @@ def create_access_token(user_id: int, ttl: timedelta = ACCESS_TOKEN_TTL) -> str:
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
-def decode_access_token(token: str) -> int:
+def student_jwt_secret() -> Optional[str]:
+    """council_api 가 POST /objections 에서 학생 서버 토큰을 검증할 때만 쓰는 선택적 키 (PRD v0.17 §9.1)."""
+    val = os.environ.get("STUDENT_JWT_SECRET", "").strip()
+    return val or None
+
+
+def decode_access_token(token: str, secret: Optional[str] = None) -> int:
     """토큰의 user id 를 돌려준다. 서명·만료·sub 형식이 틀리면 jwt.PyJWTError 를 던진다."""
-    payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM], options={"require": ["sub", "exp"]})
+    key = secret if secret is not None else JWT_SECRET
+    payload = jwt.decode(token, key, algorithms=[JWT_ALGORITHM], options={"require": ["sub", "exp"]})
     sub = payload["sub"]
     if not isinstance(sub, str) or not _USER_ID_PATTERN.fullmatch(sub):
         raise jwt.InvalidTokenError("sub 가 user id 형식이 아님")

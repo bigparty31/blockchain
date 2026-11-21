@@ -38,6 +38,15 @@ class _EntryListScreenState extends State<EntryListScreen> {
   bool _loading = true;
   List<EntryChain> _chains = [];
   final Map<int, VerificationReport> _reports = {};
+
+  /// 조회 세대. 새로고침마다 올린다.
+  ///
+  /// **검증은 `await` 하지 않고 시작한다** — 목록을 먼저 그려야 해서다. 그래서
+  /// 새로고침하면 **이전 검증 루프가 아직 돌고 있다.** 세대를 안 보면 늦게 도착한
+  /// 옛 결과가 같은 id 의 새 결과를 덮어쓴다. 금액이 바뀐 기록을 열어도 이전 조회의
+  /// 「검증됨」이 그대로 붙어, **변조 경고가 사라지고 「확인 필요」 필터에서도 빠진다**
+  /// (이슈 #109). 화면에 보이는 숫자와 배지가 서로 다른 것을 가리키는 상태다.
+  int _generation = 0;
   late _Filter _filter =
       widget.unseenAfterEntryId == null ? _Filter.all : _Filter.unseen;
 
@@ -77,10 +86,13 @@ class _EntryListScreenState extends State<EntryListScreen> {
   /// **무슨 일이 있어도 `_loading` 은 끈다.** 예전에는 조회가 중간에 던지면
   /// 스피너가 영영 안 꺼져서 화면이 멈춘 것처럼 보였다.
   Future<void> _load() async {
+    // 이 줄이 돌기 전에 시작된 검증은 모두 옛 세대가 된다 ([_generation]).
+    final generation = ++_generation;
+
     if (mounted) setState(() => _loading = true);
     try {
       final entries = await _api.fetchEntries();
-      if (!mounted) return;
+      if (!mounted || generation != _generation) return;
 
       setState(() {
         _chains = EntryMerge.fold(entries);
@@ -93,13 +105,13 @@ class _EntryListScreenState extends State<EntryListScreen> {
         await _api.markEntriesSeen(maxId);
       }
 
-      _verifyAll();
+      _verifyAll(generation);
     } on SessionExpired {
       // 세션이 끊겼다. `AuthService.onUnauthorized` 가 로그인 화면으로 보내므로
       // 여기서는 목록을 비우기만 한다 — **예시 데이터로 메우지 않는다.**
       // 잡지 않으면 `_load` 가 await 되지 않아(`initState`) 처리되지 않은 비동기
       // 예외가 되고, 테스트에서는 그대로 실패로 뜬다.
-      if (mounted) {
+      if (mounted && generation == _generation) {
         setState(() {
           _chains = [];
           _reports.clear();
@@ -108,14 +120,16 @@ class _EntryListScreenState extends State<EntryListScreen> {
     } on LedgerUnavailable {
       // 실서버를 보고 있는데 조회가 깨졌다. 빈 목록이 「내역 없음」으로 읽히는
       // 문제는 남지만, 지어낸 내역을 보여주는 것보다 낫다.
-      if (mounted) {
+      if (mounted && generation == _generation) {
         setState(() {
           _chains = [];
           _reports.clear();
         });
       }
     } finally {
-      if (mounted) setState(() => _loading = false);
+      // 옛 세대의 실패·완료가 새 조회의 목록을 비우거나 스피너를 끄지 않게 한다.
+      // 새 조회는 자기 finally 에서 스피너를 끈다.
+      if (mounted && generation == _generation) setState(() => _loading = false);
     }
   }
 
@@ -130,20 +144,28 @@ class _EntryListScreenState extends State<EntryListScreen> {
   /// 「검증 중」에 남는다 — 화면은 멀쩡해 보이는데 검증만 멈춘 상태다.
   /// 지갑 매핑처럼 전체에 걸리는 조회도 같은 이유로 감싼다. 매핑을 못 받으면
   /// 등록자 대조만 「모름」이 되고, 해시·영수증 대조는 그대로 돌아간다.
-  Future<void> _verifyAll() async {
+  ///
+  /// [generation] 이 지나간 조회의 것이면 **결과를 버린다.** 늦게 도착한 옛 결과를
+  /// 그대로 쓰면 같은 id 의 새 결과를 덮어써서, 금액이 바뀐 기록에 이전 조회의
+  /// 「검증됨」이 붙는다 (이슈 #109).
+  Future<void> _verifyAll(int generation) async {
     Map<String, int>? wallets;
     try {
       wallets = await _api.fetchWalletMap();
     } catch (_) {
       wallets = null;
     }
+    if (generation != _generation) return;
 
-    for (final chain in _chains) {
+    // 목록도 이 세대의 것으로 들고 돈다. 도중에 `_chains` 가 바뀌어도 섞이지 않는다.
+    final chains = _chains;
+
+    for (final chain in chains) {
       for (final entry in chain.allEntries) {
         try {
           final onChain = await _api.fetchOnChainEntry(entry.id);
           final receiptBytes = await _api.fetchReceiptBytes(entry);
-          if (!mounted) return;
+          if (!mounted || generation != _generation) return;
 
           setState(() {
             _reports[entry.id] = EntryVerifier.verify(

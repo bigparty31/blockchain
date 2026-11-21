@@ -4,7 +4,8 @@
  *   터미널 1:  npx hardhat node
  *   터미널 2:  npx hardhat run scripts/deploy.ts --network localhost
  *
- * 순서: RoleManager(회장, 총무, 감사1, 감사2) → BudgetToken → AccountingLedger → setLedger → MembershipSBT.
+ * 순서: RoleManager(회장, 총무, 감사1, 감사2) → BudgetToken → AccountingLedger → setLedger → MembershipSBT
+ *       → ObjectionRegistry(…, relayer).
  * 네 임원은 생성자 인자다. 별도 롤 부여 단계가 없고, 끝난 뒤 배포자는 어떤 권한도 갖지 않는다.
  *
  * 계정 배치 (Hardhat 기본 니모닉의 순서. 개인키는 Hardhat 이 공개한 테스트 키라 파일에 두지 않는다):
@@ -12,8 +13,13 @@
  *   [1] president  회장
  *   [2] treasurer  총무
  *   [3] auditor    감사 1
- *   [4] relayer    서버 릴레이어. 롤 없음 (이전 배치와 같은 번호를 유지한다)
+ *   [4] relayer    서버 릴레이어. 롤 없음 (이전 배치와 같은 번호를 유지한다). ObjectionRegistry.raise 를 부를 유일한 주소
  *   [5] auditor2   감사 2 (감사 최소 2명 — 회장 키 분실 복구용)
+ *
+ * 실제 기기 주소로 배포 (시연 VM, PRD §9.2 「임원 주소는 배포 때 초기 롤로 넣는다」):
+ *   OFFICER_PRESIDENT, OFFICER_TREASURER, OFFICER_AUDITOR1, OFFICER_AUDITOR2 를 넷 다 주면 [1][2][3][5] 대신 쓴다.
+ *   하나라도 비면 넷 다 Hardhat 계정이다 (일부만 주면 멈춘다). 배포자 [0]·릴레이어 [4] 는 그대로다.
+ *   이때는 Hardhat 키로 임원 서명을 대신할 수 없으니 시드 예산 발행(issue_seed_budgets)을 건너뛴다.
  *
  * 결과는 deployments/<network>.json 과 deployments/abi/*.json 에 쓴다. 백엔드(손종인)가 읽는 파일이다.
  * JSON 안의 abi 경로는 그 JSON 파일이 있는 폴더(deployments/) 기준이다.
@@ -27,7 +33,7 @@ import { network } from "hardhat";
 import { deployAll } from "./lib/deployAll.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const CONTRACTS = ["RoleManager", "BudgetToken", "AccountingLedger", "MembershipSBT"] as const;
+const CONTRACTS = ["RoleManager", "BudgetToken", "AccountingLedger", "MembershipSBT", "ObjectionRegistry"] as const;
 const ALLOWED_NETWORKS = ["localhost"];
 
 const conn = await network.getOrCreate();
@@ -40,7 +46,34 @@ if (!ALLOWED_NETWORKS.includes(networkName)) {
   );
 }
 
-const [deployer, president, treasurer, auditor, relayer, auditor2] = await ethers.getSigners();
+const [deployer, hhPresident, hhTreasurer, hhAuditor, relayer, hhAuditor2] = await ethers.getSigners();
+
+// 임원 주소: 환경변수 넷이 모두 있으면 그것, 모두 없으면 Hardhat 계정. 일부만 있으면 오타일 가능성이 커서 멈춘다.
+const OFFICER_ENV = ["OFFICER_PRESIDENT", "OFFICER_TREASURER", "OFFICER_AUDITOR1", "OFFICER_AUDITOR2"] as const;
+const officerEnv = OFFICER_ENV.map((k) => (process.env[k] ?? "").trim());
+const given = officerEnv.filter((v) => v !== "").length;
+if (given !== 0 && given !== OFFICER_ENV.length) {
+  const missing = OFFICER_ENV.filter((_, i) => officerEnv[i] === "");
+  throw new Error(`임원 주소 환경변수는 넷 다 주거나 모두 비워야 합니다. 빠진 것: ${missing.join(", ")}`);
+}
+const useDeviceOfficers = given === OFFICER_ENV.length;
+const officerAddr = (i: number, fallback: string) => {
+  if (!useDeviceOfficers) return fallback;
+  if (!ethers.isAddress(officerEnv[i])) throw new Error(`${OFFICER_ENV[i]} 가 주소가 아닙니다: ${officerEnv[i]}`);
+  return ethers.getAddress(officerEnv[i].toLowerCase()); // 소문자로 받아도 체크섬 형태로 기록한다
+};
+const president = { address: officerAddr(0, hhPresident.address) };
+const treasurer = { address: officerAddr(1, hhTreasurer.address) };
+const auditor = { address: officerAddr(2, hhAuditor.address) };
+const auditor2 = { address: officerAddr(3, hhAuditor2.address) };
+if (useDeviceOfficers) {
+  for (const a of [president, treasurer, auditor, auditor2]) {
+    // 생성자도 중복·0 주소는 막지만, 배포자·릴레이어와 겹치는 것은 막지 않는다
+    if (a.address === deployer.address || a.address === relayer.address) {
+      throw new Error(`임원 주소 ${a.address} 가 배포자 또는 릴레이어와 같습니다`);
+    }
+  }
+}
 const { chainId } = await ethers.provider.getNetwork();
 
 console.log(`network=${networkName} chainId=${chainId}`);
@@ -48,6 +81,7 @@ console.log(`deployer=${deployer.address}`);
 console.log(`president=${president.address}\ntreasurer=${treasurer.address}`);
 console.log(`auditor=${auditor.address}\nauditor2=${auditor2.address}`);
 console.log(`relayer=${relayer.address} (롤 없음)`);
+console.log(`임원 주소: ${useDeviceOfficers ? "환경변수(실제 기기)" : "Hardhat 기본 계정"}`);
 
 const d = await deployAll(
   ethers,
@@ -57,6 +91,7 @@ const d = await deployAll(
     auditor1: auditor.address,
     auditor2: auditor2.address,
   },
+  relayer.address,
   deployer,
 );
 
@@ -88,11 +123,21 @@ assert((await d.budgetToken.roleManager()) === d.addresses.RoleManager, "BudgetT
 assert((await d.ledger.roleManager()) === d.addresses.RoleManager, "AccountingLedger.roleManager 불일치");
 assert((await d.ledger.budgetToken()) === d.addresses.BudgetToken, "AccountingLedger.budgetToken 불일치");
 assert((await d.membershipSBT.roleManager()) === d.addresses.RoleManager, "MembershipSBT.roleManager 불일치");
+assert((await d.objectionRegistry.roleManager()) === d.addresses.RoleManager, "ObjectionRegistry.roleManager 불일치");
+assert((await d.objectionRegistry.ledger()) === d.addresses.AccountingLedger, "ObjectionRegistry.ledger 불일치");
+assert((await d.objectionRegistry.membershipSBT()) === d.addresses.MembershipSBT, "ObjectionRegistry.membershipSBT 불일치");
+assert((await d.objectionRegistry.relayer()) === relayer.address, "ObjectionRegistry.relayer 불일치");
 
-// EIP-712 도메인: 서명을 받는 네 컨트랙트 모두
+// EIP-712 도메인: 서명을 받는 다섯 컨트랙트 모두
 const eip712: Record<string, object> = {};
 for (const name of CONTRACTS) {
-  const contract = { RoleManager: d.roleManager, BudgetToken: d.budgetToken, AccountingLedger: d.ledger, MembershipSBT: d.membershipSBT }[name];
+  const contract = {
+    RoleManager: d.roleManager,
+    BudgetToken: d.budgetToken,
+    AccountingLedger: d.ledger,
+    MembershipSBT: d.membershipSBT,
+    ObjectionRegistry: d.objectionRegistry,
+  }[name];
   const onchain: string = await contract.DOMAIN_SEPARATOR();
   const expected = ethers.TypedDataEncoder.hashDomain({
     name,

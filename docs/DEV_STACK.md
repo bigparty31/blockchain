@@ -19,10 +19,21 @@ bash scripts/dev-stack-reset.sh
 
 체인과 DB 를 지운 뒤 배포, 마이그레이션, 시드, 체인 예산 발행까지 진행한다. `.env` 가 없으면 비밀값과 Tailscale 주소를 넣어 새로 만든다.
 
+`.env` 가 이미 있어도 아래 두 값이 비어 있으면 채운다. 없으면 체인 쓰기(등록·확정·예산·SBT 발행)와 회원권 조회가 503 이다.
+
+- `RELAYER_PRIVATE_KEY` — Hardhat #4 계정(롤 없음). 공개된 개발용 키라 이 체인에서만 쓴다
+- `STUDENT_WALLET_MNEMONIC` — 새로 만든다. **초기화해도 바꾸지 않는다.** 바꾸면 학생 주소가 모두 바뀐다 (`docs/SERVER_ENV.md` 6절)
+
 기본 초기화는 행사비·사업비·운영비를 체인에 발행한다. 한 학기·한 항목에 예산은 하나라서 이 세 항목을 예산 편성 화면에서 다시 발행하면 `ALREADY_ISSUED` 로 끝난다. 편성 화면을 시험할 때는 체인 발행을 건너뛴다.
 
 ```bash
 bash scripts/dev-stack-reset.sh --no-budgets
+```
+
+시연용으로 임원 롤을 실제 기기 주소로 배포할 때는 주소 넷을 환경변수로 준다. Hardhat 키로 대신 서명할 수 없어 예산은 회장 기기가 편성 화면에서 발행하므로 `--no-budgets` 가 필요하다 (빠뜨리면 스크립트가 멈춘다). DB `users.wallet_address` 는 시드 뒤 같은 주소로 따로 맞춘다.
+
+```bash
+OFFICER_PRESIDENT=0x... OFFICER_TREASURER=0x... OFFICER_AUDITOR1=0x... OFFICER_AUDITOR2=0x... bash scripts/dev-stack-reset.sh --no-budgets
 ```
 
 **VM 을 재시작했거나 `chain` 컨테이너가 다시 시작되면 이 스크립트를 실행해야 한다.** 체인은 메모리에만 저장되어 지워지지만 DB 는 남아 서로 어긋난다.
