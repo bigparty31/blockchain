@@ -12,6 +12,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app import cache
 from app.chain import ChainSetupError
 from app.chain.provider import check_chain_config, close_chain_client
 from app.routers.bundles import STUDENT_QUERY_ROUTERS
@@ -23,6 +24,7 @@ async def lifespan(app: FastAPI):
     check_chain_config()
     # 재알림 작업·푸시 전송(app.services.notification_worker)은 띄우지 않는다. DB 에 쓰고 FCM 키가 필요하다 — 학생회 서버만 한다
     yield
+    await cache.close()
     await close_chain_client()
 
 

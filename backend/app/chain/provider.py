@@ -13,9 +13,10 @@ RELAYER_PRIVATE_KEY 가 없으면 Web3ChainClient 는 읽기 전용이다 — �
 실패는 ChainSetupError(배포 기록 문제는 하위 클래스 DeploymentError)로 올라가고 API 는 503 으로 바꾼다.
 """
 import asyncio
+import inspect
 import logging
 import os
-from typing import Optional
+from typing import Any, Optional
 
 from app.chain.client import ChainClient
 from app.chain.fake import FakeChainClient
@@ -132,3 +133,16 @@ def reset_chain_client() -> None:
     """만들어 둔 클라이언트를 닫지 않고 버린다. 이벤트 루프 밖에서 부르는 테스트용 — 실제 연결은 close_chain_client 로 닫는다."""
     global _client, _failure, _lock, _lock_loop
     _client, _failure, _lock, _lock_loop = None, None, None, None
+
+
+async def resolve_chain_client(request: Any) -> ChainClient:
+    """캐시 미스 시에만 체인 클라이언트를 지연 획득한다.
+
+    `Depends(get_chain_client)` 를 라우트 시그니처에 두면 캐시 적중 경로에서도
+    체인 provider 초기화·RPC 점검이 실행되므로 조회 생산자 내부에서 호출한다.
+    """
+    getter = request.app.dependency_overrides.get(get_chain_client, get_chain_client)
+    res = getter()
+    if inspect.isawaitable(res):
+        res = await res
+    return res
