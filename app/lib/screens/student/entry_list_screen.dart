@@ -111,7 +111,7 @@ class _EntryListScreenState extends State<EntryListScreen> {
       // 여기서는 목록을 비우기만 한다 — **예시 데이터로 메우지 않는다.**
       // 잡지 않으면 `_load` 가 await 되지 않아(`initState`) 처리되지 않은 비동기
       // 예외가 되고, 테스트에서는 그대로 실패로 뜬다.
-      if (mounted) {
+      if (mounted && generation == _generation) {
         setState(() {
           _chains = [];
           _reports.clear();
@@ -120,14 +120,16 @@ class _EntryListScreenState extends State<EntryListScreen> {
     } on LedgerUnavailable {
       // 실서버를 보고 있는데 조회가 깨졌다. 빈 목록이 「내역 없음」으로 읽히는
       // 문제는 남지만, 지어낸 내역을 보여주는 것보다 낫다.
-      if (mounted) {
+      if (mounted && generation == _generation) {
         setState(() {
           _chains = [];
           _reports.clear();
         });
       }
     } finally {
-      if (mounted) setState(() => _loading = false);
+      // 옛 세대의 실패·완료가 새 조회의 목록을 비우거나 스피너를 끄지 않게 한다.
+      // 새 조회는 자기 finally 에서 스피너를 끈다.
+      if (mounted && generation == _generation) setState(() => _loading = false);
     }
   }
 
