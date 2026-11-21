@@ -462,21 +462,34 @@ void main() {
       expect(cleared, 0);
     });
 
-    test('resetSessionState 가 이의 목록과 데모 깃발을 되돌린다', () async {
-      // 서버가 없는 상태로 이의를 제기하면 세션 동안 로컬에 남는다.
-      StudentApiService.client = MockClient((_) async => throw http.ClientException('no server'));
-      await StudentApiService().fetchEntries(); // 데모 모드로 들어간다
-      await StudentApiService().raiseObjection(entryId: 1, content: '이 지출의 근거가 궁금합니다');
-      expect(await StudentApiService().fetchObjections(), isNotEmpty);
+    test('resetSessionState 가 데모 깃발을 되돌린다', () async {
+      await enterRealMode();
+      expect(StudentApiService().usingDemoData, isFalse);
 
       await StudentApiService().resetSessionState();
 
       expect(
-        await StudentApiService().fetchObjections(),
-        isEmpty,
-        reason: '이전 사용자가 제기한 이의가 다음 사람에게 보인다',
+        StudentApiService().usingDemoData,
+        isTrue,
+        reason: '다음 사용자의 첫 조회가 실패하면 예시 데이터를 실제 원장으로 읽는다',
       );
+    });
+
+    /// #128 로 `POST /objections` 가 생긴 뒤로는 **데모 모드에도 로컬 사본을 두지
+    /// 않는다.** 사본이 있으면 접수되지도 않은 이의가 「접수되었습니다」로 뜨고,
+    /// 그 사본이 세션을 넘어가면 다음 사람에게 남의 이의가 보인다.
+    test('데모 모드에서도 이의 제기는 실패로 끝나고 아무 목록에도 남지 않는다', () async {
+      StudentApiService.client =
+          MockClient((_) async => throw http.ClientException('no server'));
+      await StudentApiService().fetchEntries(); // 데모 모드로 들어간다
       expect(StudentApiService().usingDemoData, isTrue);
+
+      await expectLater(
+        StudentApiService()
+            .raiseObjection(entryId: 1, content: '이 지출의 근거가 궁금합니다'),
+        throwsA(isA<ObjectionFailed>()),
+      );
+      expect(await StudentApiService().fetchObjections(), isEmpty);
     });
   });
 

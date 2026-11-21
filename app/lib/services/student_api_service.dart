@@ -3,6 +3,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import '../core/api_config.dart';
 import '../core/enums.dart';
+import '../core/format.dart';
 import '../core/hashing.dart';
 import '../core/term_info.dart';
 import '../models/balance_model.dart';
@@ -105,12 +106,10 @@ class StudentApiService {
   int get skippedEntryCount => _skippedEntryCount;
   int _skippedEntryCount = 0;
 
-  /// 서버에 `POST /objections` 가 없을 때 제기한 이의를 담아 두는 곳.
-  ///
-  /// 엔드포인트가 생기면 이 목록은 통째로 지운다. **항목(`entries`)에는 이런
-  /// 폴백을 두지 않는다** — `POST /entries` 는 이미 서버에 있어서, 여기에도
-  /// 사본을 두면 「어느 쪽이 진짜 데이터냐」가 갈린다.
-  final List<ObjectionModel> _pendingObjections = [];
+  // 이의 제기에는 로컬 폴백을 두지 않는다. #128 이 `POST /objections`(학생회 서버)를
+  // 넣으면서 엔드포인트가 생겼고, 그 뒤로 사본을 들고 있으면 **접수되지 않은 이의가
+  // 「접수되었습니다」로 뜬다.** 항목(`entries`)에 폴백을 두지 않는 것과 같은 이유다 —
+  // 서버에 경로가 있는데 사본까지 두면 「어느 쪽이 진짜 데이터냐」가 갈린다.
 
   // ── 원장 ────────────────────────────────────────────────────
 
@@ -235,6 +234,75 @@ class StudentApiService {
     return null;
   }
 
+  /// GET /terms — **지금 학기의 온체인 학기 코드**(`YYYYS`). 못 읽으면 null.
+  ///
+  /// 합계를 이 코드로 거른다. 예전에는 [TermInfo.currentTermCode] 상수(`20262`)를 썼는데,
+  /// **학기가 넘어가면 그 학기 금액이 통째로 빠진다** — 화면은 멀쩡하고 숫자만 0 에
+  /// 가까워져서 「아직 집행이 없다」로 읽힌다. 계좌 스냅샷은 서버가 고른 학기로 오므로
+  /// 대조 기준도 서로 어긋난다.
+  ///
+  /// 고르는 기준은 **서버와 같다** (`backend/app/services/membership.py` 의 `current_term`):
+  /// 이미 시작한 학기만 후보로 두고, 그중 아직 안 끝난 학기가 있으면 그 안에서,
+  /// 없으면 시작한 학기 전체에서 **시작일이 가장 늦은** 것을 고른다.
+  ///
+  /// **`id` 가 아니라 `started_at` 으로 고르고, 미래 학기는 후보에서 뺀다.** 예전에는
+  /// 배열에서 처음 걸리는 기간 내 학기를 쓰고 없으면 id 가 가장 큰 학기를 썼는데,
+  /// 그러면 두 자리에서 서버와 갈린다 — ① 다음 학기가 미리 등록된 채 학기 사이 공백에
+  /// 들어가면 앱은 아직 시작도 안 한 다음 학기를 고르고 서버는 이전 학기를 고른다,
+  /// ② 기간이 겹치면 앱은 배열 순서상 첫 학기를, 서버는 나중에 시작한 학기를 고른다.
+  /// 계좌 스냅샷은 서버가 고른 학기로 오므로, 기준이 갈리면 **장부 합계와 계좌 차액이
+  /// 서로 다른 학기를 말한다** (#130 Codex 2차).
+  ///
+  /// 임원 쪽([ApiService.fetchCurrentTermId])은 아직 id 기준이다. 그쪽은 파트가 다르고
+  /// 학기가 어긋나도 체인이 `TermMismatch` 로 막아 주므로 여기서 같이 바꾸지 않았다.
+  ///
+  /// **못 읽으면 null 이고, 그때는 거르지 않는다.** 모르는 채로 거르면 멀쩡한 항목이
+  /// 합계에서 사라진다 — 모르는 것을 없는 것으로 취급하지 않는다.
+  /// 학기 경계 시각을 **서버 `current_term` 과 같게** 읽는다.
+  ///
+  /// 시간대가 없는 값은 UTC 로 본다 (`backend/app/services/membership.py` 의 `_aware`).
+  /// SQLite 는 시간대를 저장하지 않아 `/terms` 가 시간대 없이 내려오는데,
+  /// 화면 표시용 [Fmt.parseServerTime] 처럼 KST 로 읽으면 학기 경계 앞뒤 9시간 동안
+  /// 앱과 서버가 서로 다른 학기를 고른다 (#130 Codex 3차). 표시용 함수는 그대로 둔다.
+  static DateTime parseTermTime(String text) {
+    var t = text.trim();
+    if (!t.contains('T')) t = '${t}T00:00:00';
+    final hasZone = RegExp(r'(Z|[+-]\d{2}(:?\d{2})?)$').hasMatch(t);
+    return DateTime.parse(hasZone ? t : '${t}Z');
+  }
+
+  Future<int?> fetchCurrentTermCode({DateTime? now}) async {
+    final json = await _getJson('${ApiConfig.baseUrl}/terms');
+    if (json is! List || json.isEmpty) return null;
+
+    final t = now ?? DateTime.now();
+    // 시작·종료를 못 읽는 학기는 아예 뺀다 — 서버와 같은 기준으로 고를 수가 없다.
+    final windows = <({Map<String, dynamic> term, DateTime start, DateTime end})>[];
+    for (final term in json.whereType<Map<String, dynamic>>()) {
+      final started = term['started_at'];
+      final ended = term['ended_at'];
+      if (started is! String || ended is! String) continue;
+      try {
+        windows.add((term: term, start: parseTermTime(started), end: parseTermTime(ended)));
+      } catch (_) {
+        // 시각을 못 읽는 학기는 건너뛴다 — 나머지로 고른다
+      }
+    }
+
+    // 아직 시작하지 않은 학기는 후보가 아니다. 진행 중인 것이 있으면 그 안에서만 고른다.
+    final started = windows.where((w) => !w.start.isAfter(t)).toList();
+    final ongoing = started.where((w) => !w.end.isBefore(t)).toList();
+    final pool = ongoing.isNotEmpty ? ongoing : started;
+    if (pool.isEmpty) return null;
+
+    // 시작일이 가장 늦은 것. 같으면 먼저 온 것을 둔다 (서버의 `max` 와 같은 결과다).
+    var pick = pool.first;
+    for (final w in pool.skip(1)) {
+      if (w.start.isAfter(pick.start)) pick = w;
+    }
+    return pick.term['term_code'] as int?;
+  }
+
   /// GET /users/wallets — **지갑 주소 → user id** 매핑 (검증 2단계)
   ///
   /// 체인의 `registrant`·`approver` 는 지갑 주소이고 DB 의 `created_by`·
@@ -323,23 +391,77 @@ class StudentApiService {
   }
 
   // ── 아직 백엔드에 없는 엔드포인트 ──────────────────────────
+  //
+  // 이의(`/objections`)는 여기서 빠졌다 — PR #128 로 생겼다. 남은 것은 스냅샷뿐이다.
 
   /// GET /snapshots/latest — 통장 잔액 스냅샷과 미등록 건 (S11)
   ///
-  /// 대조 기능 자체는 서버에 `GET /bank/snapshots` · `/bank/snapshots/{id}` 로 있지만
-  /// **학생은 그쪽을 쓸 수 없다** — 둘 다 `council_only` 라 학생 토큰은 403 이고,
-  /// `bank` 라우터가 `STUDENT_QUERY_ROUTERS` 에 없어 학생 서버에는 경로가 생기지 않는다
-  /// (2026-11-12 실연동에서 확인, `docs/backend_requests.md` §1-5). 경로를 바꾸면 안 되는 이유다.
+  /// **「아직 안 올라왔다」와 「못 읽었다」를 나눠 돌려준다.** 둘 다 보여 줄 숫자가
+  /// 없는 것은 같지만 학생에게는 다른 말이다 — 앞은 학기 초의 정상 상태이고, 뒤는
+  /// 확인해야 할 고장이다. 뭉뚱그리면 멀쩡한 서버를 두고 「불러오지 못했습니다」가
+  /// 떠서 학생이 고장으로 읽는다.
   ///
-  /// **실서버를 보고 있으면 폴백하지 않는다.** 이 엔드포인트는 백엔드에 아직
-  /// 없어서 실모드에서 404 가 확정인데, 그때 예시 스냅샷을 돌려주면 **실제
-  /// 장부와 가짜 통장 잔액·미등록 거래가 한 화면에 섞인다.** [usingDemoData] 는
+  /// 서버는 거래내역이 아직 없으면 **404** 로 답한다(`아직 업로드된 계좌 거래내역이
+  /// 없습니다`). 총무가 CSV 를 올리면 그때부터 200 이다.
+  ///
+  /// **실서버를 보고 있으면 폴백하지 않는다.** 예시 스냅샷을 돌려주면 **실제 장부와
+  /// 가짜 통장 잔액·미등록 거래가 한 화면에 섞인다.** [usingDemoData] 는
   /// `fetchEntries` 가 성공해서 false 이므로 데모 배너도 뜨지 않아, 학생은 그
   /// 혼합을 알아챌 방법이 없다 ([fetchOnChainEntry]·[fetchMyMembership] 의 같은 판단).
-  Future<SnapshotModel?> fetchLatestSnapshot() async {
-    final json = await _getJson('${ApiConfig.baseUrl}/snapshots/latest');
-    if (json is Map<String, dynamic>) return SnapshotModel.fromJson(json);
-    return _usingDemoData ? _demoSnapshot() : null;
+  Future<({SnapshotModel? snapshot, bool notUploadedYet})>
+      fetchLatestSnapshot() async {
+    final auth = _auth;
+
+    http.Response? res;
+    try {
+      res = await client
+          .get(Uri.parse('${ApiConfig.baseUrl}/snapshots/latest'),
+              headers: auth.headers)
+          .timeout(_timeout);
+    } catch (_) {
+      res = null; // 서버에 닿지 못했다
+    }
+
+    if (res != null) {
+      await _checkUnauthorized(res.statusCode, token: auth.token);
+
+      if (res.statusCode == 200) {
+        try {
+          final json = jsonDecode(utf8.decode(res.bodyBytes));
+          if (json is Map<String, dynamic>) {
+            return (snapshot: SnapshotModel.fromJson(json), notUploadedYet: false);
+          }
+        } catch (_) {
+          // 본문을 못 읽었다 — 아래 「못 읽음」으로 떨어진다
+        }
+      }
+
+      // **404 가 다 「아직 안 올라옴」은 아니다.** 서버는 진행 중인 학기가 없을 때도
+      // 404 를 준다(`snapshots.py` — 「진행 중인 학기가 없습니다」). 경로가 틀렸을 때도
+      // 마찬가지다. 그것까지 정상이라고 말하면 **설정이 잘못된 상태가 학기 초처럼 보인다.**
+      //
+      // 그래서 업로드가 없다고 밝힌 응답만 그쪽으로 분류하고, 나머지 404 는 「못 읽음」
+      // 으로 둔다 — 모르는 404 를 고장 쪽에 두는 편이 안전하다.
+      //
+      // 본문 글귀에 기대는 것이 약한 고리라, 서버가 구분 가능한 코드를 주면 그쪽으로 바꾼다.
+      if (res.statusCode == 404) {
+        return (snapshot: null, notUploadedYet: _saysNotUploaded(res));
+      }
+    }
+
+    // 서버에 닿지 못했거나 그 밖의 실패. 데모 모드에서만 예시를 쓴다.
+    return (snapshot: _usingDemoData ? _demoSnapshot() : null, notUploadedYet: false);
+  }
+
+  /// 404 본문이 **업로드가 없다**고 밝혔는지. 읽지 못하면 거짓 — 모르는 404 는 고장이다.
+  static bool _saysNotUploaded(http.Response res) {
+    try {
+      final body = jsonDecode(utf8.decode(res.bodyBytes));
+      final detail = body is Map ? body['detail'] : null;
+      return detail is String && detail.contains('거래내역');
+    } catch (_) {
+      return false;
+    }
   }
 
   /// GET /objections?entry_id= — 이의 목록 (S8)
@@ -352,21 +474,24 @@ class StudentApiService {
       return json.map((e) => ObjectionModel.fromJson(e)).toList();
     }
 
-    // 이번 세션에 직접 제기한 것만 돌려준다. 미리 넣어 둔 예시 이의는 두지 않는다 —
-    // 쓴 적 없는 질문이 「답변 대기」로 떠 있으면 자기가 올린 것과 구분되지 않는다.
-    return entryId == null
-        ? List.of(_pendingObjections)
-        : _pendingObjections.where((o) => o.entryId == entryId).toList();
+    // 못 읽었으면 빈 목록이다. 예시 이의를 끼워 넣지 않는다 — 쓴 적 없는 질문이
+    // 「답변 대기」로 떠 있으면 자기가 올린 것과 구분되지 않는다.
+    return const [];
   }
 
   /// POST /objections — 이의 제기 (S8)
   ///
+  /// **쓰기라서 학생회 서버로 보낸다** ([ApiConfig.councilBaseUrl]). 학생 서버는 읽기 전용
+  /// DB 에 릴레이어 키가 없어(PRD §9.1) 이 경로를 아예 싣지 않는다 — 조회(`GET /objections`)는
+  /// 양쪽에 있지만 쓰기는 학생회 서버에만 있고, 거기서 `Role.STUDENT` 를 허용한다.
+  /// [ApiConfig.baseUrl] 로 보내면 학생 토큰일 때 학생 서버로 가 **404** 가 된다.
+  ///
   /// 본문의 정본화·해시는 백엔드가 한다 (HASHING.md §1.1, §3).
   /// 학생 앱은 쓰기 권한이 없어 직접 서명하지 않는다 (PRD §9.2).
   ///
-  /// 서버 원장을 보고 있는데 전송이 실패하면 [ObjectionFailed] 를 던진다.
-  /// 조용히 로컬 폴백으로 넘어가면 **접수되지도 않은 이의가 「접수되었습니다」로
-  /// 뜬다** — 학생은 답변을 기다리지만 학생회에는 아무것도 가 있지 않다
+  /// 접수되지 않았으면 **데모 모드에서도** [ObjectionFailed] 를 던진다. 로컬 사본으로
+  /// 넘어가면 **접수되지도 않은 이의가 「접수되었습니다」로 뜬다** — 학생은 답변을
+  /// 기다리지만 학생회에는 아무것도 가 있지 않다
   /// (스토리보드 5 ③ 「실패: 서버 무응답 → 토스트 · 입력 내용은 남겨둔다」).
   /// Throws [ObjectionFailed], [SessionExpired].
   Future<ObjectionModel> raiseObjection({
@@ -379,7 +504,7 @@ class StudentApiService {
     try {
       res = await client
           .post(
-            Uri.parse('${ApiConfig.baseUrl}/objections'),
+            Uri.parse('${ApiConfig.councilBaseUrl}/objections'),
             headers: {'Content-Type': 'application/json', ...auth.headers},
             body: jsonEncode({'entry_id': entryId, 'content': content}),
           )
@@ -404,33 +529,10 @@ class StudentApiService {
       }
     }
 
-    // **보낸 세션이 아직 그 세션인지 먼저 본다.** 로그아웃·세션 만료가 이
-    // 응답보다 먼저 도착하면 [resetSessionState] 가 목록을 비우고 데모 깃발을
-    // 다시 켜 두는데, 그 상태에서 아래 폴백으로 내려가면 **지난 사용자가 쓴
-    // 이의가 목록에 들어간다.** 다음 사람의 조회가 실패하면(그때 폴백이
-    // `_pendingObjections` 를 돌려준다) 남의 이의 내용이 자기 것으로 보인다.
-    //
-    // 세션이 바뀌었으면 폴백도 성공도 아니다 — 받을 화면 자체가 없다.
-    if (_staleSession(auth.generation)) throw const ObjectionFailed();
-
-    if (!_usingDemoData) throw const ObjectionFailed();
-
-    // 서버가 없을 때. 만들어서 돌려주기만 하면 화면을 나가는 순간 사라지므로
-    // 세션 동안 들고 있는다.
-    final nextId = _pendingObjections.isEmpty
-        ? 1
-        : _pendingObjections.map((o) => o.id).reduce((a, b) => a > b ? a : b) + 1;
-
-    final created = ObjectionModel(
-      id: nextId,
-      entryId: entryId,
-      userId: 3,
-      content: content,
-      status: ObjectionStatus.OPEN,
-      raisedAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
-    );
-    _pendingObjections.add(created);
-    return created;
+    // 여기까지 왔으면 접수되지 않았다. 서버가 없든 응답이 실패든, 학생에게는
+    // **실패로 말한다** — 로컬 사본으로 「접수되었습니다」를 만들면 학생은 답변을
+    // 기다리지만 학생회에는 아무것도 가 있지 않다.
+    throw const ObjectionFailed();
   }
 
   /// GET /memberships/me — 본인 SBT 보유 여부와 QR 페이로드 (S5)
@@ -612,10 +714,10 @@ class StudentApiService {
   /// 로그아웃·세션 만료 때 **세션에 묶인 상태를 비운다** (`main.dart` 가 연결).
   ///
   /// 이 클래스는 싱글턴이라 로그아웃해도 살아 있다. 비우지 않으면 같은 기기의
-  /// 다음 사람에게 **이전 사용자가 제기한 이의 목록**이 보이고, 미확인 뱃지가
-  /// 이전 사용자의 「마지막으로 본 항목」을 기준으로 계산된다. 데모 깃발도
-  /// 되돌려 두어야 다음 사용자의 첫 조회가 실패했을 때 예시 데이터를 실제
-  /// 원장으로 읽지 않는다.
+  /// 다음 사람에게 미확인 뱃지가 **이전 사용자의 「마지막으로 본 항목」**을 기준으로
+  /// 계산되고, 「읽지 못한 건수」도 이전 조회의 값이 남는다. 데모 깃발도 되돌려
+  /// 두어야 다음 사용자의 첫 조회가 실패했을 때 예시 데이터를 실제 원장으로
+  /// 읽지 않는다.
   /// 진행 중인 [resetSessionState] 의 보관소 삭제. 없으면 null 이다.
   ///
   /// `main.dart` 는 `onSessionCleared` 가 `void` 라 **이것을 기다리지 않는다.**
@@ -628,7 +730,6 @@ class StudentApiService {
   Future<void> resetSessionState() {
     // **`await` 전에 비운다.** `onSessionCleared` 는 세션이 비워지는 순간
     // 동기로 불리므로, 여기까지는 다음 사용자의 요청이 끼어들 틈이 없다.
-    _pendingObjections.clear();
     _usingDemoData = true;
     _skippedEntryCount = 0;
     final reset = _clearLastSeen();
@@ -924,6 +1025,13 @@ class StudentApiService {
       approver: e.approvedBy == null
           ? OnChainEntry.zeroAddress
           : (_demoWallets[e.approvedBy] ?? OnChainEntry.zeroAddress),
+      // 사유 해시도 **항목에서 만든다.** 따로 적어 두면 사유 문구를 고칠 때 한쪽만
+      // 바뀌어 데모가 「사유 불일치」로 뒤집힌다 — 위의 주소와 같은 이유다.
+      // 경고 없이 확정한 건은 bytes32(0) 이다 (HASHING.md §3).
+      hadWarning: e.warningAckReason != null,
+      reasonHash: e.warningAckReason != null
+          ? Hashing.textHash(e.warningAckReason!)
+          : OnChainEntry.zeroHash,
     );
   }
 

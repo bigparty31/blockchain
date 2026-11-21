@@ -203,27 +203,118 @@ class EntryVerifier {
       userIdByAddress: userIdByAddress,
     ));
 
-    if (e.status == EntryStatus.REJECTED) {
-      // 컨트랙트의 approver 는 확정자와 반려자를 겸하는데 DB 에는 반려자 컬럼이 없다.
-      // 그대로 비교하면 반려된 항목이 전부 위조로 판정된다 (§2, §8).
-      checks.add(FieldCheck(
-        label: '승인자',
-        chain: c.approver ?? '(읽지 못함)',
-        local: '—',
-        state: CheckState.notApplicable,
-        note: 'rejected_by 컬럼이 생기기 전까지 반려 항목은 비교하지 않는다',
-      ));
-    } else {
-      checks.add(_comparePerson(
-        label: '승인자',
-        chainAddress: c.approver,
-        missingField: 'approver',
-        userId: e.approvedBy,
-        userIdByAddress: userIdByAddress,
-      ));
-    }
+    // 컨트랙트의 approver 는 확정자와 반려자를 겸하고, DB 는 둘을 나눠 담는다.
+    // 상태에 따라 대조 상대가 갈린다 — 틀린 쪽과 비교하면 멀쩡한 항목이 위조로 뜬다.
+    final isRejected = e.status == EntryStatus.REJECTED;
+    checks.add(_comparePerson(
+      label: isRejected ? '반려자' : '승인자',
+      chainAddress: c.approver,
+      missingField: 'approver',
+      userId: isRejected ? e.rejectedBy : e.approvedBy,
+      userIdByAddress: userIdByAddress,
+    ));
+
+    checks.add(_compareReasonHash(e, c));
 
     return checks;
+  }
+
+  /// 사유 해시 대조 (`docs/HASHING.md` §3).
+  ///
+  /// 체인에는 해시만 남고 원문은 DB 에 있다. **학생이 읽는 사유가 승인·반려 당시의 그
+  /// 사유인지**를 여기서 본다 — 원문을 나중에 고쳐도 해시는 못 고치기 때문이다.
+  ///
+  /// | 상태 | 체인 `reason_hash` | 원문 |
+  /// |---|---|---|
+  /// | 경고 무시 확정 | 사유 해시 | `warning_ack_reason` |
+  /// | 반려 | 사유 해시 | `reject_reason` |
+  /// | 경고 없는 확정 | `bytes32(0)` | 없음 |
+  ///
+  /// **받은 원문을 그대로 해시한다.** 앱이 [Hashing.canonicalText] 로 다시 다듬지
+  /// 않는다 — 백엔드가 저장 시점에 다듬은 값이 정본이고(§1.1), 앱이 또 다듬으면 서버가
+  /// 정본이 아닌 값을 내려보내도 조용히 교정되어 **통과해 버린다.** 검증은 화면에 보이는
+  /// 바이트가 체인과 맞는지를 묻는 것이다.
+  static FieldCheck _compareReasonHash(EntryModel e, OnChainEntry c) {
+    const label = '승인·반려 사유';
+
+    final isRejected = e.status == EntryStatus.REJECTED;
+    final reason = isRejected ? e.rejectReason : e.warningAckReason;
+
+    // **`had_warning` 이 없으면 사유 해시에 묻는다.** 이 값만 보고 「경고 없는 확정」으로
+    // 단정하면, `reason_hash` 는 주면서 `had_warning` 은 빠뜨린 응답에서 **경고를 무시하고
+    // 확정한 멀쩡한 항목이 「불일치」로 뜬다** — 0 이 아닌 해시가 체인에 남아 있는데도
+    // 「사유가 없어야 한다」는 분기로 가기 때문이다. 체인에 사유 해시가 있다는 것 자체가
+    // 사유가 있었다는 증거이므로, 모르는 쪽(null)에서는 그 증거를 따른다.
+    final expectsReason = isRejected ||
+        c.hadWarning == true ||
+        (c.hadWarning == null &&
+            c.reasonHash != null &&
+            c.reasonHash != OnChainEntry.zeroHash);
+
+    if (c.reasonHash == null) {
+      // **서버가 아직 안 내려주는 필드다.** 여기서 무조건 「모름」을 남기면, 사유가
+      // 애초에 없는 평범한 확정 항목까지 전부 「부분 검증」으로 떨어진다 — 확인할
+      // 것이 없는데 확인 못 했다고 말하는 셈이다.
+      //
+      // 그래서 **학생에게 사유가 보이는 경우에만** 「모름」으로 남긴다. 보이는 글을
+      // 대조하지 못한 것은 실제로 모르는 것이 맞다.
+      final hasVisibleReason = expectsReason || (reason != null && reason.isNotEmpty);
+      return FieldCheck(
+        label: label,
+        chain: '(읽지 못함)',
+        local: hasVisibleReason ? (reason ?? '(원문 없음)') : '없음',
+        state: hasVisibleReason ? CheckState.unavailable : CheckState.notApplicable,
+        note: hasVisibleReason
+            ? '응답에 reason_hash 가 없어 사유를 대조하지 못했다'
+            : '사유가 없는 항목이라 대조할 것이 없다',
+      );
+    }
+
+    // 경고 없는 확정 — 사유가 없는 것이 정상이고, 체인도 0 이어야 한다.
+    if (!expectsReason) {
+      // **장부에 사유가 있으면 「없음」이라고 말하지 않는다.** 체인은 경고 없이
+      // 확정됐다는데 DB 에는 사유가 달려 있는 상태다. 그 사유는 체인에 해시가 없어
+      // 재계산할 대상이 없고 `meta_hash` 에도 들어가지 않으므로, 통과로 두면 **검증된
+      // 적 없는 글이 상세 화면에 뜬다** — 나중에 끼워 넣어도 배지는 초록이다.
+      if (reason != null && reason.isNotEmpty) {
+        return FieldCheck(
+          label: label,
+          chain: '없음',
+          local: reason,
+          state: CheckState.failed,
+          note: '체인은 경고 없이 확정됐다는데 장부에는 사유가 있다',
+        );
+      }
+
+      final isZero = c.reasonHash == OnChainEntry.zeroHash;
+      return FieldCheck(
+        label: label,
+        chain: isZero ? '없음' : c.reasonHash!,
+        local: '없음',
+        state: isZero ? CheckState.passed : CheckState.failed,
+        note: isZero ? '경고 없이 확정되어 사유가 없다' : '사유가 없어야 하는데 체인에 해시가 있다',
+      );
+    }
+
+    if (reason == null || reason.isEmpty) {
+      return FieldCheck(
+        label: label,
+        chain: c.reasonHash!,
+        local: '(원문 없음)',
+        state: CheckState.unavailable,
+        note: '체인에는 사유 해시가 있는데 원문을 받지 못해 재계산할 수 없다',
+      );
+    }
+
+    final recomputed = Hashing.textHash(reason);
+    final ok = recomputed.toLowerCase() == c.reasonHash!.toLowerCase();
+    return FieldCheck(
+      label: label,
+      chain: c.reasonHash!,
+      local: recomputed,
+      state: ok ? CheckState.passed : CheckState.failed,
+      note: ok ? null : '화면에 보이는 사유가 승인·반려 당시의 사유와 다르다',
+    );
   }
 
   /// 한 필드를 대조한다. [chain] 이 null 이면 **응답에 그 필드가 없었다**는 뜻이므로
