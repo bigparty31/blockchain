@@ -23,13 +23,16 @@ class BudgetModel {
   });
 
   factory BudgetModel.fromJson(Map<String, dynamic> json) {
+    final int planned = json['planned_amount'] ?? 0;
+    final int remaining = json['remaining_amount'] ?? 0;
     return BudgetModel(
       id: json['id'] ?? 0,
       termId: json['term_id'] ?? 1,
       category: json['category'] ?? '',
-      plannedAmount: json['planned_amount'] ?? 0,
-      remainingAmount: json['remaining_amount'] ?? 0,
-      executionRate: (json['execution_rate'] as num?)?.toDouble() ?? 0.0,
+      plannedAmount: planned,
+      remainingAmount: remaining,
+      // 서버 값은 소수 4자리로 반올림돼 있어 다시 반올림하면 한 칸 어긋난다 — 편성·잔량으로 직접 계산한다
+      executionRate: planned > 0 ? (planned - remaining) / planned : 0.0,
       version: json['version'] ?? 1,
       expiresAt: json['expires_at'] ?? 0,
       revisionReason: json['revision_reason'],

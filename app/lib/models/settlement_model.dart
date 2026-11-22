@@ -116,15 +116,19 @@ class BudgetExecution {
 
   factory BudgetExecution.fromJson(Map<String, dynamic> json) {
     final r = _Reader(json, '예산 집행');
+    final planned = r.integer('planned_amount');
+    final spent = r.integer('spent');
     return BudgetExecution(
       budgetId: r.integer('budget_id'),
       category: r.text('category'),
       initialAmount: r.integer('initial_amount'),
-      plannedAmount: r.integer('planned_amount'),
+      plannedAmount: planned,
       version: r.integer('version'),
-      spent: r.integer('spent'),
+      spent: spent,
       remaining: r.integer('remaining'),
-      executionRate: r.maybeRate('execution_rate'),
+      // 서버의 execution_rate 는 소수 4자리로 이미 반올림돼 있다 — 그 값을 다시 1자리로 반올림하면
+      // 13.447% 가 13.5% 로 올라 학생 홈(13.4%)과 어긋난다. 집행액·편성액으로 직접 계산한다
+      executionRate: planned > 0 ? spent / planned : null,
     );
   }
 }
