@@ -824,7 +824,6 @@ class _Registered {
   const _Registered(this.draft, this.id, this.outcome);
 }
 
-/// 조회한 정정 대상 요약 — 사용자가 어느 내역의 어느 금액을 고치는지 눈으로 확인하게 한다.
 /// 정정할 수 있는 내역 후보 — 한 줄을 누르면 그 ID 로 조회한다.
 class _CandidateList extends StatelessWidget {
   final List<EntryChain> chains;
@@ -878,6 +877,7 @@ class _CandidateList extends StatelessWidget {
   }
 }
 
+/// 조회한 정정 대상 요약 — 사용자가 어느 내역의 어느 금액을 고치는지 눈으로 확인하게 한다.
 class _TargetCard extends StatelessWidget {
   final EntryChain chain;
   const _TargetCard({required this.chain});
