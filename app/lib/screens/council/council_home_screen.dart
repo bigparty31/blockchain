@@ -245,7 +245,9 @@ class _CouncilHomeScreenState extends State<CouncilHomeScreen> with WidgetsBindi
         slivers: [
           // ── 그라디언트 AppBar ──────────────────────────────
           SliverAppBar(
-            expandedHeight: 200,
+            // 헤더 안 글자(배지·제목·한 줄 소개)는 시스템 글자 크기를 따라 커진다. 높이를 200 으로 고정하면
+            // 글자 1.5배에서 넘쳐 소개 줄이 가려진다 — 커진 만큼 높이를 더한다 (글자 세 줄의 기본 높이 약 70)
+            expandedHeight: 200 + (MediaQuery.textScalerOf(context).scale(1) - 1) * 70,
             pinned: true,
             backgroundColor: AppTheme.primary,
             foregroundColor: Colors.white,
