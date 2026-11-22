@@ -62,16 +62,12 @@ void main() {
 
       await _pumpHome(tester);
 
-      // **범위 한계** — 조회의 마지막 단계인 `lastSeenEntryId` 가
-      // `flutter_secure_storage` 를 타는데, 위젯 테스트의 가짜 시계 아래에서는
-      // 그 Future 가 `pump` 만으로 끝나지 않는다 (`student_layout_test.dart` 의
-      // 같은 한계). 그래서 성공 경로는 로딩에서 멈춘 채로만 볼 수 있다.
-      //
-      // 그래도 이 테스트에는 값이 있다 — 「실패 화면이 늘 떠 있다」와
-      // 「로딩 중에 미리 실패라고 단정한다」를 둘 다 잡는다.
+      // 로그인한 학번이 없으면 `lastSeenEntryId` 가 보안 저장소를 타지 않고 바로 0 을 돌려준다
+      // (미확인 기준은 학번별 키라서 — `StudentApiService._lastSeenKeyFor`). 그래서 조회가 끝까지 간다.
+      await tester.pump(const Duration(milliseconds: 50));
       expect(find.text('불러올 수 없습니다'), findsNothing);
       expect(find.text('다시 시도'), findsNothing);
-      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsNothing, reason: '응답이 멀쩡하면 로딩이 끝나야 한다');
     });
   });
 
