@@ -931,7 +931,7 @@ class _BankDiffCard extends StatelessWidget {
           if (snapshot.unrecorded.isNotEmpty) ...[
             const Divider(height: 24),
             Text(
-              '원장에 없는 계좌 거래 ${snapshot.unrecorded.length}건',
+              '원장에 없는 계좌 출금 ${snapshot.unrecorded.length}건',
               style: const TextStyle(
                 fontSize: 12,
                 fontWeight: FontWeight.bold,
