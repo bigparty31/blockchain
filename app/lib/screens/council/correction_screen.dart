@@ -17,6 +17,24 @@ import 'receipt_picker.dart';
 List<BudgetModel> reclassifyCandidates(List<BudgetModel> budgets, {required int? termId, required int? fromBudgetId}) =>
     budgets.where((b) => b.id != fromBudgetId && (termId == null || b.termId == termId)).toList();
 
+/// 정정을 신청할 수 있는 내역 — 확정(CONFIRMED)된 원본이고, 승인 대기 중인 정정이 없는 것. 최신(id 큰 것)이 위.
+///
+/// 조회 규칙(`_lookupTarget`)과 같다. 후보에 있는 것을 눌렀는데 「정정할 수 없어요」가 뜨지 않게 같은 기준으로 거른다.
+List<EntryChain> correctableChains(List<EntryModel> entries) {
+  final chains = EntryMerge.fold(entries)
+      .where((c) => c.isConfirmed && !c.corrections.any((x) => x.status == EntryStatus.PENDING))
+      .toList();
+  chains.sort((a, b) => b.original.id.compareTo(a.original.id));
+  return chains;
+}
+
+/// 후보 한 줄 — `id:1 | 사용처:농협 | 금액:800원`. 수입은 사용처 대신 출처.
+String correctableLabel(EntryChain c) {
+  final e = c.original;
+  final who = e.kind == EntryKind.INCOME ? '출처' : '사용처';
+  return 'id:${e.id} | $who:${e.counterparty} | 금액:${Fmt.plain(c.finalAmount)}원';
+}
+
 /// [이승호 담당: app/lib/screens/council/]
 /// 4. 정정 등록 화면 (스토리보드 10, T8) — 확정된 원본을 고치지 않고 증감분을 새 항목으로 올린다 (PRD §4.4).
 ///
@@ -71,6 +89,12 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
         if (mounted) _lookupTarget();
       });
     }
+    // 정정할 수 있는 내역 후보 — 못 읽어도 화면은 그대로 쓴다 (ID 를 직접 넣어 조회하면 그쪽이 이유를 보여 준다)
+    ApiService().fetchEntries().then((list) {
+      if (mounted) setState(() => _candidates = correctableChains(list));
+    }, onError: (Object e) {
+      if (e is! ApiUnavailable) throw e;
+    });
     ApiService().fetchBudgets().then((b) {
       if (mounted) setState(() => _budgets = b);
     }, onError: (Object e) {
@@ -82,6 +106,21 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
 
   /// 예산 목록을 못 읽은 이유.
   String? _budgetsError;
+
+  /// 정정을 신청할 수 있는 내역 후보 ([correctableChains]). 못 읽었으면 비어 있다.
+  List<EntryChain> _candidates = const [];
+
+  /// 입력한 ID 숫자를 포함하는 후보만 (비어 있으면 전부).
+  List<EntryChain> get _shownCandidates {
+    final q = _entryIdController.text.trim();
+    if (q.isEmpty) return _candidates;
+    return _candidates.where((c) => '${c.original.id}'.contains(q)).toList();
+  }
+
+  void _pickCandidate(EntryChain c) {
+    _entryIdController.text = '${c.original.id}';
+    _lookupTarget();
+  }
 
   String _budgetName(int? id) {
     for (final b in _budgets) {
@@ -529,6 +568,8 @@ class _CorrectionScreenState extends State<CorrectionScreen> {
                   padding: const EdgeInsets.symmetric(vertical: 12),
                 ),
               ),
+              if (_target == null && _shownCandidates.isNotEmpty)
+                _CandidateList(chains: _shownCandidates, onPick: _pickCandidate),
               if (_target != null) _TargetCard(chain: _target!),
               if (_targetError != null)
                 Padding(
@@ -781,6 +822,59 @@ class _Registered {
   final int id;
   final SubmitOutcome outcome;
   const _Registered(this.draft, this.id, this.outcome);
+}
+
+/// 정정할 수 있는 내역 후보 — 한 줄을 누르면 그 ID 로 조회한다.
+class _CandidateList extends StatelessWidget {
+  final List<EntryChain> chains;
+  final void Function(EntryChain) onPick;
+  const _CandidateList({required this.chains, required this.onPick});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.only(top: 10),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppTheme.divider),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Padding(
+            padding: EdgeInsets.fromLTRB(14, 10, 14, 4),
+            child: Text('정정할 수 있는 내역 — 눌러서 고르세요',
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppTheme.textSub),
+            ),
+          ),
+          // 내역이 많으면 이 안에서 따로 스크롤한다 — 아래 정정 사유·금액 입력이 밀려나지 않게
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 240),
+            child: ListView.separated(
+              shrinkWrap: true,
+              padding: EdgeInsets.zero,
+              itemCount: chains.length,
+              separatorBuilder: (_, __) => const Divider(height: 1, color: AppTheme.divider),
+              itemBuilder: (_, i) {
+                final c = chains[i];
+                return InkWell(
+                  key: Key('correctable_${c.original.id}'),
+                  onTap: () => onPick(c),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                    child: Text(correctableLabel(c),
+                      style: const TextStyle(fontSize: 13, color: AppTheme.textMain),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 /// 조회한 정정 대상 요약 — 사용자가 어느 내역의 어느 금액을 고치는지 눈으로 확인하게 한다.
