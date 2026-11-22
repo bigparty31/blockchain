@@ -4,6 +4,7 @@ import '../../core/entry_merge.dart';
 import '../../core/entry_verifier.dart';
 import '../../core/enums.dart';
 import '../../core/format.dart';
+import '../../models/objection_model.dart';
 import '../../services/auth_service.dart';
 import '../../services/student_api_service.dart';
 import 'entry_detail_screen.dart';
@@ -38,6 +39,13 @@ class _EntryListScreenState extends State<EntryListScreen> {
   bool _loading = true;
   List<EntryChain> _chains = [];
   final Map<int, VerificationReport> _reports = {};
+
+  /// **답변된 이의가 달린 항목 id.** 「확인 필요」에서 경고 승인 건이 빠지는
+  /// 유일한 신호다 ([_visible] 의 `flagged` 참고).
+  ///
+  /// 읽지 못하면 비워 둔다 — 비우는 쪽이 아니라 **남기는 쪽으로 기운다.**
+  /// 조회 실패로 경고 건이 목록에서 사라지면, 학생은 그것을 「해소됐다」로 읽는다.
+  Set<int> _answeredEntryIds = {};
 
   /// 조회 세대. 새로고침마다 올린다.
   ///
@@ -98,6 +106,21 @@ class _EntryListScreenState extends State<EntryListScreen> {
         _chains = EntryMerge.fold(entries);
         _reports.clear();
       });
+
+      // 답변된 이의를 모은다 ([_answeredEntryIds]). 목록을 먼저 그린 뒤에 받는다 —
+      // 이것 때문에 내역이 늦게 뜨면 안 된다. 실패해도 목록은 그대로 간다.
+      Set<int> answered = const {};
+      try {
+        final objections = await _api.fetchObjections();
+        answered = {
+          for (final o in objections)
+            if (o.status == ObjectionStatus.ANSWERED) o.entryId,
+        };
+      } catch (_) {
+        // 못 읽었으면 아무것도 해소하지 않는다 ([_answeredEntryIds] 주석).
+      }
+      if (!mounted || generation != _generation) return;
+      setState(() => _answeredEntryIds = answered);
 
       // 목록을 열어본 시점에 미확인 뱃지(S12)를 지운다.
       if (entries.isNotEmpty) {
@@ -211,15 +234,35 @@ class _EntryListScreenState extends State<EntryListScreen> {
             .where((c) => c.allEntries.any((e) => e.id > after))
             .toList();
       case _Filter.flagged:
-        // 학생이 눈여겨봐야 할 건 — 검증 실패 또는 경고 승인.
+        // 학생이 눈여겨봐야 할 건 — 검증 실패 또는 **아직 답을 못 받은** 경고 승인.
         // 정정 항목이 어긋난 체인도 여기 걸려야 한다. 원본만 보면
         // 정정 쪽 불일치가 「확인 필요」에서 조용히 빠진다.
+        //
+        // **경고 승인 건은 답변을 받으면 빠진다** ([_answeredEntryIds]).
+        // 경고(OCR 불일치·용도 불일치)는 확정 시점에 박히고 그 뒤로 바뀌지
+        // 않는다 — 확정된 기록은 고치지 않기 때문이다(PRD 규칙 5). 그래서
+        // 이것만 보면 한번 걸린 건이 학기 내내 남아, 「확인 필요」가 비워지지
+        // 않는 누적 목록이 된다. 그러면 지금 당장 이상한 건(변조 감지)이
+        // 묵은 기록에 묻힌다.
+        //
+        // 해소 신호를 **이의 답변**으로 잡는다. 학생이 할 수 있는 행동이 이의
+        // 제기뿐이고, 답변은 온체인에 남는 공개 사실이라(ObjectionRegistry.answer)
+        // 학생이나 서버가 임의로 지울 수 없다. 누가 물었든 답이 달리면 해소로
+        // 본다 — 답변 본문은 모두에게 공개되므로 질문자에게만 해소될 이유가 없다.
+        //
+        // **기록 자체는 사라지지 않는다.** 항목 상세의 「경고 상태로 승인됨」
+        // 배지는 그대로 남는다. 빠지는 것은 「확인이 필요하다」는 신호뿐이다.
+        //
+        // 변조 감지는 답변으로 해소되지 않는다. 값이 체인과 다시 맞아야만
+        // 사라진다 — 답변은 어긋난 값을 되돌려 놓지 못한다.
         return _chains.where((c) {
           final tampered = c.allEntries
               .any((e) => _reports[e.id]?.isTampered ?? false);
           final head = c.original;
-          return tampered ||
+          final warned =
               OcrWarningBadge.isWarning(head.ocrStatus, head.categoryWarning);
+          return tampered ||
+              (warned && !_answeredEntryIds.contains(head.id));
         }).toList();
     }
   }
