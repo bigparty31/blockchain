@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import '../../core/app_theme.dart';
 import '../../core/entry_merge.dart';
-import '../../core/enums.dart';
 import '../../core/format.dart';
 import '../../core/logout_action.dart';
 import '../../core/term_info.dart';
@@ -12,6 +11,22 @@ import '../../services/student_api_service.dart';
 import 'entry_list_screen.dart';
 import 'my_sbt_screen.dart';
 import 'widgets/student_badges.dart';
+
+/// 카테고리별 지출 차트의 색. **승인 항목표의 지출 항목 수(8종)만큼 둔다** —
+/// 행사비·사업비·운영비·홍보비·복지비·회의비·비품비·예비비
+/// (backend `app/chain/eip712.py` APPROVED_CATEGORIES, docs/CONTRACTS.md category 표).
+/// 색이 항목보다 적으면 `i % length` 로 돌려 쓰게 되어 누적 막대와 범례를 색으로
+/// 맞춰 볼 수 없다. 표에 항목을 더하면 여기도 같이 늘린다.
+const List<Color> _categoryPalette = [
+  AppTheme.primary, // 보라
+  AppTheme.income, // 청록
+  AppTheme.pending, // 앰버
+  AppTheme.info, // 블루
+  AppTheme.success, // 에메랄드
+  AppTheme.expense, // 핑크레드
+  AppTheme.primaryDark, // 인디고
+  Color(0xFF84CC16), // 라임 — 위 일곱 색과 가장 덜 겹치는 색으로 고른다
+];
 
 /// [장정아 담당 파트: app/lib/screens/student/]
 /// 학생 대시보드 — 잔액·수입·지출(S1), 예산 집행률·개정 이력(S6),
@@ -450,31 +465,27 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
 
   /// 카테고리별 지출 차트 (S13)
   Widget _buildCategoryChart() {
-    // 예산 카테고리별로 확정 지출을 모은다.
-    // 정정 항목은 증감분이므로 그대로 더하면 최종값이 된다.
-    final byCategory = <String, int>{};
-    for (final e in _entries) {
-      if (e.status != EntryStatus.CONFIRMED || e.kind != EntryKind.EXPENSE)
-        continue;
-      final matched = _budgets.where((b) => b.id == e.budgetId);
-      final name = matched.isEmpty ? '미분류' : matched.first.category;
-      byCategory[name] = (byCategory[name] ?? 0) + e.amount;
-    }
-
-    if (byCategory.isEmpty) return const SizedBox.shrink();
-
-    final total = byCategory.values.fold(0, (a, b) => a + b);
-    // 정정 항목 금액은 증감분(음수)이라 원본과 정정이 서로 상쇄되면 합계가 0 이
-    // 될 수 있다. 목록이 비었는지만 보고 합계를 그대로 나누면 `~/ 0` 으로 앱이 죽는다.
-    // 합계가 0 이하면 비율 막대 자체가 뜻을 잃으므로 차트를 내린다.
-    if (total <= 0) return const SizedBox.shrink();
-    final palette = [
-      AppTheme.primary,
-      AppTheme.income,
-      AppTheme.pending,
-      AppTheme.info
+    // **바로 위 「예산 집행 현황」과 같은 값에서 그린다.** 항목별 집행액은
+    // 체인의 `편성액 − 잔량`이고([_BudgetCard] 와 같은 `GET /budgets`), 확정은
+    // 전부 `confirmEntry` → `BudgetToken.spend` 를 거치므로 이 값이 확정 지출의
+    // 합계다. 예전에는 `_entries` 의 CONFIRMED 지출을 따로 더했는데, 같은 사실을
+    // 두 출처에서 세는 구조라 둘이 어긋나면 화면 안에서 숫자가 맞지 않았다
+    // (체인만 다시 배포한 개발 환경, 시드 더미 확정 건 등).
+    //
+    // 건별 내역은 체인에 없어서(해시만) 「어떤 건이 채웠나」는 여전히 수입·지출
+    // 내역에서 본다. 여기는 비율만 그리므로 항목별 합계만 있으면 된다.
+    final items = <MapEntry<String, int>>[
+      for (final b in _budgets)
+        if (b.plannedAmount - b.remainingAmount > 0)
+          MapEntry(b.category, b.plannedAmount - b.remainingAmount),
     ];
-    final items = byCategory.entries.toList();
+
+    if (items.isEmpty) return const SizedBox.shrink();
+
+    final total = items.fold(0, (a, e) => a + e.value);
+    // 집행액이 모두 0 이면(편성만 하고 아직 집행 전) 비율 막대가 뜻을 잃고,
+    // 그대로 나누면 `~/ 0` 으로 앱이 죽는다. 그럴 때는 차트를 내린다.
+    if (total <= 0) return const SizedBox.shrink();
 
     return Container(
       padding: const EdgeInsets.all(18),
@@ -490,6 +501,14 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
               color: AppTheme.textMain,
             ),
           ),
+          // 바로 위 예산 카드의 집행률(편성액 대비)과 **기준이 다르다** — 여기 %는
+          // 전체 지출을 100 으로 본 비중이다. 둘 다 "행사비 00%" 로만 적혀 있으면
+          // 같은 수여야 할 것처럼 읽혀 어긋난 것으로 보인다.
+          const SizedBox(height: 4),
+          const Text(
+            '전체 확정 지출 대비 비중',
+            style: TextStyle(fontSize: 12, color: AppTheme.textSub),
+          ),
           const SizedBox(height: 14),
           // 한 줄 누적 막대
           ClipRRect(
@@ -500,7 +519,7 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
                 children: List.generate(items.length, (i) {
                   return Expanded(
                     flex: (items[i].value * 1000 ~/ total).clamp(1, 1000),
-                    child: Container(color: palette[i % palette.length]),
+                    child: Container(color: _categoryPalette[i % _categoryPalette.length]),
                   );
                 }),
               ),
@@ -522,7 +541,7 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
                     width: 10,
                     height: 10,
                     decoration: BoxDecoration(
-                      color: palette[i % palette.length],
+                      color: _categoryPalette[i % _categoryPalette.length],
                       borderRadius: BorderRadius.circular(3),
                     ),
                   ),
